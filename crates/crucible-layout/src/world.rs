@@ -89,6 +89,11 @@ pub struct Output {
     pub workspaces: Vec<WorkspaceId>,
     /// Index into `workspaces` of the active workspace.
     pub active: usize,
+    /// The output's pixel geometry (position + size in the global/Space coordinate space).
+    ///
+    /// `World::new()` and `add_output` seed this; the compositor keeps it in sync via
+    /// [`World::set_output_rect`] with the live pixel size of the corresponding physical monitor.
+    pub rect: Rect,
 }
 
 impl Output {
@@ -159,6 +164,9 @@ pub enum LayoutError {
     /// The requested move/switch target is the same workspace the window already lives on.
     #[error("window already on target workspace")]
     SameWorkspace,
+    /// Attempted to remove the only/last output; at least one output must always exist.
+    #[error("cannot remove the last output")]
+    LastOutput,
 }
 
 /// The whole layout model: arena maps + the focused output.
@@ -206,6 +214,8 @@ impl World {
             id: output_id,
             workspaces: vec![workspace_id],
             active: 0,
+            // Placeholder; the compositor calls `set_output_rect` with the real pixel size.
+            rect: Rect::new(0, 0, 0, 0),
         };
 
         let mut outputs = BTreeMap::new();
@@ -240,6 +250,22 @@ impl World {
     #[must_use]
     pub fn output(&self, id: OutputId) -> Option<&Output> {
         self.outputs.get(&id)
+    }
+
+    /// Iterates over every output as `(OutputId, &Output)`, in ascending id order.
+    pub fn outputs(&self) -> impl Iterator<Item = (OutputId, &Output)> {
+        self.outputs.iter().map(|(id, o)| (*id, o))
+    }
+
+    /// Iterates over every output id, in ascending order.
+    pub fn output_ids(&self) -> impl Iterator<Item = OutputId> + '_ {
+        self.outputs.keys().copied()
+    }
+
+    /// The number of outputs currently in the model (always ≥ 1).
+    #[must_use]
+    pub fn output_count(&self) -> usize {
+        self.outputs.len()
     }
 
     /// Looks up a workspace.
@@ -335,6 +361,19 @@ impl World {
                 Some((window_id, rect))
             })
             .collect()
+    }
+
+    /// Like [`World::geometry`] but uses the output's **stored** [`Output::rect`] origin/size.
+    ///
+    /// Convenience for callers that have kept the model's rect up to date via
+    /// [`World::set_output_rect`]; the returned rects are in the output's own coordinate space
+    /// (origin at `rect.x`/`rect.y`). Returns an empty `Vec` if `output_id` is unknown.
+    #[must_use]
+    pub fn geometry_for(&self, output_id: OutputId, gaps: GapConfig) -> Vec<(WindowId, Rect)> {
+        let Some(output) = self.outputs.get(&output_id) else {
+            return Vec::new();
+        };
+        self.geometry(output_id, output.rect, gaps)
     }
 
     fn focused_output_ref(&self) -> &Output {
@@ -528,26 +567,7 @@ impl World {
     /// Creates a new empty workspace on the focused output, pushes it on the stack, and switches to
     /// it. Returns the new workspace id.
     pub fn new_workspace(&mut self, name: impl Into<String>) -> (WorkspaceId, Reconcile) {
-        let workspace_id = WorkspaceId::from_raw(self.workspace_ids.alloc());
-        let pane_id = PaneId::from_raw(self.pane_ids.alloc());
-
-        self.panes.insert(
-            pane_id,
-            Pane {
-                id: pane_id,
-                windows: Vec::new(),
-                focused: 0,
-            },
-        );
-        self.workspaces.insert(
-            workspace_id,
-            Workspace {
-                id: workspace_id,
-                name: name.into(),
-                focused_pane: pane_id,
-                tree: SplitTree::new(pane_id),
-            },
-        );
+        let workspace_id = self.build_workspace(name);
 
         let output = self.outputs.get_mut(&self.focused_output).expect("output");
         output.workspaces.push(workspace_id);
@@ -641,6 +661,127 @@ impl World {
         Ok(self.focus_reconcile())
     }
 
+    // ---- outputs ------------------------------------------------------------------------------
+
+    /// Creates a fresh empty workspace (one empty pane) and inserts both into the arena maps.
+    ///
+    /// Shared by [`World::new`]-style seeding, [`World::add_output`], and [`World::new_workspace`].
+    /// Returns the new workspace id. Does **not** attach the workspace to any output.
+    fn build_workspace(&mut self, name: impl Into<String>) -> WorkspaceId {
+        let workspace_id = WorkspaceId::from_raw(self.workspace_ids.alloc());
+        let pane_id = PaneId::from_raw(self.pane_ids.alloc());
+        self.panes.insert(
+            pane_id,
+            Pane {
+                id: pane_id,
+                windows: Vec::new(),
+                focused: 0,
+            },
+        );
+        self.workspaces.insert(
+            workspace_id,
+            Workspace {
+                id: workspace_id,
+                name: name.into(),
+                focused_pane: pane_id,
+                tree: SplitTree::new(pane_id),
+            },
+        );
+        workspace_id
+    }
+
+    /// Adds a new output with `rect`, giving it its own independent initial workspace + empty pane.
+    ///
+    /// Mirrors what [`World::new`] does for the first output. The new output starts with no windows
+    /// and is **not** made the focused output, so nothing currently visible changes — the returned
+    /// [`Reconcile`] is the no-op `Default`. Returns the new [`OutputId`].
+    pub fn add_output(&mut self, rect: Rect) -> (OutputId, Reconcile) {
+        let output_id = OutputId::from_raw(self.output_ids.alloc());
+        let workspace_id = self.build_workspace("1");
+        self.outputs.insert(
+            output_id,
+            Output {
+                id: output_id,
+                workspaces: vec![workspace_id],
+                active: 0,
+                rect,
+            },
+        );
+        // New output is empty and not focused: nothing visible changes.
+        (output_id, Reconcile::default())
+    }
+
+    /// Removes an output **without destroying any windows**.
+    ///
+    /// The removed output's entire workspace stack (and thus its panes and windows, which live in
+    /// the arena maps and are never touched here) is **appended onto a surviving output's**
+    /// workspace stack. The survivor is the focused output if it survives, else the lowest remaining
+    /// [`OutputId`]. The migrated workspaces become inactive on the survivor, so their windows are
+    /// hidden, not closed.
+    ///
+    /// If `id` was the focused output, focus repoints to the survivor. Returns
+    /// [`LayoutError::LastOutput`] when asked to remove the only output, or
+    /// [`LayoutError::UnknownOutput`] for an unknown id.
+    pub fn remove_output(&mut self, id: OutputId) -> Result<Reconcile, LayoutError> {
+        if !self.outputs.contains_key(&id) {
+            return Err(LayoutError::UnknownOutput(id));
+        }
+        if self.outputs.len() == 1 {
+            return Err(LayoutError::LastOutput);
+        }
+
+        // Pick the survivor: the focused output if it isn't the one being removed, else the lowest
+        // remaining output id.
+        let survivor = if self.focused_output != id {
+            self.focused_output
+        } else {
+            self.outputs
+                .keys()
+                .copied()
+                .find(|oid| *oid != id)
+                .expect("≥1 other output remains")
+        };
+
+        let removed = self.outputs.remove(&id).expect("output present");
+        // Migrate the removed output's workspaces (with their panes/windows) onto the survivor.
+        // They become inactive (the survivor keeps its own active index), so windows are hidden.
+        let survivor_output = self.outputs.get_mut(&survivor).expect("survivor present");
+        survivor_output.workspaces.extend(removed.workspaces);
+
+        // Repoint focus if we just removed the focused output.
+        if self.focused_output == id {
+            self.focused_output = survivor;
+        }
+
+        // Windows from the migrated (now inactive) workspaces are hidden, not removed.
+        Ok(Reconcile {
+            removed: Vec::new(),
+            focused_window: self.focused_window(),
+            visibility_changed: true,
+        })
+    }
+
+    /// Sets the stored pixel geometry of `id`. Errors if the output is unknown.
+    pub fn set_output_rect(&mut self, id: OutputId, rect: Rect) -> Result<(), LayoutError> {
+        let output = self
+            .outputs
+            .get_mut(&id)
+            .ok_or(LayoutError::UnknownOutput(id))?;
+        output.rect = rect;
+        Ok(())
+    }
+
+    /// Routes focus to `id` so subsequent window/workspace ops act on that output.
+    ///
+    /// Recomputes the focused window for the newly focused output. Errors if `id` is unknown.
+    pub fn set_focused_output(&mut self, id: OutputId) -> Result<Reconcile, LayoutError> {
+        if !self.outputs.contains_key(&id) {
+            return Err(LayoutError::UnknownOutput(id));
+        }
+        self.focused_output = id;
+        Ok(self.focus_reconcile())
+    }
+
     // ---- helpers ------------------------------------------------------------------------------
 
     /// Finds which workspace + pane currently holds `window`.
@@ -679,12 +820,36 @@ impl World {
             "focused pane is in the active workspace"
         );
         ws.tree.check_invariants();
-        // Every output's active index is valid and every listed workspace exists.
+        // At least one output always exists.
+        assert!(!self.outputs.is_empty(), "≥1 output always");
+        // Every output's active index is valid, has ≥1 workspace, and every listed workspace exists.
+        // Also assert each workspace belongs to exactly one output (no id aliasing after migrate).
+        let mut ws_owner: BTreeMap<WorkspaceId, OutputId> = BTreeMap::new();
         for o in self.outputs.values() {
+            assert!(!o.workspaces.is_empty(), "every output has ≥1 workspace");
             assert!(o.active < o.workspaces.len());
             for w in &o.workspaces {
                 assert!(self.workspaces.contains_key(w), "listed workspace exists");
+                let prev = ws_owner.insert(*w, o.id);
+                assert!(
+                    prev.is_none(),
+                    "workspace {w:?} belongs to exactly one output"
+                );
             }
+        }
+        // Every workspace is owned by some output (no orphaned workspaces).
+        for w in self.workspaces.keys() {
+            assert!(
+                ws_owner.contains_key(w),
+                "workspace {w:?} owned by an output"
+            );
+        }
+        // Every workspace's focused pane exists in its own tree.
+        for w in self.workspaces.values() {
+            assert!(
+                w.panes().contains(&w.focused_pane),
+                "workspace focused pane is in its tree"
+            );
         }
         // Every pane referenced by every workspace tree exists, and pane focus is in range.
         for w in self.workspaces.values() {
@@ -742,5 +907,212 @@ mod cycle_tests {
         assert_eq!(cycle_index(0, 3, 4), 1);
         assert_eq!(cycle_index(0, 0, 1), 0);
         assert_eq!(cycle_index(0, 1, 1), 0);
+    }
+}
+
+#[cfg(test)]
+mod multi_output_tests {
+    use super::*;
+    use crate::Direction;
+
+    const GAPS: GapConfig = GapConfig::new(0, 0);
+    const R1: Rect = Rect::new(0, 0, 1920, 1080);
+    const R2: Rect = Rect::new(1920, 0, 1280, 1024);
+
+    #[test]
+    fn new_world_has_one_output_with_placeholder_rect() {
+        let w = World::new();
+        assert_eq!(w.output_count(), 1);
+        let id = w.focused_output();
+        assert_eq!(w.output(id).unwrap().rect, Rect::new(0, 0, 0, 0));
+        w.check_invariants();
+    }
+
+    #[test]
+    fn add_output_creates_an_independent_stack() {
+        let mut w = World::new();
+        let first = w.focused_output();
+        let (second, rec) = w.add_output(R2);
+        // New output starts empty and does not become focused; no visible change.
+        assert_eq!(rec, Reconcile::default());
+        assert_ne!(first, second);
+        assert_eq!(w.focused_output(), first);
+        assert_eq!(w.output_count(), 2);
+
+        // The second output owns its own single workspace, distinct from the first's.
+        let ws_first = w.output(first).unwrap().active_workspace();
+        let ws_second = w.output(second).unwrap().active_workspace();
+        assert_ne!(ws_first, ws_second);
+        assert_eq!(w.output(second).unwrap().rect, R2);
+        w.check_invariants();
+    }
+
+    #[test]
+    fn ops_on_focused_output_do_not_disturb_other_outputs() {
+        let mut w = World::new();
+        let first = w.focused_output();
+        let (second, _) = w.add_output(R2);
+
+        let second_before = w.output(second).unwrap().clone();
+        // All of these act on `first` (the focused output).
+        let _ = w.open_window();
+        let _ = w.split(Direction::Right);
+        let _ = w.new_workspace("scratch");
+
+        // The second output is byte-for-byte unchanged.
+        assert_eq!(w.output(second).unwrap(), &second_before);
+        // ...but the first output gained a workspace.
+        assert_eq!(w.output(first).unwrap().workspaces.len(), 2);
+        w.check_invariants();
+    }
+
+    #[test]
+    fn switching_focused_output_then_ops_affect_only_that_output() {
+        let mut w = World::new();
+        let first = w.focused_output();
+        let (second, _) = w.add_output(R2);
+
+        let first_before = w.output(first).unwrap().clone();
+        let _ = w.set_focused_output(second).unwrap();
+        assert_eq!(w.focused_output(), second);
+
+        let (win, _) = w.open_window();
+        let _ = w.new_workspace("2");
+
+        // First output untouched.
+        assert_eq!(w.output(first).unwrap(), &first_before);
+        // Second output now has two workspaces, and the window landed on it.
+        assert_eq!(w.output(second).unwrap().workspaces.len(), 2);
+        assert!(w.locate_window(win).is_some());
+        w.check_invariants();
+    }
+
+    #[test]
+    fn per_output_geometry_is_independent() {
+        let mut w = World::new();
+        let first = w.focused_output();
+        w.set_output_rect(first, R1).unwrap();
+        let (second, _) = w.add_output(R2);
+
+        // A window on the first output.
+        let (win1, _) = w.open_window();
+        // Switch focus and add a window on the second output.
+        let _ = w.set_focused_output(second).unwrap();
+        let (win2, _) = w.open_window();
+
+        let g1 = w.geometry(first, R1, GAPS);
+        assert_eq!(g1.len(), 1);
+        assert_eq!(g1[0], (win1, R1));
+
+        let g2 = w.geometry(second, R2, GAPS);
+        assert_eq!(g2.len(), 1);
+        // geometry uses an output-relative rect; we pass R2's own size at origin in real use, but
+        // here we pass R2 directly and expect the window to fill it.
+        assert_eq!(g2[0].0, win2);
+
+        // geometry_for uses the stored rect (R2, offset at x=1920).
+        let g2_stored = w.geometry_for(second, GAPS);
+        assert_eq!(g2_stored.len(), 1);
+        assert_eq!(g2_stored[0], (win2, R2));
+        w.check_invariants();
+    }
+
+    #[test]
+    fn remove_output_migrates_workspaces_and_windows_without_loss() {
+        let mut w = World::new();
+        let first = w.focused_output();
+        let (second, _) = w.add_output(R2);
+
+        // Put a window on the second output (on its own workspace).
+        let _ = w.set_focused_output(second).unwrap();
+        let (win, _) = w.open_window();
+        let _ = w.new_workspace("extra"); // second now has 2 workspaces
+        let (win2, _) = w.open_window();
+        assert_eq!(w.window_count(), 2);
+
+        // Refocus first, then remove the second output.
+        let _ = w.set_focused_output(first).unwrap();
+        let first_ws_before = w.output(first).unwrap().workspaces.len();
+        let rec = w.remove_output(second).unwrap();
+
+        // No windows destroyed; both still locatable.
+        assert_eq!(w.window_count(), 2);
+        assert!(w.locate_window(win).is_some());
+        assert!(w.locate_window(win2).is_some());
+        assert!(rec.removed.is_empty());
+        assert!(rec.visibility_changed);
+
+        // Second output's 2 workspaces appended onto the first.
+        assert_eq!(
+            w.output(first).unwrap().workspaces.len(),
+            first_ws_before + 2
+        );
+        assert_eq!(w.output_count(), 1);
+        w.check_invariants();
+    }
+
+    #[test]
+    fn remove_focused_output_repoints_focus_to_survivor() {
+        let mut w = World::new();
+        let first = w.focused_output();
+        let (second, _) = w.add_output(R2);
+
+        let _ = w.set_focused_output(second).unwrap();
+        assert_eq!(w.focused_output(), second);
+
+        let rec = w.remove_output(second).unwrap();
+        assert_eq!(w.focused_output(), first);
+        assert_eq!(rec.focused_window, w.focused_window());
+        w.check_invariants();
+    }
+
+    #[test]
+    fn remove_last_output_errors() {
+        let mut w = World::new();
+        let only = w.focused_output();
+        assert_eq!(w.remove_output(only), Err(LayoutError::LastOutput));
+        w.check_invariants();
+    }
+
+    #[test]
+    fn remove_unknown_output_errors() {
+        let mut w = World::new();
+        let bogus = OutputId::from_raw(999);
+        assert_eq!(
+            w.remove_output(bogus),
+            Err(LayoutError::UnknownOutput(bogus))
+        );
+    }
+
+    #[test]
+    fn set_output_rect_and_set_focused_errors_on_unknown() {
+        let mut w = World::new();
+        let bogus = OutputId::from_raw(999);
+        assert_eq!(
+            w.set_output_rect(bogus, R1),
+            Err(LayoutError::UnknownOutput(bogus))
+        );
+        assert_eq!(
+            w.set_focused_output(bogus),
+            Err(LayoutError::UnknownOutput(bogus))
+        );
+    }
+
+    #[test]
+    fn remove_survivor_is_lowest_id_when_focused_is_removed() {
+        // Three outputs; focus the highest, remove it -> survivor should be the focused-if-survives
+        // rule; but when focused is removed, survivor is the lowest remaining id.
+        let mut w = World::new();
+        let first = w.focused_output();
+        let (second, _) = w.add_output(R2);
+        let (third, _) = w.add_output(R2);
+
+        let _ = w.set_focused_output(third).unwrap();
+        let _ = w.remove_output(third).unwrap();
+        // Lowest remaining id is `first`.
+        assert_eq!(w.focused_output(), first);
+        assert!(w.output(first).is_some());
+        assert!(w.output(second).is_some());
+        w.check_invariants();
     }
 }

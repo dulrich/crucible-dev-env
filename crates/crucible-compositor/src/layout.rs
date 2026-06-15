@@ -17,22 +17,43 @@
 //! (`Space::unmap_elem`) but **kept alive** in the id↔element map so re-showing them (stack cycle /
 //! workspace switch) is just a re-`map_element` + configure — no surface teardown.
 //!
-//! ## Multi-output caveat (read this before WS-4)
-//! [`World::new`] creates exactly **one** model output and there is no public API to add more, so all
-//! real compositor outputs are currently driven from that single model `OutputId` (the focused
-//! output): each physical output renders the model's active workspace, positioned at that output's
-//! offset in the `Space`. This satisfies WS-3's exit criteria (winit single-output tiling; udev shows
-//! the active workspace on every connector). True per-output independent workspaces need a model
-//! `add_output`/`output_rect` API — flagged for WS-4 / a follow-up `crucible-layout` change.
+//! ## Multi-output (P2-WS-3.5): independent per-monitor workspaces
+//! Each physical Smithay [`Output`](smithay::output::Output) is mapped 1:1 to a model
+//! [`crucible_layout::OutputId`], stashed in the Smithay output's `user_data()` (see
+//! [`model_output_id`] / [`set_model_output_id`]). The **first** compositor output adopts the
+//! existing `World::new()` output; each subsequent connector calls [`World::add_output`] and records
+//! its mapping. [`CrucibleState::apply_geometry`] iterates every Smithay output and asks the model
+//! for *that output's own* active workspace geometry, so each monitor now shows an independent
+//! workspace stack. The focused model output (which receives new windows and workspace ops) is
+//! routed via [`World::set_focused_output`] as input/maps target an output.
 
 use std::collections::HashMap;
 
-use crucible_layout::{GapConfig, LayoutError, Reconcile, Rect, WindowId, World};
+use crucible_layout::{GapConfig, LayoutError, OutputId, Reconcile, Rect, WindowId, World};
+use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 
 use crate::element::WindowElement;
 use crate::focus::KeyboardFocusTarget;
 use crate::state::{Backend, CrucibleState};
+
+/// Wrapper stored in a Smithay [`Output`]'s `user_data()` binding it to a model [`OutputId`].
+///
+/// Using the `UserDataMap` (rather than a parallel `HashMap` in state) keeps the Smithay↔model
+/// mapping co-located with the output it describes, so there is nothing to keep in sync on add/remove.
+#[derive(Debug, Clone, Copy)]
+struct ModelOutputId(OutputId);
+
+/// Returns the model [`OutputId`] bound to `output`, if one has been set.
+#[must_use]
+pub fn model_output_id(output: &Output) -> Option<OutputId> {
+    output.user_data().get::<ModelOutputId>().map(|m| m.0)
+}
+
+/// Binds `id` to `output` in its `user_data()` (idempotent: the first binding wins).
+pub fn set_model_output_id(output: &Output, id: OutputId) {
+    output.user_data().insert_if_missing(|| ModelOutputId(id));
+}
 
 /// The model plus the stable [`WindowId`] ↔ [`WindowElement`] bidirectional map.
 ///
@@ -204,32 +225,36 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Recomputes and applies geometry + visibility for all mapped outputs (no focus change).
     ///
     /// Exposed separately so the per-frame backends can re-assert geometry cheaply (it is idempotent)
-    /// without touching focus. Each compositor output is mapped to the single model `OutputId` (see
-    /// the module-level multi-output caveat) and positioned at its `Space` offset.
+    /// without touching focus. Each compositor output is mapped 1:1 to a model `OutputId` (via its
+    /// `user_data()`); each contributes **its own** active workspace's windows, positioned at that
+    /// output's offset in the `Space`. Outputs not yet bound to a model id are skipped.
     pub fn apply_geometry(&mut self) {
-        let output_id = self.layout.world.focused_output();
         let gaps = GapConfig::default();
 
-        // Snapshot each output's global geometry so we don't hold a borrow on the Space while mutating
-        // it below. The size drives the model's per-output `Rect`; the location is the offset into the
-        // global Space coordinate space.
-        let output_geos: Vec<Rectangle<i32, Logical>> = self
+        // Snapshot each output's global geometry + model id so we don't hold a borrow on the Space
+        // while mutating it below. The size drives the model's per-output `Rect`; the location is the
+        // offset into the global Space coordinate space.
+        let output_geos: Vec<(OutputId, Rectangle<i32, Logical>)> = self
             .space
             .outputs()
-            .filter_map(|o| self.space.output_geometry(o))
+            .filter_map(|o| {
+                let id = model_output_id(o)?;
+                let geo = self.space.output_geometry(o)?;
+                Some((id, geo))
+            })
             .collect();
 
-        // Build the desired visible set across all outputs (output-relative rects from the model,
-        // shifted by each output's offset into global Space coordinates).
+        // Build the desired visible set across all outputs (each output's OWN active workspace,
+        // output-relative rects shifted by that output's offset into global Space coordinates).
         let mut next: Vec<(WindowId, Rect)> = Vec::new();
-        for geo in &output_geos {
+        for (model_id, geo) in &output_geos {
             let output_rect = Rect {
                 x: 0,
                 y: 0,
                 width: geo.size.w,
                 height: geo.size.h,
             };
-            for (id, rect) in self.layout.world.geometry(output_id, output_rect, gaps) {
+            for (id, rect) in self.layout.world.geometry(*model_id, output_rect, gaps) {
                 next.push((
                     id,
                     Rect {
@@ -266,6 +291,96 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
 
         self.last_layout = next;
+    }
+
+    /// Registers a Smithay `output` with the model: adopt-or-add, then bind + size it.
+    ///
+    /// The **first** compositor output adopts the model's pre-existing `World::new()` output (which is
+    /// otherwise unbound); every subsequent output calls [`World::add_output`] to get its own
+    /// independent workspace stack. Either way the chosen model [`OutputId`] is stashed in the
+    /// Smithay output's `user_data()` and its stored rect is set to `rect` (the live pixel geometry in
+    /// global Space coordinates). Returns the model [`OutputId`]. Idempotent: re-registering an
+    /// already-bound output only refreshes its rect.
+    pub fn register_output(&mut self, output: &Output, rect: Rect) -> OutputId {
+        if let Some(existing) = model_output_id(output) {
+            let _ = self.layout.world.set_output_rect(existing, rect);
+            return existing;
+        }
+
+        // Adopt the initial unbound model output (the one `World::new()` created) for the first
+        // compositor output; otherwise allocate a fresh model output.
+        let bound: std::collections::HashSet<OutputId> =
+            self.space.outputs().filter_map(model_output_id).collect();
+        let initial = self
+            .layout
+            .world
+            .output_ids()
+            .find(|id| !bound.contains(id));
+
+        let model_id = match initial {
+            Some(id) => id,
+            None => {
+                let (id, _) = self.layout.world.add_output(rect);
+                id
+            }
+        };
+        let _ = self.layout.world.set_output_rect(model_id, rect);
+        set_model_output_id(output, model_id);
+        model_id
+    }
+
+    /// Updates the stored model rect for `output` from its current Space geometry.
+    ///
+    /// Called after an output is (re)mapped/resized so [`World::geometry_for`] and any geometry pass
+    /// see the live pixel size. No-op for an output not yet bound to a model id.
+    pub fn sync_output_rect(&mut self, output: &Output) {
+        let Some(model_id) = model_output_id(output) else {
+            return;
+        };
+        let Some(geo) = self.space.output_geometry(output) else {
+            return;
+        };
+        let rect = Rect {
+            x: geo.loc.x,
+            y: geo.loc.y,
+            width: geo.size.w,
+            height: geo.size.h,
+        };
+        let _ = self.layout.world.set_output_rect(model_id, rect);
+    }
+
+    /// Removes the Smithay `output`'s model output, migrating its workspaces to a survivor.
+    ///
+    /// Looks up the bound model [`OutputId`], calls [`World::remove_output`] (which preserves every
+    /// window by appending the removed output's workspaces onto a surviving output), and applies the
+    /// resulting reconcile. No-op (logged) if the output is unbound or is the last model output.
+    pub fn unregister_output(&mut self, output: &Output) {
+        let Some(model_id) = model_output_id(output) else {
+            return;
+        };
+        match self.layout.world.remove_output(model_id) {
+            Ok(reconcile) => self.apply_layout(&reconcile),
+            Err(err) => {
+                tracing::warn!(?err, "remove_output failed; keeping model output");
+            }
+        }
+    }
+
+    /// Routes the focused model output to the one backing `output`, if bound.
+    ///
+    /// Call when input/pointer focus moves onto a monitor (or a window maps there) so new windows and
+    /// workspace verbs act on that monitor. Applies the focus reconcile. No-op if unbound or already
+    /// focused.
+    pub fn focus_output(&mut self, output: &Output) {
+        let Some(model_id) = model_output_id(output) else {
+            return;
+        };
+        if self.layout.world.focused_output() == model_id {
+            return;
+        }
+        if let Ok(reconcile) = self.layout.world.set_focused_output(model_id) {
+            self.apply_layout(&reconcile);
+        }
     }
 
     /// Re-points keyboard focus (and X11 focus) at the model's focused window, if any.

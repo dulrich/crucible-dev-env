@@ -134,6 +134,8 @@ pub fn run_winit() {
         .shm_state
         .update_formats(state.backend_data.backend.renderer().shm_formats());
     state.space.map_output(&output, (0, 0));
+    // Adopt the model's initial output for this single winit output and size it to the real pixels.
+    state.register_output(&output, crucible_layout::Rect::new(0, 0, size.w, size.h));
 
     // Bring up XWayland so X11 apps run alongside Wayland clients (WS-5). On readiness this exports
     // `DISPLAY` and attaches the X11 window manager; see `crate::xwayland`.
@@ -154,7 +156,8 @@ pub fn run_winit() {
                 output.change_current_state(Some(mode), None, None, None);
                 output.set_preferred(mode);
                 state.space.map_output(&output, (0, 0));
-                // Re-tile to the new output size (model-driven, idempotent).
+                // Keep the model's stored rect in sync, then re-tile (model-driven, idempotent).
+                state.sync_output_rect(&output);
                 state.apply_geometry();
             }
             WinitEvent::CloseRequested => {

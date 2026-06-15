@@ -296,6 +296,8 @@ fn fixup_output_positions(state: &mut CrucibleState<UdevData>) {
         state.space.map_output(&output, (offset_x, 0));
         output.change_current_state(None, None, None, Some((offset_x, 0).into()));
         smithay::desktop::layer_map_for_output(&output).arrange();
+        // Keep the model's stored rect origin/size in sync with the new Space position.
+        state.sync_output_rect(&output);
         offset_x += width;
     }
     // Output positions/sizes changed: re-assert model-driven geometry (idempotent).
@@ -760,6 +762,13 @@ impl CrucibleState<UdevData> {
             device_id: node,
         });
 
+        // Snapshot the data needed to register this connector with the model once the `device`
+        // borrow is released (the registration must touch `self`, but `device` borrows `self`).
+        let mode_size = wl_mode.size;
+        let register_output = output.clone();
+        let register_rect =
+            crucible_layout::Rect::new(position.0, position.1, mode_size.w, mode_size.h);
+
         let planes = match drm_device.planes(&crtc) {
             Ok(planes) => planes,
             Err(err) => {
@@ -795,6 +804,11 @@ impl CrucibleState<UdevData> {
         };
         device.surfaces.insert(crtc, surface);
 
+        // Register this connector with the model now that the `device` borrow is released: the first
+        // compositor output adopts the existing `World::new()` output; subsequent connectors get
+        // their own independent workspace stack via `add_output`.
+        self.register_output(&register_output, register_rect);
+
         // Kick off rendering for the new output.
         self.handle
             .insert_idle(move |state| state.render_surface(node, crtc));
@@ -811,6 +825,9 @@ impl CrucibleState<UdevData> {
             return;
         };
         if let Some(surface) = device.surfaces.remove(&crtc) {
+            // Migrate this output's model workspaces (and their windows) onto a survivor before
+            // unmapping the Smithay output, so no window is destroyed on disconnect.
+            self.unregister_output(&surface.output);
             self.space.unmap_output(&surface.output);
             self.space.refresh();
         }

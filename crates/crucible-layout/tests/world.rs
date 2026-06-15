@@ -505,3 +505,45 @@ fn deep_nested_focus_ascent_never_surfaces_parent() {
     w.focus(Right);
     assert_eq!(w.focused_window(), Some(two));
 }
+
+// ---- multi-output (P2-WS-3.5) -------------------------------------------------------------------
+
+#[test]
+fn add_then_remove_output_preserves_all_windows_end_to_end() {
+    use crucible_layout::Rect;
+
+    let mut w = World::new();
+    let first = w.focused_output();
+    w.set_output_rect(first, Rect::new(0, 0, 1920, 1080))
+        .unwrap();
+
+    // A window on the first output.
+    let (win_a, _) = w.open_window();
+
+    // Add a second output, focus it, and open a window there (on its own workspace stack).
+    let (second, rec) = w.add_output(Rect::new(1920, 0, 1280, 1024));
+    assert!(rec.removed.is_empty());
+    w.set_focused_output(second).unwrap();
+    let (win_b, _) = w.open_window();
+    w.check_invariants();
+    assert_eq!(w.window_count(), 2);
+
+    // Remove the second output: its workspace (with win_b) migrates onto the survivor; nothing dies.
+    w.set_focused_output(first).unwrap();
+    let rec = w.remove_output(second).unwrap();
+    w.check_invariants();
+    assert!(rec.removed.is_empty());
+    assert!(rec.visibility_changed);
+    assert_eq!(w.window_count(), 2);
+    assert!(w.window(win_a).is_some());
+    assert!(w.window(win_b).is_some());
+    assert_eq!(w.output_count(), 1);
+}
+
+#[test]
+fn last_output_cannot_be_removed() {
+    let mut w = World::new();
+    let only = w.focused_output();
+    assert_eq!(w.remove_output(only), Err(LayoutError::LastOutput));
+    w.check_invariants();
+}
