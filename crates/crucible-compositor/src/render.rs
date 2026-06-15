@@ -15,7 +15,7 @@ use smithay::{
     backend::renderer::{
         Color32F, ImportAll, ImportMem, Renderer,
         damage::{Error as OutputDamageTrackerError, OutputDamageTracker, RenderOutputResult},
-        element::{Wrap, surface::WaylandSurfaceRenderElement},
+        element::{Wrap, solid::SolidColorRenderElement, surface::WaylandSurfaceRenderElement},
     },
     desktop::space::{Space, SpaceRenderElements},
     output::Output,
@@ -24,13 +24,15 @@ use smithay::{
 use crate::{drawing::PointerRenderElement, element::WindowElement};
 
 smithay::backend::renderer::element::render_elements! {
-    /// Compositor-drawn render elements that are not part of the desktop [`Space`] — currently just
-    /// the cursor. (Focus borders and stack indicators join this enum in a later phase.)
+    /// Compositor-drawn render elements that are not part of the desktop [`Space`]: the cursor,
+    /// plus focus-ring borders and per-pane stack indicators (added in P2-WS-5).
     pub CustomRenderElements<R> where R: ImportAll + ImportMem;
     /// The pointer cursor element from [`crate::drawing`].
     Pointer=PointerRenderElement<R>,
     /// A bare Wayland surface (e.g. a drag-and-drop icon) drawn outside the space.
     Surface=WaylandSurfaceRenderElement<R>,
+    /// Solid-color chrome: focus-ring border strips and per-pane stack-indicator pips.
+    SolidColor=SolidColorRenderElement,
 }
 
 impl<R: Renderer + ImportAll + ImportMem> std::fmt::Debug for CustomRenderElements<R> {
@@ -38,6 +40,7 @@ impl<R: Renderer + ImportAll + ImportMem> std::fmt::Debug for CustomRenderElemen
         match self {
             Self::Pointer(arg0) => f.debug_tuple("Pointer").field(arg0).finish(),
             Self::Surface(arg0) => f.debug_tuple("Surface").field(arg0).finish(),
+            Self::SolidColor(arg0) => f.debug_tuple("SolidColor").field(arg0).finish(),
             Self::_GenericCatcher(arg0) => f.debug_tuple("_GenericCatcher").field(arg0).finish(),
         }
     }

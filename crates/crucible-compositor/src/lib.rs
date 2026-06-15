@@ -40,5 +40,8 @@ pub mod render;
 /// Compositor-drawn chrome: cursor, borders, stack indicators.
 pub mod drawing;
 
+/// Focus-ring border and per-pane stack indicator chrome (P2-WS-5).
+pub mod chrome;
+
 /// Unified render-element type.
 pub mod element;

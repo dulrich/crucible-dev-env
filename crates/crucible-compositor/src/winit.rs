@@ -195,11 +195,16 @@ pub fn run_winit() {
             let cursor_pos = state.pointer.current_location();
             let cursor_phys = cursor_pos.to_physical(scale).to_i32_round();
 
+            // Chrome (focus border + stack badges) — built before the backend borrow below since
+            // SolidColorRenderElement needs no renderer reference.
+            let mut chrome: Vec<CustomRenderElements<GlesRenderer>> = state.chrome_elements();
+
             let backend = &mut state.backend_data.backend;
             let damage_tracker = &mut state.backend_data.damage_tracker;
             let age = backend.buffer_age().unwrap_or(0);
 
             let render_res = backend.bind().and_then(|(renderer, mut fb)| {
+                // Cursor on top of chrome.
                 let cursor_elements: Vec<CustomRenderElements<GlesRenderer>> =
                     smithay::backend::renderer::element::AsRenderElements::render_elements(
                         &pointer_element,
@@ -208,11 +213,14 @@ pub fn run_winit() {
                         scale,
                         1.0,
                     );
+                // Front-to-back: cursor → chrome → windows.
+                let mut all_elements = cursor_elements;
+                all_elements.append(&mut chrome);
 
                 render_output(
                     &output,
                     &state.space,
-                    cursor_elements,
+                    all_elements,
                     renderer,
                     &mut fb,
                     damage_tracker,

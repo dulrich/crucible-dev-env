@@ -1019,20 +1019,32 @@ impl CrucibleState<UdevData> {
         }
         .unwrap();
 
-        // Cursor element, drawn only on the output the pointer is over.
-        let mut custom_elements: Vec<CustomRenderElements<UdevRenderer<'_>>> = Vec::new();
+        // Chrome (focus border + stack badges) — built here using the free function directly to
+        // avoid a whole-`self` borrow conflict with `renderer` (which holds `&mut self.backend_data`).
+        // SolidColorRenderElement is renderer-agnostic; no renderer reference is needed.
+        let mut chrome: Vec<CustomRenderElements<UdevRenderer<'_>>> =
+            crate::chrome::build_chrome_elements(&self.layout.world, &self.last_layout)
+                .into_iter()
+                .map(CustomRenderElements::SolidColor)
+                .collect();
+
+        // Cursor element, drawn only on the output the pointer is over (on top of chrome).
         if output_geo.to_f64().contains(pointer_location) {
             let cursor_pos = pointer_location - output_geo.loc.to_f64();
-            custom_elements = self.backend_data.pointer_element.render_elements(
-                &mut renderer,
-                cursor_pos.to_physical(scale).to_i32_round(),
-                scale,
-                1.0,
-            );
+            let cursor_elements: Vec<CustomRenderElements<UdevRenderer<'_>>> =
+                self.backend_data.pointer_element.render_elements(
+                    &mut renderer,
+                    cursor_pos.to_physical(scale).to_i32_round(),
+                    scale,
+                    1.0,
+                );
+            // Front-to-back: cursor → chrome → windows.
+            let mut all = cursor_elements;
+            all.append(&mut chrome);
+            chrome = all;
         }
 
-        let (elements, clear_color) =
-            output_elements(&output, &self.space, custom_elements, &mut renderer);
+        let (elements, clear_color) = output_elements(&output, &self.space, chrome, &mut renderer);
 
         let surface = self
             .backend_data
