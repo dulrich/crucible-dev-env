@@ -107,6 +107,14 @@ pub trait Backend {
     fn early_import(&mut self, surface: &WlSurface);
     /// Propagates keyboard LED state changes to the backend's input devices.
     fn update_led_state(&mut self, led_state: LedState);
+    /// Requests a switch to virtual terminal `vt`, returning whether the backend handled it.
+    ///
+    /// Only the udev/DRM backend owns a `libseat` session and can switch VTs; the default
+    /// implementation returns `false` so the nested `winit` backend (which has no session) ignores
+    /// `Ctrl+Alt+F<n>` chords.
+    fn change_vt(&mut self, _vt: i32) -> bool {
+        false
+    }
 }
 
 /// Central, backend-agnostic compositor state driven by the calloop event loop.
@@ -398,3 +406,94 @@ impl<B: Backend + 'static> XWaylandShellHandler for CrucibleState<B> {
 // above). One invocation therefore wires compositor + shm + output + xdg-shell + layer-shell +
 // seat + data-device + primary-selection (and any future globals) at once.
 delegate_dispatch2!(@<B: Backend + 'static> CrucibleState<B>);
+
+use smithay::{
+    backend::renderer::element::{RenderElementStates, default_primary_scanout_output_compare},
+    desktop::utils::{
+        OutputPresentationFeedback, surface_presentation_feedback_flags_from_states,
+        surface_primary_scanout_output, update_surface_primary_scanout_output,
+    },
+};
+
+/// Records, for every surface on `output`, which output actually scanned it out this frame.
+///
+/// Smithay needs this bookkeeping to deliver correct `wl_surface.frame` throttling and presentation
+/// feedback when a surface spans multiple outputs. Used by the udev/DRM render path after a frame is
+/// rendered (the nested `winit` path has a single output and does not need it). Mirrors anvil's
+/// helper, trimmed to CDE's window set (no DnD icon / cursor-surface scanout tracking yet).
+pub fn update_primary_scanout_output(
+    space: &Space<WindowElement>,
+    output: &Output,
+    render_element_states: &RenderElementStates,
+) {
+    space.elements().for_each(|window| {
+        window.0.with_surfaces(|surface, states| {
+            update_surface_primary_scanout_output(
+                surface,
+                output,
+                states,
+                None,
+                render_element_states,
+                default_primary_scanout_output_compare,
+            );
+        });
+    });
+    let map = smithay::desktop::layer_map_for_output(output);
+    for layer_surface in map.layers() {
+        layer_surface.with_surfaces(|surface, states| {
+            update_surface_primary_scanout_output(
+                surface,
+                output,
+                states,
+                None,
+                render_element_states,
+                default_primary_scanout_output_compare,
+            );
+        });
+    }
+}
+
+/// Collects the [`OutputPresentationFeedback`] for everything visible on `output`.
+///
+/// Walks the mapped windows (and the output's layer surfaces) and gathers their presentation
+/// feedback so the DRM backend can call `feedback.presented(..)` after the page-flip completes,
+/// telling clients exactly when their frame hit the screen. Mirrors anvil's helper.
+pub fn take_presentation_feedback(
+    output: &Output,
+    space: &Space<WindowElement>,
+    render_element_states: &RenderElementStates,
+) -> OutputPresentationFeedback {
+    let mut output_presentation_feedback = OutputPresentationFeedback::new(output);
+
+    space.elements().for_each(|window| {
+        if space.outputs_for_element(window).contains(output) {
+            window.0.take_presentation_feedback(
+                &mut output_presentation_feedback,
+                surface_primary_scanout_output,
+                |surface, _| {
+                    surface_presentation_feedback_flags_from_states(
+                        surface,
+                        None,
+                        render_element_states,
+                    )
+                },
+            );
+        }
+    });
+    let map = smithay::desktop::layer_map_for_output(output);
+    for layer_surface in map.layers() {
+        layer_surface.take_presentation_feedback(
+            &mut output_presentation_feedback,
+            surface_primary_scanout_output,
+            |surface, _| {
+                surface_presentation_feedback_flags_from_states(
+                    surface,
+                    None,
+                    render_element_states,
+                )
+            },
+        );
+    }
+
+    output_presentation_feedback
+}

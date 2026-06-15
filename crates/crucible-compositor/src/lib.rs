@@ -16,7 +16,7 @@ pub mod state;
 /// Nested `winit` development backend.
 pub mod winit;
 
-/// `udev`/DRM/KMS TTY backend (WS-1 stub; implemented in WS-6).
+/// `udev`/DRM/KMS TTY backend (multi-output, libseat session, VT switching).
 pub mod udev;
 
 /// Wayland shell protocol handlers (xdg-shell + wlr-layer-shell).

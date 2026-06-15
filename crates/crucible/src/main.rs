@@ -1,8 +1,8 @@
 //! Entry point for the Crucible Dev Env (CDE) binary.
 //!
 //! Parses the backend-selection flag, sets up tracing, and dispatches to the matching compositor
-//! backend. WS-2 wires up `--winit` (the nested development backend); `--tty-udev` (DRM/KMS) lands
-//! in WS-6 and is still a stub.
+//! backend. `--winit` runs the nested development backend; `--tty-udev` runs the DRM/KMS backend on
+//! a real TTY across multiple outputs.
 
 fn main() {
     tracing_subscriber::fmt()
@@ -14,10 +14,7 @@ fn main() {
 
     match std::env::args().nth(1).as_deref() {
         Some("--winit") => crucible_compositor::winit::run_winit(),
-        Some("--tty-udev") => {
-            // The DRM/KMS TTY backend arrives in WS-6; see plans/01-compositor-up.md.
-            println!("--tty-udev (DRM/KMS TTY backend): not yet implemented");
-        }
+        Some("--tty-udev") => crucible_compositor::udev::run_udev(),
         _ => {
             println!(
                 "{} {} — {}",
@@ -25,7 +22,10 @@ fn main() {
                 env!("CARGO_PKG_VERSION"),
                 env!("CARGO_PKG_DESCRIPTION"),
             );
-            println!("pass --winit to start the nested development compositor.");
+            println!(
+                "pass --winit to start the nested development compositor, or --tty-udev to run on \
+                 a TTY (DRM/KMS, multi-output)."
+            );
         }
     }
 }

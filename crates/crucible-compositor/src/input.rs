@@ -34,15 +34,15 @@ use std::sync::atomic::Ordering;
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, Event, InputBackend, InputEvent, KeyState,
-        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
     },
     desktop::WindowSurfaceType,
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, MotionEvent},
+        pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
     },
     reexports::wayland_server::protocol::wl_pointer,
-    utils::{Logical, Point, SERIAL_COUNTER, Serial},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial},
 };
 use tracing::{debug, error, info, warn};
 
@@ -78,6 +78,11 @@ pub enum KeyAction {
     FocusUp,
     /// Move focus right — **stubbed** to a focus cycle (Phase 2 owns directional/tiling logic).
     FocusRight,
+    /// Switch to virtual terminal `n` (only meaningful on the udev/DRM backend).
+    ///
+    /// Produced when libinput delivers a `Ctrl+Alt+F<n>` chord (the `XF86Switch_VT_<n>` keysyms).
+    /// The nested `winit` backend never sees these, so this arm is a no-op there.
+    VtSwitch(i32),
 }
 
 /// Maps a modifier+keysym combination to a [`KeyAction`], or `None` to forward the key.
@@ -91,6 +96,13 @@ pub enum KeyAction {
 /// - `Super+H` / `Super+J` / `Super+K` / `Super+L` → directional focus (stubbed; see
 ///   [`KeyAction`])
 pub fn process_keyboard_shortcut(modifiers: ModifiersState, keysym: Keysym) -> Option<KeyAction> {
+    // VT switching (`Ctrl+Alt+F<n>`) takes priority over the Super leader and is independent of it.
+    // libinput maps `Ctrl+Alt+F<n>` to the `XF86Switch_VT_<n>` keysyms; map those to a VT switch.
+    if (Keysym::XF86_Switch_VT_1.raw()..=Keysym::XF86_Switch_VT_12.raw()).contains(&keysym.raw()) {
+        let vt = (keysym.raw() - Keysym::XF86_Switch_VT_1.raw() + 1) as i32;
+        return Some(KeyAction::VtSwitch(vt));
+    }
+
     // Only the Super (logo / Mod4) leader is bound; everything else forwards to the client.
     if !modifiers.logo {
         return None;
@@ -125,7 +137,7 @@ impl CrucibleState<WinitData> {
     /// Handles the events the nested winit backend emits: keyboard keys (through the Super-leader
     /// filter), absolute pointer motion, pointer buttons, and scroll axes. Other events (touch,
     /// gestures, relative motion) are not produced by the winit backend and are ignored here; they
-    /// arrive with the udev/libinput path in WS-6.
+    /// arrive with the udev/libinput path (see [`CrucibleState::process_input_event_libinput`]).
     pub fn process_input_event(&mut self, event: InputEvent<smithay::backend::winit::WinitInput>) {
         type B = smithay::backend::winit::WinitInput;
         match event {
@@ -135,7 +147,30 @@ impl CrucibleState<WinitData> {
             }
             InputEvent::PointerButton { event } => self.process_pointer_button::<B>(event),
             InputEvent::PointerAxis { event } => self.process_pointer_axis::<B>(event),
-            // Winit does not emit these; the udev/libinput backend (WS-6) handles them.
+            // Winit does not emit these; the udev/libinput backend handles them.
+            _ => {}
+        }
+    }
+}
+
+impl<B: Backend + 'static> CrucibleState<B> {
+    /// Routes a single libinput [`InputEvent`] into the seat (the udev/DRM backend path).
+    ///
+    /// Generic over the [`InputBackend`] so it works with `LibinputInputBackend`; reuses the **same**
+    /// per-event seat handlers the winit path uses ([`Self::process_keyboard_event`],
+    /// [`Self::process_pointer_button`], [`Self::process_pointer_axis`]). The difference from the
+    /// winit path is the pointer-motion model: real input devices deliver **relative** motion
+    /// ([`InputEvent::PointerMotion`]) rather than the absolute motion winit emits, so this routes
+    /// motion through [`Self::process_pointer_motion_relative`]. Device add/remove are surfaced to
+    /// the caller (which configures libinput / tracks keyboards for LED sync) and otherwise ignored.
+    pub fn process_input_event_libinput<I: InputBackend>(&mut self, event: InputEvent<I>) {
+        match event {
+            InputEvent::Keyboard { event } => self.process_keyboard_event::<I>(event),
+            InputEvent::PointerMotion { event } => self.process_pointer_motion_relative::<I>(event),
+            InputEvent::PointerButton { event } => self.process_pointer_button::<I>(event),
+            InputEvent::PointerAxis { event } => self.process_pointer_axis::<I>(event),
+            // Touch/gesture/device events are not handled yet; the udev source inspects
+            // DeviceAdded/DeviceRemoved itself for keyboard-LED bookkeeping before calling us.
             _ => {}
         }
     }
@@ -149,7 +184,7 @@ impl CrucibleState<WinitData> {
     ///   never sees a dangling key-up), otherwise forwarded.
     ///
     /// Any intercepted [`KeyAction`] is dispatched via [`Self::handle_key_action`].
-    fn process_keyboard_event<B: InputBackend>(&mut self, evt: B::KeyboardKeyEvent) {
+    fn process_keyboard_event<I: InputBackend>(&mut self, evt: I::KeyboardKeyEvent) {
         let keycode = evt.key_code();
         let state = evt.state();
         let serial = SERIAL_COUNTER.next_serial();
@@ -215,6 +250,14 @@ impl CrucibleState<WinitData> {
             // windows so the chord path is observably wired without committing to a layout model.
             KeyAction::FocusLeft | KeyAction::FocusUp => self.cycle_focus(false),
             KeyAction::FocusRight | KeyAction::FocusDown => self.cycle_focus(true),
+            KeyAction::VtSwitch(vt) => {
+                // Only the udev/DRM backend owns a session; on winit this is a no-op (the backend's
+                // default `change_vt` returns `false`).
+                info!(to = vt, "VT switch requested");
+                if !self.backend_data.change_vt(vt) {
+                    warn!(to = vt, "Backend does not support VT switching");
+                }
+            }
         }
     }
 
@@ -284,9 +327,9 @@ impl CrucibleState<WinitData> {
     /// Transforms the device position into the output's logical geometry, updates the pointer
     /// location and pointer focus (the surface under the cursor, from the [`Space`]), so the focused
     /// client receives enter/leave/motion. No-op if no output is mapped yet.
-    fn process_pointer_motion_absolute<B: InputBackend>(
+    fn process_pointer_motion_absolute<I: InputBackend>(
         &mut self,
-        evt: B::PointerMotionAbsoluteEvent,
+        evt: I::PointerMotionAbsoluteEvent,
     ) {
         let Some(output) = self.space.outputs().next().cloned() else {
             return;
@@ -313,8 +356,73 @@ impl CrucibleState<WinitData> {
         pointer.frame(self);
     }
 
+    /// Maps **relative** pointer motion (real input devices, via libinput) into the seat.
+    ///
+    /// Unlike winit's absolute motion, libinput delivers a motion *delta*. The new pointer location
+    /// is the previous location plus the delta, clamped to the union of all mapped outputs so the
+    /// cursor cannot leave the visible area (it can cross freely between outputs laid left-to-right).
+    /// The seat receives both the relative-motion event (for clients that requested it via the
+    /// relative-pointer protocol, gated by [`Backend::HAS_RELATIVE_MOTION`]) and the resulting
+    /// absolute motion. No-op until at least one output is mapped.
+    fn process_pointer_motion_relative<I: InputBackend>(&mut self, evt: I::PointerMotionEvent) {
+        if self.space.outputs().next().is_none() {
+            return;
+        }
+
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.pointer.clone();
+
+        let mut location = pointer.current_location() + evt.delta();
+        location = self.clamp_coords(location);
+
+        let under = self.surface_under(location);
+        pointer.relative_motion(
+            self,
+            under.clone(),
+            &RelativeMotionEvent {
+                delta: evt.delta(),
+                delta_unaccel: evt.delta_unaccel(),
+                utime: evt.time(),
+            },
+        );
+        pointer.motion(
+            self,
+            under,
+            &MotionEvent {
+                location,
+                serial,
+                time: evt.time_msec(),
+            },
+        );
+        pointer.frame(self);
+    }
+
+    /// Clamps a pointer location to the bounding box of all mapped outputs.
+    ///
+    /// With outputs laid out left-to-right (see the udev backend), the union is a single horizontal
+    /// strip, so this keeps the cursor on-screen while letting it move between adjacent outputs.
+    /// Returns `pos` unchanged when no output is mapped.
+    fn clamp_coords(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
+        let mut bbox: Option<Rectangle<i32, Logical>> = None;
+        for output in self.space.outputs() {
+            if let Some(geo) = self.space.output_geometry(output) {
+                bbox = Some(match bbox {
+                    Some(acc) => acc.merge(geo),
+                    None => geo,
+                });
+            }
+        }
+        let Some(bbox) = bbox else {
+            return pos;
+        };
+        let bbox = bbox.to_f64();
+        let x = pos.x.clamp(bbox.loc.x, bbox.loc.x + bbox.size.w - 1.0);
+        let y = pos.y.clamp(bbox.loc.y, bbox.loc.y + bbox.size.h - 1.0);
+        (x, y).into()
+    }
+
     /// Delivers a pointer button to the seat, moving keyboard focus on press.
-    fn process_pointer_button<B: InputBackend>(&mut self, evt: B::PointerButtonEvent) {
+    fn process_pointer_button<I: InputBackend>(&mut self, evt: I::PointerButtonEvent) {
         let serial = SERIAL_COUNTER.next_serial();
         let button = evt.button_code();
         let state = wl_pointer::ButtonState::from(evt.state());
@@ -337,7 +445,7 @@ impl CrucibleState<WinitData> {
     }
 
     /// Delivers a scroll axis frame to the seat.
-    fn process_pointer_axis<B: InputBackend>(&mut self, evt: B::PointerAxisEvent) {
+    fn process_pointer_axis<I: InputBackend>(&mut self, evt: I::PointerAxisEvent) {
         let horizontal = evt
             .amount(Axis::Horizontal)
             .unwrap_or_else(|| evt.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0);
