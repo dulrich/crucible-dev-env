@@ -15,3 +15,5 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+crucible-compositor = { path = "../crucible-compositor" }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }

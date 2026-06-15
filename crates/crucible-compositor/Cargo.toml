@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 crucible-layout = { path = "../crucible-layout" }
+tracing.workspace = true
 
 # Keymap/keysym handling shared with Smithay's input path. Pinned to the same
 # version Smithay master resolves to so there is a single unified copy.
