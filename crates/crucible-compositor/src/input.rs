@@ -21,12 +21,36 @@
 //! with no compositor state, so the binding logic is unit-tested without a running compositor (see
 //! the tests at the bottom of this module).
 //!
+//! The binding defaults are structured as a table inside `process_keyboard_shortcut` so that Phase 3
+//! can replace the lookup with a config-driven override. The defaults live here; Phase 3 sources them
+//! from `crucible-config`.
+//!
+//! ## Default binding table (WS-4)
+//!
+//! | Chord                 | `KeyAction`              | Model op                              |
+//! |-----------------------|--------------------------|---------------------------------------|
+//! | `Super+Return`        | `Run(terminal)`          | spawn terminal (fills focused pane)   |
+//! | `Super+Q`             | `Quit`                   | stop compositor                       |
+//! | `Super+H/J/K/L`       | `Focus{Left,Down,Up,Right}` | `World::focus(dir)`              |
+//! | `Super+Shift+H/J/K/L` | `Move{Left,Down,Up,Right}`  | `World::move_(dir)`              |
+//! | `Super+Backslash`     | `SplitRight`             | `World::split(Right)`                 |
+//! | `Super+Minus`         | `SplitDown`              | `World::split(Down)`                  |
+//! | `Super+Shift+Return`  | `StackWindow`            | spawn terminal (stacks in pane)       |
+//! | `Super+Tab`           | `CycleStackNext`         | `World::cycle_stack(1)`               |
+//! | `Super+Shift+Tab`     | `CycleStackPrev`         | `World::cycle_stack(-1)`              |
+//! | `Super+Ctrl+H/J/K/L`  | `Resize{Left,Down,Up,Right}` | `World::resize(dir, 0.05)`       |
+//! | `Super+]`             | `NextWorkspace`          | `World::cycle_workspace(1)`           |
+//! | `Super+[`             | `PrevWorkspace`          | `World::cycle_workspace(-1)`          |
+//! | `Super+N`             | `NewWorkspace`           | `World::new_workspace(auto_name)`     |
+//! | `Super+Shift+]`       | `MoveWindowToNextWorkspace` | `World::move_window_to_workspace` |
+//! | `Super+Shift+[`       | `MoveWindowToPrevWorkspace` | `World::move_window_to_workspace` |
+//!
+//! `rename-workspace` and the fuzzy workspace picker are **Phase 3** (`// Phase 3: picker/prompt`).
+//!
 //! ## Scope (WS-4)
 //! This is the **winit** event path only — `udev`/libinput is WS-6. Focus targets stay bare
 //! [`WlSurface`] (Wayland-only); the `KeyboardFocusTarget`/`PointerFocusTarget` enums that unify
-//! layer/popup/X11 focus are WS-5 work (see [`crate::focus`]). The directional focus actions
-//! (`Super+H/J/K/L`) are an explicit **stub**: real directional/tiling movement is Phase 2; for now
-//! they perform a simple focus cycle among mapped windows.
+//! layer/popup/X11 focus are WS-5 work (see [`crate::focus`]).
 
 use std::process::Command;
 use std::sync::atomic::Ordering;
@@ -61,23 +85,89 @@ const DEFAULT_TERMINALS: &[&str] = &["foot", "alacritty", "kitty", "weston-termi
 
 /// A compositor action triggered by an intercepted `Super`-leader chord.
 ///
-/// Produced by [`process_keyboard_shortcut`] and consumed by
-/// [`CrucibleState::handle_key_action`]. The directional variants are **stubs** for Phase 1 (the
-/// real directional/tiling movement is Phase 2 — see [`CrucibleState::cycle_focus`]).
+/// Produced by [`process_keyboard_shortcut`] and consumed by [`CrucibleState::handle_key_action`].
+/// Each variant maps 1:1 to a CDE verb; the dispatch in `handle_key_action` calls the
+/// corresponding [`crucible_layout::World`] op and then `apply_layout`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyAction {
-    /// Quit the compositor cleanly (stop the main loop).
+    /// Quit the compositor cleanly (stop the main loop). `Super+Q`.
     Quit,
-    /// Spawn a program (currently only the terminal, via `Super+Return`).
+    /// Spawn a program. `Super+Return` spawns the terminal; it connects via the Wayland socket
+    /// and the shell map path (`new_toplevel`) places it in the focused pane automatically.
     Run(String),
-    /// Move focus left — **stubbed** to a focus cycle (Phase 2 owns directional/tiling logic).
+
+    // ---- directional focus (`Super+H/J/K/L`) -----------------------------------------------
+    /// Move pane focus left within the active workspace.
     FocusLeft,
-    /// Move focus down — **stubbed** to a focus cycle (Phase 2 owns directional/tiling logic).
+    /// Move pane focus down within the active workspace.
     FocusDown,
-    /// Move focus up — **stubbed** to a focus cycle (Phase 2 owns directional/tiling logic).
+    /// Move pane focus up within the active workspace.
     FocusUp,
-    /// Move focus right — **stubbed** to a focus cycle (Phase 2 owns directional/tiling logic).
+    /// Move pane focus right within the active workspace.
     FocusRight,
+
+    // ---- pane move (`Super+Shift+H/J/K/L`) -------------------------------------------------
+    /// Swap the focused pane with its left neighbour (focus follows).
+    MoveLeft,
+    /// Swap the focused pane with its down neighbour (focus follows).
+    MoveDown,
+    /// Swap the focused pane with its up neighbour (focus follows).
+    MoveUp,
+    /// Swap the focused pane with its right neighbour (focus follows).
+    MoveRight,
+
+    // ---- split (`Super+Backslash`, `Super+Minus`) ------------------------------------------
+    /// Split the focused pane rightward; the new empty pane becomes focused.
+    ///
+    /// The user then spawns a terminal (`Super+Return`) which maps into the now-focused pane.
+    SplitRight,
+    /// Split the focused pane downward; the new empty pane becomes focused.
+    SplitDown,
+
+    // ---- stack (`Super+Shift+Return`, `Super+Tab`, `Super+Shift+Tab`) ---------------------
+    /// Stack a new terminal window into the focused pane by spawning it.
+    ///
+    /// Because `World::open_window` is only ever called from the surface-map path (when a client
+    /// connects and maps a toplevel), keybinds must not fabricate a surface-less `WindowId`.
+    /// Instead, this verb spawns the terminal; the shell map path pushes the new window onto the
+    /// focused pane's stack. Plain `Super+Return` does the same thing — they are identical at the
+    /// model level; the separate verb exists for discoverability and for Phase 3 to bind
+    /// differently if desired.
+    StackWindow,
+    /// Cycle the focused pane's window stack forward by one (next window).
+    CycleStackNext,
+    /// Cycle the focused pane's window stack backward by one (previous window).
+    CycleStackPrev,
+
+    // ---- resize (`Super+Ctrl+H/J/K/L`) ----------------------------------------------------
+    /// Shrink the focused pane leftward (shift the left split edge outward).
+    ResizeLeft,
+    /// Shrink the focused pane downward (shift the bottom split edge inward).
+    ResizeDown,
+    /// Shrink the focused pane upward (shift the top split edge outward).
+    ResizeUp,
+    /// Expand the focused pane rightward (shift the right split edge outward).
+    ResizeRight,
+
+    // ---- workspace (`Super+]`, `Super+[`, `Super+N`, `Super+Shift+]`, `Super+Shift+[`) ----
+    /// Switch to the next workspace on the focused output (wraps around).
+    NextWorkspace,
+    /// Switch to the previous workspace on the focused output (wraps around).
+    PrevWorkspace,
+    /// Create a new workspace on the focused output with an auto-generated name and switch to it.
+    ///
+    /// The fuzzy picker / interactive naming is **Phase 3** (`// Phase 3: picker/prompt`).
+    NewWorkspace,
+    /// Move the focused window to the next workspace on the focused output (wraps around).
+    ///
+    /// No-op when there is no focused window or only one workspace exists.
+    MoveWindowToNextWorkspace,
+    /// Move the focused window to the previous workspace on the focused output (wraps around).
+    ///
+    /// No-op when there is no focused window or only one workspace exists.
+    MoveWindowToPrevWorkspace,
+
+    // ---- VT switch (udev/DRM only) ---------------------------------------------------------
     /// Switch to virtual terminal `n` (only meaningful on the udev/DRM backend).
     ///
     /// Produced when libinput delivers a `Ctrl+Alt+F<n>` chord (the `XF86Switch_VT_<n>` keysyms).
@@ -89,12 +179,13 @@ pub enum KeyAction {
 ///
 /// **Pure** (no compositor state) so the `Super`-leader binding table is unit-testable without a
 /// running compositor. Only `Super` (`modifiers.logo`, Mod4) chords are bound; every other key
-/// returns `None` and is forwarded to the focused client. The bound set for WS-4 is:
+/// returns `None` and is forwarded to the focused client.
 ///
-/// - `Super+Return` → [`KeyAction::Run`] (spawn a terminal)
-/// - `Super+Q` → [`KeyAction::Quit`]
-/// - `Super+H` / `Super+J` / `Super+K` / `Super+L` → directional focus (stubbed; see
-///   [`KeyAction`])
+/// The bindings are structured as a readable `match` table (modifier pattern × keysym → action)
+/// so that **Phase 3** can replace the dispatch with a config-driven lookup without touching
+/// `handle_key_action`. The defaults live here; Phase 3 sources them from `crucible-config`.
+///
+/// See the module-level binding table for the full chord → verb mapping.
 pub fn process_keyboard_shortcut(modifiers: ModifiersState, keysym: Keysym) -> Option<KeyAction> {
     // VT switching (`Ctrl+Alt+F<n>`) takes priority over the Super leader and is independent of it.
     // libinput maps `Ctrl+Alt+F<n>` to the `XF86Switch_VT_<n>` keysyms; map those to a VT switch.
@@ -108,14 +199,63 @@ pub fn process_keyboard_shortcut(modifiers: ModifiersState, keysym: Keysym) -> O
         return None;
     }
 
-    match keysym {
-        Keysym::Return => Some(KeyAction::Run(terminal_command())),
-        // Both lower- and upper-case `q` map to quit so the bind works regardless of Shift/Caps.
-        Keysym::q | Keysym::Q => Some(KeyAction::Quit),
-        Keysym::h | Keysym::H => Some(KeyAction::FocusLeft),
-        Keysym::j | Keysym::J => Some(KeyAction::FocusDown),
-        Keysym::k | Keysym::K => Some(KeyAction::FocusUp),
-        Keysym::l | Keysym::L => Some(KeyAction::FocusRight),
+    // Decompose modifier flags once for the table below.
+    let shift = modifiers.shift;
+    let ctrl = modifiers.ctrl;
+
+    // --- binding table (Phase 3: replace this match with a config-driven lookup) ---
+    //
+    // Ordering: plain Super first, then Super+Shift, then Super+Ctrl. Within each group,
+    // keysyms are listed in the order they appear in the module-level doc table.
+    match (shift, ctrl, keysym) {
+        // ---- plain Super ---------------------------------------------------------------
+        (false, false, Keysym::Return) => Some(KeyAction::Run(terminal_command())),
+        // Both lower- and upper-case map to Quit so the bind works regardless of Caps Lock.
+        (false, false, Keysym::q | Keysym::Q) => Some(KeyAction::Quit),
+
+        // focus: Super+H/J/K/L
+        (false, false, Keysym::h) => Some(KeyAction::FocusLeft),
+        (false, false, Keysym::j) => Some(KeyAction::FocusDown),
+        (false, false, Keysym::k) => Some(KeyAction::FocusUp),
+        (false, false, Keysym::l) => Some(KeyAction::FocusRight),
+
+        // split: Super+Backslash (right) / Super+Minus (down)
+        (false, false, Keysym::backslash) => Some(KeyAction::SplitRight),
+        (false, false, Keysym::minus) => Some(KeyAction::SplitDown),
+
+        // cycle-stack: Super+Tab (next) — Super+Shift+Tab (prev) handled below
+        (false, false, Keysym::Tab) => Some(KeyAction::CycleStackNext),
+
+        // workspace navigation: Super+] next, Super+[ prev, Super+N new
+        (false, false, Keysym::bracketright) => Some(KeyAction::NextWorkspace),
+        (false, false, Keysym::bracketleft) => Some(KeyAction::PrevWorkspace),
+        (false, false, Keysym::n | Keysym::N) => Some(KeyAction::NewWorkspace),
+
+        // ---- Super+Shift -----------------------------------------------------------
+        // spawn into current pane (stack-window): Super+Shift+Return
+        (true, false, Keysym::Return) => Some(KeyAction::StackWindow),
+
+        // move pane: Super+Shift+H/J/K/L
+        (true, false, Keysym::h | Keysym::H) => Some(KeyAction::MoveLeft),
+        (true, false, Keysym::j | Keysym::J) => Some(KeyAction::MoveDown),
+        (true, false, Keysym::k | Keysym::K) => Some(KeyAction::MoveUp),
+        (true, false, Keysym::l | Keysym::L) => Some(KeyAction::MoveRight),
+
+        // cycle-stack prev: Super+Shift+Tab
+        (true, false, Keysym::Tab | Keysym::ISO_Left_Tab) => Some(KeyAction::CycleStackPrev),
+
+        // move window to workspace: Super+Shift+] next, Super+Shift+[ prev
+        (true, false, Keysym::bracketright) => Some(KeyAction::MoveWindowToNextWorkspace),
+        (true, false, Keysym::bracketleft) => Some(KeyAction::MoveWindowToPrevWorkspace),
+
+        // ---- Super+Ctrl ------------------------------------------------------------
+        // resize: Super+Ctrl+H/J/K/L
+        (false, true, Keysym::h | Keysym::H) => Some(KeyAction::ResizeLeft),
+        (false, true, Keysym::j | Keysym::J) => Some(KeyAction::ResizeDown),
+        (false, true, Keysym::k | Keysym::K) => Some(KeyAction::ResizeUp),
+        (false, true, Keysym::l | Keysym::L) => Some(KeyAction::ResizeRight),
+
+        // ---- unmatched Super chord → forward to client -----------------------------
         _ => None,
     }
 }
@@ -238,24 +378,28 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// Dispatches an intercepted [`KeyAction`].
+    /// Dispatches an intercepted [`KeyAction`] to the appropriate model op + apply step.
+    ///
+    /// Infallible ops (those returning `Reconcile` directly) call `apply_layout` inline.
+    /// Fallible ops (those returning `Result<Reconcile, LayoutError>`) use `with_model` and log
+    /// expected no-op errors (e.g. `SameWorkspace`, `LastOutput`) at debug level so they don't
+    /// surface as noise in normal use.
     fn handle_key_action(&mut self, action: KeyAction) {
+        use crucible_layout::Direction;
+
+        /// Amount by which a single resize keystroke adjusts the split ratio.
+        const RESIZE_DELTA: f64 = 0.05;
+
         match action {
+            // ---- compositor-level actions -----------------------------------------------
             KeyAction::Quit => {
                 info!("Super+Q: quitting");
                 self.running.store(false, Ordering::SeqCst);
             }
-            KeyAction::Run(cmd) => self.spawn_terminal(&cmd),
-            // TEMPORARY WS-3 test hook — **WS-4 replaces this** with the real verb set
-            // (`split-right`/`split-down`/`focus <dir>`/…). To exercise tiling live without WS-4's
-            // keybinding engine, the four directional chords drive the model directly:
-            //   Super+J -> split-down,  Super+K -> split-right  (then Super+Return fills the new pane)
-            //   Super+H -> focus left,  Super+L -> focus right  (move pane focus, model-driven)
-            // Each goes through `apply_layout` so geometry/visibility/focus follow the model.
-            KeyAction::FocusDown => self.debug_model_op(DebugModelOp::SplitDown),
-            KeyAction::FocusUp => self.debug_model_op(DebugModelOp::SplitRight),
-            KeyAction::FocusLeft => self.debug_model_op(DebugModelOp::FocusLeft),
-            KeyAction::FocusRight => self.debug_model_op(DebugModelOp::FocusRight),
+            KeyAction::Run(cmd) => {
+                info!(cmd, "Super+Return: spawning terminal into focused pane");
+                self.spawn_terminal(&cmd);
+            }
             KeyAction::VtSwitch(vt) => {
                 // Only the udev/DRM backend owns a session; on winit this is a no-op (the backend's
                 // default `change_vt` returns `false`).
@@ -263,6 +407,176 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 if !self.backend_data.change_vt(vt) {
                     warn!(to = vt, "Backend does not support VT switching");
                 }
+            }
+
+            // ---- directional focus ------------------------------------------------------
+            KeyAction::FocusLeft => {
+                let r = self.layout.world.focus(Direction::Left);
+                self.apply_layout(&r);
+            }
+            KeyAction::FocusDown => {
+                let r = self.layout.world.focus(Direction::Down);
+                self.apply_layout(&r);
+            }
+            KeyAction::FocusUp => {
+                let r = self.layout.world.focus(Direction::Up);
+                self.apply_layout(&r);
+            }
+            KeyAction::FocusRight => {
+                let r = self.layout.world.focus(Direction::Right);
+                self.apply_layout(&r);
+            }
+
+            // ---- pane move --------------------------------------------------------------
+            KeyAction::MoveLeft => {
+                let r = self.layout.world.move_(Direction::Left);
+                self.apply_layout(&r);
+            }
+            KeyAction::MoveDown => {
+                let r = self.layout.world.move_(Direction::Down);
+                self.apply_layout(&r);
+            }
+            KeyAction::MoveUp => {
+                let r = self.layout.world.move_(Direction::Up);
+                self.apply_layout(&r);
+            }
+            KeyAction::MoveRight => {
+                let r = self.layout.world.move_(Direction::Right);
+                self.apply_layout(&r);
+            }
+
+            // ---- split ------------------------------------------------------------------
+            KeyAction::SplitRight => {
+                let (_, r) = self.layout.world.split(Direction::Right);
+                self.apply_layout(&r);
+            }
+            KeyAction::SplitDown => {
+                let (_, r) = self.layout.world.split(Direction::Down);
+                self.apply_layout(&r);
+            }
+
+            // ---- stack-window -----------------------------------------------------------
+            // Spawning a terminal causes the client to connect, map a toplevel, and flow through
+            // `new_toplevel` → `World::open_window`, which pushes the window onto the focused
+            // pane's stack. We must not call `World::open_window` or `World::stack_window`
+            // directly from a keybind: doing so allocates a `WindowId` with no backing surface
+            // and corrupts the `by_id` map. The spawn IS the stack — it stacks into the focused
+            // pane automatically.
+            KeyAction::StackWindow => {
+                let cmd = terminal_command();
+                info!(
+                    cmd,
+                    "Super+Shift+Return: spawning terminal to stack into focused pane"
+                );
+                self.spawn_terminal(&cmd);
+            }
+
+            // ---- cycle stack ------------------------------------------------------------
+            KeyAction::CycleStackNext => {
+                let r = self.layout.world.cycle_stack(1);
+                self.apply_layout(&r);
+            }
+            KeyAction::CycleStackPrev => {
+                let r = self.layout.world.cycle_stack(-1);
+                self.apply_layout(&r);
+            }
+
+            // ---- resize -----------------------------------------------------------------
+            KeyAction::ResizeLeft => {
+                let r = self.layout.world.resize(Direction::Left, RESIZE_DELTA);
+                self.apply_layout(&r);
+            }
+            KeyAction::ResizeDown => {
+                let r = self.layout.world.resize(Direction::Down, RESIZE_DELTA);
+                self.apply_layout(&r);
+            }
+            KeyAction::ResizeUp => {
+                let r = self.layout.world.resize(Direction::Up, RESIZE_DELTA);
+                self.apply_layout(&r);
+            }
+            KeyAction::ResizeRight => {
+                let r = self.layout.world.resize(Direction::Right, RESIZE_DELTA);
+                self.apply_layout(&r);
+            }
+
+            // ---- workspace navigation ---------------------------------------------------
+            KeyAction::NextWorkspace => {
+                let r = self.layout.world.cycle_workspace(1);
+                self.apply_layout(&r);
+            }
+            KeyAction::PrevWorkspace => {
+                let r = self.layout.world.cycle_workspace(-1);
+                self.apply_layout(&r);
+            }
+            KeyAction::NewWorkspace => {
+                // Auto-generate a workspace name from the total number of workspaces on the
+                // focused output + 1, so each new workspace gets a unique numeric label
+                // (e.g. "2", "3", …). Phase 3 replaces this with an interactive naming prompt
+                // via the fuzzy picker.
+                // Phase 3: picker/prompt — replace auto-name with user-supplied name from picker.
+                let name = {
+                    let oid = self.layout.world.focused_output();
+                    let n = self
+                        .layout
+                        .world
+                        .output(oid)
+                        .map_or(1, |o| o.workspaces.len() + 1);
+                    n.to_string()
+                };
+                info!(name, "Super+N: creating new workspace");
+                let (_, r) = self.layout.world.new_workspace(name);
+                self.apply_layout(&r);
+            }
+
+            // ---- rename-workspace -------------------------------------------------------
+            // Phase 3: picker/prompt — wire to an interactive rename prompt. For now this verb
+            // has no default binding; the action variant exists so Phase 3 can add a binding
+            // without touching the dispatch arm.
+
+            // ---- move window to workspace -----------------------------------------------
+            KeyAction::MoveWindowToNextWorkspace => {
+                self.move_focused_window_to_adjacent_workspace(1);
+            }
+            KeyAction::MoveWindowToPrevWorkspace => {
+                self.move_focused_window_to_adjacent_workspace(-1);
+            }
+        }
+    }
+
+    /// Moves the currently focused window to the workspace `delta` steps from the active one.
+    ///
+    /// `delta = 1` → next workspace; `delta = -1` → previous workspace (both wrap). No-op when
+    /// there is no focused window, only one workspace exists, or the model rejects the move.
+    fn move_focused_window_to_adjacent_workspace(&mut self, delta: i64) {
+        use crucible_layout::LayoutError;
+
+        let Some(window_id) = self.layout.world.focused_window() else {
+            debug!("move-window-to-workspace: no focused window; ignoring");
+            return;
+        };
+
+        // Determine the target workspace by cycling the active output's workspace stack.
+        let output_id = self.layout.world.focused_output();
+        let Some(output) = self.layout.world.output(output_id) else {
+            return;
+        };
+        let ws_count = output.workspaces.len();
+        if ws_count < 2 {
+            debug!("move-window-to-workspace: only one workspace; ignoring");
+            return;
+        }
+        let active_idx = output.active;
+        // Wrap-around index arithmetic: same formula as `cycle_index` in `crucible-layout`.
+        let target_idx = ((active_idx as i64 + delta).rem_euclid(ws_count as i64)) as usize;
+        let target_ws = output.workspaces[target_idx];
+
+        match self.with_model(|w| w.move_window_to_workspace(window_id, target_ws)) {
+            Ok(()) => {}
+            Err(LayoutError::SameWorkspace) => {
+                debug!("move-window-to-workspace: already on target workspace");
+            }
+            Err(err) => {
+                warn!(%err, "move-window-to-workspace: unexpected error");
             }
         }
     }
@@ -524,37 +838,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let serial = SERIAL_COUNTER.next_serial();
         keyboard.set_focus(self, target, serial);
     }
-
-    /// **TEMPORARY WS-3 test hook — WS-4 replaces this.**
-    ///
-    /// Drives a single `crucible-layout` model mutation (split or directional pane focus) and applies
-    /// the resulting reconcile so a human can exercise tiling live before the WS-4 keybinding engine
-    /// exists. WS-4 owns the real verb set and binding table; this method (and its caller in
-    /// [`Self::handle_key_action`]) goes away then.
-    fn debug_model_op(&mut self, op: DebugModelOp) {
-        use crucible_layout::Direction;
-        let reconcile = match op {
-            DebugModelOp::SplitRight => self.layout.world.split(Direction::Right).1,
-            DebugModelOp::SplitDown => self.layout.world.split(Direction::Down).1,
-            DebugModelOp::FocusLeft => self.layout.world.focus(Direction::Left),
-            DebugModelOp::FocusRight => self.layout.world.focus(Direction::Right),
-        };
-        self.apply_layout(&reconcile);
-    }
-}
-
-/// **TEMPORARY WS-3 test hook** — the model mutations the directional debug chords drive. WS-4
-/// replaces both this and the chord wiring with the real verb set.
-#[derive(Debug, Clone, Copy)]
-enum DebugModelOp {
-    /// Split the focused pane to the right (new empty pane becomes focused).
-    SplitRight,
-    /// Split the focused pane downward (new empty pane becomes focused).
-    SplitDown,
-    /// Move pane focus left.
-    FocusLeft,
-    /// Move pane focus right.
-    FocusRight,
 }
 
 #[cfg(test)]
@@ -568,6 +851,26 @@ mod tests {
             ..Default::default()
         }
     }
+
+    /// Builds a [`ModifiersState`] with `logo` + `shift` (Super+Shift).
+    fn super_shift() -> ModifiersState {
+        ModifiersState {
+            logo: true,
+            shift: true,
+            ..Default::default()
+        }
+    }
+
+    /// Builds a [`ModifiersState`] with `logo` + `ctrl` (Super+Ctrl).
+    fn super_ctrl() -> ModifiersState {
+        ModifiersState {
+            logo: true,
+            ctrl: true,
+            ..Default::default()
+        }
+    }
+
+    // ---- existing bindings (preserved) -------------------------------------------------------
 
     #[test]
     fn super_return_runs_a_terminal() {
@@ -588,8 +891,10 @@ mod tests {
         );
     }
 
+    // ---- directional focus: Super+H/J/K/L ---------------------------------------------------
+
     #[test]
-    fn super_hjkl_maps_to_directional_focus_stubs() {
+    fn super_hjkl_maps_to_directional_focus() {
         assert_eq!(
             process_keyboard_shortcut(super_only(), Keysym::h),
             Some(KeyAction::FocusLeft)
@@ -608,6 +913,169 @@ mod tests {
         );
     }
 
+    // ---- pane move: Super+Shift+H/J/K/L -----------------------------------------------------
+
+    #[test]
+    fn super_shift_hjkl_maps_to_move() {
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::h),
+            Some(KeyAction::MoveLeft)
+        );
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::j),
+            Some(KeyAction::MoveDown)
+        );
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::k),
+            Some(KeyAction::MoveUp)
+        );
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::l),
+            Some(KeyAction::MoveRight)
+        );
+        // Upper-case variants (Shift already set, so Keysym may arrive capitalised).
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::H),
+            Some(KeyAction::MoveLeft)
+        );
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::L),
+            Some(KeyAction::MoveRight)
+        );
+    }
+
+    // ---- split: Super+Backslash / Super+Minus -----------------------------------------------
+
+    #[test]
+    fn super_backslash_splits_right() {
+        assert_eq!(
+            process_keyboard_shortcut(super_only(), Keysym::backslash),
+            Some(KeyAction::SplitRight)
+        );
+    }
+
+    #[test]
+    fn super_minus_splits_down() {
+        assert_eq!(
+            process_keyboard_shortcut(super_only(), Keysym::minus),
+            Some(KeyAction::SplitDown)
+        );
+    }
+
+    // ---- stack-window: Super+Shift+Return ---------------------------------------------------
+
+    #[test]
+    fn super_shift_return_stacks_window() {
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::Return),
+            Some(KeyAction::StackWindow)
+        );
+    }
+
+    // ---- cycle stack: Super+Tab / Super+Shift+Tab -------------------------------------------
+
+    #[test]
+    fn super_tab_cycles_stack_next() {
+        assert_eq!(
+            process_keyboard_shortcut(super_only(), Keysym::Tab),
+            Some(KeyAction::CycleStackNext)
+        );
+    }
+
+    #[test]
+    fn super_shift_tab_cycles_stack_prev() {
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::Tab),
+            Some(KeyAction::CycleStackPrev)
+        );
+        // Some keyboard layouts deliver Super+Shift+Tab as ISO_Left_Tab.
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::ISO_Left_Tab),
+            Some(KeyAction::CycleStackPrev)
+        );
+    }
+
+    // ---- resize: Super+Ctrl+H/J/K/L --------------------------------------------------------
+
+    #[test]
+    fn super_ctrl_hjkl_maps_to_resize() {
+        assert_eq!(
+            process_keyboard_shortcut(super_ctrl(), Keysym::h),
+            Some(KeyAction::ResizeLeft)
+        );
+        assert_eq!(
+            process_keyboard_shortcut(super_ctrl(), Keysym::j),
+            Some(KeyAction::ResizeDown)
+        );
+        assert_eq!(
+            process_keyboard_shortcut(super_ctrl(), Keysym::k),
+            Some(KeyAction::ResizeUp)
+        );
+        assert_eq!(
+            process_keyboard_shortcut(super_ctrl(), Keysym::l),
+            Some(KeyAction::ResizeRight)
+        );
+        // Upper-case variants.
+        assert_eq!(
+            process_keyboard_shortcut(super_ctrl(), Keysym::H),
+            Some(KeyAction::ResizeLeft)
+        );
+        assert_eq!(
+            process_keyboard_shortcut(super_ctrl(), Keysym::L),
+            Some(KeyAction::ResizeRight)
+        );
+    }
+
+    // ---- workspace navigation: Super+] / Super+[ / Super+N ---------------------------------
+
+    #[test]
+    fn super_bracketright_next_workspace() {
+        assert_eq!(
+            process_keyboard_shortcut(super_only(), Keysym::bracketright),
+            Some(KeyAction::NextWorkspace)
+        );
+    }
+
+    #[test]
+    fn super_bracketleft_prev_workspace() {
+        assert_eq!(
+            process_keyboard_shortcut(super_only(), Keysym::bracketleft),
+            Some(KeyAction::PrevWorkspace)
+        );
+    }
+
+    #[test]
+    fn super_n_new_workspace() {
+        assert_eq!(
+            process_keyboard_shortcut(super_only(), Keysym::n),
+            Some(KeyAction::NewWorkspace)
+        );
+        assert_eq!(
+            process_keyboard_shortcut(super_only(), Keysym::N),
+            Some(KeyAction::NewWorkspace)
+        );
+    }
+
+    // ---- move window to workspace: Super+Shift+] / Super+Shift+[ ---------------------------
+
+    #[test]
+    fn super_shift_bracketright_move_window_next() {
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::bracketright),
+            Some(KeyAction::MoveWindowToNextWorkspace)
+        );
+    }
+
+    #[test]
+    fn super_shift_bracketleft_move_window_prev() {
+        assert_eq!(
+            process_keyboard_shortcut(super_shift(), Keysym::bracketleft),
+            Some(KeyAction::MoveWindowToPrevWorkspace)
+        );
+    }
+
+    // ---- forward / unmatched guards --------------------------------------------------------
+
     #[test]
     fn unmatched_super_chord_is_none() {
         // A Super chord with no binding is not intercepted (forwarded to the client).
@@ -621,7 +1089,15 @@ mod tests {
         assert_eq!(process_keyboard_shortcut(no_mods, Keysym::Return), None);
         assert_eq!(process_keyboard_shortcut(no_mods, Keysym::q), None);
         assert_eq!(process_keyboard_shortcut(no_mods, Keysym::h), None);
+        assert_eq!(process_keyboard_shortcut(no_mods, Keysym::backslash), None);
+        assert_eq!(process_keyboard_shortcut(no_mods, Keysym::Tab), None);
+        assert_eq!(
+            process_keyboard_shortcut(no_mods, Keysym::bracketright),
+            None
+        );
     }
+
+    // ---- terminal fallback -----------------------------------------------------------------
 
     #[test]
     fn terminal_command_falls_back_to_default_without_env() {
