@@ -77,6 +77,13 @@ type WindowRenderElement<R> =
 /// Collects the render elements for `output`: the compositor `custom_elements` (the cursor) on top,
 /// then the mapped windows from `space` below.
 ///
+/// ## Visibility (P2-WS-3, decision #4)
+/// The `space` is already the model's **visible** set: [`CrucibleState::apply_layout`]
+/// (`crate::layout`) maps only the active workspace's focused-per-pane windows into the `Space` and
+/// `unmap_elem`s everything else (inactive workspaces, stacked-but-not-focused windows). So
+/// collecting from `space` here renders exactly the visible windows — no extra per-element filtering
+/// is needed, and we deliberately avoid a separate `Space` per workspace.
+///
 /// Returns the element list (front-to-back) and the clear color the damage tracker uses for any
 /// uncovered region.
 pub fn output_elements<R>(

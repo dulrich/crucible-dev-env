@@ -22,6 +22,7 @@
 
 use std::borrow::Cow;
 
+use crucible_layout::WindowId;
 use smithay::{
     backend::renderer::{
         ImportAll, ImportMem, Renderer, Texture,
@@ -45,7 +46,34 @@ use crate::focus::PointerFocusTarget;
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowElement(pub Window);
 
+/// The model [`WindowId`] this element is bound to, stored in the window's [`UserDataMap`].
+///
+/// Wrapped in a newtype so it is keyed distinctly in the type-indexed user-data map. The id is set
+/// once, when the window is mapped through `World::open_window` (see [`crate::layout`]), and read
+/// back to drive geometry/visibility/focus from the model.
+#[derive(Debug, Clone, Copy)]
+struct WindowIdMarker(WindowId);
+
 impl WindowElement {
+    /// Binds this element to its model [`WindowId`].
+    ///
+    /// Called exactly once on map. Idempotent for the same id; replacing an existing id is a bug, so
+    /// later writes are ignored (the first binding wins) — [`Self::window_id`] always reflects the
+    /// id assigned at map time.
+    pub fn set_window_id(&self, id: WindowId) {
+        self.0.user_data().insert_if_missing(|| WindowIdMarker(id));
+    }
+
+    /// Returns the model [`WindowId`] bound to this element, if any.
+    ///
+    /// `None` only for elements not (yet) routed through the model — e.g. override-redirect X11
+    /// surfaces that place themselves and are never inserted into the [`World`](crucible_layout::World).
+    pub fn window_id(&self) -> Option<WindowId> {
+        self.0
+            .user_data()
+            .get::<WindowIdMarker>()
+            .map(|marker| marker.0)
+    }
     /// Wraps a Wayland toplevel surface into a [`WindowElement`].
     pub fn new_wayland_window(toplevel: smithay::wayland::shell::xdg::ToplevelSurface) -> Self {
         WindowElement(Window::new_wayland_window(toplevel))

@@ -246,10 +246,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.running.store(false, Ordering::SeqCst);
             }
             KeyAction::Run(cmd) => self.spawn_terminal(&cmd),
-            // STUB (Phase 2 owns real directional/tiling movement): cycle focus among mapped
-            // windows so the chord path is observably wired without committing to a layout model.
-            KeyAction::FocusLeft | KeyAction::FocusUp => self.cycle_focus(false),
-            KeyAction::FocusRight | KeyAction::FocusDown => self.cycle_focus(true),
+            // TEMPORARY WS-3 test hook — **WS-4 replaces this** with the real verb set
+            // (`split-right`/`split-down`/`focus <dir>`/…). To exercise tiling live without WS-4's
+            // keybinding engine, the four directional chords drive the model directly:
+            //   Super+J -> split-down,  Super+K -> split-right  (then Super+Return fills the new pane)
+            //   Super+H -> focus left,  Super+L -> focus right  (move pane focus, model-driven)
+            // Each goes through `apply_layout` so geometry/visibility/focus follow the model.
+            KeyAction::FocusDown => self.debug_model_op(DebugModelOp::SplitDown),
+            KeyAction::FocusUp => self.debug_model_op(DebugModelOp::SplitRight),
+            KeyAction::FocusLeft => self.debug_model_op(DebugModelOp::FocusLeft),
+            KeyAction::FocusRight => self.debug_model_op(DebugModelOp::FocusRight),
             KeyAction::VtSwitch(vt) => {
                 // Only the udev/DRM backend owns a session; on winit this is a no-op (the backend's
                 // default `change_vt` returns `false`).
@@ -275,36 +281,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(_child) => {}
             Err(err) => error!(cmd, %err, "Failed to spawn terminal"),
         }
-    }
-
-    /// **Stub** focus cycle among mapped windows (Phase 2 replaces this with directional/tiling
-    /// movement).
-    ///
-    /// Picks the next (`forward`) or previous mapped window relative to the current keyboard focus
-    /// and assigns keyboard focus to it, raising it in the [`Space`](smithay::desktop::Space). With
-    /// zero or one window this is a no-op.
-    fn cycle_focus(&mut self, forward: bool) {
-        let windows: Vec<WindowElement> = self.space.elements().cloned().collect();
-        if windows.len() < 2 {
-            return;
-        }
-
-        // Locate the currently focused window (if the keyboard focus is on a window at all).
-        let current = match self.keyboard_focus() {
-            Some(KeyboardFocusTarget::Window(focused)) => {
-                windows.iter().position(|w| *w == focused)
-            }
-            _ => None,
-        };
-
-        let next_idx = match current {
-            Some(i) if forward => (i + 1) % windows.len(),
-            Some(i) => (i + windows.len() - 1) % windows.len(),
-            None => 0,
-        };
-
-        let next = windows[next_idx].clone();
-        self.focus_window(next);
     }
 
     /// Raises `window` in the [`Space`](smithay::desktop::Space) and gives it keyboard focus.
@@ -541,6 +517,37 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let serial = SERIAL_COUNTER.next_serial();
         keyboard.set_focus(self, target, serial);
     }
+
+    /// **TEMPORARY WS-3 test hook — WS-4 replaces this.**
+    ///
+    /// Drives a single `crucible-layout` model mutation (split or directional pane focus) and applies
+    /// the resulting reconcile so a human can exercise tiling live before the WS-4 keybinding engine
+    /// exists. WS-4 owns the real verb set and binding table; this method (and its caller in
+    /// [`Self::handle_key_action`]) goes away then.
+    fn debug_model_op(&mut self, op: DebugModelOp) {
+        use crucible_layout::Direction;
+        let reconcile = match op {
+            DebugModelOp::SplitRight => self.layout.world.split(Direction::Right).1,
+            DebugModelOp::SplitDown => self.layout.world.split(Direction::Down).1,
+            DebugModelOp::FocusLeft => self.layout.world.focus(Direction::Left),
+            DebugModelOp::FocusRight => self.layout.world.focus(Direction::Right),
+        };
+        self.apply_layout(&reconcile);
+    }
+}
+
+/// **TEMPORARY WS-3 test hook** — the model mutations the directional debug chords drive. WS-4
+/// replaces both this and the chord wiring with the real verb set.
+#[derive(Debug, Clone, Copy)]
+enum DebugModelOp {
+    /// Split the focused pane to the right (new empty pane becomes focused).
+    SplitRight,
+    /// Split the focused pane downward (new empty pane becomes focused).
+    SplitDown,
+    /// Move pane focus left.
+    FocusLeft,
+    /// Move pane focus right.
+    FocusRight,
 }
 
 #[cfg(test)]

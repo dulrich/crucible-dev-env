@@ -23,7 +23,7 @@ use smithay::{
     },
     output::Output,
     reexports::wayland_server::protocol::{wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
-    utils::{IsAlive, Logical, Rectangle, Serial},
+    utils::Serial,
     wayland::{
         compositor::with_states,
         shell::{
@@ -41,7 +41,6 @@ use tracing::warn;
 
 use crate::{
     element::WindowElement,
-    focus::KeyboardFocusTarget,
     state::{Backend, CrucibleState},
 };
 
@@ -64,10 +63,13 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
         // Do NOT configure here: the initial configure of an xdg_surface must be sent during the
         // first commit (see `ensure_initial_configure`), once the surface is otherwise ready.
         let window = WindowElement::new_wayland_window(surface);
-        place_new_window(&mut self.space, &window, true);
 
-        // Give the newly mapped toplevel keyboard focus so the client actually receives keys.
-        self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(window)));
+        // Route the map through the model: open a window into the focused pane, bind it to the
+        // element, then apply geometry/visibility/focus from the resulting reconcile. The model —
+        // not a centered placeholder — owns where and at what size this window lands.
+        let (id, reconcile) = self.layout.world.open_window();
+        self.layout.insert(id, window);
+        self.apply_layout(&reconcile);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
@@ -97,25 +99,16 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        if let Some(window) = self.window_for_surface(surface.wl_surface()) {
-            self.space.unmap_elem(&window);
-        }
-
-        // If the destroyed window held keyboard focus, move focus to the next mapped window (or
-        // clear it) so keys keep flowing. Placeholder policy — Phase 2's tiling owns real
-        // focus-follows-layout behavior.
-        let still_focused = matches!(
-            self.keyboard_focus(),
-            Some(KeyboardFocusTarget::Window(ref w)) if w.alive()
-        );
-        if !still_focused {
-            let next = self
-                .space
-                .elements()
-                .next_back()
-                .cloned()
-                .map(KeyboardFocusTarget::Window);
-            self.set_keyboard_focus(next);
+        let Some(window) = self.window_for_surface(surface.wl_surface()) else {
+            return;
+        };
+        // Unmap from the Space immediately; the model close + reconcile then re-tiles the survivors
+        // and re-points focus (focus-follows-layout is owned by `crucible-layout`).
+        self.space.unmap_elem(&window);
+        if let Some(id) = window.window_id() {
+            if let Ok(reconcile) = self.layout.world.close_window(id) {
+                self.apply_layout(&reconcile);
+            }
         }
     }
 
@@ -211,41 +204,6 @@ impl<B: Backend + 'static> WlrLayerShellHandler for CrucibleState<B> {
     }
 }
 
-/// Logical-coordinate area a new window is placed within when no output is mapped yet.
-const FALLBACK_PLACEMENT_AREA: (i32, i32) = (1280, 800);
-
-/// Computes the top-left location that centers a window of `win_size` within `area`.
-///
-/// Pure placement math (no compositor state) so it can be unit-tested without a GPU/display. If the
-/// window is larger than the area in a dimension, that coordinate is clamped to the area's origin
-/// rather than going negative.
-fn centered_location(
-    area: Rectangle<i32, Logical>,
-    win_size: smithay::utils::Size<i32, Logical>,
-) -> smithay::utils::Point<i32, Logical> {
-    let x = area.loc.x + (area.size.w - win_size.w).max(0) / 2;
-    let y = area.loc.y + (area.size.h - win_size.h).max(0) / 2;
-    (x, y).into()
-}
-
-/// Maps a freshly created toplevel into `space` with **placeholder placement**.
-///
-/// Phase-1 placement is intentionally a placeholder: the window is centered within the first
-/// output's logical area (falling back to a fixed area if no output is mapped yet). Real CDE
-/// tiling — directional splits, stacks, workspaces — is Phase 2; this just gets the surface visible.
-pub fn place_new_window(space: &mut Space<WindowElement>, window: &WindowElement, activate: bool) {
-    let area = space
-        .outputs()
-        .next()
-        .and_then(|o| space.output_geometry(o))
-        .unwrap_or_else(|| Rectangle::from_size(FALLBACK_PLACEMENT_AREA.into()));
-
-    // The window's size may still be zero (the client has not committed a buffer yet); placement is
-    // recomputed only here and the client picks its own size, so it re-centers naturally on commit.
-    let location = centered_location(area, window.geometry().size);
-    space.map_element(window.clone(), location, activate);
-}
-
 /// Sends the initial `configure` for a newly committed surface, if it has not been sent yet.
 ///
 /// The xdg-shell protocol forbids configuring a surface before its first commit, so the compositor
@@ -319,41 +277,5 @@ pub fn ensure_initial_configure(
                 layer.layer_surface().send_configure();
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use smithay::utils::{Point, Size};
-
-    #[test]
-    fn centers_window_smaller_than_area() {
-        let area = Rectangle::from_size(Size::from((1000, 800)));
-        let loc = centered_location(area, Size::from((200, 100)));
-        // (1000 - 200) / 2 = 400 ; (800 - 100) / 2 = 350
-        assert_eq!(loc, Point::from((400, 350)));
-    }
-
-    #[test]
-    fn honors_area_origin_offset() {
-        let area = Rectangle::new(Point::from((100, 50)), Size::from((1000, 800)));
-        let loc = centered_location(area, Size::from((200, 100)));
-        assert_eq!(loc, Point::from((100 + 400, 50 + 350)));
-    }
-
-    #[test]
-    fn clamps_window_larger_than_area_to_origin() {
-        let area = Rectangle::new(Point::from((10, 20)), Size::from((100, 100)));
-        // A window wider/taller than the area must not be placed at negative coordinates.
-        let loc = centered_location(area, Size::from((400, 400)));
-        assert_eq!(loc, Point::from((10, 20)));
-    }
-
-    #[test]
-    fn zero_size_window_centers_on_area_center() {
-        let area = Rectangle::from_size(Size::from((1280, 800)));
-        let loc = centered_location(area, Size::from((0, 0)));
-        assert_eq!(loc, Point::from((640, 400)));
     }
 }

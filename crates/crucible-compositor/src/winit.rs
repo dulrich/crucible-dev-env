@@ -154,6 +154,8 @@ pub fn run_winit() {
                 output.change_current_state(Some(mode), None, None, None);
                 output.set_preferred(mode);
                 state.space.map_output(&output, (0, 0));
+                // Re-tile to the new output size (model-driven, idempotent).
+                state.apply_geometry();
             }
             WinitEvent::CloseRequested => {
                 state

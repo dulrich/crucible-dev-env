@@ -68,9 +68,12 @@ use smithay::{
 };
 use tracing::{info, warn};
 
+use crucible_layout::{Rect, WindowId};
+
 use crate::{
     element::WindowElement,
     focus::{KeyboardFocusTarget, PointerFocusTarget},
+    layout::LayoutState,
     shell::ensure_initial_configure,
 };
 
@@ -141,6 +144,18 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub space: Space<WindowElement>,
     /// Tracks xdg/layer popups and their grab/dismiss lifecycle.
     pub popups: PopupManager,
+
+    /// The pure layout model + the stable `WindowId` ↔ [`WindowElement`] map (decision #1/#5).
+    ///
+    /// The single source of truth for placement, visibility, stacking, and focus; the `Space` above
+    /// is the *mechanism* driven from this model by [`CrucibleState::apply_layout`].
+    pub layout: LayoutState,
+    /// The last visible-window rect set applied to the `Space` (global Space coords).
+    ///
+    /// Diffed against each fresh `World::geometry` result so only windows whose rect/visibility
+    /// actually changed are reconfigured (idempotent apply — no configure storms). See
+    /// [`crate::layout::diff_layout`].
+    pub last_layout: Vec<(WindowId, Rect)>,
 
     /// `wl_compositor` / `wl_subcompositor` global state.
     pub compositor_state: CompositorState,
@@ -263,6 +278,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             clock,
             space: Space::default(),
             popups: PopupManager::default(),
+            layout: LayoutState::new(),
+            last_layout: Vec::new(),
             compositor_state,
             shm_state,
             output_manager_state,

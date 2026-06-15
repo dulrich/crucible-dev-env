@@ -53,7 +53,6 @@ use tracing::{error, info, trace, warn};
 
 use crate::{
     element::WindowElement,
-    shell::place_new_window,
     state::{Backend, CrucibleState},
 };
 
@@ -161,18 +160,18 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        // Accept the map, wrap it as a desktop window, place it with the WS-3 placeholder
-        // placement (centered), then configure the X11 side to the resulting bbox.
+        // Accept the map, wrap it as a desktop window, then route it through the model exactly like a
+        // Wayland toplevel: `open_window` lands it in the focused pane and the reconcile drives its
+        // tiled geometry (the `configure` to the computed size happens in `apply_layout`), visibility,
+        // and focus. No centered placeholder.
         if let Err(err) = window.set_mapped(true) {
             warn!(%err, "Failed to mark X11 window mapped");
             return;
         }
         let elem = WindowElement::new_x11_window(window.clone());
-        place_new_window(&mut self.space, &elem, true);
-        if let Some(bbox) = self.space.element_bbox(&elem) {
-            let _ = window.configure(Some(bbox));
-        }
-        self.set_keyboard_focus(Some(elem.into()));
+        let (id, reconcile) = self.layout.world.open_window();
+        self.layout.insert(id, elem);
+        self.apply_layout(&reconcile);
     }
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
@@ -183,8 +182,20 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
     }
 
     fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {
-        if let Some(elem) = self.x11_element(&window) {
+        // Find the element by its X11 surface in the id↔element map (covers windows hidden on an
+        // inactive workspace / behind a stack, which are not in the Space), then unmap from the Space
+        // and close it in the model so the survivors re-tile and focus follows.
+        if let Some(elem) = self
+            .layout
+            .find(|e| e.x11_surface() == Some(&window))
+            .cloned()
+        {
             self.space.unmap_elem(&elem);
+            if let Some(id) = elem.window_id() {
+                if let Ok(reconcile) = self.layout.world.close_window(id) {
+                    self.apply_layout(&reconcile);
+                }
+            }
         }
         if !window.is_override_redirect() {
             let _ = window.set_mapped(false);

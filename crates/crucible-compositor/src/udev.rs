@@ -298,6 +298,8 @@ fn fixup_output_positions(state: &mut CrucibleState<UdevData>) {
         smithay::desktop::layer_map_for_output(&output).arrange();
         offset_x += width;
     }
+    // Output positions/sizes changed: re-assert model-driven geometry (idempotent).
+    state.apply_geometry();
 }
 
 /// Picks any available GPU as a last resort when the seat has no obvious primary GPU.

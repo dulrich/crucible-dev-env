@@ -28,6 +28,9 @@ pub mod input;
 /// Focus targets and focus-following policy.
 pub mod focus;
 
+/// Bridge from the pure `crucible-layout` model to the Smithay `Space` (placement/visibility/focus).
+pub mod layout;
+
 /// XWayland integration (WS-1 stub; implemented in WS-5).
 pub mod xwayland;
 
