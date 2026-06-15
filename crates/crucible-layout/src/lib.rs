@@ -5,8 +5,20 @@
 //! dependency** so the layout logic can be exhaustively unit-tested without a running compositor —
 //! this is the near-TDD core of the project. See `AGENTS.md` for the canonical vocabulary.
 //!
-//! The concrete model types arrive in Phase 2 (see `plans/`). For now this crate establishes the
-//! shared primitives the rest of the workspace builds on.
+//! The model is `Clone` and free of `Rc`/`RefCell` so it can be cheaply snapshotted and (Phase 3)
+//! serialized. The public surface is:
+//!
+//! - typed ids: [`WindowId`], [`PaneId`], [`WorkspaceId`], [`OutputId`];
+//! - model types: [`Window`], [`Pane`], [`Workspace`], [`Output`], [`World`];
+//! - the [`Reconcile`] result every mutating op returns (what the compositor must apply);
+//! - [`LayoutError`] for the fallible ops.
+
+mod ids;
+mod tree;
+mod world;
+
+pub use ids::{OutputId, PaneId, WindowId, WorkspaceId};
+pub use world::{LayoutError, Output, Pane, Reconcile, Window, Workspace, World};
 
 /// A cardinal direction, used for directional split, focus, and move operations.
 ///

@@ -11,3 +11,4 @@ description = "Pure Output/Workspace/Pane/Window layout model for Crucible Dev E
 workspace = true
 
 [dependencies]
+thiserror.workspace = true

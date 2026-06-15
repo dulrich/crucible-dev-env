@@ -304,6 +304,9 @@ dependencies = [
 [[package]]
 name = "crucible-layout"
 version = "0.0.0"
+dependencies = [
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "crucible-persist"
