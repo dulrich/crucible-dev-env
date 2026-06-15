@@ -89,6 +89,21 @@ pub(crate) struct SplitTree<L> {
     free: Vec<usize>,
 }
 
+/// A view into a single tree node, returned by [`SplitTree::node_kind`].
+///
+/// Lets the geometry pass walk the tree without exposing the internal `Node` representation.
+pub(crate) enum NodeKind<L> {
+    /// A leaf carrying its payload.
+    Leaf(L),
+    /// An internal split with axis, ratio, and the ids of both children.
+    Split {
+        axis: Axis,
+        ratio: f64,
+        first: NodeId,
+        second: NodeId,
+    },
+}
+
 /// Default split ratio for a freshly created split.
 pub(crate) const DEFAULT_RATIO: f64 = 0.5;
 /// Clamp bound keeping ratios strictly inside `(0, 1)`.
@@ -408,6 +423,32 @@ impl<L: Copy + PartialEq> SplitTree<L> {
             current = parent;
         }
         false
+    }
+
+    /// Returns the `NodeId` of the root node. Used by the geometry pass to start a tree walk.
+    pub(crate) fn root_id(&self) -> NodeId {
+        self.root
+    }
+
+    /// Returns a view of the node at `id` for use by the geometry pass.
+    ///
+    /// Panics if `id` does not refer to a live node (same contract as internal helpers).
+    pub(crate) fn node_kind(&self, id: NodeId) -> NodeKind<L> {
+        match self.node(id) {
+            Node::Leaf { value, .. } => NodeKind::Leaf(*value),
+            Node::Split {
+                axis,
+                ratio,
+                first,
+                second,
+                ..
+            } => NodeKind::Split {
+                axis: *axis,
+                ratio: *ratio,
+                first: *first,
+                second: *second,
+            },
+        }
     }
 
     /// Reads the ratio of the nearest ancestor split on `dir`'s axis above `value` (for tests).

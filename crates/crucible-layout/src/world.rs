@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::geometry::{GapConfig, Rect, geometry_of_workspace};
 use crate::ids::IdGen;
 use crate::tree::SplitTree;
 use crate::{Direction, OutputId, PaneId, WindowId, WorkspaceId};
@@ -294,6 +295,45 @@ impl World {
             .panes()
             .into_iter()
             .filter_map(|pid| self.panes.get(&pid).and_then(Pane::focused_window))
+            .collect()
+    }
+
+    /// Computes pixel rects for all **visible** windows on the given output.
+    ///
+    /// For each pane in the output's **active** workspace, the pane's focused window (if any) is
+    /// paired with the pixel [`Rect`] computed by subdividing `output_rect` according to the
+    /// workspace's split tree and the provided [`GapConfig`].
+    ///
+    /// - Panes with no windows contribute nothing.
+    /// - Stacked (non-focused) windows get no rect.
+    /// - Panes on inactive workspaces get no rect.
+    ///
+    /// If `output_id` is unknown, returns an empty `Vec`.
+    ///
+    /// See [`GapConfig::default`] for the recommended temporary defaults (Phase 3 will source these
+    /// from `crucible-config`).
+    #[must_use]
+    pub fn geometry(
+        &self,
+        output_id: OutputId,
+        output_rect: Rect,
+        gaps: GapConfig,
+    ) -> Vec<(WindowId, Rect)> {
+        let Some(output) = self.outputs.get(&output_id) else {
+            return Vec::new();
+        };
+        let ws_id = output.active_workspace();
+        let Some(workspace) = self.workspaces.get(&ws_id) else {
+            return Vec::new();
+        };
+        let pane_rects = geometry_of_workspace(workspace, output_rect, gaps);
+        pane_rects
+            .into_iter()
+            .filter_map(|(pane_id, rect)| {
+                let pane = self.panes.get(&pane_id)?;
+                let window_id = pane.focused_window()?;
+                Some((window_id, rect))
+            })
             .collect()
     }
 

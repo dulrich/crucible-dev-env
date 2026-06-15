@@ -13,10 +13,12 @@
 //! - the [`Reconcile`] result every mutating op returns (what the compositor must apply);
 //! - [`LayoutError`] for the fallible ops.
 
+pub mod geometry;
 mod ids;
 mod tree;
 mod world;
 
+pub use geometry::{GapConfig, Rect};
 pub use ids::{OutputId, PaneId, WindowId, WorkspaceId};
 pub use world::{LayoutError, Output, Pane, Reconcile, Window, Workspace, World};
 
