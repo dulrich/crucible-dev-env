@@ -1,0 +1,13 @@
+[package]
+name = "crucible-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "KDL configuration parsing, validation, and hot-reload for Crucible Dev Env"
+
+[lints]
+workspace = true
+
+[dependencies]

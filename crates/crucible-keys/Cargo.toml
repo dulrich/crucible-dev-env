@@ -1,0 +1,14 @@
+[package]
+name = "crucible-keys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Super-leader keybinding engine for Crucible Dev Env"
+
+[lints]
+workspace = true
+
+[dependencies]
+crucible-layout = { path = "../crucible-layout" }

@@ -1,0 +1,15 @@
+[package]
+name = "crucible-compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Smithay-based Wayland compositor core for Crucible Dev Env"
+
+[lints]
+workspace = true
+
+[dependencies]
+crucible-layout = { path = "../crucible-layout" }
+# Smithay, winit/udev backends, and XWayland glue are added in Phase 1.

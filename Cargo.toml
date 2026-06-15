@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+authors = ["David Ulrich <david@ulrichdev.com>"]
+description = "The language-agnostic desktop environment that turns your entire developer machine into an IDE"
+repository = ""
+rust-version = "1.85"
+
+# Shared dependency versions. Crates opt in via `dep.workspace = true`.
+# Dependency posture: allowed, but limited to clear, significant wins over an
+# in-project implementation. See AGENTS.md.
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1", features = ["derive"] }
+
+# Lints are defined once here and inherited by every crate with `[lints]
+# workspace = true`. CI runs `cargo clippy -- -D warnings`.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
