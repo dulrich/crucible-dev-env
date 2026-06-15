@@ -11,5 +11,12 @@ fn main() {
         env!("CARGO_PKG_VERSION"),
         env!("CARGO_PKG_DESCRIPTION"),
     );
-    println!("pre-alpha: see plans/00-mvp-roadmap.md for what's coming.");
+
+    // WS-1 recognizes the backend-selection flags the later workstreams will wire up, but the
+    // compositor itself is still a stub. See plans/01-compositor-up.md.
+    match std::env::args().nth(1).as_deref() {
+        Some("--winit") => println!("--winit (nested development backend): not yet implemented"),
+        Some("--tty-udev") => println!("--tty-udev (DRM/KMS TTY backend): not yet implemented"),
+        _ => println!("pre-alpha: see plans/00-mvp-roadmap.md for what's coming."),
+    }
 }

@@ -12,4 +12,37 @@ workspace = true
 
 [dependencies]
 crucible-layout = { path = "../crucible-layout" }
-# Smithay, winit/udev backends, and XWayland glue are added in Phase 1.
+
+# Keymap/keysym handling shared with Smithay's input path. Pinned to the same
+# version Smithay master resolves to so there is a single unified copy.
+xkbcommon = "0.9"
+
+# Smithay tracks `master` (anvil does too; master is ahead of the 0.7.0 crates.io
+# release). Pinned to an exact commit for reproducible builds — see the
+# "Primary risk — Smithay version skew" note in plans/01-compositor-up.md.
+# WS-1 only *links* Smithay; per-feature use lands in later workstreams.
+[dependencies.smithay]
+git = "https://github.com/Smithay/smithay"
+rev = "66fc28b98e03c6530e886e6e6e4836ae98cbabf4"
+default-features = false
+features = [
+    "backend_winit",
+    "backend_udev",
+    "backend_drm",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_session_libseat",
+    "backend_egl",
+    "renderer_gl",
+    "renderer_multi",
+    "renderer_pixman",
+    "desktop",
+    "wayland_frontend",
+    "xwayland",
+]
+
+# DRM device discovery/EDID helpers used by the udev backend (anvil pulls this in
+# from the same workspace commit). Pinned to the matching Smithay rev.
+[dependencies.smithay-drm-extras]
+git = "https://github.com/Smithay/smithay"
+rev = "66fc28b98e03c6530e886e6e6e4836ae98cbabf4"
