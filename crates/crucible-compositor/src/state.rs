@@ -49,6 +49,7 @@ use smithay::{
             is_sync_subsurface,
         },
         output::{OutputHandler, OutputManagerState},
+        seat::WaylandFocus,
         selection::{
             SelectionHandler,
             data_device::{
@@ -61,11 +62,17 @@ use smithay::{
         shell::{wlr_layer::WlrLayerShellState, xdg::XdgShellState},
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
+        xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
     },
+    xwayland::{X11Wm, XWaylandClientData},
 };
 use tracing::{info, warn};
 
-use crate::{element::WindowElement, shell::ensure_initial_configure};
+use crate::{
+    element::WindowElement,
+    focus::{KeyboardFocusTarget, PointerFocusTarget},
+    shell::ensure_initial_configure,
+};
 
 /// Per-client state stored in each Wayland client's [`ClientData`].
 ///
@@ -141,6 +148,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub data_device_state: DataDeviceState,
     /// `zwp_primary_selection_device_manager_v1` global state.
     pub primary_selection_state: PrimarySelectionState,
+    /// `xwayland_shell_v1` global state (lets XWayland associate `wl_surface`s with X11 windows).
+    pub xwayland_shell_state: XWaylandShellState,
     /// `wl_seat` state managing seats and their capabilities.
     pub seat_state: SeatState<CrucibleState<B>>,
 
@@ -158,6 +167,14 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// Each entry's matching *release* is swallowed so the focused client never sees a dangling
     /// key-up for a key the compositor consumed. See [`crate::input`].
     pub suppressed_keys: Vec<smithay::input::keyboard::Keysym>,
+
+    /// The running XWayland X11 window manager, once XWayland has reached `Ready` (WS-5).
+    ///
+    /// `None` until [`Self::start_xwayland`] has spawned the server and `X11Wm::start_wm` attached
+    /// the WM; used to drive X11 focus/raise and the clipboard bridge. See [`crate::xwayland`].
+    pub xwm: Option<X11Wm>,
+    /// The X11 `DISPLAY` number XWayland is serving (e.g. `1` for `:1`), once known.
+    pub xdisplay: Option<u32>,
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
@@ -218,6 +235,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
         let mut seat_state = SeatState::new();
 
         // Create the seat with keyboard + pointer capabilities. NB: this only *advertises* the
@@ -244,12 +262,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
             layer_shell_state,
             data_device_state,
             primary_selection_state,
+            xwayland_shell_state,
             seat_state,
             seat,
             pointer,
             cursor_status: CursorImageStatus::default_named(),
             seat_name,
             suppressed_keys: Vec::new(),
+            xwm: None,
+            xdisplay: None,
         }
     }
 }
@@ -260,7 +281,15 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
     }
 
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
-        &client.get_data::<ClientState>().unwrap().compositor_state
+        // XWayland clients carry Smithay's own `XWaylandClientData` rather than CDE's `ClientState`,
+        // so check for it first; both expose a `CompositorClientState`.
+        if let Some(state) = client.get_data::<XWaylandClientData>() {
+            return &state.compositor_state;
+        }
+        if let Some(state) = client.get_data::<ClientState>() {
+            return &state.compositor_state;
+        }
+        panic!("Unknown client data type")
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -301,22 +330,24 @@ impl<B: Backend + 'static> ShmHandler for CrucibleState<B> {
 impl<B: Backend + 'static> OutputHandler for CrucibleState<B> {}
 
 impl<B: Backend + 'static> SeatHandler for CrucibleState<B> {
-    // WS-3 uses bare `WlSurface` focus targets (smallvil-style); the richer
-    // `KeyboardFocusTarget`/`PointerFocusTarget` enums arrive with the input path in WS-4. See
-    // `crate::focus`.
-    type KeyboardFocus = WlSurface;
-    type PointerFocus = WlSurface;
-    type TouchFocus = WlSurface;
+    // WS-5 widens the seat's focus types from the bare-`WlSurface` WS-3/WS-4 placeholder to the
+    // surface-kind-spanning enums in `crate::focus`, so the same seat focuses Wayland *and*
+    // XWayland surfaces (layer/popup/X11 included).
+    type KeyboardFocus = KeyboardFocusTarget;
+    type PointerFocus = PointerFocusTarget;
+    type TouchFocus = PointerFocusTarget;
 
     fn seat_state(&mut self) -> &mut SeatState<CrucibleState<B>> {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, seat: &Seat<Self>, target: Option<&WlSurface>) {
+    fn focus_changed(&mut self, seat: &Seat<Self>, target: Option<&KeyboardFocusTarget>) {
         // Keep the data-device and primary-selection focus in sync with keyboard focus so the
-        // focused client owns the clipboard. (Keyboard focus itself is set by the WS-4 input path.)
+        // focused client owns the clipboard.
         let dh = &self.display_handle;
-        let client = target.and_then(|s| dh.get_client(s.id()).ok());
+        let client = target
+            .and_then(WaylandFocus::wl_surface)
+            .and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
     }
@@ -349,6 +380,15 @@ impl<B: Backend + 'static> DndGrabHandler for CrucibleState<B> {}
 impl<B: Backend + 'static> PrimarySelectionHandler for CrucibleState<B> {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
         &mut self.primary_selection_state
+    }
+}
+
+// XWayland associates the `wl_surface` a client commits with the X11 window it belongs to via this
+// shell protocol. `X11Wm::start_wm` requires the handler; the default `surface_associated` is
+// sufficient for CDE (the WM tracks the association internally).
+impl<B: Backend + 'static> XWaylandShellHandler for CrucibleState<B> {
+    fn xwayland_shell_state(&mut self) -> &mut XWaylandShellState {
+        &mut self.xwayland_shell_state
     }
 }
 

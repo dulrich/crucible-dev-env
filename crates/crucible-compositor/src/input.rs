@@ -41,13 +41,14 @@ use smithay::{
         keyboard::{FilterResult, Keysym, ModifiersState},
         pointer::{AxisFrame, ButtonEvent, MotionEvent},
     },
-    reexports::wayland_server::protocol::{wl_pointer, wl_surface::WlSurface},
+    reexports::wayland_server::protocol::wl_pointer,
     utils::{Logical, Point, SERIAL_COUNTER, Serial},
-    wayland::seat::WaylandFocus,
 };
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    element::WindowElement,
+    focus::{KeyboardFocusTarget, PointerFocusTarget},
     state::{Backend, CrucibleState},
     winit::WinitData,
 };
@@ -240,17 +241,18 @@ impl CrucibleState<WinitData> {
     /// and assigns keyboard focus to it, raising it in the [`Space`](smithay::desktop::Space). With
     /// zero or one window this is a no-op.
     fn cycle_focus(&mut self, forward: bool) {
-        let windows: Vec<_> = self.space.elements().cloned().collect();
+        let windows: Vec<WindowElement> = self.space.elements().cloned().collect();
         if windows.len() < 2 {
             return;
         }
 
-        let focused = self.keyboard_focus();
-        let current = focused.as_ref().and_then(|surface| {
-            windows
-                .iter()
-                .position(|w| w.wl_surface().map(|s| &*s == surface).unwrap_or(false))
-        });
+        // Locate the currently focused window (if the keyboard focus is on a window at all).
+        let current = match self.keyboard_focus() {
+            Some(KeyboardFocusTarget::Window(focused)) => {
+                windows.iter().position(|w| *w == focused)
+            }
+            _ => None,
+        };
 
         let next_idx = match current {
             Some(i) if forward => (i + 1) % windows.len(),
@@ -259,10 +261,22 @@ impl CrucibleState<WinitData> {
         };
 
         let next = windows[next_idx].clone();
-        self.space.raise_element(&next, true);
-        if let Some(surface) = next.wl_surface() {
-            self.set_keyboard_focus(Some(surface.into_owned()));
+        self.focus_window(next);
+    }
+
+    /// Raises `window` in the [`Space`](smithay::desktop::Space) and gives it keyboard focus.
+    ///
+    /// For an XWayland window this both activates it (the seat drives the X11 `set_input_focus`
+    /// through the [`KeyboardFocusTarget::Window`] target) and raises it in the X11 stacking order
+    /// via the running [`X11Wm`](smithay::xwayland::X11Wm).
+    fn focus_window(&mut self, window: WindowElement) {
+        self.space.raise_element(&window, true);
+        if let Some(surface) = window.x11_surface() {
+            if let Some(xwm) = self.xwm.as_mut() {
+                let _ = xwm.raise_window(surface);
+            }
         }
+        self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(window)));
     }
 
     /// Maps absolute winit pointer motion into the output and delivers it to the seat.
@@ -364,24 +378,29 @@ impl CrucibleState<WinitData> {
         pointer.frame(self);
     }
 
-    /// Returns the surface (and its top-left in global logical coords) under `pos`, if any.
+    /// Returns the [`PointerFocusTarget`] (and its top-left in global logical coords) under `pos`,
+    /// if any.
     ///
-    /// WS-4 uses bare [`WlSurface`] pointer focus; the richer focus-target enum (layer/popup/X11)
-    /// is WS-5. Resolution walks the [`Space`]'s mapped windows only.
-    fn surface_under(&self, pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
+    /// Resolution walks the [`Space`]'s mapped windows and dispatches over the window kind so X11
+    /// windows resolve to a [`PointerFocusTarget::X11Surface`] and Wayland windows to a
+    /// [`PointerFocusTarget::WlSurface`] (see [`WindowElement::surface_under`]).
+    fn surface_under(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
         self.space
             .element_under(pos)
             .and_then(|(window, location)| {
                 window
                     .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
-                    .map(|(surface, surface_loc)| (surface, (location + surface_loc).to_f64()))
+                    .map(|(target, surface_loc)| (target, (location + surface_loc).to_f64()))
             })
     }
 
     /// Moves keyboard focus to the window under the current pointer location, if any.
     ///
     /// Used on pointer press (click-to-focus). Raises the window in the [`Space`] and assigns the
-    /// seat's keyboard focus to its root surface.
+    /// seat's keyboard focus to it (activating X11 windows through the focus path).
     fn update_keyboard_focus_under_pointer(&mut self, _serial: Serial) {
         let location = self.pointer.current_location();
         if let Some((window, _)) = self
@@ -389,30 +408,30 @@ impl CrucibleState<WinitData> {
             .element_under(location)
             .map(|(w, p)| (w.clone(), p))
         {
-            self.space.raise_element(&window, true);
-            let surface = window.wl_surface().map(|s| s.into_owned());
-            self.set_keyboard_focus(surface);
+            self.focus_window(window);
         }
     }
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
-    /// Returns the seat's current keyboard-focus [`WlSurface`], if any.
-    pub fn keyboard_focus(&self) -> Option<WlSurface> {
+    /// Returns the seat's current [`KeyboardFocusTarget`], if any.
+    pub fn keyboard_focus(&self) -> Option<KeyboardFocusTarget> {
         self.seat.get_keyboard().and_then(|kbd| kbd.current_focus())
     }
 
-    /// Sets (or clears) the seat's keyboard focus to `surface`.
+    /// Sets (or clears) the seat's keyboard focus to `target`.
     ///
-    /// Called from the shell map path (so a newly mapped toplevel receives keys) and from the input
-    /// path (click-to-focus / the stubbed focus cycle). A fresh serial is allocated for the focus
-    /// change.
-    pub fn set_keyboard_focus(&mut self, surface: Option<WlSurface>) {
+    /// Called from the shell map path (so a newly mapped toplevel/X11 window receives keys) and
+    /// from the input path (click-to-focus / the stubbed focus cycle). A fresh serial is allocated
+    /// for the focus change. When `target` is an XWayland window the seat's
+    /// [`KeyboardTarget`](smithay::input::keyboard::KeyboardTarget) impl drives the X11
+    /// `set_input_focus`/take-focus that activates it.
+    pub fn set_keyboard_focus(&mut self, target: Option<KeyboardFocusTarget>) {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
         let serial = SERIAL_COUNTER.next_serial();
-        keyboard.set_focus(self, surface, serial);
+        keyboard.set_focus(self, target, serial);
     }
 }
 

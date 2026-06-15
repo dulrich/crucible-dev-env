@@ -21,6 +21,12 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 serde = { version = "1", features = ["derive"] }
 
+# X11 protocol bindings used by the XWayland integration (WS-5). Smithay's
+# `x11rb_event_source` feature drives the X11 WM connection from calloop; anvil
+# pairs the same `x11rb` crate with that feature. Version resolves against the
+# pinned Smithay rev (anvil uses the same dependency).
+x11rb = "0.13"
+
 # Lints are defined once here and inherited by every crate with `[lints]
 # workspace = true`. CI runs `cargo clippy -- -D warnings`.
 [workspace.lints.clippy]

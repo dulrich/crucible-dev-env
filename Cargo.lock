@@ -285,6 +285,7 @@ dependencies = [
  "smithay",
  "smithay-drm-extras",
  "tracing",
+ "x11rb",
  "xkbcommon",
 ]
 

@@ -14,6 +14,10 @@ workspace = true
 crucible-layout = { path = "../crucible-layout" }
 tracing.workspace = true
 
+# X11 bindings for the XWayland window-manager connection (WS-5). Paired with
+# Smithay's `x11rb_event_source` feature below, mirroring anvil's xwayland set.
+x11rb.workspace = true
+
 # Keymap/keysym handling shared with Smithay's input path. Pinned to the same
 # version Smithay master resolves to so there is a single unified copy.
 xkbcommon = "0.9"
@@ -40,6 +44,8 @@ features = [
     "desktop",
     "wayland_frontend",
     "xwayland",
+    # Drives the XWayland X11 WM connection from the calloop event loop (WS-5).
+    "x11rb_event_source",
 ]
 
 # DRM device discovery/EDID helpers used by the udev backend (anvil pulls this in

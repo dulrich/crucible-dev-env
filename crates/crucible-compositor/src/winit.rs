@@ -135,6 +135,10 @@ pub fn run_winit() {
         .update_formats(state.backend_data.backend.renderer().shm_formats());
     state.space.map_output(&output, (0, 0));
 
+    // Bring up XWayland so X11 apps run alongside Wayland clients (WS-5). On readiness this exports
+    // `DISPLAY` and attaches the X11 window manager; see `crate::xwayland`.
+    state.start_xwayland();
+
     let start_time = Instant::now();
     let mut pointer_element = PointerElement::default();
 
