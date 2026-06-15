@@ -10,32 +10,32 @@
 //! module layout and links Smithay; each module below is a documented stub filled in by a later
 //! workstream.
 
-/// Compositor state and calloop event-loop wiring (WS-1 stub).
+/// Compositor state, Wayland globals, and calloop event-loop wiring.
 pub mod state;
 
-/// Nested `winit` development backend (WS-1 stub).
+/// Nested `winit` development backend.
 pub mod winit;
 
-/// `udev`/DRM/KMS TTY backend (WS-1 stub).
+/// `udev`/DRM/KMS TTY backend (WS-1 stub; implemented in WS-6).
 pub mod udev;
 
-/// Wayland shell protocol handlers (WS-1 stub).
+/// Wayland shell protocol handlers (xdg-shell + wlr-layer-shell).
 pub mod shell;
 
-/// Input handling and Super-leader dispatch (WS-1 stub).
+/// Input handling and Super-leader dispatch (WS-1 stub; implemented in WS-4).
 pub mod input;
 
-/// Focus targets and focus-following policy (WS-1 stub).
+/// Focus targets and focus-following policy.
 pub mod focus;
 
-/// XWayland integration (WS-1 stub).
+/// XWayland integration (WS-1 stub; implemented in WS-5).
 pub mod xwayland;
 
-/// Per-frame rendering and presentation (WS-1 stub).
+/// Per-frame rendering and presentation.
 pub mod render;
 
-/// Compositor-drawn chrome: cursor, borders, stack indicators (WS-1 stub).
+/// Compositor-drawn chrome: cursor, borders, stack indicators.
 pub mod drawing;
 
-/// Unified render-element type (WS-1 stub).
+/// Unified render-element type.
 pub mod element;

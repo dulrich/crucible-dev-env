@@ -4,16 +4,25 @@
 //! surface trees, XWayland windows, and the compositor-drawn chrome from [`crate::drawing`] — into
 //! a single damage-tracked element type the renderer in [`crate::render`] can iterate per output.
 //!
-//! Implemented in a later workstream (WS-6); the richer `CrucibleRenderElement` enum lands then.
+//! For WS-3 [`WindowElement`] remains a thin alias to Smithay's
+//! [`Window`](smithay::desktop::Window): a plain Wayland window already implements every trait the
+//! compositor relies on here — [`SpaceElement`](smithay::desktop::space::SpaceElement) (so it can
+//! live in the [`Space`](smithay::desktop::Space)),
+//! [`WaylandFocus`](smithay::wayland::seat::WaylandFocus) (surface lookup),
+//! [`IsAlive`](smithay::utils::IsAlive), and
+//! [`AsRenderElements`](smithay::backend::renderer::element::AsRenderElements) (so the render path
+//! can collect its surface tree).
 //!
-//! For WS-2 this is a minimal alias: the desktop [`Space`](smithay::desktop::Space) in
-//! [`crate::state::CrucibleState`] needs a concrete element type, and a plain Wayland
-//! [`Window`](smithay::desktop::Window) already implements
-//! [`SpaceElement`](smithay::desktop::space::SpaceElement). WS-3 replaces this with a wrapper that
-//! also carries XWayland surfaces.
+//! ## WS-5 seam (XWayland)
+//! anvil wraps the window in a `WindowElement(Window)` newtype so it can carry an additional
+//! `X11Surface` arm and server-side-decoration state. CDE deliberately defers that: when WS-5 adds
+//! XWayland, replace this alias with such a newtype (or enum) and forward the trait impls to the
+//! inner kind. Keeping the alias now means the WS-3 shell/render code is already written against the
+//! `WindowElement` name, so widening it later is a localized change.
 
-/// The element type stored in the compositor's desktop space.
+/// The element type stored in the compositor's desktop [`Space`](smithay::desktop::Space).
 ///
-/// WS-2 placeholder aliased to Smithay's [`Window`](smithay::desktop::Window); widened to a
-/// surface-kind-spanning wrapper in WS-3.
+/// A WS-3 alias to Smithay's [`Window`](smithay::desktop::Window) (Wayland toplevels only). Widened
+/// to a surface-kind-spanning wrapper when XWayland lands in WS-5 — see the module docs for the
+/// seam.
 pub type WindowElement = smithay::desktop::Window;

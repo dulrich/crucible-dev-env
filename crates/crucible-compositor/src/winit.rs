@@ -4,21 +4,22 @@
 //! spare TTY. [`run_winit`] brings up a [`Display`] and a calloop [`EventLoop`] parameterized over
 //! [`CrucibleState<WinitData>`], creates a [`winit`](smithay::backend::winit) window backed by a
 //! [`GlesRenderer`], treats that window as a single Smithay [`Output`], and drives a render loop
-//! that clears the output to a solid color each frame while dispatching Wayland clients. Selected
-//! at runtime via `--winit`.
+//! that composites the mapped client surfaces plus the cursor each frame. Selected at runtime via
+//! `--winit`.
 //!
-//! This is the WS-2 bring-up: a client can connect and enumerate globals, but nothing maps yet
-//! (window mapping/placement is WS-3, input is WS-4). The structure mirrors anvil's `winit.rs` so
-//! the per-frame compositor logic can be filled in incrementally.
+//! ## WS-3 render path
+//! WS-2 cleared the output to a solid color. WS-3 collects the mapped windows from the desktop
+//! [`Space`](smithay::desktop::Space) as [`WaylandSurfaceRenderElement`]s (via
+//! [`crate::render::render_output`]) and composites a cursor element on top, then sends frame
+//! callbacks so clients keep drawing. `space.refresh()` / `popups.cleanup()` run each iteration.
+//! Input is still **not** routed into the seat (WS-4).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay::{
     backend::{
         renderer::{
-            ImportMemWl,
-            damage::{Error as OutputDamageTrackerError, OutputDamageTracker},
-            element::solid::SolidColorRenderElement,
+            ImportMemWl, damage::Error as OutputDamageTrackerError, damage::OutputDamageTracker,
             gles::GlesRenderer,
         },
         winit::{self, WinitEvent},
@@ -27,17 +28,21 @@ use smithay::{
     reexports::{
         calloop::EventLoop, wayland_server::Display, winit::event_loop::pump_events::PumpStatus,
     },
-    utils::Transform,
+    utils::{Scale, Transform},
 };
 use tracing::{error, info, warn};
 
-use crate::state::{Backend, CrucibleState};
+use crate::{
+    drawing::PointerElement,
+    render::{CustomRenderElements, render_output},
+    state::{Backend, CrucibleState},
+};
 
 /// Name advertised for the single output backed by the winit window.
 pub const OUTPUT_NAME: &str = "winit";
 
 /// Solid color the output is cleared to each frame (a dark slate), as `[r, g, b, a]`.
-const CLEAR_COLOR: [f32; 4] = [0.05, 0.05, 0.08, 1.0];
+pub const CLEAR_COLOR: [f32; 4] = [0.05, 0.05, 0.08, 1.0];
 
 /// Backend data for the nested `winit` development backend.
 ///
@@ -69,10 +74,10 @@ impl Backend for WinitData {
 /// Brings up and runs the nested `winit` development backend.
 ///
 /// Creates the Wayland [`Display`] and calloop [`EventLoop`], opens a `winit` window with a
-/// [`GlesRenderer`], registers it as a single [`Output`] whose [`Mode`] matches the window, builds
-/// the [`CrucibleState`] (which exports the Wayland socket / `WAYLAND_DISPLAY` and the WS-2
-/// globals), then loops: pumping [`WinitEvent`]s, clearing the output to [`CLEAR_COLOR`] each
-/// frame, dispatching the event loop, and flushing clients.
+/// [`GlesRenderer`], registers it as a single [`Output`], builds the [`CrucibleState`] (which
+/// exports the Wayland socket / `WAYLAND_DISPLAY` and all WS-3 globals + the seat), then loops:
+/// pumping [`WinitEvent`]s, compositing the mapped surfaces and cursor, dispatching the event loop,
+/// sending frame callbacks, and flushing clients.
 ///
 /// Returns once the window is closed or a fatal error occurs.
 pub fn run_winit() {
@@ -130,6 +135,9 @@ pub fn run_winit() {
         .update_formats(state.backend_data.backend.renderer().shm_formats());
     state.space.map_output(&output, (0, 0));
 
+    let start_time = Instant::now();
+    let mut pointer_element = PointerElement::default();
+
     info!("Initialization completed, starting the main loop.");
 
     while state.running.load(std::sync::atomic::Ordering::SeqCst) {
@@ -148,7 +156,7 @@ pub fn run_winit() {
                     .running
                     .store(false, std::sync::atomic::Ordering::SeqCst);
             }
-            // Input is wired in WS-4; other events are ignored for WS-2.
+            // Input is wired in WS-4; other winit events are ignored for WS-3.
             _ => (),
         });
 
@@ -159,22 +167,49 @@ pub fn run_winit() {
             break;
         }
 
-        // Drawing logic: clear the single output to a solid color.
+        // Reset the cursor to the default if the client surface backing it went away.
+        if let smithay::input::pointer::CursorImageStatus::Surface(ref surface) =
+            state.cursor_status
         {
+            if !smithay::utils::IsAlive::alive(surface) {
+                state.cursor_status = smithay::input::pointer::CursorImageStatus::default_named();
+            }
+        }
+        pointer_element.set_status(state.cursor_status.clone());
+
+        // Compose and present the frame: mapped surfaces from the Space, with the cursor on top.
+        {
+            let scale = Scale::from(output.current_scale().fractional_scale());
+            let cursor_pos = state.pointer.current_location();
+            let cursor_phys = cursor_pos.to_physical(scale).to_i32_round();
+
             let backend = &mut state.backend_data.backend;
             let damage_tracker = &mut state.backend_data.damage_tracker;
             let age = backend.buffer_age().unwrap_or(0);
 
             let render_res = backend.bind().and_then(|(renderer, mut fb)| {
-                // No mapped windows yet (WS-3); render an empty element list so the tracker
-                // simply clears the output to the background color.
-                let elements: [SolidColorRenderElement; 0] = [];
-                damage_tracker
-                    .render_output(renderer, &mut fb, age, &elements, CLEAR_COLOR)
-                    .map_err(|err| match err {
-                        OutputDamageTrackerError::Rendering(err) => err.into(),
-                        OutputDamageTrackerError::OutputNoMode(_) => unreachable!(),
-                    })
+                let cursor_elements: Vec<CustomRenderElements<GlesRenderer>> =
+                    smithay::backend::renderer::element::AsRenderElements::render_elements(
+                        &pointer_element,
+                        renderer,
+                        cursor_phys,
+                        scale,
+                        1.0,
+                    );
+
+                render_output(
+                    &output,
+                    &state.space,
+                    cursor_elements,
+                    renderer,
+                    &mut fb,
+                    damage_tracker,
+                    age,
+                )
+                .map_err(|err| match err {
+                    OutputDamageTrackerError::Rendering(err) => err.into(),
+                    OutputDamageTrackerError::OutputNoMode(_) => unreachable!(),
+                })
             });
 
             match render_res {
@@ -195,6 +230,14 @@ pub fn run_winit() {
             }
         }
 
+        // Send frame callbacks so clients render their next frame.
+        let frame_time = start_time.elapsed();
+        state.space.elements().for_each(|window| {
+            window.send_frame(&output, frame_time, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
+        });
+
         let result = event_loop.dispatch(Some(Duration::from_millis(16)), &mut state);
         if result.is_err() {
             state
@@ -202,6 +245,7 @@ pub fn run_winit() {
                 .store(false, std::sync::atomic::Ordering::SeqCst);
         } else {
             state.space.refresh();
+            state.popups.cleanup();
             display_handle.flush_clients().unwrap();
         }
     }
