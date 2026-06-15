@@ -49,7 +49,6 @@ use smithay::{
             is_sync_subsurface,
         },
         output::{OutputHandler, OutputManagerState},
-        seat::WaylandFocus,
         selection::{
             SelectionHandler,
             data_device::{
@@ -154,6 +153,11 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub cursor_status: CursorImageStatus,
     /// Human-readable seat name advertised to clients.
     pub seat_name: String,
+    /// Keysyms whose *press* was intercepted as a Super-leader chord (WS-4).
+    ///
+    /// Each entry's matching *release* is swallowed so the focused client never sees a dangling
+    /// key-up for a key the compositor consumed. See [`crate::input`].
+    pub suppressed_keys: Vec<smithay::input::keyboard::Keysym>,
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
@@ -245,6 +249,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             pointer,
             cursor_status: CursorImageStatus::default_named(),
             seat_name,
+            suppressed_keys: Vec::new(),
         }
     }
 }
@@ -344,21 +349,6 @@ impl<B: Backend + 'static> DndGrabHandler for CrucibleState<B> {}
 impl<B: Backend + 'static> PrimarySelectionHandler for CrucibleState<B> {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
         &mut self.primary_selection_state
-    }
-}
-
-/// Returns the [`WlSurface`] of the seat's current keyboard focus, if any.
-///
-/// A small bridge so other modules can query focus without reaching into the seat directly. Marked
-/// `#[allow(dead_code)]` because the WS-4 input path is its first real consumer; defined now so the
-/// `WaylandFocus` import is exercised and the helper exists at the WS-3/WS-4 seam.
-impl<B: Backend + 'static> CrucibleState<B> {
-    #[allow(dead_code)]
-    fn focused_surface(&self) -> Option<WlSurface> {
-        self.seat
-            .get_keyboard()
-            .and_then(|kbd| kbd.current_focus())
-            .and_then(|t| t.wl_surface().map(|s| s.into_owned()))
     }
 }
 

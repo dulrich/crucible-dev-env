@@ -65,6 +65,11 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
         // first commit (see `ensure_initial_configure`), once the surface is otherwise ready.
         let window = WindowElement::new_wayland_window(surface);
         place_new_window(&mut self.space, &window, true);
+
+        // WS-4: give the newly mapped toplevel keyboard focus so the client actually receives keys.
+        // Focus targets are bare `WlSurface` for now; the focus-target enum is WS-5 (XWayland).
+        let focus = window.wl_surface().map(|s| s.into_owned());
+        self.set_keyboard_focus(focus);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
@@ -96,6 +101,22 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(window) = self.window_for_surface(surface.wl_surface()) {
             self.space.unmap_elem(&window);
+        }
+
+        // WS-4: if the destroyed window held keyboard focus, move focus to the next mapped window
+        // (or clear it) so keys keep flowing. Placeholder policy — Phase 2's tiling owns real
+        // focus-follows-layout behavior.
+        let still_focused = self
+            .keyboard_focus()
+            .map(|s| self.window_for_surface(&s).is_some())
+            .unwrap_or(false);
+        if !still_focused {
+            let next = self
+                .space
+                .elements()
+                .next_back()
+                .and_then(|w| w.wl_surface().map(|s| s.into_owned()));
+            self.set_keyboard_focus(next);
         }
     }
 

@@ -156,7 +156,10 @@ pub fn run_winit() {
                     .running
                     .store(false, std::sync::atomic::Ordering::SeqCst);
             }
-            // Input is wired in WS-4; other winit events are ignored for WS-3.
+            // WS-4: funnel winit input (keyboard/pointer) into the seat. The Super-leader is
+            // intercepted inside; everything else is forwarded to the focused client.
+            WinitEvent::Input(event) => state.process_input_event(event),
+            // Redraw/CreateSurface events are handled by the render loop below.
             _ => (),
         });
 
