@@ -1,3 +1,11 @@
+---
+title: README
+created: 2026-06-15
+modified: 2026-07-19
+word-count: 581
+tags: ""
+---
+
 # Crucible Dev Env (CDE)
 
 > The language-agnostic desktop environment that turns your entire developer machine into an IDE.
