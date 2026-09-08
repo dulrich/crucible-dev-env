@@ -12,3 +12,4 @@ workspace = true
 
 [dependencies]
 crucible-layout = { path = "../crucible-layout" }
+xkeysym.workspace = true

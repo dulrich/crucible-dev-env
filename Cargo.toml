@@ -27,6 +27,14 @@ serde = { version = "1", features = ["derive"] }
 # pinned Smithay rev (anvil uses the same dependency).
 x11rb = "0.13"
 
+# Keysym type + constant table for `crucible-keys`' canonical chord policy (WP-R2). This is
+# exactly the crate `xkbcommon::xkb::Keysym` (Smithay's `Keysym`) re-exports, so the compositor
+# passes its keysyms into `crucible-keys` with no conversion, while `crucible-keys` itself stays
+# free of the `xkbcommon`/Smithay FFI dependency — a plain, dependency-free constant table, not a
+# parallel keysym implementation. `default-features = false` drops the optional `bytemuck`/`serde`
+# integrations neither side needs.
+xkeysym = { version = "0.2", default-features = false }
+
 # Lints are defined once here and inherited by every crate with `[lints]
 # workspace = true`. CI runs `cargo clippy -- -D warnings`.
 [workspace.lints.clippy]

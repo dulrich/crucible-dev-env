@@ -1,0 +1,309 @@
+//! The `Super`-leader chord table: maps a modifier + keysym combination to an [`Action`].
+//!
+//! This is the canonical key policy (`reviews/2026-07-30-tn-code-review.md` F1): the compositor
+//! converts its own `ModifiersState`/`Keysym` types to [`Modifiers`]/[`Keysym`] at the edge and
+//! calls [`resolve`]; it owns no binding table of its own.
+//!
+//! ## Default binding table
+//!
+//! | Chord                 | [`Action`]                    | Model op                          |
+//! |-----------------------|--------------------------------|-----------------------------------|
+//! | `Super+Return`        | `Run(terminal)`                | spawn terminal (focused pane)     |
+//! | `Super+Q`             | `Quit`                         | stop compositor                   |
+//! | `Super+H/J/K/L`       | `Focus(Left/Down/Up/Right)`    | `World::focus(dir)`               |
+//! | `Super+Shift+H/J/K/L` | `Move(Left/Down/Up/Right)`     | `World::move_(dir)`               |
+//! | `Super+Backslash`     | `Split(Right)`                 | `World::split(Right)`             |
+//! | `Super+Minus`         | `Split(Down)`                  | `World::split(Down)`              |
+//! | `Super+Shift+Return`  | `StackWindow`                  | spawn terminal (stacks in pane)   |
+//! | `Super+Tab`           | `CycleStack(1)`                | `World::cycle_stack(1)`           |
+//! | `Super+Shift+Tab`     | `CycleStack(-1)`               | `World::cycle_stack(-1)`          |
+//! | `Super+Ctrl+H/J/K/L`  | `Resize(Left/Down/Up/Right)`   | `World::resize(dir, delta)`       |
+//! | `Super+]`             | `CycleWorkspace(1)`            | `World::cycle_workspace(1)`       |
+//! | `Super+[`             | `CycleWorkspace(-1)`           | `World::cycle_workspace(-1)`      |
+//! | `Super+N`             | `NewWorkspace`                 | `World::new_workspace(auto_name)` |
+//! | `Super+Shift+]`       | `MoveWindowToWorkspace(1)`     | `World::move_window_to_workspace` |
+//! | `Super+Shift+[`       | `MoveWindowToWorkspace(-1)`    | `World::move_window_to_workspace` |
+//! | `Ctrl+Alt+F<n>`       | `VtSwitch(n)`                  | backend VT switch (independent of `Super`) |
+//!
+//! `rename-workspace` and the fuzzy workspace picker are **Phase 3** (no default binding yet).
+//!
+//! The bindings are a readable `match` table (modifier pattern × keysym → action) so **Phase 3**
+//! can replace the lookup with a config-driven one (`crucible-config`) without touching
+//! [`resolve`]'s callers.
+
+use crate::action::{Action, terminal_command};
+use crucible_layout::Direction;
+
+/// Re-export of the keysym type the chord table matches against.
+///
+/// This is exactly the type `smithay::input::keyboard::Keysym` re-exports (via `xkbcommon`), so
+/// the compositor passes its keysyms straight through with no conversion — only [`Modifiers`]
+/// needs an edge conversion, since `ModifiersState` is Smithay's own bitset type.
+pub use xkeysym::Keysym;
+
+/// The subset of keyboard modifier state the chord table cares about.
+///
+/// Deliberately not the compositor's `ModifiersState`: `crucible-keys` has no Smithay dependency,
+/// so the compositor converts at the edge (see `crucible-compositor::input::keyboard`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    /// The `Super` (Mod4 / "logo"/"windows") key. CDE's leader; every default chord requires it
+    /// except VT switching (`Ctrl+Alt+F<n>`), which is independent of the leader.
+    pub logo: bool,
+    /// The `Shift` key.
+    pub shift: bool,
+    /// The `Ctrl` key.
+    pub ctrl: bool,
+}
+
+/// Maps a modifier + keysym combination to an [`Action`], or `None` to forward the key.
+///
+/// **Pure** (no compositor state) so the `Super`-leader binding table is unit-testable without a
+/// running compositor. Only `Super` (`modifiers.logo`) chords are bound (VT switching is the one
+/// exception, checked first and independent of `Super`); every other key returns `None` and is
+/// forwarded to the focused client.
+#[must_use]
+pub fn resolve(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
+    // VT switching (`Ctrl+Alt+F<n>`) takes priority over the Super leader and is independent of it.
+    // libinput maps `Ctrl+Alt+F<n>` to the `XF86Switch_VT_<n>` keysyms; map those to a VT switch.
+    if (Keysym::XF86_Switch_VT_1.raw()..=Keysym::XF86_Switch_VT_12.raw()).contains(&keysym.raw()) {
+        let vt = (keysym.raw() - Keysym::XF86_Switch_VT_1.raw() + 1) as i32;
+        return Some(Action::VtSwitch(vt));
+    }
+
+    // Only the Super (logo / Mod4) leader is bound; everything else forwards to the client.
+    if !modifiers.logo {
+        return None;
+    }
+
+    // Decompose modifier flags once for the table below.
+    let shift = modifiers.shift;
+    let ctrl = modifiers.ctrl;
+
+    // --- binding table (Phase 3: replace this match with a config-driven lookup) ---
+    //
+    // Ordering: plain Super first, then Super+Shift, then Super+Ctrl. Within each group, keysyms
+    // are listed in the order they appear in the module-level doc table.
+    match (shift, ctrl, keysym) {
+        // ---- plain Super ---------------------------------------------------------------
+        (false, false, Keysym::Return) => Some(Action::Run(terminal_command())),
+        // Both lower- and upper-case map to Quit so the bind works regardless of Caps Lock.
+        (false, false, Keysym::q | Keysym::Q) => Some(Action::Quit),
+
+        // focus: Super+H/J/K/L
+        (false, false, Keysym::h) => Some(Action::Focus(Direction::Left)),
+        (false, false, Keysym::j) => Some(Action::Focus(Direction::Down)),
+        (false, false, Keysym::k) => Some(Action::Focus(Direction::Up)),
+        (false, false, Keysym::l) => Some(Action::Focus(Direction::Right)),
+
+        // split: Super+Backslash (right) / Super+Minus (down)
+        (false, false, Keysym::backslash) => Some(Action::Split(Direction::Right)),
+        (false, false, Keysym::minus) => Some(Action::Split(Direction::Down)),
+
+        // cycle-stack: Super+Tab (next) — Super+Shift+Tab (prev) handled below
+        (false, false, Keysym::Tab) => Some(Action::CycleStack(1)),
+
+        // workspace navigation: Super+] next, Super+[ prev, Super+N new
+        (false, false, Keysym::bracketright) => Some(Action::CycleWorkspace(1)),
+        (false, false, Keysym::bracketleft) => Some(Action::CycleWorkspace(-1)),
+        (false, false, Keysym::n | Keysym::N) => Some(Action::NewWorkspace),
+
+        // ---- Super+Shift -----------------------------------------------------------
+        // spawn into current pane (stack-window): Super+Shift+Return
+        (true, false, Keysym::Return) => Some(Action::StackWindow),
+
+        // move pane: Super+Shift+H/J/K/L
+        (true, false, Keysym::h | Keysym::H) => Some(Action::Move(Direction::Left)),
+        (true, false, Keysym::j | Keysym::J) => Some(Action::Move(Direction::Down)),
+        (true, false, Keysym::k | Keysym::K) => Some(Action::Move(Direction::Up)),
+        (true, false, Keysym::l | Keysym::L) => Some(Action::Move(Direction::Right)),
+
+        // cycle-stack prev: Super+Shift+Tab
+        (true, false, Keysym::Tab | Keysym::ISO_Left_Tab) => Some(Action::CycleStack(-1)),
+
+        // move window to workspace: Super+Shift+] next, Super+Shift+[ prev
+        (true, false, Keysym::bracketright) => Some(Action::MoveWindowToWorkspace(1)),
+        (true, false, Keysym::bracketleft) => Some(Action::MoveWindowToWorkspace(-1)),
+
+        // ---- Super+Ctrl ------------------------------------------------------------
+        // resize: Super+Ctrl+H/J/K/L
+        (false, true, Keysym::h | Keysym::H) => Some(Action::Resize(Direction::Left)),
+        (false, true, Keysym::j | Keysym::J) => Some(Action::Resize(Direction::Down)),
+        (false, true, Keysym::k | Keysym::K) => Some(Action::Resize(Direction::Up)),
+        (false, true, Keysym::l | Keysym::L) => Some(Action::Resize(Direction::Right)),
+
+        // ---- unmatched Super chord → forward to client -----------------------------
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a [`Modifiers`] with only `logo` (Super) set.
+    fn super_only() -> Modifiers {
+        Modifiers {
+            logo: true,
+            ..Default::default()
+        }
+    }
+
+    /// Builds a [`Modifiers`] with `logo` + `shift` (Super+Shift).
+    fn super_shift() -> Modifiers {
+        Modifiers {
+            logo: true,
+            shift: true,
+            ..Default::default()
+        }
+    }
+
+    /// Builds a [`Modifiers`] with `logo` + `ctrl` (Super+Ctrl).
+    fn super_ctrl() -> Modifiers {
+        Modifiers {
+            logo: true,
+            ctrl: true,
+            ..Default::default()
+        }
+    }
+
+    // ---- exhaustive default-chord table --------------------------------------------------
+    //
+    // One row per default chord in the module-level doc table (case-folded pairs collapsed to a
+    // single row where the resolver treats them identically), asserted in one pass so a future
+    // change to the table cannot silently drop or misroute a chord.
+
+    #[test]
+    fn super_return_runs_a_terminal() {
+        // `Action::Run`'s payload reads `$TERMINAL` at resolve time, which other tests in this
+        // crate mutate concurrently (see `action::tests`); check the variant shape here instead
+        // of the exact string so this test cannot race on that global.
+        assert!(matches!(
+            resolve(super_only(), Keysym::Return),
+            Some(Action::Run(_))
+        ));
+    }
+
+    #[test]
+    fn every_default_chord_resolves_to_its_action() {
+        let plain_super: &[(Keysym, Action)] = &[
+            (Keysym::q, Action::Quit),
+            (Keysym::Q, Action::Quit),
+            (Keysym::h, Action::Focus(Direction::Left)),
+            (Keysym::j, Action::Focus(Direction::Down)),
+            (Keysym::k, Action::Focus(Direction::Up)),
+            (Keysym::l, Action::Focus(Direction::Right)),
+            (Keysym::backslash, Action::Split(Direction::Right)),
+            (Keysym::minus, Action::Split(Direction::Down)),
+            (Keysym::Tab, Action::CycleStack(1)),
+            (Keysym::bracketright, Action::CycleWorkspace(1)),
+            (Keysym::bracketleft, Action::CycleWorkspace(-1)),
+            (Keysym::n, Action::NewWorkspace),
+            (Keysym::N, Action::NewWorkspace),
+        ];
+        for (keysym, expected) in plain_super {
+            assert_eq!(
+                resolve(super_only(), *keysym),
+                Some(expected.clone()),
+                "Super+{keysym:?}"
+            );
+        }
+
+        let super_shift_chords: &[(Keysym, Action)] = &[
+            (Keysym::Return, Action::StackWindow),
+            (Keysym::h, Action::Move(Direction::Left)),
+            (Keysym::H, Action::Move(Direction::Left)),
+            (Keysym::j, Action::Move(Direction::Down)),
+            (Keysym::J, Action::Move(Direction::Down)),
+            (Keysym::k, Action::Move(Direction::Up)),
+            (Keysym::K, Action::Move(Direction::Up)),
+            (Keysym::l, Action::Move(Direction::Right)),
+            (Keysym::L, Action::Move(Direction::Right)),
+            (Keysym::Tab, Action::CycleStack(-1)),
+            (Keysym::ISO_Left_Tab, Action::CycleStack(-1)),
+            (Keysym::bracketright, Action::MoveWindowToWorkspace(1)),
+            (Keysym::bracketleft, Action::MoveWindowToWorkspace(-1)),
+        ];
+        for (keysym, expected) in super_shift_chords {
+            assert_eq!(
+                resolve(super_shift(), *keysym),
+                Some(expected.clone()),
+                "Super+Shift+{keysym:?}"
+            );
+        }
+
+        let super_ctrl_chords: &[(Keysym, Action)] = &[
+            (Keysym::h, Action::Resize(Direction::Left)),
+            (Keysym::H, Action::Resize(Direction::Left)),
+            (Keysym::j, Action::Resize(Direction::Down)),
+            (Keysym::J, Action::Resize(Direction::Down)),
+            (Keysym::k, Action::Resize(Direction::Up)),
+            (Keysym::K, Action::Resize(Direction::Up)),
+            (Keysym::l, Action::Resize(Direction::Right)),
+            (Keysym::L, Action::Resize(Direction::Right)),
+        ];
+        for (keysym, expected) in super_ctrl_chords {
+            assert_eq!(
+                resolve(super_ctrl(), *keysym),
+                Some(expected.clone()),
+                "Super+Ctrl+{keysym:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn vt_switch_is_independent_of_super() {
+        // No modifiers at all still resolves a VT-switch keysym.
+        assert_eq!(
+            resolve(Modifiers::default(), Keysym::XF86_Switch_VT_1),
+            Some(Action::VtSwitch(1))
+        );
+        assert_eq!(
+            resolve(super_only(), Keysym::XF86_Switch_VT_12),
+            Some(Action::VtSwitch(12))
+        );
+        // Every VT in the advertised range resolves to its 1-based index.
+        for n in 1..=12 {
+            let raw = Keysym::XF86_Switch_VT_1.raw() + (n - 1);
+            assert_eq!(
+                resolve(Modifiers::default(), Keysym::new(raw)),
+                Some(Action::VtSwitch(n as i32))
+            );
+        }
+    }
+
+    // ---- capitalization and modifier precedence -------------------------------------------
+
+    #[test]
+    fn shift_modifier_precedence_over_keysym_case() {
+        // The resolver decides the verb from the *modifier bit*, not from whether the keysym
+        // already arrived case-shifted — `h` and `H` under Super+Shift must resolve identically.
+        assert_eq!(
+            resolve(super_shift(), Keysym::h),
+            resolve(super_shift(), Keysym::H)
+        );
+        assert_eq!(
+            resolve(super_shift(), Keysym::h),
+            Some(Action::Move(Direction::Left))
+        );
+    }
+
+    // ---- unmatched / no-Super chords → forward ---------------------------------------------
+
+    #[test]
+    fn unmatched_super_chord_is_none() {
+        assert_eq!(resolve(super_only(), Keysym::z), None);
+    }
+
+    #[test]
+    fn non_super_keys_are_forwarded() {
+        // Without the logo modifier, even bound keysyms must forward to the focused client.
+        let no_mods = Modifiers::default();
+        assert_eq!(resolve(no_mods, Keysym::Return), None);
+        assert_eq!(resolve(no_mods, Keysym::q), None);
+        assert_eq!(resolve(no_mods, Keysym::h), None);
+        assert_eq!(resolve(no_mods, Keysym::backslash), None);
+        assert_eq!(resolve(no_mods, Keysym::Tab), None);
+        assert_eq!(resolve(no_mods, Keysym::bracketright), None);
+    }
+}

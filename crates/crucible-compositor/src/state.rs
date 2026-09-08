@@ -73,6 +73,7 @@ use crucible_layout::Projection;
 use crate::{
     element::WindowElement,
     focus::{KeyboardFocusTarget, PointerFocusTarget},
+    input::SuppressedKeys,
     layout::LayoutState,
     shell::ensure_initial_configure,
 };
@@ -185,11 +186,13 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub cursor_status: CursorImageStatus,
     /// Human-readable seat name advertised to clients.
     pub seat_name: String,
-    /// Keysyms whose *press* was intercepted as a Super-leader chord (WS-4).
+    /// Physical keycodes whose *press* was intercepted as a Super-leader chord (WS-4).
     ///
     /// Each entry's matching *release* is swallowed so the focused client never sees a dangling
-    /// key-up for a key the compositor consumed. See [`crate::input`].
-    pub suppressed_keys: Vec<smithay::input::keyboard::Keysym>,
+    /// key-up for a key the compositor consumed — tracked by keycode, not the resolved keysym, so
+    /// a modifier change between press and release cannot desync the match
+    /// (`reviews/2026-09-07-tn-code-review.md` F10). See [`crate::input`].
+    pub suppressed_keys: SuppressedKeys,
 
     /// The running XWayland X11 window manager, once XWayland has reached `Ready` (WS-5).
     ///
@@ -293,7 +296,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             pointer,
             cursor_status: CursorImageStatus::default_named(),
             seat_name,
-            suppressed_keys: Vec::new(),
+            suppressed_keys: SuppressedKeys::new(),
             xwm: None,
             xdisplay: None,
         }
