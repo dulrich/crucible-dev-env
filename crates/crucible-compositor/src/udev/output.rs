@@ -1,0 +1,327 @@
+//! Connector/output lifecycle for the `udev` backend: turning a connected connector into a
+//! mapped [`Output`], tearing it down again, and keeping the output strip laid out.
+//!
+//! This module owns everything between a DRM connector and CDE's model of an output:
+//! [`UdevOutputId`] (the `(device, crtc)` identity stamped into every output's user data),
+//! [`SurfaceData`] (the per-CRTC swapchain and `wl_output` global), and the execution of the
+//! transition plans computed by [`super::plan`]. Placement arithmetic lives in the planner; this
+//! module only applies it, and it binds outputs to the model exclusively through the controller
+//! methods on [`CrucibleState`] (`register_output`/`unregister_output`/`sync_output_rect`/
+//! `apply_layout`) — it never reaches into `layout.world` itself.
+
+use smithay::{
+    backend::{
+        allocator::gbm::GbmAllocator,
+        drm::{
+            DrmDeviceFd, DrmNode,
+            exporter::gbm::GbmFramebufferExporter,
+            output::{DrmOutput, DrmOutputRenderElements},
+        },
+    },
+    desktop::{Space, utils::OutputPresentationFeedback},
+    output::{Mode as WlMode, Output, PhysicalProperties},
+    reexports::{
+        drm::control::{ModeTypeFlags, connector, crtc},
+        wayland_server::{DisplayHandle, backend::GlobalId},
+    },
+};
+use smithay_drm_extras::display_info;
+use tracing::{debug, info, warn};
+
+use crate::{element::WindowElement, state::CrucibleState};
+
+use super::plan::{self, MappedOutput, OutputPlan};
+use super::{OutputElements, UdevData};
+
+/// Identifies the [`Output`] driven by a particular `(device, crtc)` pair.
+///
+/// Stored in each output's `user_data` so VBlank/render callbacks can find the Smithay [`Output`]
+/// that corresponds to the CRTC the event fired for.
+///
+/// `Copy` so it can double as the planner's opaque output key (see [`super::plan`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct UdevOutputId {
+    /// The DRM device (GPU) node the output lives on.
+    pub device_id: DrmNode,
+    /// The CRTC scanning out this output.
+    pub crtc: crtc::Handle,
+}
+
+/// One mapped output (connector/CRTC) on a DRM device.
+///
+/// Holds the Smithay [`Output`], its `wl_output` global, and the [`DrmOutput`] that owns the
+/// per-output swapchain and page-flip scheduling.
+pub(super) struct SurfaceData {
+    /// Display handle, used to remove the `wl_output` global on drop.
+    dh: DisplayHandle,
+    /// The Smithay output mapped into the shared [`Space`].
+    output: Output,
+    /// The `wl_output` global advertised to clients (removed on drop).
+    global: Option<GlobalId>,
+    /// The DRM compositor for this CRTC: owns the GBM swapchain and frame submission.
+    pub drm_output: DrmOutput<
+        GbmAllocator<DrmDeviceFd>,
+        GbmFramebufferExporter<DrmDeviceFd>,
+        Option<OutputPresentationFeedback>,
+        DrmDeviceFd,
+    >,
+}
+
+impl Drop for SurfaceData {
+    fn drop(&mut self) {
+        self.output.leave_all();
+        if let Some(global) = self.global.take() {
+            self.dh.remove_global::<CrucibleState<UdevData>>(global);
+        }
+    }
+}
+
+/// The Space's outputs as the planner sees them, in Space order.
+///
+/// Every output this backend maps carries a [`UdevOutputId`] (it is stamped in
+/// [`CrucibleState::connector_connected`] before the output is mapped), so an output without one
+/// is not ours and is left out of the strip.
+pub(super) fn output_strip(space: &Space<WindowElement>) -> Vec<MappedOutput<UdevOutputId>> {
+    space
+        .outputs()
+        .filter_map(|output| {
+            let key = *output.user_data().get::<UdevOutputId>()?;
+            let geometry = space.output_geometry(output);
+            Some(MappedOutput {
+                key,
+                width: geometry.map(|geo| geo.size.w).unwrap_or(0),
+                position: geometry.map(|geo| (geo.loc.x, geo.loc.y)).unwrap_or((0, 0)),
+            })
+        })
+        .collect()
+}
+
+/// Looks up the mapped [`Output`] driven by `key`.
+pub(super) fn output_for(space: &Space<WindowElement>, key: UdevOutputId) -> Option<Output> {
+    space
+        .outputs()
+        .find(|output| output.user_data().get::<UdevOutputId>() == Some(&key))
+        .cloned()
+}
+
+/// Executes a transition plan: drops the outputs it removes, then re-lays the survivors.
+///
+/// This is the whole-transition entry point (a device removal); a single connector disconnect
+/// inside a device rescan removes without reflowing, because the rescan reflows once at the end.
+pub(super) fn apply_plan(state: &mut CrucibleState<UdevData>, plan: &OutputPlan<UdevOutputId>) {
+    if plan.is_empty() {
+        debug!("Output transition touches no mapped output");
+    }
+    for key in &plan.remove {
+        drop_mapped_output(state, *key);
+    }
+    apply_positions(state, plan);
+}
+
+/// Re-lays every mapped output left-to-right and re-arranges each output's layer map.
+///
+/// Called after a device rescan so the outputs form a contiguous left-to-right strip with no gaps
+/// or overlaps (anvil's `fixup_positions`); a mode change can resize an output under us, which
+/// moves everything to its right. The placement rule itself lives in [`plan::plan_reflow`].
+pub(super) fn reflow_outputs(state: &mut CrucibleState<UdevData>) {
+    let plan = plan::plan_reflow(&output_strip(&state.space));
+    apply_positions(state, &plan);
+}
+
+/// Maps every output in `plan.positions` at its planned origin and re-asserts the projection.
+///
+/// Every planned position is applied, not just the ones [`OutputPlan::survivor_reflow`] reports as
+/// moved: re-mapping an output that stayed put is idempotent, and its layer map still has to be
+/// re-arranged in case the output's *size* changed.
+fn apply_positions(state: &mut CrucibleState<UdevData>, plan: &OutputPlan<UdevOutputId>) {
+    if !plan.survivor_reflow.is_empty() {
+        debug!(
+            reflowed = plan.survivor_reflow.len(),
+            "Output strip changed width; shifting the outputs to the right of it"
+        );
+    }
+    for placement in &plan.positions {
+        let Some(output) = output_for(&state.space, placement.key) else {
+            continue;
+        };
+        state.space.map_output(&output, placement.position);
+        output.change_current_state(None, None, None, Some(placement.position.into()));
+        smithay::desktop::layer_map_for_output(&output).arrange();
+        // Keep the model's stored rect origin/size in sync with the new Space position.
+        state.sync_output_rect(&output);
+    }
+    // Output positions/sizes changed: re-assert the model-driven projection (idempotent).
+    state.apply_layout();
+}
+
+/// Tears down one mapped output: migrates its model workspaces onto a survivor, then unmaps it.
+///
+/// A [`SurfaceData`] only ever exists for an output that is mapped in the [`Space`], so a plan's
+/// removal set and the device's surface map agree; an output whose surface never came up (its DRM
+/// output failed to initialize) is left alone here, exactly as before.
+fn drop_mapped_output(state: &mut CrucibleState<UdevData>, key: UdevOutputId) {
+    let Some(device) = state.backend_data.backends.get_mut(&key.device_id) else {
+        return;
+    };
+    let Some(surface) = device.surfaces.remove(&key.crtc) else {
+        return;
+    };
+    // Migrate this output's model workspaces (and their windows) onto a survivor before
+    // unmapping the Smithay output, so no window is destroyed on disconnect.
+    state.unregister_output(&surface.output);
+    state.space.unmap_output(&surface.output);
+    state.space.refresh();
+}
+
+impl CrucibleState<UdevData> {
+    /// Sets up a newly connected connector as a mapped [`Output`] and kicks off its first frame.
+    pub(super) fn connector_connected(
+        &mut self,
+        node: DrmNode,
+        connector: connector::Info,
+        crtc: crtc::Handle,
+    ) {
+        let Some(device) = self.backend_data.backends.get_mut(&node) else {
+            return;
+        };
+        let render_node = device.render_node.unwrap_or(self.backend_data.primary_gpu);
+        let mut renderer = self
+            .backend_data
+            .gpus
+            .single_renderer(&render_node)
+            .unwrap();
+
+        let output_name = format!(
+            "{}-{}",
+            connector.interface().as_str(),
+            connector.interface_id()
+        );
+        info!(?crtc, "Setting up connector {}", output_name);
+
+        let drm_device = device.drm_output_manager.device();
+        let display_info = display_info::for_connector(drm_device, connector.handle());
+        let make = display_info
+            .as_ref()
+            .and_then(|info| info.make())
+            .unwrap_or_else(|| "Unknown".into());
+        let model = display_info
+            .as_ref()
+            .and_then(|info| info.model())
+            .unwrap_or_else(|| "Unknown".into());
+        let serial_number = display_info
+            .as_ref()
+            .and_then(|info| info.serial())
+            .unwrap_or_else(|| "Unknown".into());
+
+        // Pick the connector's preferred mode (else the first one).
+        let mode_id = connector
+            .modes()
+            .iter()
+            .position(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
+            .unwrap_or(0);
+        let drm_mode = connector.modes()[mode_id];
+        let wl_mode = WlMode::from(drm_mode);
+
+        let (phys_w, phys_h) = connector.size().unwrap_or((0, 0));
+        let output = Output::new(
+            output_name,
+            PhysicalProperties {
+                size: (phys_w as i32, phys_h as i32).into(),
+                subpixel: connector.subpixel().into(),
+                make,
+                model,
+                serial_number,
+            },
+        );
+        let global = output.create_global::<CrucibleState<UdevData>>(&self.display_handle);
+
+        // Lay this output to the right of all existing ones. A connect always plans exactly one
+        // addition, and appending never moves an existing output; an empty strip puts this first
+        // output at the origin.
+        let id = UdevOutputId {
+            device_id: node,
+            crtc,
+        };
+        let connect = plan::plan_connect(&output_strip(&self.space), id);
+        let position = connect
+            .add
+            .first()
+            .map_or((0, 0), |placement| placement.position);
+
+        output.set_preferred(wl_mode);
+        output.change_current_state(Some(wl_mode), None, None, Some(position.into()));
+        self.space.map_output(&output, position);
+        output.user_data().insert_if_missing(|| id);
+
+        // Snapshot the data needed to register this connector with the model once the `device`
+        // borrow is released (the registration must touch `self`, but `device` borrows `self`).
+        let mode_size = wl_mode.size;
+        let register_output = output.clone();
+        let register_rect =
+            crucible_layout::Rect::new(position.0, position.1, mode_size.w, mode_size.h);
+
+        let planes = match drm_device.planes(&crtc) {
+            Ok(planes) => planes,
+            Err(err) => {
+                warn!("Failed to query crtc planes: {}", err);
+                return;
+            }
+        };
+
+        let drm_output = match device
+            .drm_output_manager
+            .lock()
+            .initialize_output::<_, OutputElements<'_>>(
+                crtc,
+                drm_mode,
+                &[connector.handle()],
+                &output,
+                Some(planes),
+                &mut renderer,
+                &DrmOutputRenderElements::default(),
+            ) {
+            Ok(drm_output) => drm_output,
+            Err(err) => {
+                warn!("Failed to initialize drm output: {}", err);
+                return;
+            }
+        };
+
+        let surface = SurfaceData {
+            dh: self.display_handle.clone(),
+            output,
+            global: Some(global),
+            drm_output,
+        };
+        device.surfaces.insert(crtc, surface);
+
+        // Register this connector with the model now that the `device` borrow is released: the first
+        // compositor output adopts the existing `World::new()` output; subsequent connectors get
+        // their own independent workspace stack via `add_output`.
+        self.register_output(&register_output, register_rect);
+
+        // Kick off rendering for the new output.
+        self.handle
+            .insert_idle(move |state| state.render_surface(node, crtc));
+    }
+
+    /// Tears down the output for a disconnected connector.
+    ///
+    /// Only the removal half of the plan is executed here: this runs inside a device rescan, which
+    /// reflows the surviving strip once after all of the scan's events have been applied.
+    pub(super) fn connector_disconnected(
+        &mut self,
+        node: DrmNode,
+        _connector: connector::Info,
+        crtc: crtc::Handle,
+    ) {
+        let id = UdevOutputId {
+            device_id: node,
+            crtc,
+        };
+        let plan = plan::plan_disconnect(&output_strip(&self.space), &[id]);
+        for key in &plan.remove {
+            drop_mapped_output(self, *key);
+        }
+    }
+}
