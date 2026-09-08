@@ -1,7 +1,7 @@
 //! `udev`/DRM/KMS backend for running CDE on a real TTY across multiple outputs.
 //!
-//! This is the production backend (WS-6), adapted from Smithay's `anvil` reference compositor and
-//! trimmed to CDE's Phase-1 scope. It brings up:
+//! This is the production backend, adapted from Smithay's `anvil` reference compositor and trimmed
+//! to what CDE needs. It brings up:
 //!
 //! 1. **Session + devices** — a [`LibSeatSession`] (so CDE can open DRM/input fds without root) and a
 //!    [`UdevBackend`] that enumerates GPUs and hotplug events. Each DRM device gets a
@@ -20,8 +20,8 @@
 //! 5. **VT switching** — [`SessionEvent::PauseSession`]/[`SessionEvent::ActivateSession`] suspend and
 //!    resume libinput and the DRM devices so `Ctrl+Alt+F<n>` VT switches work.
 //!
-//! Selected at runtime via `--tty-udev`. Compared to anvil this backend omits (deferred to later
-//! phases) DMA-BUF feedback, `drm_syncobj`, DRM leasing, the on-screen FPS overlay, DnD-icon
+//! Selected at runtime via `--tty-udev`. Compared to anvil this backend omits DMA-BUF
+//! feedback, `drm_syncobj`, DRM leasing, the on-screen FPS overlay, DnD-icon
 //! rendering, and the multi-GPU pointer-texture cache; CDE draws its self-contained default cursor
 //! via [`PointerElement`](crate::drawing::PointerElement) just like the winit path.
 //!

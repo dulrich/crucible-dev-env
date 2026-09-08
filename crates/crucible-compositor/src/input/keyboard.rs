@@ -130,7 +130,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Sets (or clears) the seat's keyboard focus to `target`.
     ///
     /// Called from the shell map path (so a newly mapped toplevel/X11 window receives keys) and
-    /// from the input path (click-to-focus / the stubbed focus cycle). A fresh serial is allocated
+    /// from the input path (click-to-focus). A fresh serial is allocated
     /// for the focus change. When `target` is an XWayland window the seat's
     /// [`KeyboardTarget`](smithay::input::keyboard::KeyboardTarget) impl drives the X11
     /// `set_input_focus`/take-focus that activates it.

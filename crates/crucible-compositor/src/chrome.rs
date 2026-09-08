@@ -39,13 +39,13 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
-// Phase-2 chrome constants — Phase 3 replaces these with crucible-config values.
+// Hardcoded chrome constants — Phase 3 replaces these with crucible-config values.
 // ---------------------------------------------------------------------------
 
 /// Set to `false` to disable all compositor chrome (focus border + stack badges).
 pub const ENABLE_CHROME: bool = true;
 
-/// Width of the focus-ring border, in logical pixels (applied at scale 1.0 for Phase 2).
+/// Width of the focus-ring border, in logical pixels (applied at scale 1.0).
 pub const BORDER_THICKNESS: i32 = 3;
 
 /// Focus-ring colour as `[R, G, B, A]` premultiplied floats.  Bright teal accent.

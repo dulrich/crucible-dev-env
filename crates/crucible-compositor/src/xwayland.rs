@@ -1,6 +1,6 @@
 //! XWayland integration: spawning the server and managing X11 windows.
 //!
-//! WS-5 brings up XWayland so legacy X11 apps run alongside native Wayland clients in the same
+//! Brings up XWayland so legacy X11 apps run alongside native Wayland clients in the same
 //! [`Space`](smithay::desktop::Space):
 //!
 //! 1. [`CrucibleState::start_xwayland`] spawns the `Xwayland` server
@@ -9,8 +9,8 @@
 //!    ([`X11Wm::start_wm`]), sets the per-client scale (X11 clients don't understand `wl_output`
 //!    fractional scale), records the X11 `DISPLAY` number, and exports `DISPLAY` so children CDE
 //!    spawns can reach the X server.
-//! 3. The [`XwmHandler`] impl reparents/maps X11 windows into the `Space` with the same placeholder
-//!    placement as the xdg path, mirrors override-redirect (OR) window geometry, and bridges the
+//! 3. The [`XwmHandler`] impl reparents/maps X11 windows into the `Space` through the same lifecycle
+//!    controller as the xdg path ([`crate::layout`]), mirrors override-redirect (OR) window geometry, and bridges the
 //!    X11↔Wayland clipboard.
 //!
 //! X11 *focus* is driven through the seat: focusing a [`KeyboardFocusTarget::Window`] backed by an
@@ -19,11 +19,11 @@
 //! `set_input_focus`/take-focus), and the input path additionally raises it via
 //! [`X11Wm::raise_window`] — see [`crate::input`] and [`crate::focus`].
 //!
-//! ## Scope (WS-5)
-//! Interactive move/resize grabs and maximize/fullscreen are deferred to Phase 2 (CDE's tiling
-//! model owns window geometry), so [`XwmHandler::move_request`]/[`XwmHandler::resize_request`] are
-//! intentionally minimal no-ops here. Placement stays the WS-3 placeholder (centered); no udev/DRM
-//! work is involved.
+//! ## Scope
+//! CDE's tiling model owns window geometry, so interactive move/resize grabs and
+//! maximize/fullscreen are not honoured: [`XwmHandler::move_request`]/
+//! [`XwmHandler::resize_request`] are deliberate no-ops. Placement comes from the projection, never
+//! from the client.
 
 use std::os::unix::io::OwnedFd;
 use std::process::Stdio;
@@ -246,13 +246,13 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
         _button: u32,
         _edges: X11ResizeEdge,
     ) {
-        // Interactive resize grabs are Phase 2 (CDE tiling owns geometry); no-op for WS-5.
-        trace!("Ignoring X11 resize_request (interactive grabs are Phase 2)");
+        // CDE tiling owns geometry; interactive resize grabs are deliberately not honoured.
+        trace!("Ignoring X11 resize_request (tiling owns geometry)");
     }
 
     fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {
-        // Interactive move grabs are Phase 2 (CDE tiling owns geometry); no-op for WS-5.
-        trace!("Ignoring X11 move_request (interactive grabs are Phase 2)");
+        // CDE tiling owns geometry; interactive move grabs are deliberately not honoured.
+        trace!("Ignoring X11 move_request (tiling owns geometry)");
     }
 
     fn send_selection(

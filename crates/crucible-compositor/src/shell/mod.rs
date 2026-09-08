@@ -4,17 +4,16 @@
 //! can render:
 //!
 //! - **xdg-shell** ([`XdgShellHandler`]): new toplevels are wrapped in a [`WindowElement`] and
-//!   mapped into the desktop [`Space`] with placeholder placement (centered on the output — real CDE
-//!   tiling is Phase 2). Popups are tracked in the [`PopupManager`]. The first `configure` is sent
+//!   mapped through the lifecycle controller in [`crate::layout`], which places them from the
+//!   projection. Popups are tracked in the [`PopupManager`]. The first `configure` is sent
 //!   lazily from the commit handler ([`ensure_initial_configure`]), as the protocol requires.
 //! - **wlr-layer-shell** ([`WlrLayerShellHandler`]): layer surfaces are accepted and arranged via
-//!   [`layer_map_for_output`]. No status bar is rendered yet (that is a later phase); this exists so
+//!   [`layer_map_for_output`]. No status bar is rendered yet; this exists so
 //!   the global is advertised and the exclusive-zone bookkeeping is in place.
 //!
-//! Protocol I/O is kept at this edge so the layout core stays compositor-free. Input handling,
-//! interactive move/resize grabs, and the bridge into the `crucible_layout` model are **not** part
-//! of WS-3 (they arrive in WS-4 / Phase 2); the handlers here only do the minimum to map and
-//! configure surfaces.
+//! Protocol I/O is kept at this edge so the layout core stays compositor-free. Input handling lives
+//! in [`crate::input`] and the bridge into the `crucible_layout` model in [`crate::layout`]; the
+//! handlers here only do the minimum to map and configure surfaces.
 
 use smithay::{
     desktop::{
@@ -93,7 +92,7 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
     }
 
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
-        // Popup grabs (keyboard/pointer) are wired with the input path in WS-4.
+        // Popup grabs (keyboard/pointer) are not yet driven; popups render without a grab.
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {

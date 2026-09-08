@@ -1,8 +1,6 @@
 //! Keyboard/pointer focus targets spanning Wayland and XWayland surfaces.
 //!
-//! WS-5 widens the seat's focus type from a bare
-//! [`WlSurface`](smithay::reexports::wayland_server::protocol::wl_surface::WlSurface) (the WS-3/WS-4
-//! smallvil-style placeholder) to two enums so the same seat can focus every surface kind CDE maps:
+//! Two enums let the same seat focus every surface kind CDE maps:
 //!
 //! - [`KeyboardFocusTarget`] — a window ([`WindowElement`], Wayland *or* XWayland), a
 //!   [`LayerSurface`], or a [`PopupKind`]. This is the seat's `KeyboardFocus`.
@@ -380,7 +378,7 @@ impl<B: Backend + 'static> TouchTarget<CrucibleState<B>> for PointerFocusTarget 
 ///
 /// [`X11Wm::start_wm`](smithay::xwayland::X11Wm) requires the seat's `PointerFocus` to implement
 /// [`DndFocus`]; this enum lets a single [`PointerFocusTarget`] satisfy that by delegating to either
-/// Smithay's Wayland or X11 offer data. CDE does not yet drive interactive DnD grabs (Phase 2), so
+/// Smithay's Wayland or X11 offer data. CDE does not yet drive interactive DnD grabs, so
 /// this exists to satisfy the bound and forward correctly when DnD does arrive.
 pub enum CrucibleOfferData<S: Source> {
     /// Offer data for a native Wayland DnD target.

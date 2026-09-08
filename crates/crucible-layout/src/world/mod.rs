@@ -4,7 +4,7 @@
 //! `World` is the single source of truth for focus, stacking, and workspace membership (decision #1
 //! in `plans/02-tiling-model.md`). It holds arena-style maps keyed by typed ids and a per-workspace
 //! [`SplitTree`] of panes. It is `Clone` and free of compositor types so it can be exhaustively
-//! unit-tested. Geometry/rect math is deliberately absent (see `World::geometry`, P2-WS-2).
+//! unit-tested. Rect math lives in `crate::geometry`; [`World::geometry`] runs it over the model.
 
 use crate::{OutputId, PaneId, WindowId, WorkspaceId, geometry::Rect, ids::IdGen, tree::SplitTree};
 use std::collections::BTreeMap;

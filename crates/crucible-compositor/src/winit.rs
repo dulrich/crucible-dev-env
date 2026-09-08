@@ -7,12 +7,12 @@
 //! that composites the mapped client surfaces plus the cursor each frame. Selected at runtime via
 //! `--winit`.
 //!
-//! ## WS-3 render path
-//! WS-2 cleared the output to a solid color. WS-3 collects the mapped windows from the desktop
+//! ## Render path
+//! Each frame collects the mapped windows from the desktop
 //! [`Space`](smithay::desktop::Space) as [`WaylandSurfaceRenderElement`]s (via
 //! [`crate::render::render_output`]) and composites a cursor element on top, then sends frame
 //! callbacks so clients keep drawing. `space.refresh()` / `popups.cleanup()` run each iteration.
-//! Input is still **not** routed into the seat (WS-4).
+//! Input events are handed to [`CrucibleState::process_input_event`].
 
 use std::time::{Duration, Instant};
 
@@ -75,7 +75,7 @@ impl Backend for WinitData {
 ///
 /// Creates the Wayland [`Display`] and calloop [`EventLoop`], opens a `winit` window with a
 /// [`GlesRenderer`], registers it as a single [`Output`], builds the [`CrucibleState`] (which
-/// exports the Wayland socket / `WAYLAND_DISPLAY` and all WS-3 globals + the seat), then loops:
+/// exports the Wayland socket / `WAYLAND_DISPLAY` and the Wayland globals + the seat), then loops:
 /// pumping [`WinitEvent`]s, compositing the mapped surfaces and cursor, dispatching the event loop,
 /// sending frame callbacks, and flushing clients.
 ///
@@ -137,7 +137,7 @@ pub fn run_winit() {
     // Adopt the model's initial output for this single winit output and size it to the real pixels.
     state.register_output(&output, crucible_layout::Rect::new(0, 0, size.w, size.h));
 
-    // Bring up XWayland so X11 apps run alongside Wayland clients (WS-5). On readiness this exports
+    // Bring up XWayland so X11 apps run alongside Wayland clients. On readiness this exports
     // `DISPLAY` and attaches the X11 window manager; see `crate::xwayland`.
     state.start_xwayland();
 
@@ -165,7 +165,7 @@ pub fn run_winit() {
                     .running
                     .store(false, std::sync::atomic::Ordering::SeqCst);
             }
-            // WS-4: funnel winit input (keyboard/pointer) into the seat. The Super-leader is
+            // Funnel winit input (keyboard/pointer) into the seat. The Super-leader is
             // intercepted inside; everything else is forwarded to the focused client.
             WinitEvent::Input(event) => state.process_input_event(event),
             // Redraw/CreateSurface events are handled by the render loop below.

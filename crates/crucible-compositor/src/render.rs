@@ -5,11 +5,11 @@
 //! desktop [`Space`](smithay::desktop::Space) plus the compositor-drawn cursor element from
 //! [`crate::drawing`], composites them with an [`OutputDamageTracker`], and presents to the backend.
 //!
-//! ## WS-3 scope
-//! WS-3 renders mapped Wayland surfaces and the cursor; focus-ring borders, stack indicators,
-//! window previews, and the udev/DRM presentation-feedback path are deferred. The element-collection
-//! helpers ([`output_elements`] / [`render_output`]) are written generically over the renderer so
-//! the udev backend (WS-6) can reuse them unchanged.
+//! ## Scope
+//! Renders mapped surfaces, the cursor, and the chrome (focus-ring borders, stack indicators);
+//! window previews are not rendered. The element-collection helpers ([`output_elements`] /
+//! [`render_output`]) are written generically over the renderer so both backends reuse them
+//! unchanged (presentation feedback is the udev backend's own concern).
 
 use smithay::{
     backend::renderer::{
@@ -25,7 +25,7 @@ use crate::{drawing::PointerRenderElement, element::WindowElement};
 
 smithay::backend::renderer::element::render_elements! {
     /// Compositor-drawn render elements that are not part of the desktop [`Space`]: the cursor,
-    /// plus focus-ring borders and per-pane stack indicators (added in P2-WS-5).
+    /// plus focus-ring borders and per-pane stack indicators.
     pub CustomRenderElements<R> where R: ImportAll + ImportMem;
     /// The pointer cursor element from [`crate::drawing`].
     Pointer=PointerRenderElement<R>,
@@ -80,7 +80,7 @@ type WindowRenderElement<R> =
 /// Collects the render elements for `output`: the compositor `custom_elements` (the cursor) on top,
 /// then the mapped windows from `space` below.
 ///
-/// ## Visibility (P2-WS-3, decision #4)
+/// ## Visibility (decision #4)
 /// The `space` is already the model's **visible** set: [`CrucibleState::apply_layout`]
 /// (`crate::layout`) maps only the active workspace's focused-per-pane windows into the `Space` and
 /// `unmap_elem`s everything else (inactive workspaces, stacked-but-not-focused windows). So

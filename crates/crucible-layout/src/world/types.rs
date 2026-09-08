@@ -185,7 +185,7 @@ impl World {
 
     /// All windows currently visible: the focused window of each pane in the active workspace.
     ///
-    /// Visibility geometry is P2-WS-2; this only reports *which* windows are eligible to be shown.
+    /// Visibility geometry is `crate::geometry`'s job; this only reports *which* windows are eligible to be shown.
     #[must_use]
     pub fn visible_windows(&self) -> Vec<WindowId> {
         self.active_workspace_ref()

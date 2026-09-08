@@ -6,9 +6,7 @@
 //! result. It is the only crate that depends on Smithay, keeping the layout/persist/config/keys
 //! crates pure and testable.
 //!
-//! The compositor is brought up in Phase 1; see `plans/01-compositor-up.md`. WS-1 establishes the
-//! module layout and links Smithay; each module below is a documented stub filled in by a later
-//! workstream.
+//! Each module below owns one durable boundary; `plans/` records how they arrived.
 
 /// Compositor state, Wayland globals, and calloop event-loop wiring.
 pub mod state;
@@ -22,7 +20,7 @@ pub mod udev;
 /// Wayland shell protocol handlers (xdg-shell + wlr-layer-shell).
 pub mod shell;
 
-/// Input handling and Super-leader dispatch (WS-1 stub; implemented in WS-4).
+/// Input handling: keyboard/pointer I/O at the seat and execution of resolved `crucible-keys` actions.
 pub mod input;
 
 /// Focus targets and focus-following policy.
@@ -31,7 +29,7 @@ pub mod focus;
 /// Bridge from the pure `crucible-layout` model to the Smithay `Space` (placement/visibility/focus).
 pub mod layout;
 
-/// XWayland integration (WS-1 stub; implemented in WS-5).
+/// XWayland integration: server lifecycle and X11 window management.
 pub mod xwayland;
 
 /// Per-frame rendering and presentation.
@@ -40,7 +38,7 @@ pub mod render;
 /// Compositor-drawn chrome: cursor, borders, stack indicators.
 pub mod drawing;
 
-/// Focus-ring border and per-pane stack indicator chrome (P2-WS-5).
+/// Focus-ring border and per-pane stack indicator chrome.
 pub mod chrome;
 
 /// Unified render-element type.

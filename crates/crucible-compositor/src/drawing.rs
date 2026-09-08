@@ -1,14 +1,14 @@
-//! Compositor-drawn chrome: cursor, focus borders, and stack indicators.
+//! The compositor-drawn pointer cursor.
 //!
-//! Future home of the compositor's own drawing primitives — focus-ring borders around the active
-//! pane/window and the stack indicators that show how many windows a pane (or workspace) holds.
+//! Focus-ring borders and stack indicators live in [`crate::chrome`]; this module owns only the
+//! cursor.
 //!
-//! ## WS-3 — the pointer cursor
-//! WS-3 brings up the [`PointerElement`]: the render element for the compositor's cursor. It draws
+//! ## The pointer cursor
+//! [`PointerElement`] is the render element for the compositor's cursor. It draws
 //! either a client-provided cursor surface (when an application sets one via `wl_pointer.set_cursor`)
 //! or CDE's built-in [`default cursor`](DEFAULT_CURSOR) bitmap for the common "named/default" case.
-//! anvil loads an XCursor theme here; CDE deliberately keeps a tiny self-contained bitmap so WS-3
-//! has no external cursor-asset dependency. A themed cursor can replace [`build_default_cursor`]
+//! anvil loads an XCursor theme here; CDE deliberately keeps a tiny self-contained bitmap so the
+//! compositor has no external cursor-asset dependency. A themed cursor can replace [`build_default_cursor`]
 //! later without touching the render path.
 
 use smithay::{

@@ -3,7 +3,7 @@
 //! [`WindowElement`] is the unified window type CDE maps, places, focuses, and renders. It spans
 //! both window kinds CDE supports:
 //! - **Wayland** toplevels (xdg-shell), and
-//! - **XWayland** X11 windows (an [`X11Surface`](smithay::xwayland::X11Surface), added in WS-5).
+//! - **XWayland** X11 windows (an [`X11Surface`](smithay::xwayland::X11Surface)).
 //!
 //! ## Why a newtype over [`Window`](smithay::desktop::Window) rather than a hand-rolled enum
 //! Smithay's [`Window`] *already* unifies the two kinds internally via
@@ -16,9 +16,8 @@
 //! [`WindowSurface::X11`]. CDE keeps the newtype (instead of a bare alias) so it owns the type and
 //! can attach CDE-specific behaviour later without touching call sites.
 //!
-//! This widens the WS-3 `pub type WindowElement = Window` alias into a newtype whose trait impls
-//! forward to the inner `Window`; the WS-3 shell/render code written against the `WindowElement`
-//! name keeps working.
+//! The newtype's trait impls forward to the inner `Window`, so shell/render code only ever sees
+//! `WindowElement`.
 
 use std::borrow::Cow;
 

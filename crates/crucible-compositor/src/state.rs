@@ -4,15 +4,14 @@
 //! It owns the Smithay [`DisplayHandle`], the calloop [`LoopHandle`], the desktop [`Space`], the
 //! [`PopupManager`], the [`Seat`], and the Wayland globals.
 //!
-//! ## WS-3 globals
-//! Building on WS-2's `wl_compositor` / `wl_shm` / `wl_output`, WS-3 adds the core globals a real
-//! client needs to map and render a window:
+//! ## Wayland globals
+//! Alongside `wl_compositor` / `wl_shm` / `wl_output`, the core globals a real client needs to map
+//! and render a window:
 //! - **xdg-shell** ([`XdgShellState`]) — toplevels and popups (handlers in [`crate::shell`]).
 //! - **wlr-layer-shell** ([`WlrLayerShellState`]) — layer surfaces for future status bars.
 //! - **wl_seat** ([`SeatState`] / [`Seat`]) — created with keyboard + pointer **capabilities** so
-//!   clients see a seat with the right caps and a cursor renders. NB: **input events are not routed
-//!   here** — funnelling winit/libinput events into the seat (and the Super-leader) is WS-4. WS-3
-//!   only advertises the seat and its capabilities.
+//!   clients see a seat with the right caps and a cursor renders. Input events are routed into the
+//!   seat by [`crate::input`]; this module only advertises the seat and its capabilities.
 //! - **wl_data_device** ([`DataDeviceState`]) + **primary selection** ([`PrimarySelectionState`]) —
 //!   clipboard/DnD plumbing with minimal handlers.
 //!
@@ -124,7 +123,7 @@ pub trait Backend {
 /// Central, backend-agnostic compositor state driven by the calloop event loop.
 ///
 /// Generic over the active [`Backend`]. Holds the Wayland [`DisplayHandle`], the calloop
-/// [`LoopHandle`], the desktop [`Space`], the [`PopupManager`], the [`Seat`], and all WS-3 Wayland
+/// [`LoopHandle`], the desktop [`Space`], the [`PopupManager`], the [`Seat`], and the Wayland
 /// globals. The active backend's data is stored in [`backend_data`](CrucibleState::backend_data).
 #[derive(Debug)]
 pub struct CrucibleState<B: Backend + 'static> {
@@ -186,7 +185,7 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub cursor_status: CursorImageStatus,
     /// Human-readable seat name advertised to clients.
     pub seat_name: String,
-    /// Physical keycodes whose *press* was intercepted as a Super-leader chord (WS-4).
+    /// Physical keycodes whose *press* was intercepted as a Super-leader chord.
     ///
     /// Each entry's matching *release* is swallowed so the focused client never sees a dangling
     /// key-up for a key the compositor consumed — tracked by keycode, not the resolved keysym, so
@@ -194,7 +193,7 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// (`reviews/2026-09-07-tn-code-review.md` F10). See [`crate::input`].
     pub suppressed_keys: SuppressedKeys,
 
-    /// The running XWayland X11 window manager, once XWayland has reached `Ready` (WS-5).
+    /// The running XWayland X11 window manager, once XWayland has reached `Ready`.
     ///
     /// `None` until [`Self::start_xwayland`] has spawned the server and `X11Wm::start_wm` attached
     /// the WM; used to drive X11 focus/raise and the clipboard bridge. See [`crate::xwayland`].
@@ -207,8 +206,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Builds the compositor state on top of an existing [`Display`] and calloop [`LoopHandle`].
     ///
     /// Creates the Wayland socket (when `listen_on_socket` is set), registers the display as a
-    /// calloop source, initializes every WS-2/WS-3 global, and creates the seat with keyboard +
-    /// pointer capabilities. Input-event routing into the seat is **not** wired here (WS-4).
+    /// calloop source, initializes every Wayland global, and creates the seat with keyboard +
+    /// pointer capabilities. Input-event routing into the seat lives in [`crate::input`].
     pub fn init(
         display: Display<CrucibleState<B>>,
         handle: LoopHandle<'static, CrucibleState<B>>,
@@ -265,7 +264,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let mut seat_state = SeatState::new();
 
         // Create the seat with keyboard + pointer capabilities. NB: this only *advertises* the
-        // capabilities; routing events into the keyboard/pointer is WS-4.
+        // capabilities; routing events into the keyboard/pointer is [`crate::input`]'s job.
         let seat_name = backend_data.seat_name();
         let mut seat = seat_state.new_wl_seat(&dh, seat_name.clone());
         let pointer = seat.add_pointer();
@@ -358,9 +357,8 @@ impl<B: Backend + 'static> ShmHandler for CrucibleState<B> {
 impl<B: Backend + 'static> OutputHandler for CrucibleState<B> {}
 
 impl<B: Backend + 'static> SeatHandler for CrucibleState<B> {
-    // WS-5 widens the seat's focus types from the bare-`WlSurface` WS-3/WS-4 placeholder to the
-    // surface-kind-spanning enums in `crate::focus`, so the same seat focuses Wayland *and*
-    // XWayland surfaces (layer/popup/X11 included).
+    // The seat's focus types are the surface-kind-spanning enums in `crate::focus`, so the same
+    // seat focuses Wayland *and* XWayland surfaces (layer/popup/X11 included).
     type KeyboardFocus = KeyboardFocusTarget;
     type PointerFocus = PointerFocusTarget;
     type TouchFocus = PointerFocusTarget;
@@ -399,9 +397,9 @@ impl<B: Backend + 'static> DataDeviceHandler for CrucibleState<B> {
     }
 }
 
-// DnD grab handlers: minimal for WS-3. `WaylandDndGrabHandler`'s default `dnd_requested` cancels
-// the drag; `DndGrabHandler`'s defaults clear the icon on drop/cancel. Interactive DnD grabs are
-// wired with the pointer path in WS-4.
+// DnD grab handlers: minimal. `WaylandDndGrabHandler`'s default `dnd_requested` cancels
+// the drag; `DndGrabHandler`'s defaults clear the icon on drop/cancel. CDE does not yet drive
+// interactive DnD grabs.
 impl<B: Backend + 'static> WaylandDndGrabHandler for CrucibleState<B> {}
 impl<B: Backend + 'static> DndGrabHandler for CrucibleState<B> {}
 

@@ -47,7 +47,7 @@
 //! projection asks the model for *each* output's own active workspace, so each monitor shows an
 //! independent workspace stack.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crucible_layout::{
     FocusChange, GapConfig, LayoutChange, LayoutError, OutputId, Projection, Rect, WindowId, World,
@@ -227,6 +227,39 @@ impl<E: Payload> LayoutState<E> {
     pub fn untrack_unmanaged(&mut self, pred: impl Fn(&E) -> bool) -> Option<E> {
         let idx = self.unmanaged.iter().position(pred)?;
         Some(self.unmanaged.remove(idx))
+    }
+
+    // ---- output binding (the model half of output registration) -----------------------------
+
+    /// Chooses the model output that backs a newly registered compositor output and stores `rect`.
+    ///
+    /// `bound` is the set of model outputs already claimed by live compositor outputs. The first
+    /// compositor output adopts the unbound output `World::new()` created; every later one
+    /// allocates a fresh model output. Either way the chosen output carries `rect` on return.
+    pub fn bind_output(&mut self, bound: &HashSet<OutputId>, rect: Rect) -> OutputId {
+        let unbound = self.world.output_ids().find(|id| !bound.contains(id));
+        let id = unbound.unwrap_or_else(|| self.world.add_output(rect));
+        self.world
+            .set_output_rect(id, rect)
+            .expect("output was just found or allocated in this model");
+        id
+    }
+
+    /// Writes `rect` onto model output `id`.
+    ///
+    /// A compositor output can outlive its model output (the connector is gone but a frame is still
+    /// in flight); that surfaces as [`LayoutError::UnknownOutput`] and leaves every surviving
+    /// output's rect untouched. The caller decides whether that is worth a warning.
+    pub fn update_output_rect(&mut self, id: OutputId, rect: Rect) -> Result<(), LayoutError> {
+        self.world.set_output_rect(id, rect)
+    }
+
+    /// Releases model output `id`, migrating its workspaces (and their windows) onto a survivor.
+    ///
+    /// The model always keeps one output: releasing the last one returns
+    /// [`LayoutError::LastOutput`] and changes nothing. See [`World::remove_output`].
+    pub fn release_output(&mut self, id: OutputId) -> Result<(), LayoutError> {
+        self.world.remove_output(id)
     }
 }
 
@@ -421,26 +454,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return existing;
         }
 
-        // Adopt the initial unbound model output (the one `World::new()` created) for the first
-        // compositor output; otherwise allocate a fresh model output.
-        let bound: std::collections::HashSet<OutputId> =
-            self.space.outputs().filter_map(model_output_id).collect();
-        let initial = self
-            .layout
-            .world
-            .output_ids()
-            .find(|id| !bound.contains(id));
-
-        let model_id = match initial {
-            Some(id) => id,
-            None => {
-                let mut added = None;
-                self.update_model(|world| added = Some(world.add_output(rect)));
-                added.expect("add_output always yields an id")
-            }
-        };
-        self.set_model_output_rect(model_id, rect);
+        // The binding decision (adopt the initial model output vs. allocate) is the model half of
+        // registration and lives on `LayoutState` so it is testable without a `Space`.
+        let bound: HashSet<OutputId> = self.space.outputs().filter_map(model_output_id).collect();
+        let model_id = self.layout.bind_output(&bound, rect);
         set_model_output_id(output, model_id);
+        self.apply_layout();
         model_id
     }
 
@@ -702,5 +721,89 @@ mod tests {
                 .diff(&layout.world.project_stored(GapConfig::default()))
                 .is_empty()
         );
+    }
+
+    // ---- output binding ----------------------------------------------------------------------
+
+    const R1: Rect = Rect::new(0, 0, 1920, 1080);
+    const R2: Rect = Rect::new(1920, 0, 1280, 1024);
+
+    #[test]
+    fn the_first_compositor_output_adopts_the_initial_model_output() {
+        let mut layout = state();
+        let initial = layout.world.focused_output();
+
+        let id = layout.bind_output(&HashSet::new(), R1);
+
+        assert_eq!(id, initial);
+        assert_eq!(layout.world.output_ids().count(), 1);
+        assert_eq!(layout.world.output(id).unwrap().rect, R1);
+    }
+
+    #[test]
+    fn a_second_compositor_output_allocates_a_fresh_model_output() {
+        let mut layout = state();
+        let first = layout.bind_output(&HashSet::new(), R1);
+
+        let second = layout.bind_output(&HashSet::from([first]), R2);
+
+        assert_ne!(second, first);
+        assert_eq!(layout.world.output_ids().count(), 2);
+        assert_eq!(layout.world.output(first).unwrap().rect, R1);
+        assert_eq!(layout.world.output(second).unwrap().rect, R2);
+    }
+
+    #[test]
+    fn binding_never_steals_an_output_another_compositor_output_holds() {
+        let mut layout = state();
+        let first = layout.bind_output(&HashSet::new(), R1);
+        let second = layout.bind_output(&HashSet::from([first]), R2);
+
+        let third = layout.bind_output(&HashSet::from([first, second]), R1);
+
+        assert!(third != first && third != second);
+        assert_eq!(layout.world.output_ids().count(), 3);
+    }
+
+    #[test]
+    fn a_stale_rect_update_is_reported_and_leaves_survivors_untouched() {
+        let mut layout = state();
+        let live = layout.bind_output(&HashSet::new(), R1);
+        let before = layout.world.clone();
+        let stale = OutputId::from_raw(u64::MAX);
+
+        let outcome = layout.update_output_rect(stale, R2);
+
+        assert_eq!(outcome, Err(LayoutError::UnknownOutput(stale)));
+        assert_eq!(layout.world, before);
+        assert_eq!(layout.world.output(live).unwrap().rect, R1);
+    }
+
+    #[test]
+    fn releasing_the_last_output_is_refused_and_changes_nothing() {
+        let mut layout = state();
+        let only = layout.bind_output(&HashSet::new(), R1);
+        layout.open_managed(TestElement::new(1));
+        let before = layout.world.clone();
+
+        assert_eq!(layout.release_output(only), Err(LayoutError::LastOutput));
+        assert_eq!(layout.world, before);
+        assert_eq!(layout.managed_count(), 1);
+    }
+
+    #[test]
+    fn releasing_a_bound_output_keeps_its_windows_on_a_survivor() {
+        let mut layout = state();
+        let first = layout.bind_output(&HashSet::new(), R1);
+        let second = layout.bind_output(&HashSet::from([first]), R2);
+        layout.world.set_focused_output(second).unwrap();
+        let id = layout.open_managed(TestElement::new(7));
+
+        layout.release_output(second).unwrap();
+
+        assert_eq!(layout.world.output_ids().collect::<Vec<_>>(), vec![first]);
+        assert_eq!(layout.world.focused_output(), first);
+        assert!(layout.world.window(id).is_some(), "migrated, not closed");
+        assert_eq!(layout.managed_count(), 1);
     }
 }

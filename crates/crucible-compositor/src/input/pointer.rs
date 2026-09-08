@@ -214,8 +214,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     fn update_keyboard_focus_under_pointer(&mut self, _serial: Serial) {
         let location = self.pointer.current_location();
         // Route the model's focused output to the monitor under the pointer so new windows and the
-        // (WS-4) workspace verbs act on the monitor the user is interacting with. Click is a clean,
-        // unambiguous focus-change signal; pure pointer-enter routing can follow in WS-4 if desired.
+        // workspace verbs act on the monitor the user is interacting with. Click is a clean,
+        // unambiguous focus-change signal; pure pointer-enter routing could follow if desired.
         let output_under = self.space.output_under(location).next().cloned();
         if let Some(output) = output_under {
             self.focus_output(&output);

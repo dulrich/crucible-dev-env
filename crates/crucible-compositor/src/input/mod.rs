@@ -1,6 +1,6 @@
 //! Input handling: pointer, keyboard, and the global Super (Mod4) leader.
 //!
-//! WS-4 funnels the nested `winit` backend's [`InputEvent`]s (and, from the udev backend, real
+//! Funnels the nested `winit` backend's [`InputEvent`]s (and, from the udev backend, real
 //! libinput devices) into the seat so the compositor becomes interactive. The module is split by
 //! concern (`reviews/2026-07-30-tn-code-review.md` F7):
 //!
@@ -23,9 +23,9 @@
 //! F3). This module only converts backend event types (Smithay `ModifiersState`/`Keysym`,
 //! physical keycodes) to that crate's types at the edge, and executes the resolved action.
 //!
-//! ## Scope (WS-4)
+//! ## Entry points
 //! [`CrucibleState::process_input_event`] is the nested **winit** path;
-//! [`CrucibleState::process_input_event_libinput`] is the **udev**/libinput path (WS-6). Both
+//! [`CrucibleState::process_input_event_libinput`] is the **udev**/libinput path. Both
 //! funnel into the same per-event seat handlers in [`keyboard`]/[`pointer`]. Focus targets stay
 //! bare `WlSurface` plus the [`KeyboardFocusTarget`](crate::focus::KeyboardFocusTarget)/
 //! [`PointerFocusTarget`](crate::focus::PointerFocusTarget) enums that unify layer/popup/X11 focus
