@@ -4,3 +4,4 @@ Cargo.lock.orig
 
 # Claude Code harness scratch (sub-agent worktrees, etc.) — never commit
 .claude/
+runs/
