@@ -64,12 +64,10 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
         // first commit (see `ensure_initial_configure`), once the surface is otherwise ready.
         let window = WindowElement::new_wayland_window(surface);
 
-        // Route the map through the model: open a window into the focused pane, bind it to the
-        // element, then apply geometry/visibility/focus from the resulting reconcile. The model —
-        // not a centered placeholder — owns where and at what size this window lands.
-        let (id, reconcile) = self.layout.world.open_window();
-        self.layout.insert(id, window);
-        self.apply_layout(&reconcile);
+        // Route the map through the lifecycle controller, which owns the model/binding/Space commit
+        // order. The projection — not a centered placeholder — decides where and at what size this
+        // window lands.
+        self.map_managed_window(window);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
@@ -99,17 +97,12 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
-        let Some(window) = self.window_for_surface(surface.wl_surface()) else {
-            return;
-        };
-        // Unmap from the Space immediately; the model close + reconcile then re-tiles the survivors
-        // and re-points focus (focus-follows-layout is owned by `crucible-layout`).
-        self.space.unmap_elem(&window);
-        if let Some(id) = window.window_id() {
-            if let Ok(reconcile) = self.layout.world.close_window(id) {
-                self.apply_layout(&reconcile);
-            }
-        }
+        // The controller closes the model first and only then releases the binding + Space mapping,
+        // so a rejected close cannot leave a half-torn-down window behind. Matching on the binding
+        // (not on the `Space`) also covers a toplevel destroyed while hidden on an inactive
+        // workspace or behind a pane stack. A repeated destroy resolves to nothing and is a no-op.
+        let target = surface.wl_surface().clone();
+        self.unmap_matching(|element| element.wl_surface().map(|s| *s == target).unwrap_or(false));
     }
 
     fn popup_destroyed(&mut self, _surface: PopupSurface) {

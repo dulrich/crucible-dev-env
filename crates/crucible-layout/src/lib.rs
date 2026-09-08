@@ -10,8 +10,13 @@
 //!
 //! - typed ids: [`WindowId`], [`PaneId`], [`WorkspaceId`], [`OutputId`];
 //! - model types: [`Window`], [`Pane`], [`Workspace`], [`Output`], [`World`];
-//! - the [`Reconcile`] result every mutating op returns (what the compositor must apply);
+//! - the derived [`Projection`] ([`World::project`]) — the single source of visible geometry and
+//!   focus — plus its [`Projection::diff`] result ([`ProjectionDiff`], [`LayoutChange`],
+//!   [`FocusChange`]), which is exactly the work the compositor must apply;
 //! - [`LayoutError`] for the fallible ops.
+//!
+//! Mutating ops return only the identity they created (or `Result<(), LayoutError>`): they emit no
+//! change hints, because the projection is re-derived and diffed after every mutation.
 
 pub mod geometry;
 mod ids;
@@ -20,7 +25,10 @@ mod world;
 
 pub use geometry::{GapConfig, Rect};
 pub use ids::{OutputId, PaneId, WindowId, WorkspaceId};
-pub use world::{LayoutError, Output, Pane, Reconcile, Window, Workspace, World};
+pub use world::{
+    FocusChange, LayoutChange, LayoutError, Output, Pane, Projection, ProjectionDiff, Window,
+    Workspace, World,
+};
 
 /// A cardinal direction, used for directional split, focus, and move operations.
 ///

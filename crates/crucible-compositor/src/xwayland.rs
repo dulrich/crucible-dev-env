@@ -49,10 +49,11 @@ use smithay::{
         xwm::{Reorder, ResizeEdge as X11ResizeEdge, XwmId},
     },
 };
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     element::WindowElement,
+    layout::Teardown,
     state::{Backend, CrucibleState},
 };
 
@@ -160,49 +161,48 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        // Accept the map, wrap it as a desktop window, then route it through the model exactly like a
-        // Wayland toplevel: `open_window` lands it in the focused pane and the reconcile drives its
-        // tiled geometry (the `configure` to the computed size happens in `apply_layout`), visibility,
-        // and focus. No centered placeholder.
+        // Accepting the map is protocol I/O and may fail recoverably: log and decline the map,
+        // leaving the model untouched. Then hand the element to the same lifecycle controller a
+        // Wayland toplevel goes through, which lands it in the focused pane and lets the projection
+        // drive its tiled geometry, visibility, and focus. No centered placeholder.
         if let Err(err) = window.set_mapped(true) {
             warn!(%err, "Failed to mark X11 window mapped");
             return;
         }
-        let elem = WindowElement::new_x11_window(window.clone());
-        let (id, reconcile) = self.layout.world.open_window();
-        self.layout.insert(id, elem);
-        self.apply_layout(&reconcile);
+        self.map_managed_window(WindowElement::new_x11_window(window));
     }
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
-        // OR windows (menus, tooltips, DnD) place themselves; honor their last configured location.
+        // OR windows (menus, tooltips, DnD) place themselves, so they stay outside the `World` —
+        // but the controller tracks them so `unmapped_window`/`destroyed_window` below can tear them
+        // down symmetrically. Honor their last configured location.
         let location = window.last_configure().loc;
-        let elem = WindowElement::new_x11_window(window);
-        self.space.map_element(elem, location, true);
+        self.map_unmanaged_element(WindowElement::new_x11_window(window), location);
     }
 
     fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {
-        // Find the element by its X11 surface in the id↔element map (covers windows hidden on an
-        // inactive workspace / behind a stack, which are not in the Space), then unmap from the Space
-        // and close it in the model so the survivors re-tile and focus follows.
-        if let Some(elem) = self
-            .layout
-            .find(|e| e.x11_surface() == Some(&window))
-            .cloned()
-        {
-            self.space.unmap_elem(&elem);
-            if let Some(id) = elem.window_id() {
-                if let Ok(reconcile) = self.layout.world.close_window(id) {
-                    self.apply_layout(&reconcile);
-                }
-            }
-        }
+        // One controller call covers both kinds: a managed window is closed in the model before its
+        // binding and `Space` mapping are released; an override-redirect element is untracked and
+        // unmapped. An element that is already gone resolves to `Teardown::Absent` — no error.
+        self.unmap_matching(|e| e.x11_surface() == Some(&window));
         if !window.is_override_redirect() {
+            // Protocol I/O: best-effort, and harmless to repeat.
             let _ = window.set_mapped(false);
         }
     }
 
-    fn destroyed_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
+    fn destroyed_window(&mut self, _xwm: XwmId, window: X11Surface) {
+        // Symmetry with the map paths: an X11 window can be destroyed without an `unmapped_window`
+        // first (notably override-redirect surfaces, which never route through the model). The same
+        // controller call tears down whichever owner still holds it, and is a no-op after an unmap
+        // already ran.
+        match self.unmap_matching(|e| e.x11_surface() == Some(&window)) {
+            Teardown::Absent => {
+                trace!("X11 window destroyed after its unmap; nothing left to tear down");
+            }
+            teardown => debug!(?teardown, "Tore down X11 window on destroy"),
+        }
+    }
 
     fn configure_request(
         &mut self,

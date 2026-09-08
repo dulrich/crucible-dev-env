@@ -1,37 +1,60 @@
 //! The bridge between the pure [`crucible_layout`] model and the Smithay [`Space`].
 //!
-//! P2-WS-3 makes `crucible-layout` the single source of truth for geometry, focus, stacking, and
-//! workspace membership (decision #1 in `plans/02-tiling-model.md`). This module owns:
+//! `crucible-layout` is the single source of truth for geometry, focus, stacking, and workspace
+//! membership (decision #1 in `plans/02-tiling-model.md`). This module owns:
 //!
-//! - the [`World`] (the model) plus a stable bidirectional [`WindowId`] ↔ [`WindowElement`] map
-//!   ([`LayoutState`]);
-//! - the **pure, unit-tested** diff helper [`diff_layout`], which turns a previous and a next set of
-//!   window rects into the minimal list of [`LayoutChange`]s the compositor must apply (so we never
-//!   issue a configure storm — only windows whose rect or visibility actually changed are touched);
-//! - the [`CrucibleState::apply_layout`] step that drives the model's geometry/visibility/focus onto
-//!   the `Space` after any model mutation.
+//! - the [`World`] (the model) plus the payload bindings — [`LayoutState`], which holds the stable
+//!   [`WindowId`] ↔ element map for **managed** windows and the flat set of **unmanaged** elements
+//!   (X11 override-redirect surfaces, which deliberately live outside the `World`);
+//! - the **lifecycle controller**: [`CrucibleState::map_managed_window`],
+//!   [`CrucibleState::unmap_matching`], [`CrucibleState::map_unmanaged_element`] and the output
+//!   registration methods. Both shell backends (xdg-shell and XWayland) go through these; no backend
+//!   sequences model/map/`Space` transitions by hand;
+//! - [`CrucibleState::apply_layout`], which derives the [`Projection`] from the model, diffs it
+//!   against the last applied one, and applies exactly that difference to the `Space`.
+//!
+//! ## One projection, no hints
+//! Every mutating `World` op returns only the identity it created (or `Result<(), LayoutError>`).
+//! What the compositor must show is *derived*: [`World::project`] produces the visible
+//! `(WindowId, Rect)` set plus the focused identity, and [`Projection::diff`] turns
+//! (previous, next) into the minimal [`LayoutChange`] list plus a [`FocusChange`]. Applying an
+//! unchanged projection is a no-op — no configures, no focus churn.
+//!
+//! ## Lifecycle commit order (the one order every transition follows)
+//! 1. **Model first.** Validate and mutate the [`World`]. This is the only step that may fail; on
+//!    failure the transition aborts and **no** payload state (element bindings, `Space`) has been
+//!    touched.
+//! 2. **Payload second.** Insert/remove the element binding and map/unmap it in the `Space`. These
+//!    steps cannot fail.
+//! 3. **Project last.** Re-derive the projection and apply the diff (geometry, then focus).
+//!
+//! Protocol I/O (an X11 `set_mapped`, a `configure`) is *recoverable*: it is logged and the
+//! transition continues or aborts cleanly. That is distinct from an invariant violation — a
+//! disagreement between the `World` and the bindings — which is logged as a warning and never
+//! silently repaired by mutating payload state behind the model's back.
 //!
 //! ## Visibility (decision #4)
-//! Only the active workspace's panes, and only each pane's focused window, are mapped into the
-//! `Space` and eligible for input/render. Non-visible windows are *unmapped* from the `Space`
-//! (`Space::unmap_elem`) but **kept alive** in the id↔element map so re-showing them (stack cycle /
-//! workspace switch) is just a re-`map_element` + configure — no surface teardown.
+//! Only the active workspace's panes, and only each pane's focused window, are in the projection and
+//! therefore mapped into the `Space`. Non-visible windows are *unmapped* (`Space::unmap_elem`) but
+//! **kept alive** in the binding map so re-showing them (stack cycle / workspace switch) is just a
+//! re-`map_element` + configure — no surface teardown.
 //!
-//! ## Multi-output (P2-WS-3.5): independent per-monitor workspaces
+//! ## Multi-output: independent per-monitor workspaces
 //! Each physical Smithay [`Output`](smithay::output::Output) is mapped 1:1 to a model
 //! [`crucible_layout::OutputId`], stashed in the Smithay output's `user_data()` (see
 //! [`model_output_id`] / [`set_model_output_id`]). The **first** compositor output adopts the
-//! existing `World::new()` output; each subsequent connector calls [`World::add_output`] and records
-//! its mapping. [`CrucibleState::apply_geometry`] iterates every Smithay output and asks the model
-//! for *that output's own* active workspace geometry, so each monitor now shows an independent
-//! workspace stack. The focused model output (which receives new windows and workspace ops) is
-//! routed via [`World::set_focused_output`] as input/maps target an output.
+//! existing `World::new()` output; each subsequent connector calls [`World::add_output`]. The
+//! projection asks the model for *each* output's own active workspace, so each monitor shows an
+//! independent workspace stack.
 
 use std::collections::HashMap;
 
-use crucible_layout::{GapConfig, LayoutError, OutputId, Reconcile, Rect, WindowId, World};
+use crucible_layout::{
+    FocusChange, GapConfig, LayoutChange, LayoutError, OutputId, Projection, Rect, WindowId, World,
+};
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
+use tracing::{debug, warn};
 
 use crate::element::WindowElement;
 use crate::focus::KeyboardFocusTarget;
@@ -55,135 +78,159 @@ pub fn set_model_output_id(output: &Output, id: OutputId) {
     output.user_data().insert_if_missing(|| ModelOutputId(id));
 }
 
-/// The model plus the stable [`WindowId`] ↔ [`WindowElement`] bidirectional map.
+/// The compositor-side payload a model window is bound to.
 ///
-/// Lives in [`CrucibleState`]. The `World` is the authority; `by_id` lets the compositor resolve a
-/// model id back to the concrete Smithay element it must position/configure/focus, and is the only
-/// place a [`WindowElement`] for a model window is retained while it is hidden (not in the `Space`).
-#[derive(Debug, Default)]
-pub struct LayoutState {
-    /// The pure layout model — single source of truth for geometry/focus/stacking/membership.
-    pub world: World,
-    /// Maps every model window to its concrete compositor element (visible or hidden).
-    by_id: HashMap<WindowId, WindowElement>,
+/// Abstracting it (rather than hard-coding [`WindowElement`]) lets the lifecycle sequencing in
+/// [`LayoutState`] be unit-tested with a stand-in payload — no Smithay surface, no running
+/// compositor.
+pub trait Payload: Clone + PartialEq {
+    /// Stamps the model id onto the payload. The first binding wins.
+    fn set_window_id(&self, id: WindowId);
+    /// The model id previously stamped onto this payload, if any.
+    fn window_id(&self) -> Option<WindowId>;
 }
 
-impl LayoutState {
+impl Payload for WindowElement {
+    fn set_window_id(&self, id: WindowId) {
+        WindowElement::set_window_id(self, id);
+    }
+
+    fn window_id(&self) -> Option<WindowId> {
+        WindowElement::window_id(self)
+    }
+}
+
+/// Which lifecycle owner holds the element a request refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// A managed window, bound to this model [`WindowId`].
+    Managed(WindowId),
+    /// An unmanaged element (X11 override-redirect), tracked outside the [`World`].
+    Unmanaged,
+    /// Nothing matches: the element was never bound, or is already torn down.
+    None,
+}
+
+/// What an unmap/destroy request actually tore down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Teardown {
+    /// A managed window: closed in the `World`, unbound, and unmapped from the `Space`.
+    Managed(WindowId),
+    /// An unmanaged element: untracked and unmapped from the `Space`.
+    Unmanaged,
+    /// Nothing matched — a repeated unmap/destroy. Harmless by construction.
+    Absent,
+}
+
+/// The model plus the compositor payload bindings.
+///
+/// Lives in [`CrucibleState`]. The [`World`] is the authority for everything it knows about;
+/// `by_id` is the only place a payload for a **managed** window is retained while that window is
+/// hidden (and therefore absent from the `Space`). `unmanaged` holds X11 override-redirect elements,
+/// which are intentionally *not* modelled in the `World` (they place themselves) but still need a
+/// symmetric owner so their unmap/destroy is complete and repeatable.
+///
+/// The steps here are the fallible/model half of the commit order documented at module level; the
+/// `Space` half lives on [`CrucibleState`], which calls these first.
+#[derive(Debug)]
+pub struct LayoutState<E = WindowElement> {
+    /// The pure layout model — single source of truth for geometry/focus/stacking/membership.
+    pub world: World,
+    /// Managed windows: model id → payload (visible or hidden).
+    by_id: HashMap<WindowId, E>,
+    /// Unmanaged (override-redirect) payloads, outside the model.
+    unmanaged: Vec<E>,
+}
+
+impl<E: Payload> Default for LayoutState<E> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<E: Payload> LayoutState<E> {
     /// Creates a fresh layout state with the default one-output/one-workspace/one-pane `World`.
     #[must_use]
     pub fn new() -> Self {
         Self {
             world: World::new(),
             by_id: HashMap::new(),
+            unmanaged: Vec::new(),
         }
     }
 
-    /// Binds `element` to the model `id` (called on map). Also stamps the id onto the element.
-    pub fn insert(&mut self, id: WindowId, element: WindowElement) {
-        element.set_window_id(id);
-        self.by_id.insert(id, element);
-    }
-
-    /// Removes the binding for `id` (called on unmap), returning the element if it was present.
-    pub fn remove(&mut self, id: WindowId) -> Option<WindowElement> {
-        self.by_id.remove(&id)
-    }
-
-    /// Resolves a model `id` to its compositor element.
+    /// Resolves a model `id` to its payload.
     #[must_use]
-    pub fn element(&self, id: WindowId) -> Option<&WindowElement> {
+    pub fn element(&self, id: WindowId) -> Option<&E> {
         self.by_id.get(&id)
     }
 
-    /// Finds the first bound element matching `pred`, searching visible *and* hidden windows.
-    ///
-    /// Used by the unmap paths to locate a window's element even when it is hidden (not in the
-    /// `Space`) — e.g. an X11 surface on an inactive workspace.
+    /// Number of managed windows currently bound (visible *and* hidden).
     #[must_use]
-    pub fn find(&self, pred: impl Fn(&WindowElement) -> bool) -> Option<&WindowElement> {
-        self.by_id.values().find(|e| pred(e))
+    pub fn managed_count(&self) -> usize {
+        self.by_id.len()
     }
-}
 
-/// A single window-placement change the compositor must apply to the `Space`.
-///
-/// Produced by the pure [`diff_layout`] helper from a previous and next rect set, so the apply step
-/// touches only what actually changed (idempotent — no configure storms).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LayoutChange {
-    /// The window is now visible at `rect` and was either newly visible or moved/resized.
+    /// The unmanaged (override-redirect) payloads currently tracked.
+    #[must_use]
+    pub fn unmanaged(&self) -> &[E] {
+        &self.unmanaged
+    }
+
+    /// Which owner — if any — holds the payload matching `pred`.
     ///
-    /// `resized` is `true` when the size changed (so the apply step must send a `configure`); a pure
-    /// move (same size, new position) sets it `false` and only re-`map_element`s.
-    Place {
-        /// The window to place.
-        id: WindowId,
-        /// Its new output-relative rect.
-        rect: Rect,
-        /// Whether the size changed (a `configure` is required), vs. a position-only move.
-        resized: bool,
-    },
-    /// The window is no longer visible and must be unmapped from the `Space`.
-    Hide {
-        /// The window to hide.
-        id: WindowId,
-    },
-}
-
-/// Computes the minimal set of [`LayoutChange`]s to turn the `previous` rect set into `next`.
-///
-/// **Pure** (no compositor types) so the diff logic is unit-tested without a running compositor.
-/// Both inputs are `(WindowId, Rect)` lists — the visible windows + their output-relative rects from
-/// `World::geometry` before and after a model mutation. Guarantees:
-///
-/// - a window present in `next` but absent/changed in `previous` yields a [`LayoutChange::Place`]
-///   (with `resized` set iff its size differs, so position-only moves skip the `configure`);
-/// - a window present in `previous` but absent from `next` yields a [`LayoutChange::Hide`];
-/// - a window whose rect is identical in both yields **no** change (idempotence — the key property
-///   that prevents configure storms).
-#[must_use]
-pub fn diff_layout(previous: &[(WindowId, Rect)], next: &[(WindowId, Rect)]) -> Vec<LayoutChange> {
-    let prev_map: HashMap<WindowId, Rect> = previous.iter().copied().collect();
-    let next_map: HashMap<WindowId, Rect> = next.iter().copied().collect();
-
-    let mut changes = Vec::new();
-
-    // Placements / moves / resizes for everything visible in `next`.
-    for (id, rect) in next {
-        match prev_map.get(id) {
-            Some(old) if old == rect => {
-                // Unchanged — emit nothing (idempotent).
-            }
-            Some(old) => {
-                let resized = old.width != rect.width || old.height != rect.height;
-                changes.push(LayoutChange::Place {
-                    id: *id,
-                    rect: *rect,
-                    resized,
-                });
-            }
-            None => {
-                // Newly visible — always needs a configure to take its computed size.
-                changes.push(LayoutChange::Place {
-                    id: *id,
-                    rect: *rect,
-                    resized: true,
-                });
-            }
+    /// Managed bindings are checked first: a payload can only ever be in one of the two sets.
+    pub fn resolve(&self, pred: impl Fn(&E) -> bool) -> Binding {
+        if let Some((id, _)) = self.by_id.iter().find(|(_, e)| pred(e)) {
+            return Binding::Managed(*id);
         }
+        if self.unmanaged.iter().any(&pred) {
+            return Binding::Unmanaged;
+        }
+        Binding::None
     }
 
-    // Anything visible before but gone now must be hidden.
-    for (id, _) in previous {
-        if !next_map.contains_key(id) {
-            changes.push(LayoutChange::Hide { id: *id });
-        }
+    /// Step 1+2 of the commit order for a **map**: open a window in the model, then bind `element`.
+    ///
+    /// `World::open_window` is infallible, so this cannot leave the pair inconsistent. Returns the
+    /// new [`WindowId`]; the caller applies the projection.
+    pub fn open_managed(&mut self, element: E) -> WindowId {
+        let id = self.world.open_window();
+        element.set_window_id(id);
+        self.by_id.insert(id, element);
+        id
     }
 
-    changes
+    /// Step 1+2 of the commit order for an **unmap**: close `id` in the model, then release its
+    /// binding.
+    ///
+    /// The model mutation happens **first and alone**: if it fails, `Err` is returned and neither
+    /// the binding map nor (by extension) the `Space` has been touched. On success the released
+    /// payload is returned so the caller can unmap it from the `Space`; `Ok(None)` means the model
+    /// knew the window but nothing was ever bound to it.
+    pub fn close_managed(&mut self, id: WindowId) -> Result<Option<E>, LayoutError> {
+        self.world.close_window(id)?;
+        Ok(self.by_id.remove(&id))
+    }
+
+    /// Tracks an unmanaged payload. Returns `false` if it was already tracked (idempotent).
+    pub fn track_unmanaged(&mut self, element: E) -> bool {
+        if self.unmanaged.contains(&element) {
+            return false;
+        }
+        self.unmanaged.push(element);
+        true
+    }
+
+    /// Untracks the first unmanaged payload matching `pred`, returning it so the caller can unmap
+    /// it. `None` when nothing matches — a repeated unmap/destroy is not an error.
+    pub fn untrack_unmanaged(&mut self, pred: impl Fn(&E) -> bool) -> Option<E> {
+        let idx = self.unmanaged.iter().position(pred)?;
+        Some(self.unmanaged.remove(idx))
+    }
 }
 
-/// Converts a model [`Rect`] (output-relative, top-left origin) into a Smithay logical rectangle.
+/// Converts a model [`Rect`] (global Space coordinates) into a Smithay logical rectangle.
 #[must_use]
 fn to_logical(rect: Rect) -> Rectangle<i32, Logical> {
     Rectangle::new(
@@ -193,82 +240,20 @@ fn to_logical(rect: Rect) -> Rectangle<i32, Logical> {
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
-    /// Applies the current model state to the `Space`: geometry, visibility, and keyboard focus.
+    /// Derives the current [`Projection`], applies the difference from the last one, and stores it.
     ///
-    /// Call after **every** model mutation, passing the [`Reconcile`] the op returned. The flow:
-    ///
-    /// 1. drop any `reconcile.removed` windows from the id↔element map (they were already removed
-    ///    from the `Space` at unmap time, but the map binding is cleared here);
-    /// 2. recompute `World::geometry` for **every** mapped compositor output (each output is offset
-    ///    by its position in the `Space`) and diff it against the last applied set with
-    ///    [`diff_layout`], applying only the changes (position via `map_element`, size via the
-    ///    toplevel/X11 `configure`), and unmapping windows that became invisible;
-    /// 3. if `reconcile.focused_window` is set (or focus otherwise changed), re-point keyboard focus
-    ///    at that window's element (X11 focus is driven through the same seat path).
-    ///
-    /// Idempotent: re-applying an unchanged model issues no configures.
-    pub fn apply_layout(&mut self, reconcile: &Reconcile) {
-        // (1) Forget removed windows.
-        for id in &reconcile.removed {
-            self.layout.remove(*id);
+    /// This is the *only* path from model to `Space`. Step 3 of the commit order; safe to call at
+    /// any time (the per-frame backends do) because an unchanged projection produces an empty diff
+    /// and therefore no configures and no focus churn.
+    pub fn apply_layout(&mut self) {
+        let bindings = self.output_bindings();
+        let next: Projection = self.layout.world.project(&bindings, GapConfig::default());
+        let diff = self.projection.diff(&next);
+        if diff.is_empty() {
+            return;
         }
 
-        // (2) Recompute + apply geometry/visibility for every output.
-        self.apply_geometry();
-
-        // (3) Follow the model's focused window with keyboard (and X11) focus.
-        if reconcile.visibility_changed || reconcile.focused_window.is_some() {
-            self.apply_focus(reconcile.focused_window);
-        }
-    }
-
-    /// Recomputes and applies geometry + visibility for all mapped outputs (no focus change).
-    ///
-    /// Exposed separately so the per-frame backends can re-assert geometry cheaply (it is idempotent)
-    /// without touching focus. Each compositor output is mapped 1:1 to a model `OutputId` (via its
-    /// `user_data()`); each contributes **its own** active workspace's windows, positioned at that
-    /// output's offset in the `Space`. Outputs not yet bound to a model id are skipped.
-    pub fn apply_geometry(&mut self) {
-        let gaps = GapConfig::default();
-
-        // Snapshot each output's global geometry + model id so we don't hold a borrow on the Space
-        // while mutating it below. The size drives the model's per-output `Rect`; the location is the
-        // offset into the global Space coordinate space.
-        let output_geos: Vec<(OutputId, Rectangle<i32, Logical>)> = self
-            .space
-            .outputs()
-            .filter_map(|o| {
-                let id = model_output_id(o)?;
-                let geo = self.space.output_geometry(o)?;
-                Some((id, geo))
-            })
-            .collect();
-
-        // Build the desired visible set across all outputs (each output's OWN active workspace,
-        // output-relative rects shifted by that output's offset into global Space coordinates).
-        let mut next: Vec<(WindowId, Rect)> = Vec::new();
-        for (model_id, geo) in &output_geos {
-            let output_rect = Rect {
-                x: 0,
-                y: 0,
-                width: geo.size.w,
-                height: geo.size.h,
-            };
-            for (id, rect) in self.layout.world.geometry(*model_id, output_rect, gaps) {
-                next.push((
-                    id,
-                    Rect {
-                        x: rect.x + geo.loc.x,
-                        y: rect.y + geo.loc.y,
-                        width: rect.width,
-                        height: rect.height,
-                    },
-                ));
-            }
-        }
-
-        let changes = diff_layout(&self.last_layout, &next);
-        for change in &changes {
+        for change in &diff.changes {
             match change {
                 LayoutChange::Place { id, rect, resized } => {
                     let Some(element) = self.layout.element(*id).cloned() else {
@@ -290,100 +275,29 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
         }
 
-        self.last_layout = next;
-    }
-
-    /// Registers a Smithay `output` with the model: adopt-or-add, then bind + size it.
-    ///
-    /// The **first** compositor output adopts the model's pre-existing `World::new()` output (which is
-    /// otherwise unbound); every subsequent output calls [`World::add_output`] to get its own
-    /// independent workspace stack. Either way the chosen model [`OutputId`] is stashed in the
-    /// Smithay output's `user_data()` and its stored rect is set to `rect` (the live pixel geometry in
-    /// global Space coordinates). Returns the model [`OutputId`]. Idempotent: re-registering an
-    /// already-bound output only refreshes its rect.
-    pub fn register_output(&mut self, output: &Output, rect: Rect) -> OutputId {
-        if let Some(existing) = model_output_id(output) {
-            let _ = self.layout.world.set_output_rect(existing, rect);
-            return existing;
+        if let FocusChange::To(target) = diff.focus {
+            self.apply_focus(target);
         }
 
-        // Adopt the initial unbound model output (the one `World::new()` created) for the first
-        // compositor output; otherwise allocate a fresh model output.
-        let bound: std::collections::HashSet<OutputId> =
-            self.space.outputs().filter_map(model_output_id).collect();
-        let initial = self
-            .layout
-            .world
-            .output_ids()
-            .find(|id| !bound.contains(id));
-
-        let model_id = match initial {
-            Some(id) => id,
-            None => {
-                let (id, _) = self.layout.world.add_output(rect);
-                id
-            }
-        };
-        let _ = self.layout.world.set_output_rect(model_id, rect);
-        set_model_output_id(output, model_id);
-        model_id
+        self.projection = next;
     }
 
-    /// Updates the stored model rect for `output` from its current Space geometry.
+    /// Snapshots every mapped compositor output as `(model id, global rect)`.
     ///
-    /// Called after an output is (re)mapped/resized so [`World::geometry_for`] and any geometry pass
-    /// see the live pixel size. No-op for an output not yet bound to a model id.
-    pub fn sync_output_rect(&mut self, output: &Output) {
-        let Some(model_id) = model_output_id(output) else {
-            return;
-        };
-        let Some(geo) = self.space.output_geometry(output) else {
-            return;
-        };
-        let rect = Rect {
-            x: geo.loc.x,
-            y: geo.loc.y,
-            width: geo.size.w,
-            height: geo.size.h,
-        };
-        let _ = self.layout.world.set_output_rect(model_id, rect);
+    /// Outputs not yet bound to a model id, or with no geometry in the `Space`, are skipped — they
+    /// contribute nothing to the projection.
+    fn output_bindings(&self) -> Vec<(OutputId, Rect)> {
+        self.space
+            .outputs()
+            .filter_map(|output| {
+                let id = model_output_id(output)?;
+                let geo = self.space.output_geometry(output)?;
+                Some((id, Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h)))
+            })
+            .collect()
     }
 
-    /// Removes the Smithay `output`'s model output, migrating its workspaces to a survivor.
-    ///
-    /// Looks up the bound model [`OutputId`], calls [`World::remove_output`] (which preserves every
-    /// window by appending the removed output's workspaces onto a surviving output), and applies the
-    /// resulting reconcile. No-op (logged) if the output is unbound or is the last model output.
-    pub fn unregister_output(&mut self, output: &Output) {
-        let Some(model_id) = model_output_id(output) else {
-            return;
-        };
-        match self.layout.world.remove_output(model_id) {
-            Ok(reconcile) => self.apply_layout(&reconcile),
-            Err(err) => {
-                tracing::warn!(?err, "remove_output failed; keeping model output");
-            }
-        }
-    }
-
-    /// Routes the focused model output to the one backing `output`, if bound.
-    ///
-    /// Call when input/pointer focus moves onto a monitor (or a window maps there) so new windows and
-    /// workspace verbs act on that monitor. Applies the focus reconcile. No-op if unbound or already
-    /// focused.
-    pub fn focus_output(&mut self, output: &Output) {
-        let Some(model_id) = model_output_id(output) else {
-            return;
-        };
-        if self.layout.world.focused_output() == model_id {
-            return;
-        }
-        if let Ok(reconcile) = self.layout.world.set_focused_output(model_id) {
-            self.apply_layout(&reconcile);
-        }
-    }
-
-    /// Re-points keyboard focus (and X11 focus) at the model's focused window, if any.
+    /// Re-points keyboard focus (and X11 focus) at the projection's focused window.
     fn apply_focus(&mut self, focused: Option<WindowId>) {
         let Some(focused) = focused else {
             // No focused window (e.g. the active workspace is empty): clear focus.
@@ -403,17 +317,197 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element)));
     }
 
-    /// Runs a fallible model mutation, applying its reconcile only on success.
+    // ---- the single mutation entry point ----------------------------------------------------
+
+    /// Runs a fallible model mutation and applies the resulting projection **only on success**.
     ///
-    /// Convenience for the (temporary) debug hook and any future caller that drives a `Result`-typed
-    /// op; errors are returned to the caller untouched.
+    /// The single entry point for every model mutation (steps 1 and 3 of the commit order): an
+    /// `Err` means the model rejected the change, nothing was mutated, and nothing is applied. The
+    /// error is returned to the caller untouched so it can distinguish an expected no-op (e.g.
+    /// [`LayoutError::SameWorkspace`]) from a real problem.
     pub fn with_model<F>(&mut self, op: F) -> Result<(), LayoutError>
     where
-        F: FnOnce(&mut World) -> Result<Reconcile, LayoutError>,
+        F: FnOnce(&mut World) -> Result<(), LayoutError>,
     {
-        let reconcile = op(&mut self.layout.world)?;
-        self.apply_layout(&reconcile);
+        op(&mut self.layout.world)?;
+        self.apply_layout();
         Ok(())
+    }
+
+    /// Infallible-op sugar over [`CrucibleState::with_model`], for `World` verbs that cannot fail.
+    pub fn update_model<F>(&mut self, op: F)
+    where
+        F: FnOnce(&mut World),
+    {
+        let outcome = self.with_model(|world| {
+            op(world);
+            Ok(())
+        });
+        debug_assert!(outcome.is_ok(), "infallible model op cannot fail");
+    }
+
+    // ---- window lifecycle controller ---------------------------------------------------------
+
+    /// Maps a **managed** window: model open, bind the element, apply the projection.
+    ///
+    /// The projection — not the caller — decides where and at what size the window lands, and
+    /// whether it takes focus. Returns the model [`WindowId`] now bound to `element`.
+    pub fn map_managed_window(&mut self, element: WindowElement) -> WindowId {
+        let id = self.layout.open_managed(element);
+        self.apply_layout();
+        id
+    }
+
+    /// Maps an **unmanaged** element (X11 override-redirect) at `location`.
+    ///
+    /// Unmanaged elements place themselves and are deliberately absent from the [`World`], so the
+    /// projection never moves or hides them. They are tracked here so
+    /// [`CrucibleState::unmap_matching`] can tear them down symmetrically. Re-mapping an already
+    /// tracked element only refreshes its position.
+    pub fn map_unmanaged_element(&mut self, element: WindowElement, location: Point<i32, Logical>) {
+        self.layout.track_unmanaged(element.clone());
+        self.space.map_element(element, location, true);
+    }
+
+    /// Tears down whichever element matches `pred`, managed or unmanaged, in the commit order.
+    ///
+    /// Resolves the owner first, so a repeated unmap/destroy resolves to [`Binding::None`] and
+    /// returns [`Teardown::Absent`] — no error, no log storm. For a managed window the model close
+    /// runs first; only if it succeeds are the binding and the `Space` mapping released.
+    pub fn unmap_matching(&mut self, pred: impl Fn(&WindowElement) -> bool) -> Teardown {
+        match self.layout.resolve(&pred) {
+            Binding::Managed(id) => match self.layout.close_managed(id) {
+                Ok(element) => {
+                    if let Some(element) = element {
+                        self.space.unmap_elem(&element);
+                    }
+                    self.apply_layout();
+                    Teardown::Managed(id)
+                }
+                Err(err) => {
+                    // The binding map and the model disagree: an invariant violation, not protocol
+                    // I/O. Report it and change nothing rather than repairing state behind the
+                    // model's back.
+                    warn!(%err, ?id, "bound window unknown to the model; leaving state untouched");
+                    Teardown::Absent
+                }
+            },
+            Binding::Unmanaged => {
+                if let Some(element) = self.layout.untrack_unmanaged(&pred) {
+                    self.space.unmap_elem(&element);
+                }
+                Teardown::Unmanaged
+            }
+            Binding::None => {
+                debug!("unmap request for an element that is already gone; ignoring");
+                Teardown::Absent
+            }
+        }
+    }
+
+    // ---- output lifecycle --------------------------------------------------------------------
+
+    /// Registers a Smithay `output` with the model: adopt-or-add, then bind + size it.
+    ///
+    /// The **first** compositor output adopts the model's pre-existing `World::new()` output (which
+    /// is otherwise unbound); every subsequent output calls [`World::add_output`] to get its own
+    /// independent workspace stack. Either way the chosen model [`OutputId`] is stashed in the
+    /// Smithay output's `user_data()` and its stored rect is set to `rect` (the live pixel geometry
+    /// in global Space coordinates). Returns the model [`OutputId`]. Idempotent: re-registering an
+    /// already-bound output only refreshes its rect.
+    pub fn register_output(&mut self, output: &Output, rect: Rect) -> OutputId {
+        if let Some(existing) = model_output_id(output) {
+            self.set_model_output_rect(existing, rect);
+            return existing;
+        }
+
+        // Adopt the initial unbound model output (the one `World::new()` created) for the first
+        // compositor output; otherwise allocate a fresh model output.
+        let bound: std::collections::HashSet<OutputId> =
+            self.space.outputs().filter_map(model_output_id).collect();
+        let initial = self
+            .layout
+            .world
+            .output_ids()
+            .find(|id| !bound.contains(id));
+
+        let model_id = match initial {
+            Some(id) => id,
+            None => {
+                let mut added = None;
+                self.update_model(|world| added = Some(world.add_output(rect)));
+                added.expect("add_output always yields an id")
+            }
+        };
+        self.set_model_output_rect(model_id, rect);
+        set_model_output_id(output, model_id);
+        model_id
+    }
+
+    /// Updates the stored model rect for `output` from its current Space geometry.
+    ///
+    /// Called after an output is (re)mapped/resized so the projection sees the live pixel size.
+    /// No-op for an output not yet bound to a model id.
+    pub fn sync_output_rect(&mut self, output: &Output) {
+        let Some(model_id) = model_output_id(output) else {
+            return;
+        };
+        let Some(geo) = self.space.output_geometry(output) else {
+            return;
+        };
+        let rect = Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h);
+        self.set_model_output_rect(model_id, rect);
+    }
+
+    /// Writes `rect` onto model output `id`, reporting (and skipping) a stale binding.
+    ///
+    /// A Smithay output can outlive its model output (the connector is gone but a frame is still in
+    /// flight). That is recoverable: the geometry update is dropped and the surviving outputs keep
+    /// their own rects.
+    fn set_model_output_rect(&mut self, id: OutputId, rect: Rect) {
+        match self.with_model(|world| world.set_output_rect(id, rect)) {
+            Ok(()) => {}
+            Err(err) => warn!(%err, ?id, "stale output binding; dropping geometry update"),
+        }
+    }
+
+    /// Removes the Smithay `output`'s model output, migrating its workspaces to a survivor.
+    ///
+    /// Calls [`World::remove_output`], which preserves every window by appending the removed
+    /// output's workspaces onto a surviving output, then applies the projection. The **last** model
+    /// output is never removed ([`LayoutError::LastOutput`]) — the model always keeps one — and an
+    /// unbound output is nothing to remove.
+    pub fn unregister_output(&mut self, output: &Output) {
+        let Some(model_id) = model_output_id(output) else {
+            debug!("unregister_output for an unbound output; ignoring");
+            return;
+        };
+        match self.with_model(|world| world.remove_output(model_id)) {
+            Ok(()) => {}
+            Err(LayoutError::LastOutput) => {
+                debug!(
+                    ?model_id,
+                    "keeping the last model output (last-output policy)"
+                );
+            }
+            Err(err) => warn!(%err, ?model_id, "remove_output failed; keeping model output"),
+        }
+    }
+
+    /// Routes the focused model output to the one backing `output`, if bound.
+    ///
+    /// Call when input/pointer focus moves onto a monitor (or a window maps there) so new windows
+    /// and workspace verbs act on that monitor. No-op if unbound or already focused.
+    pub fn focus_output(&mut self, output: &Output) {
+        let Some(model_id) = model_output_id(output) else {
+            return;
+        };
+        if self.layout.world.focused_output() == model_id {
+            return;
+        }
+        if let Err(err) = self.with_model(|world| world.set_focused_output(model_id)) {
+            warn!(%err, ?model_id, "stale output binding; focus stays where it is");
+        }
     }
 }
 
@@ -438,130 +532,175 @@ fn configure_size(element: &WindowElement, size: Size<i32, Logical>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
 
-    fn r(x: i32, y: i32, w: i32, h: i32) -> Rect {
-        Rect {
-            x,
-            y,
-            width: w,
-            height: h,
+    /// A stand-in payload: carries the same id-stamping contract as [`WindowElement`] with no
+    /// Smithay surface behind it, so the lifecycle sequencing is testable without a compositor.
+    #[derive(Debug, Clone, PartialEq)]
+    struct TestElement {
+        tag: u32,
+        id: Rc<Cell<Option<WindowId>>>,
+    }
+
+    impl TestElement {
+        fn new(tag: u32) -> Self {
+            Self {
+                tag,
+                id: Rc::new(Cell::new(None)),
+            }
         }
     }
 
-    fn wid(n: u64) -> WindowId {
-        WindowId::from_raw(n)
+    impl Payload for TestElement {
+        fn set_window_id(&self, id: WindowId) {
+            if self.id.get().is_none() {
+                self.id.set(Some(id));
+            }
+        }
+
+        fn window_id(&self) -> Option<WindowId> {
+            self.id.get()
+        }
+    }
+
+    fn tagged(tag: u32) -> impl Fn(&TestElement) -> bool {
+        move |e: &TestElement| e.tag == tag
+    }
+
+    fn state() -> LayoutState<TestElement> {
+        LayoutState::new()
     }
 
     #[test]
-    fn unchanged_layout_yields_no_changes() {
-        let set = vec![(wid(0), r(0, 0, 100, 100)), (wid(1), r(100, 0, 100, 100))];
-        assert!(diff_layout(&set, &set).is_empty());
+    fn opening_a_managed_window_binds_the_payload_both_ways() {
+        let mut layout = state();
+        let element = TestElement::new(1);
+        let id = layout.open_managed(element.clone());
+
+        assert_eq!(element.window_id(), Some(id));
+        assert_eq!(layout.element(id), Some(&element));
+        assert_eq!(layout.managed_count(), 1);
+        assert_eq!(layout.world.window_count(), 1);
+        assert_eq!(layout.resolve(tagged(1)), Binding::Managed(id));
     }
 
     #[test]
-    fn newly_visible_window_is_placed_with_configure() {
-        let prev = vec![];
-        let next = vec![(wid(0), r(0, 0, 800, 600))];
-        let changes = diff_layout(&prev, &next);
+    fn closing_a_managed_window_releases_model_and_binding_together() {
+        let mut layout = state();
+        let id = layout.open_managed(TestElement::new(1));
+
+        let released = layout.close_managed(id).expect("close succeeds");
+        assert_eq!(released.map(|e| e.tag), Some(1));
+        assert_eq!(layout.managed_count(), 0);
+        assert_eq!(layout.world.window_count(), 0);
+        // The window is gone from both halves, so a repeat resolves to nothing at all.
+        assert_eq!(layout.resolve(tagged(1)), Binding::None);
+    }
+
+    #[test]
+    fn repeated_close_is_an_error_the_resolver_never_reaches() {
+        let mut layout = state();
+        let id = layout.open_managed(TestElement::new(1));
+        layout.close_managed(id).expect("first close succeeds");
+
+        // Directly re-closing reports the model's rejection...
         assert_eq!(
-            changes,
-            vec![LayoutChange::Place {
-                id: wid(0),
-                rect: r(0, 0, 800, 600),
-                resized: true,
-            }]
+            layout.close_managed(id),
+            Err(LayoutError::UnknownWindow(id))
         );
+        // ...but the controller resolves first, so a repeated unmap is simply a no-op.
+        assert_eq!(layout.resolve(tagged(1)), Binding::None);
     }
 
     #[test]
-    fn removed_window_is_hidden() {
-        let prev = vec![(wid(0), r(0, 0, 800, 600))];
-        let next = vec![];
+    fn a_failed_model_close_leaves_every_binding_untouched() {
+        let mut layout = state();
+        let kept = layout.open_managed(TestElement::new(1));
+        let other = layout.open_managed(TestElement::new(2));
+        let unknown = WindowId::from_raw(9_999);
+
+        let before_world = layout.world.clone();
         assert_eq!(
-            diff_layout(&prev, &next),
-            vec![LayoutChange::Hide { id: wid(0) }]
+            layout.close_managed(unknown),
+            Err(LayoutError::UnknownWindow(unknown))
         );
+
+        // Model and bindings are byte-identical to before the failed mutation, so the caller never
+        // reaches the `Space` half of the commit order.
+        assert_eq!(layout.world, before_world);
+        assert_eq!(layout.managed_count(), 2);
+        assert!(layout.element(kept).is_some());
+        assert!(layout.element(other).is_some());
     }
 
     #[test]
-    fn position_only_move_does_not_set_resized() {
-        // Same size, different origin -> a move that must NOT trigger a configure.
-        let prev = vec![(wid(0), r(0, 0, 400, 600))];
-        let next = vec![(wid(0), r(410, 0, 400, 600))];
-        assert_eq!(
-            diff_layout(&prev, &next),
-            vec![LayoutChange::Place {
-                id: wid(0),
-                rect: r(410, 0, 400, 600),
-                resized: false,
-            }]
+    fn unmanaged_elements_are_tracked_outside_the_world() {
+        let mut layout = state();
+        let element = TestElement::new(7);
+
+        assert!(layout.track_unmanaged(element.clone()));
+        assert_eq!(layout.resolve(tagged(7)), Binding::Unmanaged);
+        // Outside the model entirely: no window, no binding.
+        assert_eq!(layout.world.window_count(), 0);
+        assert_eq!(layout.managed_count(), 0);
+        assert_eq!(layout.unmanaged().len(), 1);
+
+        // Re-mapping the same element does not duplicate the tracking entry.
+        assert!(!layout.track_unmanaged(element));
+        assert_eq!(layout.unmanaged().len(), 1);
+    }
+
+    #[test]
+    fn unmanaged_unmap_then_destroy_is_symmetric_and_idempotent() {
+        let mut layout = state();
+        layout.track_unmanaged(TestElement::new(7));
+
+        // First unmap tears it down...
+        assert_eq!(layout.untrack_unmanaged(tagged(7)).map(|e| e.tag), Some(7));
+        assert!(layout.unmanaged().is_empty());
+        // ...and the following destroy (or any repeat) finds nothing and is harmless.
+        assert_eq!(layout.resolve(tagged(7)), Binding::None);
+        assert!(layout.untrack_unmanaged(tagged(7)).is_none());
+    }
+
+    #[test]
+    fn managed_and_unmanaged_sets_stay_distinct() {
+        let mut layout = state();
+        let managed = layout.open_managed(TestElement::new(1));
+        layout.track_unmanaged(TestElement::new(2));
+
+        assert_eq!(layout.resolve(tagged(1)), Binding::Managed(managed));
+        assert_eq!(layout.resolve(tagged(2)), Binding::Unmanaged);
+        assert_eq!(layout.resolve(tagged(3)), Binding::None);
+        // Tearing down the unmanaged one leaves the managed window alone.
+        assert!(layout.untrack_unmanaged(tagged(2)).is_some());
+        assert_eq!(layout.managed_count(), 1);
+        assert_eq!(layout.world.window_count(), 1);
+    }
+
+    #[test]
+    fn the_projection_reflects_managed_windows_only() {
+        let mut layout = state();
+        let output = layout.world.focused_output();
+        layout
+            .world
+            .set_output_rect(output, Rect::new(0, 0, 800, 600))
+            .expect("output exists");
+
+        let managed = layout.open_managed(TestElement::new(1));
+        layout.track_unmanaged(TestElement::new(2));
+
+        let projection = layout.world.project_stored(GapConfig::default());
+        assert_eq!(projection.windows().len(), 1);
+        assert!(projection.is_visible(managed));
+        assert_eq!(projection.focus(), Some(managed));
+
+        // Re-deriving without touching the model yields an empty diff: applying it is a no-op.
+        assert!(
+            projection
+                .diff(&layout.world.project_stored(GapConfig::default()))
+                .is_empty()
         );
-    }
-
-    #[test]
-    fn resize_sets_resized_flag() {
-        let prev = vec![(wid(0), r(0, 0, 800, 600))];
-        let next = vec![(wid(0), r(0, 0, 400, 600))];
-        assert_eq!(
-            diff_layout(&prev, &next),
-            vec![LayoutChange::Place {
-                id: wid(0),
-                rect: r(0, 0, 400, 600),
-                resized: true,
-            }]
-        );
-    }
-
-    #[test]
-    fn split_re_tiles_only_the_two_affected_panes() {
-        // One full-width window, then a second appears taking the right half: the first shrinks to
-        // the left half (resized) and the second is newly placed. Nothing is spuriously hidden.
-        let prev = vec![(wid(0), r(0, 0, 800, 600))];
-        let next = vec![(wid(0), r(0, 0, 400, 600)), (wid(1), r(400, 0, 400, 600))];
-        let changes = diff_layout(&prev, &next);
-        assert_eq!(changes.len(), 2);
-        assert!(changes.contains(&LayoutChange::Place {
-            id: wid(0),
-            rect: r(0, 0, 400, 600),
-            resized: true,
-        }));
-        assert!(changes.contains(&LayoutChange::Place {
-            id: wid(1),
-            rect: r(400, 0, 400, 600),
-            resized: true,
-        }));
-    }
-
-    #[test]
-    fn stack_cycle_hides_one_shows_another_in_place() {
-        // A stacked pane: window 0 visible, then cycle makes window 1 visible in the SAME rect.
-        // 0 is hidden, 1 is placed (newly visible -> configure).
-        let rect = r(0, 0, 800, 600);
-        let prev = vec![(wid(0), rect)];
-        let next = vec![(wid(1), rect)];
-        let changes = diff_layout(&prev, &next);
-        assert_eq!(changes.len(), 2);
-        assert!(changes.contains(&LayoutChange::Hide { id: wid(0) }));
-        assert!(changes.contains(&LayoutChange::Place {
-            id: wid(1),
-            rect,
-            resized: true,
-        }));
-    }
-
-    #[test]
-    fn workspace_switch_hides_all_old_shows_all_new() {
-        // Switching workspaces replaces the whole visible set.
-        let prev = vec![(wid(0), r(0, 0, 400, 600)), (wid(1), r(400, 0, 400, 600))];
-        let next = vec![(wid(2), r(0, 0, 800, 600))];
-        let changes = diff_layout(&prev, &next);
-        assert_eq!(changes.len(), 3);
-        assert!(changes.contains(&LayoutChange::Hide { id: wid(0) }));
-        assert!(changes.contains(&LayoutChange::Hide { id: wid(1) }));
-        assert!(changes.contains(&LayoutChange::Place {
-            id: wid(2),
-            rect: r(0, 0, 800, 600),
-            resized: true,
-        }));
     }
 }

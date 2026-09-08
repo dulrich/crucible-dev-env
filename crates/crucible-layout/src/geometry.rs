@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn single_pane_fills_output_minus_outer_gap() {
         let mut w = World::new();
-        let (win, _) = w.open_window();
+        let win = w.open_window();
         let ws_id = w.active_workspace_id();
         let ws = w.workspace(ws_id).unwrap();
 
@@ -308,7 +308,7 @@ mod tests {
         let _ = w.open_window();
         let _ = w.split(Direction::Right);
         // Push ratio to 0.75 (first pane gets 75%)
-        let _ = w.resize(Direction::Right, 0.25);
+        w.resize(Direction::Right, 0.25);
 
         let ws_id = w.active_workspace_id();
         let ws = w.workspace(ws_id).unwrap();
@@ -335,7 +335,7 @@ mod tests {
         let mut w = World::new();
         let _ = w.open_window(); // pane 0 focused
         let _ = w.split(Direction::Right); // pane 1 to the right (horizontal split)
-        let _ = w.focus(Direction::Left); // go back to pane 0
+        w.focus(Direction::Left); // go back to pane 0
         let _ = w.split(Direction::Down); // pane 2 below pane 0 (vertical split of pane 0)
 
         let ws_id = w.active_workspace_id();
@@ -353,7 +353,7 @@ mod tests {
         let mut w = World::new();
         let _ = w.open_window();
         let _ = w.split(Direction::Right);
-        let _ = w.focus(Direction::Left);
+        w.focus(Direction::Left);
         let _ = w.split(Direction::Down);
 
         let ws_id = w.active_workspace_id();
@@ -381,9 +381,9 @@ mod tests {
     #[test]
     fn stacked_pane_rect_follows_focused_window() {
         let mut w = World::new();
-        let (win_a, _) = w.open_window();
+        let win_a = w.open_window();
         // Push a second window onto the same pane's stack.
-        let (win_b, _) = w.stack_window();
+        let win_b = w.stack_window();
 
         let output_id = w.focused_output();
         let gaps = GapConfig::default();
@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(rects[0].0, win_b, "focused window (win_b) gets the rect");
 
         // Cycle the stack: win_a becomes focused.
-        let _ = w.cycle_stack(1);
+        w.cycle_stack(1);
         let rects = w.geometry(output_id, OUTPUT, gaps);
         assert_eq!(rects.len(), 1);
         assert_eq!(rects[0].0, win_a, "after cycle, win_a gets the rect");
@@ -407,11 +407,11 @@ mod tests {
     #[test]
     fn inactive_workspace_panes_get_no_rect() {
         let mut w = World::new();
-        let (win_a, _) = w.open_window();
+        let win_a = w.open_window();
 
         // Create and switch to a new workspace.
         let _ = w.new_workspace("2");
-        let (win_b, _) = w.open_window();
+        let win_b = w.open_window();
 
         let output_id = w.focused_output();
         let gaps = GapConfig::default();
@@ -437,7 +437,7 @@ mod tests {
         assert!(rects.is_empty());
 
         // Open in focused (second) pane only.
-        let (win, _) = w.open_window();
+        let win = w.open_window();
         let rects = w.geometry(output_id, OUTPUT, GapConfig::default());
         assert_eq!(rects.len(), 1);
         assert_eq!(rects[0].0, win);

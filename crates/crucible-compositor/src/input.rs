@@ -87,7 +87,7 @@ const DEFAULT_TERMINALS: &[&str] = &["foot", "alacritty", "kitty", "weston-termi
 ///
 /// Produced by [`process_keyboard_shortcut`] and consumed by [`CrucibleState::handle_key_action`].
 /// Each variant maps 1:1 to a CDE verb; the dispatch in `handle_key_action` calls the
-/// corresponding [`crucible_layout::World`] op and then `apply_layout`.
+/// corresponding [`crucible_layout::World`] op through the state's single mutation entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyAction {
     /// Quit the compositor cleanly (stop the main loop). `Super+Q`.
@@ -380,10 +380,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Dispatches an intercepted [`KeyAction`] to the appropriate model op + apply step.
     ///
-    /// Infallible ops (those returning `Reconcile` directly) call `apply_layout` inline.
-    /// Fallible ops (those returning `Result<Reconcile, LayoutError>`) use `with_model` and log
-    /// expected no-op errors (e.g. `SameWorkspace`, `LastOutput`) at debug level so they don't
-    /// surface as noise in normal use.
+    /// Every op goes through the single mutation entry point: infallible verbs via `update_model`,
+    /// fallible ones via `with_model`, which applies the re-derived projection only on success and
+    /// logs expected no-op errors (e.g. `SameWorkspace`) at debug level so they don't surface as
+    /// noise in normal use.
     fn handle_key_action(&mut self, action: KeyAction) {
         use crucible_layout::Direction;
 
@@ -411,48 +411,42 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
             // ---- directional focus ------------------------------------------------------
             KeyAction::FocusLeft => {
-                let r = self.layout.world.focus(Direction::Left);
-                self.apply_layout(&r);
+                self.update_model(|w| w.focus(Direction::Left));
             }
             KeyAction::FocusDown => {
-                let r = self.layout.world.focus(Direction::Down);
-                self.apply_layout(&r);
+                self.update_model(|w| w.focus(Direction::Down));
             }
             KeyAction::FocusUp => {
-                let r = self.layout.world.focus(Direction::Up);
-                self.apply_layout(&r);
+                self.update_model(|w| w.focus(Direction::Up));
             }
             KeyAction::FocusRight => {
-                let r = self.layout.world.focus(Direction::Right);
-                self.apply_layout(&r);
+                self.update_model(|w| w.focus(Direction::Right));
             }
 
             // ---- pane move --------------------------------------------------------------
             KeyAction::MoveLeft => {
-                let r = self.layout.world.move_(Direction::Left);
-                self.apply_layout(&r);
+                self.update_model(|w| w.move_(Direction::Left));
             }
             KeyAction::MoveDown => {
-                let r = self.layout.world.move_(Direction::Down);
-                self.apply_layout(&r);
+                self.update_model(|w| w.move_(Direction::Down));
             }
             KeyAction::MoveUp => {
-                let r = self.layout.world.move_(Direction::Up);
-                self.apply_layout(&r);
+                self.update_model(|w| w.move_(Direction::Up));
             }
             KeyAction::MoveRight => {
-                let r = self.layout.world.move_(Direction::Right);
-                self.apply_layout(&r);
+                self.update_model(|w| w.move_(Direction::Right));
             }
 
             // ---- split ------------------------------------------------------------------
             KeyAction::SplitRight => {
-                let (_, r) = self.layout.world.split(Direction::Right);
-                self.apply_layout(&r);
+                self.update_model(|w| {
+                    w.split(Direction::Right);
+                });
             }
             KeyAction::SplitDown => {
-                let (_, r) = self.layout.world.split(Direction::Down);
-                self.apply_layout(&r);
+                self.update_model(|w| {
+                    w.split(Direction::Down);
+                });
             }
 
             // ---- stack-window -----------------------------------------------------------
@@ -473,40 +467,32 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
             // ---- cycle stack ------------------------------------------------------------
             KeyAction::CycleStackNext => {
-                let r = self.layout.world.cycle_stack(1);
-                self.apply_layout(&r);
+                self.update_model(|w| w.cycle_stack(1));
             }
             KeyAction::CycleStackPrev => {
-                let r = self.layout.world.cycle_stack(-1);
-                self.apply_layout(&r);
+                self.update_model(|w| w.cycle_stack(-1));
             }
 
             // ---- resize -----------------------------------------------------------------
             KeyAction::ResizeLeft => {
-                let r = self.layout.world.resize(Direction::Left, RESIZE_DELTA);
-                self.apply_layout(&r);
+                self.update_model(|w| w.resize(Direction::Left, RESIZE_DELTA));
             }
             KeyAction::ResizeDown => {
-                let r = self.layout.world.resize(Direction::Down, RESIZE_DELTA);
-                self.apply_layout(&r);
+                self.update_model(|w| w.resize(Direction::Down, RESIZE_DELTA));
             }
             KeyAction::ResizeUp => {
-                let r = self.layout.world.resize(Direction::Up, RESIZE_DELTA);
-                self.apply_layout(&r);
+                self.update_model(|w| w.resize(Direction::Up, RESIZE_DELTA));
             }
             KeyAction::ResizeRight => {
-                let r = self.layout.world.resize(Direction::Right, RESIZE_DELTA);
-                self.apply_layout(&r);
+                self.update_model(|w| w.resize(Direction::Right, RESIZE_DELTA));
             }
 
             // ---- workspace navigation ---------------------------------------------------
             KeyAction::NextWorkspace => {
-                let r = self.layout.world.cycle_workspace(1);
-                self.apply_layout(&r);
+                self.update_model(|w| w.cycle_workspace(1));
             }
             KeyAction::PrevWorkspace => {
-                let r = self.layout.world.cycle_workspace(-1);
-                self.apply_layout(&r);
+                self.update_model(|w| w.cycle_workspace(-1));
             }
             KeyAction::NewWorkspace => {
                 // Auto-generate a workspace name from the total number of workspaces on the
@@ -524,8 +510,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     n.to_string()
                 };
                 info!(name, "Super+N: creating new workspace");
-                let (_, r) = self.layout.world.new_workspace(name);
-                self.apply_layout(&r);
+                self.update_model(|w| {
+                    w.new_workspace(name);
+                });
             }
 
             // ---- rename-workspace -------------------------------------------------------

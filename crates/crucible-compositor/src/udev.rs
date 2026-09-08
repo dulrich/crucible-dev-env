@@ -300,8 +300,8 @@ fn fixup_output_positions(state: &mut CrucibleState<UdevData>) {
         state.sync_output_rect(&output);
         offset_x += width;
     }
-    // Output positions/sizes changed: re-assert model-driven geometry (idempotent).
-    state.apply_geometry();
+    // Output positions/sizes changed: re-assert the model-driven projection (idempotent).
+    state.apply_layout();
 }
 
 /// Picks any available GPU as a last resort when the seat has no obvious primary GPU.
@@ -1023,7 +1023,7 @@ impl CrucibleState<UdevData> {
         // avoid a whole-`self` borrow conflict with `renderer` (which holds `&mut self.backend_data`).
         // SolidColorRenderElement is renderer-agnostic; no renderer reference is needed.
         let mut chrome: Vec<CustomRenderElements<UdevRenderer<'_>>> =
-            crate::chrome::build_chrome_elements(&self.layout.world, &self.last_layout)
+            crate::chrome::build_chrome_elements(&self.layout.world, &self.projection)
                 .into_iter()
                 .map(CustomRenderElements::SolidColor)
                 .collect();

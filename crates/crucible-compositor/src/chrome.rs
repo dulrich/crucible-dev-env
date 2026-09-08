@@ -8,15 +8,14 @@
 //! All geometry math is factored into **pure, unit-tested helpers** at the bottom of this module
 //! ([`border_rects`] and [`stack_pips`]).  The compositor-side entry point
 //! [`CrucibleState::chrome_elements`] calls those helpers with data read from
-//! `self.layout.world` (model focus/stack state) and `self.last_layout` (global-coord rects that
-//! were last applied to the `Space`).  No model mutation; no stale cache — the elements are rebuilt
-//! from live model state each frame.
+//! `self.layout.world` (model stack state) and `self.projection` (the projection last applied to
+//! the `Space`).  No model mutation; no stale cache — the elements are rebuilt from live model state
+//! each frame.
 //!
 //! ## Per-output correctness
-//! `last_layout` is built by `apply_geometry` as the union of every output's **own** active
-//! workspace's visible windows (each shifted to global Space coordinates).  Chrome reads those same
-//! rects, so it automatically covers only currently-visible windows across all outputs without any
-//! additional per-output filtering.
+//! The projection is derived across every output's **own** active workspace's visible windows (each
+//! shifted to global Space coordinates).  Chrome reads those same rects, so it automatically covers
+//! only currently-visible windows across all outputs without any additional per-output filtering.
 //!
 //! ## Phase 3 seam
 //! The constants below (`ENABLE_CHROME`, `BORDER_THICKNESS`, `BORDER_COLOR`, …) are hard-coded for
@@ -32,7 +31,7 @@ use smithay::{
     utils::{Physical, Rectangle},
 };
 
-use crucible_layout::{Rect, WindowId};
+use crucible_layout::{Projection, Rect};
 
 use crate::{
     render::CustomRenderElements,
@@ -147,9 +146,9 @@ pub fn stack_pips(
 
 /// Builds the chrome render elements (focus border + stack badges) for the current frame.
 ///
-/// Reads `focused_window` from the model's world, looks it up in `last_layout` to get its rect,
-/// then constructs border strips via [`border_rects`].  Then iterates every output's active
-/// workspace's panes; for panes with `> 1` window, builds pip indicators via [`stack_pips`].
+/// Reads the focused identity and every visible rect from the applied [`Projection`], then
+/// constructs border strips via [`border_rects`].  Then iterates every output's active workspace's
+/// panes; for panes with `> 1` window, builds pip indicators via [`stack_pips`].
 ///
 /// Returns an empty vec when [`ENABLE_CHROME`] is `false`.
 ///
@@ -157,20 +156,17 @@ pub fn stack_pips(
 /// elements so the stacking order from front to back is: cursor → chrome → windows.
 pub fn build_chrome_elements(
     world: &crucible_layout::World,
-    last_layout: &[(WindowId, Rect)],
+    projection: &Projection,
 ) -> Vec<SolidColorRenderElement> {
     if !ENABLE_CHROME {
         return Vec::new();
     }
 
-    // Build a fast rect-lookup from the visible window set.
-    let rect_of: std::collections::HashMap<WindowId, Rect> = last_layout.iter().copied().collect();
-
     let mut elements: Vec<SolidColorRenderElement> = Vec::new();
 
     // ---- 1. Focus-ring border around the focused window ----
-    if let Some(focused_id) = world.focused_window() {
-        if let Some(&win_rect) = rect_of.get(&focused_id) {
+    if let Some(focused_id) = projection.focus() {
+        if let Some(win_rect) = projection.rect_of(focused_id) {
             for strip in border_rects(win_rect, BORDER_THICKNESS) {
                 elements.push(SolidColorRenderElement::new(
                     Id::new(),
@@ -185,7 +181,7 @@ pub fn build_chrome_elements(
 
     // ---- 2. Per-pane stack-position indicators ----
     // Iterate every output's active workspace panes; for any pane with > 1 window, draw pips
-    // anchored at the top-right of that pane's focused-window rect in last_layout.
+    // anchored at the top-right of that pane's focused-window rect in the projection.
     for (_output_id, output) in world.outputs() {
         let ws_id = output.active_workspace();
         let Some(workspace) = world.workspace(ws_id) else {
@@ -199,11 +195,11 @@ pub fn build_chrome_elements(
             if len <= 1 {
                 continue;
             }
-            // The pane's "rect" in last_layout is its focused window's rect.
+            // The pane's "rect" in the projection is its focused window's rect.
             let Some(focused_win) = pane.focused_window() else {
                 continue;
             };
-            let Some(&pane_rect) = rect_of.get(&focused_win) else {
+            let Some(pane_rect) = projection.rect_of(focused_win) else {
                 continue;
             };
             for (rect, is_focused) in stack_pips(pane_rect, pane.focused, len) {
@@ -233,8 +229,8 @@ pub fn build_chrome_elements(
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Returns the chrome render elements for the current frame.
     ///
-    /// Reads live model state (`self.layout.world`) and `self.last_layout` (which holds the
-    /// global-Space rects that were last applied to the `Space`) to produce:
+    /// Reads live model state (`self.layout.world`) and `self.projection` (the projection last
+    /// applied to the `Space`, in global-Space rects) to produce:
     /// - A focus-ring border (4 strips) around the focused window.
     /// - Per-pane stack-position pips for any pane with `> 1` window.
     ///
@@ -250,7 +246,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             + smithay::backend::renderer::ImportAll
             + smithay::backend::renderer::ImportMem,
     {
-        build_chrome_elements(&self.layout.world, &self.last_layout)
+        build_chrome_elements(&self.layout.world, &self.projection)
             .into_iter()
             .map(CustomRenderElements::SolidColor)
             .collect()

@@ -158,7 +158,7 @@ pub fn run_winit() {
                 state.space.map_output(&output, (0, 0));
                 // Keep the model's stored rect in sync, then re-tile (model-driven, idempotent).
                 state.sync_output_rect(&output);
-                state.apply_geometry();
+                state.apply_layout();
             }
             WinitEvent::CloseRequested => {
                 state
