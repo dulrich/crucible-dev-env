@@ -205,6 +205,7 @@ impl CrucibleState<UdevData> {
                 &self.layout.world,
                 &self.projection,
                 empty_focus_rect,
+                (output_geo.loc.x, output_geo.loc.y),
             )
             .into_iter()
             .map(CustomRenderElements::SolidColor)

@@ -14,8 +14,11 @@
 //!
 //! ## Per-output correctness
 //! The projection is derived across every output's **own** active workspace's visible windows (each
-//! shifted to global Space coordinates).  Chrome reads those same rects, so it automatically covers
-//! only currently-visible windows across all outputs without any additional per-output filtering.
+//! shifted to global Space coordinates).  Chrome reads those same rects, so it covers only
+//! currently-visible windows across all outputs.  Render elements, however, are positioned in the
+//! *output's* frame, so [`build_chrome_elements`] takes the rendered output's global origin and
+//! translates every rect by it ([`to_output_local`]); without that, a second output mirrors the
+//! first output's chrome and never shows its own.
 //!
 //! ## Phase 3 seam
 //! The constants below (`ENABLE_CHROME`, `BORDER_THICKNESS`, `BORDER_COLOR`, …) are hard-coded for
@@ -140,6 +143,16 @@ pub fn stack_pips(
         .collect()
 }
 
+/// Translates a global-Space `rect` into the frame of the output whose global origin is `origin`.
+#[must_use]
+pub fn to_output_local(rect: Rect, origin: (i32, i32)) -> Rect {
+    Rect {
+        x: rect.x - origin.0,
+        y: rect.y - origin.1,
+        ..rect
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compositor entry point — reads model state, produces SolidColorRenderElements.
 // ---------------------------------------------------------------------------
@@ -158,6 +171,7 @@ pub fn build_chrome_elements(
     world: &crucible_layout::World,
     projection: &Projection,
     empty_focus_rect: Option<Rect>,
+    output_origin: (i32, i32),
 ) -> Vec<SolidColorRenderElement> {
     if !ENABLE_CHROME {
         return Vec::new();
@@ -173,7 +187,7 @@ pub fn build_chrome_elements(
         .and_then(|id| projection.rect_of(id))
         .or(empty_focus_rect);
     if let Some(ring_rect) = ring {
-        for strip in border_rects(ring_rect, BORDER_THICKNESS) {
+        for strip in border_rects(to_output_local(ring_rect, output_origin), BORDER_THICKNESS) {
             elements.push(SolidColorRenderElement::new(
                 Id::new(),
                 strip,
@@ -207,6 +221,7 @@ pub fn build_chrome_elements(
             let Some(pane_rect) = projection.rect_of(focused_win) else {
                 continue;
             };
+            let pane_rect = to_output_local(pane_rect, output_origin);
             for (rect, is_focused) in stack_pips(pane_rect, pane.focused, len) {
                 let color = if is_focused {
                     PIP_ACTIVE_COLOR
@@ -256,6 +271,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             &self.layout.world,
             &self.projection,
             self.focused_empty_pane_rect(),
+            // The winit backend renders its single output at the Space origin.
+            (0, 0),
         )
         .into_iter()
         .map(CustomRenderElements::SolidColor)
@@ -281,6 +298,21 @@ mod tests {
     }
 
     // ---- border_rects tests ----
+
+    #[test]
+    fn output_local_translation_moves_second_output_chrome_on_screen() {
+        // Two 3840-wide outputs side by side: a ring on the right output (global x=3850) must land
+        // at local x=10 on it, and a ring on the left output must fall off the right one.
+        let right_ring = to_output_local(rect(3850, 20, 1900, 2100), (3840, 0));
+        assert_eq!(right_ring, rect(10, 20, 1900, 2100));
+        let left_ring_on_right = to_output_local(rect(10, 20, 1900, 2100), (3840, 0));
+        assert!(left_ring_on_right.x + left_ring_on_right.width <= 0);
+        // The origin output is unchanged.
+        assert_eq!(
+            to_output_local(rect(10, 20, 30, 40), (0, 0)),
+            rect(10, 20, 30, 40)
+        );
+    }
 
     #[test]
     fn border_frames_window_with_correct_thickness() {
