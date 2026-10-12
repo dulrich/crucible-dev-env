@@ -54,7 +54,7 @@ use crucible_layout::{
 };
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::element::WindowElement;
 use crate::focus::KeyboardFocusTarget;
@@ -524,8 +524,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if self.layout.world.focused_output() == model_id {
             return;
         }
-        if let Err(err) = self.with_model(|world| world.set_focused_output(model_id)) {
-            warn!(%err, ?model_id, "stale output binding; focus stays where it is");
+        match self.with_model(|world| world.set_focused_output(model_id)) {
+            Ok(()) => info!(
+                output = %output.name(),
+                focus = %self.layout.world.focus_path(),
+                "output focus"
+            ),
+            Err(err) => warn!(%err, ?model_id, "stale output binding; focus stays where it is"),
         }
     }
 }

@@ -64,12 +64,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
         };
 
         match self.with_model(|world| apply_model_action(world, &model_action)) {
-            Ok(()) => {}
+            // One info line per layout verb (not per keystroke) with the resulting model focus,
+            // so hardware logs show where the next split/spawn/workspace verb will land.
+            Ok(()) => {
+                info!(action = ?model_action, focus = %self.layout.world.focus_path(), "layout action");
+            }
             Err(LayoutError::SameWorkspace) => {
                 debug!("move-window-to-workspace: already on target workspace");
             }
             Err(err) => {
-                warn!(%err, "model action failed");
+                warn!(action = ?model_action, %err, "model action failed");
             }
         }
     }

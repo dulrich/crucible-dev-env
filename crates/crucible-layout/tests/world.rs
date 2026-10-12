@@ -962,3 +962,48 @@ fn focus_unknown_window_errors_without_mutation() {
     );
     assert_eq!(w, before);
 }
+
+#[test]
+fn focus_path_tracks_output_workspace_pane_and_window() {
+    let mut w = World::new();
+    let empty = w.focus_path();
+    assert_eq!(empty.output, w.focused_output());
+    assert_eq!(empty.workspace, w.active_workspace_id());
+    assert_eq!(empty.workspace_name, "1");
+    assert_eq!(empty.pane, w.focused_pane_id());
+    assert_eq!(empty.window, None);
+
+    let id = w.open_window();
+    w.split(Right);
+    let split = w.focus_path();
+    assert_ne!(split.pane, empty.pane);
+    assert_eq!(split.window, None);
+
+    w.focus(Left);
+    assert_eq!(w.focus_path().window, Some(id));
+
+    w.new_workspace("code");
+    let ws2 = w.focus_path();
+    assert_eq!(ws2.workspace_name, "code");
+    assert_eq!(ws2.window, None);
+}
+
+#[test]
+fn focus_path_display_is_one_compact_line() {
+    let mut w = World::new();
+    let empty = w.focus_path();
+    let expected_empty = format!(
+        "output={} workspace={}:\"1\" pane={} window=-",
+        empty.output.raw(),
+        empty.workspace.raw(),
+        empty.pane.raw()
+    );
+    assert_eq!(empty.to_string(), expected_empty);
+
+    let id = w.open_window();
+    assert!(
+        w.focus_path()
+            .to_string()
+            .ends_with(&format!("window={}", id.raw()))
+    );
+}

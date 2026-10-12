@@ -98,6 +98,38 @@ impl Output {
     }
 }
 
+/// The model focus path at one instant; see [`World::focus_path`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FocusPath {
+    /// The focused output.
+    pub output: OutputId,
+    /// The active workspace on that output.
+    pub workspace: WorkspaceId,
+    /// That workspace's name.
+    pub workspace_name: String,
+    /// The focused pane on that workspace.
+    pub pane: PaneId,
+    /// The focused window of that pane, if the pane is not empty.
+    pub window: Option<WindowId>,
+}
+
+impl std::fmt::Display for FocusPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "output={} workspace={}:{:?} pane={} window=",
+            self.output.raw(),
+            self.workspace.raw(),
+            self.workspace_name,
+            self.pane.raw()
+        )?;
+        match self.window {
+            Some(id) => write!(f, "{}", id.raw()),
+            None => f.write_str("-"),
+        }
+    }
+}
+
 /// Shared stack-rotation primitive for both pane window-stacks and output workspace-stacks.
 ///
 /// Rotates `current` by `delta` within `[0, len)` with wraparound. Returns `0` for an empty stack.
@@ -245,6 +277,23 @@ impl World {
             return Vec::new();
         };
         self.geometry(output_id, output.rect, gaps)
+    }
+
+    /// A snapshot of the full model focus path (output → workspace → pane → window).
+    ///
+    /// Cheap to take before and after a mutation; its [`Display`](std::fmt::Display) form is the
+    /// compact one-line shape the compositor logs at info level so hardware logs show where
+    /// splits, spawns and workspace verbs will land.
+    #[must_use]
+    pub fn focus_path(&self) -> FocusPath {
+        let workspace = self.active_workspace_ref();
+        FocusPath {
+            output: self.focused_output,
+            workspace: workspace.id,
+            workspace_name: workspace.name.clone(),
+            pane: workspace.focused_pane,
+            window: self.focused_window(),
+        }
     }
 
     fn focused_output_ref(&self) -> &Output {

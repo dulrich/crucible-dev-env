@@ -14,7 +14,7 @@ use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotio
 use smithay::reexports::wayland_server::protocol::wl_pointer;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
 
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
@@ -224,9 +224,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         match element_under {
             Some(window) => {
                 if let Some(id) = window.window_id() {
-                    if let Err(err) = self.with_model(|world| world.focus_window(id)) {
-                        warn!(%err, ?id, "click on a window the model does not know");
-                    }
+                    self.focus_window_in_model(id, "click");
                 } else {
                     // Unmanaged: today's behaviour — route the model output, keyboard-only focus.
                     self.focus_output_under(location);
@@ -237,6 +235,24 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
             None => self.focus_output_under(location),
         }
+    }
+
+    /// Routes model focus to managed window `id` because of pointer `cause` (`"click"`/`"hover"`).
+    ///
+    /// Logs the new focus path at info level only when the model focus actually moved, so a
+    /// click on the already-focused window stays quiet. Returns `false` if the model does not
+    /// know `id` (logged as a warning).
+    fn focus_window_in_model(&mut self, id: crucible_layout::WindowId, cause: &str) -> bool {
+        let before = self.layout.world.focus_path();
+        if let Err(err) = self.with_model(|world| world.focus_window(id)) {
+            warn!(%err, ?id, cause, "pointer focus on a window the model does not know");
+            return false;
+        }
+        let after = self.layout.world.focus_path();
+        if after != before {
+            info!(cause, focus = %after, "pointer focus");
+        }
+        true
     }
 
     /// Routes the model's focused output to the monitor under `location` (no-op if unchanged).
@@ -278,8 +294,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         match (self.hover_target.clone(), element_under) {
             (Some(HoverTarget::Window(id)), Some(window)) => {
-                if let Err(err) = self.with_model(|world| world.focus_window(id)) {
-                    warn!(%err, ?id, "hover over a window the model does not know");
+                if !self.focus_window_in_model(id, "hover") {
                     return;
                 }
                 // If the model already pointed at `id` (no projected focus change), `apply_focus`

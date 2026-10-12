@@ -26,8 +26,8 @@ mod world;
 pub use geometry::{GapConfig, Rect};
 pub use ids::{OutputId, PaneId, WindowId, WorkspaceId};
 pub use world::{
-    FocusChange, LayoutChange, LayoutError, Output, Pane, Projection, ProjectionDiff, Window,
-    Workspace, World,
+    FocusChange, FocusPath, LayoutChange, LayoutError, Output, Pane, Projection, ProjectionDiff,
+    Window, Workspace, World,
 };
 
 /// A cardinal direction, used for directional split, focus, and move operations.

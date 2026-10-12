@@ -16,7 +16,7 @@ mod windows;
 mod workspaces;
 
 pub use projection::{FocusChange, LayoutChange, Projection, ProjectionDiff};
-pub use types::{Output, Pane, Window, Workspace};
+pub use types::{FocusPath, Output, Pane, Window, Workspace};
 
 /// Errors returned by fallible `World` operations.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
