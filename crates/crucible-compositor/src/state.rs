@@ -200,6 +200,77 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub xwm: Option<X11Wm>,
     /// The X11 `DISPLAY` number XWayland is serving (e.g. `1` for `:1`), once known.
     pub xdisplay: Option<u32>,
+    /// Whether pointer motion moves focus onto the managed window (or output) under the cursor.
+    ///
+    /// On by default; set from [`CompositorOptions`] by the backend entry points.
+    pub focus_follows_mouse: bool,
+    /// The last hover target seen by focus-follows-mouse; focus moves only when this changes
+    /// (pointer *enter*), so keyboard-driven focus is not undone by a pointer twitch.
+    pub hover_target: Option<HoverTarget>,
+}
+
+/// What the pointer hovers, for focus-follows-mouse enter detection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HoverTarget {
+    /// A managed window (model id).
+    Window(crucible_layout::WindowId),
+    /// Empty space on this output.
+    Output(smithay::output::Output),
+}
+
+/// Records `current` as the hover target and reports whether it is a new one (an *enter*).
+///
+/// `None` (an unmanaged element, or nothing resolvable) leaves `stored` unchanged and is never an
+/// enter.
+pub fn hover_entered<T: PartialEq>(stored: &mut Option<T>, current: Option<T>) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    if stored.as_ref() == Some(&current) {
+        return false;
+    }
+    *stored = Some(current);
+    true
+}
+
+#[cfg(test)]
+mod hover_tests {
+    use super::hover_entered;
+
+    #[test]
+    fn first_target_is_an_enter_and_repeats_are_not() {
+        let mut stored = None;
+        assert!(hover_entered(&mut stored, Some(1)));
+        assert!(!hover_entered(&mut stored, Some(1)));
+        assert!(hover_entered(&mut stored, Some(2)));
+        assert_eq!(stored, Some(2));
+    }
+
+    #[test]
+    fn none_leaves_the_tracker_unchanged() {
+        let mut stored = Some(1);
+        assert!(!hover_entered(&mut stored, None));
+        assert_eq!(stored, Some(1));
+        // Returning to the same target after an unmanaged detour is not a new enter.
+        assert!(!hover_entered(&mut stored, Some(1)));
+    }
+}
+
+/// Runtime options threaded from the binary's CLI/env parsing into the compositor.
+///
+/// A pre-phase-3 stopgap: the phase-3 KDL config replaces these switches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositorOptions {
+    /// Pointer motion focuses the managed window under the cursor (default `true`).
+    pub focus_follows_mouse: bool,
+}
+
+impl Default for CompositorOptions {
+    fn default() -> Self {
+        Self {
+            focus_follows_mouse: true,
+        }
+    }
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
@@ -298,6 +369,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             suppressed_keys: SuppressedKeys::new(),
             xwm: None,
             xdisplay: None,
+            focus_follows_mouse: true,
+            hover_target: None,
         }
     }
 }

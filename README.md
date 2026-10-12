@@ -70,6 +70,11 @@ cargo run -- --tty-udev
 Set `$TERMINAL` before launching if you don't have `foot` installed, e.g. `TERMINAL=alacritty cargo
 run -- --winit`. Logging verbosity is controlled by `RUST_LOG` (e.g. `RUST_LOG=debug`).
 
+Focus follows the mouse by default: hovering a window focuses it, like clicking it. Disable it with
+`--no-focus-follows-mouse` after the backend flag (e.g. `cargo run -- --tty-udev
+--no-focus-follows-mouse`) or `CDE_FOCUS_FOLLOWS_MOUSE=0` (`false`/`off` also work). The Phase 3
+config file will replace this switch.
+
 Once inside, press **`Super+Return`** to spawn your first terminal, then **`Super+\`** to split. See
 the full keymap below.
 
@@ -96,7 +101,8 @@ hotkeys. Defaults (Phase 3 will make these configurable):
 
 Splitting creates an **empty** focused pane; the next terminal you spawn (`Super+Return`) fills it.
 Spawning into a pane that already holds a window **stacks** it (only the focused one is visible —
-cycle with `Super+Tab`). Workspace/window verbs act on the monitor your pointer last clicked.
+cycle with `Super+Tab`). New windows, splits and workspace verbs act where the focused window is —
+the window you last clicked or (with focus-follows-mouse) hovered.
 
 ## Build & test
 

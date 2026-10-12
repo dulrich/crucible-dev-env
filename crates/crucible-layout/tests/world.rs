@@ -879,3 +879,86 @@ fn remove_survivor_is_lowest_id_when_focused_is_removed() {
     assert!(w.output(second).is_some());
     w.check_invariants();
 }
+
+#[test]
+fn focus_window_selects_its_pane_and_stack_position() {
+    let mut w = world();
+    let a = w.open_window(); // pane A
+    w.split(Right);
+    let b = w.open_window(); // pane B, stacked under c
+    let c = w.stack_window();
+    let pane_b = w.focused_pane_id();
+    assert_eq!(w.focused_window(), Some(c));
+
+    // Focus the buried stacked window b: same pane, stack index moves to b.
+    w.focus_window(b).unwrap();
+    w.check_invariants();
+    assert_eq!(w.focused_pane_id(), pane_b);
+    assert_eq!(w.focused_window(), Some(b));
+    assert!(w.visible_windows().contains(&b));
+    assert!(!w.visible_windows().contains(&c));
+
+    // Focus a in the other pane: focused pane moves.
+    w.focus_window(a).unwrap();
+    w.check_invariants();
+    assert_ne!(w.focused_pane_id(), pane_b);
+    assert_eq!(w.focused_window(), Some(a));
+    // A following open lands in a's pane.
+    let pane_a = w.focused_pane_id();
+    let d = w.open_window();
+    assert_eq!(w.focused_pane_id(), pane_a);
+    assert_ne!(w.focused_pane_id(), pane_b);
+    assert_eq!(w.focused_window(), Some(d));
+}
+
+#[test]
+fn focus_window_on_another_output_moves_output_focus() {
+    let mut w = World::new();
+    let first = w.focused_output();
+    w.set_output_rect(first, R1).unwrap();
+    let a = w.open_window();
+    let second = w.add_output(R2);
+    w.set_focused_output(second).unwrap();
+    let b = w.open_window();
+    let ws_b = w.active_workspace_id();
+    assert_eq!(w.focused_window(), Some(b));
+
+    w.focus_window(a).unwrap();
+    w.check_invariants();
+    assert_eq!(w.focused_output(), first);
+    assert_eq!(w.focused_window(), Some(a));
+
+    w.focus_window(b).unwrap();
+    w.check_invariants();
+    assert_eq!(w.focused_output(), second);
+    assert_eq!(w.active_workspace_id(), ws_b);
+    assert_eq!(w.focused_window(), Some(b));
+}
+
+#[test]
+fn focus_window_activates_a_hidden_workspace() {
+    let mut w = World::new();
+    let a = w.open_window();
+    let ws1 = w.active_workspace_id();
+    w.new_workspace("two");
+    let b = w.open_window();
+    assert_eq!(w.visible_windows(), vec![b]);
+
+    w.focus_window(a).unwrap();
+    w.check_invariants();
+    assert_eq!(w.active_workspace_id(), ws1);
+    assert_eq!(w.visible_windows(), vec![a]);
+}
+
+#[test]
+fn focus_unknown_window_errors_without_mutation() {
+    let mut w = world();
+    w.open_window();
+    let before = w.clone();
+    let bogus = WindowId::from_raw(999);
+    assert_eq!(
+        w.focus_window(bogus),
+        Err(LayoutError::UnknownWindow(bogus))
+    );
+    assert_eq!(w, before);
+}

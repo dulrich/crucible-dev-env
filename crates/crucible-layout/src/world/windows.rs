@@ -126,6 +126,45 @@ impl World {
         }
     }
 
+    /// Focuses `window` wherever it lives: the output owning its workspace becomes the focused
+    /// output, that workspace becomes the output's active workspace, the window's pane becomes the
+    /// workspace's focused pane, and the pane's stack index points at the window.
+    ///
+    /// Errors with [`LayoutError::UnknownWindow`] (and mutates nothing) when `window` is not in the
+    /// model.
+    pub fn focus_window(&mut self, window: WindowId) -> Result<(), LayoutError> {
+        let location = self
+            .locate_window(window)
+            .ok_or(LayoutError::UnknownWindow(window))?;
+        let (output_id, ws_index) = self
+            .outputs
+            .iter()
+            .find_map(|(id, o)| {
+                o.workspaces
+                    .iter()
+                    .position(|ws| *ws == location.workspace)
+                    .map(|idx| (*id, idx))
+            })
+            .ok_or(LayoutError::UnknownWorkspace(location.workspace))?;
+
+        self.focused_output = output_id;
+        self.outputs
+            .get_mut(&output_id)
+            .expect("owner output")
+            .active = ws_index;
+        self.workspaces
+            .get_mut(&location.workspace)
+            .expect("located workspace")
+            .focused_pane = location.pane;
+        let pane = self.panes.get_mut(&location.pane).expect("located pane");
+        pane.focused = pane
+            .windows
+            .iter()
+            .position(|w| *w == window)
+            .expect("window in its pane");
+        Ok(())
+    }
+
     /// Moves the focused pane in `dir`, swapping it with its directional neighbour.
     ///
     /// Focus follows the moved pane. No-op when there is no neighbour in that direction.

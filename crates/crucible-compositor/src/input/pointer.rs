@@ -14,9 +14,11 @@ use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotio
 use smithay::reexports::wayland_server::protocol::wl_pointer;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
 
+use tracing::warn;
+
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
-use crate::state::{Backend, CrucibleState};
+use crate::state::{Backend, CrucibleState, HoverTarget, hover_entered};
 
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Maps absolute winit pointer motion into the output and delivers it to the seat.
@@ -52,6 +54,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             },
         );
         pointer.frame(self);
+        self.focus_follows_pointer();
     }
 
     /// Maps **relative** pointer motion (real input devices, via libinput) into the seat.
@@ -96,6 +99,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             },
         );
         pointer.frame(self);
+        self.focus_follows_pointer();
     }
 
     /// Clamps a pointer location to the bounding box of all mapped outputs.
@@ -208,24 +212,89 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Moves keyboard focus to the window under the current pointer location, if any.
     ///
-    /// Used on pointer press (click-to-focus). Raises the window in the
-    /// [`Space`](smithay::desktop::Space) and assigns the seat's keyboard focus to it (activating
-    /// X11 windows through the focus path).
+    /// Used on pointer press (click-to-focus). A **managed** window (one with a model
+    /// [`WindowId`](crucible_layout::WindowId)) is focused through the model
+    /// ([`crucible_layout::World::focus_window`] via `with_model`), so the model's output,
+    /// workspace, pane and stack position follow the click and splits/new windows act there.
+    /// Clicking empty space routes model focus to the output under the pointer. An unmanaged
+    /// (override-redirect) element only gets keyboard focus; it is never enrolled in the model.
     fn update_keyboard_focus_under_pointer(&mut self, _serial: Serial) {
         let location = self.pointer.current_location();
-        // Route the model's focused output to the monitor under the pointer so new windows and the
-        // workspace verbs act on the monitor the user is interacting with. Click is a clean,
-        // unambiguous focus-change signal; pure pointer-enter routing could follow if desired.
+        let element_under = self.space.element_under(location).map(|(w, _)| w.clone());
+        match element_under {
+            Some(window) => {
+                if let Some(id) = window.window_id() {
+                    if let Err(err) = self.with_model(|world| world.focus_window(id)) {
+                        warn!(%err, ?id, "click on a window the model does not know");
+                    }
+                } else {
+                    // Unmanaged: today's behaviour — route the model output, keyboard-only focus.
+                    self.focus_output_under(location);
+                }
+                // Raise + keyboard focus. Idempotent when `apply_focus` already did it; required
+                // for unmanaged elements and when the model focus did not change.
+                self.focus_window(window);
+            }
+            None => self.focus_output_under(location),
+        }
+    }
+
+    /// Routes the model's focused output to the monitor under `location` (no-op if unchanged).
+    fn focus_output_under(&mut self, location: Point<f64, Logical>) {
         let output_under = self.space.output_under(location).next().cloned();
         if let Some(output) = output_under {
             self.focus_output(&output);
         }
-        if let Some((window, _)) = self
-            .space
-            .element_under(location)
-            .map(|(w, p)| (w.clone(), p))
-        {
-            self.focus_window(window);
+    }
+
+    /// Focus-follows-mouse: moves focus when the pointer *enters* a new hover target.
+    ///
+    /// The target is the managed window under the pointer, or the output when over empty space;
+    /// unmanaged elements leave the tracker unchanged. Focus moves only when the target differs
+    /// from the last one seen ([`hover_entered`]), so keyboard-driven focus (a split, `Super+H`…)
+    /// is not reverted by a pointer twitch over the same window. While a pointer grab is active
+    /// (button held, drag) the tracker still updates but no focus moves, so releasing a drag over
+    /// a new window does not count as an enter. Does nothing when the option is off.
+    fn focus_follows_pointer(&mut self) {
+        if !self.focus_follows_mouse {
+            return;
+        }
+        let location = self.pointer.current_location();
+        let element_under = self.space.element_under(location).map(|(w, _)| w.clone());
+        let current = match &element_under {
+            Some(window) => window.window_id().map(HoverTarget::Window),
+            None => self
+                .space
+                .output_under(location)
+                .next()
+                .cloned()
+                .map(HoverTarget::Output),
+        };
+        let mut stored = self.hover_target.take();
+        let entered = hover_entered(&mut stored, current);
+        self.hover_target = stored;
+        if !entered || self.pointer.is_grabbed() {
+            return;
+        }
+        match (self.hover_target.clone(), element_under) {
+            (Some(HoverTarget::Window(id)), Some(window)) => {
+                if let Err(err) = self.with_model(|world| world.focus_window(id)) {
+                    warn!(%err, ?id, "hover over a window the model does not know");
+                    return;
+                }
+                // If the model already pointed at `id` (no projected focus change), `apply_focus`
+                // did not run; sync keyboard focus to the entered window.
+                let now = match self.keyboard_focus() {
+                    Some(KeyboardFocusTarget::Window(w)) => w.window_id(),
+                    _ => None,
+                };
+                if now != Some(id) {
+                    self.focus_window(window);
+                }
+            }
+            // `focus_output` is a no-op when that output is already focused.
+            (Some(HoverTarget::Output(output)), _) => self.focus_output(&output),
+            _ => {}
         }
     }
 
