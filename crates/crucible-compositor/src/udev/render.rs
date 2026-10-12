@@ -28,7 +28,7 @@ use smithay::{
     utils::{IsAlive, Scale},
     wayland::presentation::Refresh,
 };
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     render::{CustomRenderElements, output_elements},
@@ -245,42 +245,52 @@ impl CrucibleState<UdevData> {
                 _ => unreachable!(),
             });
 
-        let reschedule = match result {
-            Ok((rendered, states)) => {
-                update_primary_scanout_output(&self.space, &output, &states);
-                if rendered {
-                    let feedback = take_presentation_feedback(&output, &self.space, &states);
-                    if let Err(err) = surface.drm_output.queue_frame(Some(feedback)) {
-                        warn!("Failed to queue frame: {:?}", err);
-                    }
-                }
-                // Send frame callbacks so clients draw their next frame.
-                let now = self.clock.now();
-                let throttle = Some(Duration::from_secs(1));
-                self.space.elements().for_each(|window| {
-                    window.send_frame(&output, now, throttle, |_, _| Some(output.clone()));
-                });
-
-                !rendered
+        let result = result.and_then(|(rendered, states)| {
+            update_primary_scanout_output(&self.space, &output, &states);
+            if rendered {
+                let feedback = take_presentation_feedback(&output, &self.space, &states);
+                // A failed queue must reach the recovery match below: swallowing it (as this
+                // port once did) leaves the CRTC with no page-flip pending and no timer, so the
+                // output never renders again — the black screen after a VT round-trip.
+                surface
+                    .drm_output
+                    .queue_frame(Some(feedback))
+                    .map_err(Into::<SwapBuffersError>::into)?;
             }
-            Err(err) => {
-                warn!("Error during rendering: {:?}", err);
-                match err {
-                    SwapBuffersError::AlreadySwapped => false,
-                    // Retry on a deactivated device (session will resume it) or a transient
-                    // permission-denied access (e.g. mid VT-switch); give up on anything else.
-                    SwapBuffersError::TemporaryFailure(err) => {
-                        match err.downcast_ref::<DrmError>() {
-                            Some(DrmError::DeviceInactive) => true,
-                            Some(DrmError::Access(DrmAccessError { source, .. })) => {
-                                source.kind() == io::ErrorKind::PermissionDenied
-                            }
-                            _ => false,
+            // Send frame callbacks so clients draw their next frame.
+            let now = self.clock.now();
+            let throttle = Some(Duration::from_secs(1));
+            self.space.elements().for_each(|window| {
+                window.send_frame(&output, now, throttle, |_, _| Some(output.clone()));
+            });
+            Ok(rendered)
+        });
+
+        let reschedule = match result {
+            Ok(rendered) => !rendered,
+            Err(err) => match recovery_for(&err) {
+                Recovery::Retry => {
+                    debug!("Rendering deferred: {:?}", err);
+                    true
+                }
+                Recovery::ResetAndRetry => {
+                    // A foreign DRM master (X on another VT) changed CRTC/connector/plane state
+                    // while we were paused, so our atomic test no longer validates. Reset the whole
+                    // device to a known state and repaint, as smithay's anvil does.
+                    warn!("Atomic test failed, resetting DRM state: {:?}", err);
+                    if let Some(device) = self.backend_data.backends.get_mut(&node) {
+                        if let Err(err) = device.drm_output_manager.device_mut().reset_state() {
+                            error!(%err, "Failed to reset DRM device state");
                         }
                     }
-                    SwapBuffersError::ContextLost(err) => panic!("Rendering loop lost: {err}"),
+                    true
                 }
-            }
+                Recovery::Drop => {
+                    warn!("Error during rendering: {:?}", err);
+                    false
+                }
+                Recovery::Fatal => panic!("Rendering loop lost: {err}"),
+            },
         };
 
         if reschedule {
@@ -295,5 +305,68 @@ impl CrucibleState<UdevData> {
                     .expect("failed to schedule frame timer");
             }
         }
+    }
+}
+
+/// How [`CrucibleState::render_surface`] recovers from a failed render or queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recovery {
+    /// Transient (session paused, or permission denied mid VT-switch): repaint next frame.
+    Retry,
+    /// The atomic test failed (stale KMS state after a VT switch): reset the device, repaint.
+    ResetAndRetry,
+    /// Nothing to do this frame (already swapped, or an unrecognised transient error).
+    Drop,
+    /// The rendering context is gone.
+    Fatal,
+}
+
+/// Classifies a render/queue error into its [`Recovery`]; mirrors smithay's anvil.
+fn recovery_for(err: &SwapBuffersError) -> Recovery {
+    match err {
+        SwapBuffersError::AlreadySwapped => Recovery::Drop,
+        SwapBuffersError::TemporaryFailure(err) => match err.downcast_ref::<DrmError>() {
+            Some(DrmError::DeviceInactive) => Recovery::Retry,
+            Some(DrmError::Access(DrmAccessError { source, .. }))
+                if source.kind() == io::ErrorKind::PermissionDenied =>
+            {
+                Recovery::Retry
+            }
+            _ => Recovery::Drop,
+        },
+        SwapBuffersError::ContextLost(err) => match err.downcast_ref::<DrmError>() {
+            Some(DrmError::TestFailed(_)) => Recovery::ResetAndRetry,
+            _ => Recovery::Fatal,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::reexports::drm::control::RawResourceHandle;
+
+    fn crtc() -> crtc::Handle {
+        crtc::Handle::from(RawResourceHandle::new(86).unwrap())
+    }
+
+    #[test]
+    fn test_failed_after_a_vt_switch_resets_and_retries() {
+        let err: SwapBuffersError = DrmError::TestFailed(crtc()).into();
+        assert_eq!(recovery_for(&err), Recovery::ResetAndRetry);
+    }
+
+    #[test]
+    fn paused_device_retries() {
+        let err: SwapBuffersError = DrmError::DeviceInactive.into();
+        assert_eq!(recovery_for(&err), Recovery::Retry);
+    }
+
+    #[test]
+    fn already_swapped_drops_the_frame() {
+        assert_eq!(
+            recovery_for(&SwapBuffersError::AlreadySwapped),
+            Recovery::Drop
+        );
     }
 }
