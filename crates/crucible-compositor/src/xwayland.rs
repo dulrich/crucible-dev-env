@@ -233,6 +233,11 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
         _above: Option<u32>,
     ) {
         // Mirror the X11 geometry into the Space so OR windows track where the X server put them.
+        // Managed windows are placed by the projection alone: echoing their X geometry back would
+        // snap them to wherever the X server last had them (originally 0,0 — the left output).
+        if !window.is_override_redirect() {
+            return;
+        }
         let Some(elem) = self.x11_element(&window) else {
             return;
         };

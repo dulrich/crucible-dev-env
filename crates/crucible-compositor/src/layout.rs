@@ -332,11 +332,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                         continue;
                     };
                     let logical = to_logical(*rect);
-                    // Size first (configure), then position via map_element so the element is mapped
-                    // (or re-mapped, for a window returning from hidden) at the right place.
-                    if *resized {
-                        configure_size(&element, logical.size);
-                    }
+                    // Configure first, then position via map_element so the element is mapped (or
+                    // re-mapped, for a window returning from hidden) at the right place.
+                    configure_placement(&element, logical, *resized);
                     self.space.map_element(element, logical.loc, false);
                 }
                 LayoutChange::Hide { id } => {
@@ -612,28 +610,57 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 }
 
-/// Sends a `configure` carrying `size` to whichever surface kind backs `element`.
+/// Sends the `configure` a projected placement needs to whichever surface kind backs `element`.
 ///
-/// Wayland toplevels get a pending-state size + `send_configure`; X11 windows get a direct
-/// `configure` at their current location with the new size. Kept free of `self` so it does not
-/// borrow the whole state.
-fn configure_size(element: &WindowElement, size: Size<i32, Logical>) {
+/// Wayland toplevels only learn their size (position is purely compositor-side), so they are
+/// configured only when `resized`. X11 windows also carry a position in the X server, which
+/// XWayland uses for input and for placing the client's own override-redirect menus, so they are
+/// configured with the full `rect` whenever it differs from their X geometry — a move alone counts.
+/// Kept free of `self` so it does not borrow the whole state.
+fn configure_placement(element: &WindowElement, rect: Rectangle<i32, Logical>, resized: bool) {
     if let Some(toplevel) = element.toplevel() {
-        toplevel.with_pending_state(|state| {
-            state.size = Some(size);
-        });
-        toplevel.send_configure();
-    } else if let Some(surface) = element.x11_surface() {
-        let geo = surface.geometry();
-        let rect = Rectangle::new(geo.loc, size);
+        if resized {
+            toplevel.with_pending_state(|state| {
+                state.size = Some(rect.size);
+            });
+            toplevel.send_configure();
+        }
+    } else if let Some(surface) = element.x11_surface()
+        && x11_needs_configure(surface.geometry(), rect)
+    {
         let _ = surface.configure(Some(rect));
     }
+}
+
+/// Whether an X11 window whose X geometry is `current` must be configured to reach `target`.
+/// **Pure** so the rule is unit-testable without an X server.
+fn x11_needs_configure(current: Rectangle<i32, Logical>, target: Rectangle<i32, Logical>) -> bool {
+    current != target
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn x11_placement_configures_on_a_move_alone() {
+        let at = |x, y, w, h| Rectangle::<i32, Logical>::new((x, y).into(), (w, h).into());
+        // The regression: same size, new position (e.g. a pane on the second output) must still
+        // reach the X server, or XWayland echoes the stale position back.
+        assert!(x11_needs_configure(
+            at(0, 0, 1920, 2160),
+            at(3840, 0, 1920, 2160)
+        ));
+        assert!(x11_needs_configure(
+            at(0, 0, 1920, 2160),
+            at(0, 0, 3840, 2160)
+        ));
+        assert!(!x11_needs_configure(
+            at(3840, 0, 1920, 2160),
+            at(3840, 0, 1920, 2160)
+        ));
+    }
 
     #[test]
     fn keyboard_sync_clears_for_an_empty_pane_even_from_an_unmanaged_holder() {
