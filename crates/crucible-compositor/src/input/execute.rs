@@ -33,7 +33,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(super) fn handle_key_action(&mut self, action: Action) {
         let model_action = match action {
             Action::Quit => {
-                info!("Super+Q: quitting");
+                info!("Super+Shift+Q: quitting");
                 self.running.store(false, Ordering::SeqCst);
                 return;
             }
@@ -71,6 +71,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
             Err(LayoutError::SameWorkspace) => {
                 debug!("move-window-to-workspace: already on target workspace");
+            }
+            // close-pane refusals are expected no-ops (non-empty or last pane), not failures.
+            Err(err @ (LayoutError::PaneNotEmpty | LayoutError::LastPane)) => {
+                debug!(%err, "close-pane refused; no-op");
             }
             Err(err) => {
                 warn!(action = ?model_action, %err, "model action failed");
@@ -155,6 +159,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
             Ok(())
         }
         Action::MoveWindowToWorkspace(delta) => move_window_to_adjacent_workspace(world, *delta),
+        Action::ClosePane => world.close_pane(),
         Action::Quit | Action::Run(_) | Action::StackWindow | Action::VtSwitch(_) => {
             unreachable!("compositor-level action; handle_key_action routes it before with_model")
         }
@@ -217,6 +222,26 @@ mod tests {
             world, want,
             "{action:?} did not dispatch the expected World call"
         );
+    }
+
+    #[test]
+    fn close_pane_dispatches_to_world_close_pane() {
+        let mut world = World::new();
+        world.split(Direction::Right); // empty, non-last focused pane
+        assert_dispatches(world, Action::ClosePane, |w| {
+            w.close_pane().unwrap();
+        });
+    }
+
+    #[test]
+    fn close_pane_refusal_leaves_world_unchanged() {
+        let mut world = World::new();
+        let before = world.clone();
+        assert_eq!(
+            apply_model_action(&mut world, &Action::ClosePane),
+            Err(LayoutError::LastPane)
+        );
+        assert_eq!(world, before);
     }
 
     #[test]

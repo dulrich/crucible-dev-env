@@ -294,43 +294,90 @@ fn resize_adjusts_ratio_without_changing_focus_or_panes() {
 }
 
 #[test]
-fn close_empties_pane_and_collapses_tree() {
+fn close_window_keeps_emptied_pane() {
     let mut w = World::new();
-    let a = w.open_window(); // pane A
+    let _a = w.open_window(); // pane A
     w.split(Right);
     let b = w.open_window(); // pane B, focused
+    // Close the only window of pane B -> pane B persists (empty).
+    w.close_window(b).unwrap();
+    w.check_invariants();
     assert_eq!(
         w.workspace(w.active_workspace_id()).unwrap().pane_count(),
         2
     );
-    // Close the only window of pane B -> pane B collapses, A is promoted.
+}
+
+#[test]
+fn close_window_in_focused_pane_keeps_focus_on_empty_pane() {
+    let mut w = World::new();
+    w.open_window();
+    w.split(Right);
+    let pane_b = w.focused_pane_id();
+    let b = w.open_window();
     w.close_window(b).unwrap();
     w.check_invariants();
+    assert_eq!(w.focused_pane_id(), pane_b);
+    assert_eq!(w.focused_window(), None);
+}
+
+#[test]
+fn close_pane_removes_empty_pane_and_focuses_promoted_sibling() {
+    let mut w = World::new();
+    let a = w.open_window(); // pane A
+    w.split(Right); // [A | B]
+    let pane_b = w.focused_pane_id();
+    w.split(Down); // [A | (B / C)], C focused and empty
+    let pane_c = w.focused_pane_id();
+    w.close_pane().unwrap();
+    w.check_invariants();
+    let ws = w.workspace(w.active_workspace_id()).unwrap();
+    assert_eq!(ws.pane_count(), 2);
+    assert!(!ws.panes().contains(&pane_c));
+    // B took C's place, so B (not first-leaf A) is focused.
+    assert_eq!(w.focused_pane_id(), pane_b);
+    assert_eq!(w.visible_windows(), vec![a]);
+}
+
+#[test]
+fn close_pane_refuses_non_empty_pane() {
+    let mut w = World::new();
+    w.open_window();
+    w.split(Right);
+    let pane_b = w.focused_pane_id();
+    let b = w.open_window();
+    let before = w.clone();
+    assert_eq!(w.close_pane(), Err(LayoutError::PaneNotEmpty));
+    assert_eq!(w, before);
+    assert_eq!(w.focused_pane_id(), pane_b);
+    assert_eq!(w.focused_window(), Some(b));
+}
+
+#[test]
+fn close_pane_refuses_last_pane() {
+    let mut w = World::new();
+    let before = w.clone();
+    assert_eq!(w.close_pane(), Err(LayoutError::LastPane));
+    assert_eq!(w, before);
+    w.check_invariants();
+}
+
+#[test]
+fn open_window_after_close_pane_lands_in_newly_focused_pane() {
+    let mut w = World::new();
+    w.split(Right); // [A | B], B focused, both empty
+    w.focus(Left);
+    let pane_a = w.focused_pane_id();
+    w.focus(Right);
+    w.close_pane().unwrap(); // remove B; A promoted and focused
+    assert_eq!(w.focused_pane_id(), pane_a);
+    let x = w.open_window();
+    w.check_invariants();
+    assert_eq!(w.focused_window(), Some(x));
     assert_eq!(
         w.workspace(w.active_workspace_id()).unwrap().pane_count(),
         1
     );
-    // Focus falls to the surviving pane holding a.
-    assert_eq!(w.focused_window(), Some(a));
-}
-
-#[test]
-fn close_focused_pane_repoints_focus_to_survivor() {
-    let mut w = World::new();
-    let a = w.open_window();
-    w.split(Right);
-    let b = w.open_window();
-    // Focused pane is B. Close B's window — focus must move to a valid pane.
-    w.close_window(b).unwrap();
-    w.check_invariants();
-    let fp = w.focused_pane_id();
-    assert!(
-        w.workspace(w.active_workspace_id())
-            .unwrap()
-            .panes()
-            .contains(&fp)
-    );
-    assert_eq!(w.focused_window(), Some(a));
 }
 
 #[test]
@@ -405,7 +452,7 @@ fn rename_workspace_updates_name_and_errors_on_unknown() {
 }
 
 #[test]
-fn move_window_to_workspace_transfers_and_collapses_source() {
+fn move_window_to_workspace_transfers_and_keeps_source_pane() {
     let mut w = World::new();
     let a = w.open_window(); // workspace 1, pane A
     w.split(Right);
@@ -414,10 +461,10 @@ fn move_window_to_workspace_transfers_and_collapses_source() {
     let ws2 = w.new_workspace("two");
     w.switch_workspace(ws1).unwrap();
 
-    // Move b (in pane B) to ws2. Pane B empties and collapses; A is promoted.
+    // Move b (in pane B) to ws2. Pane B empties but persists.
     w.move_window_to_workspace(b, ws2).unwrap();
     w.check_invariants();
-    assert_eq!(w.workspace(ws1).unwrap().pane_count(), 1);
+    assert_eq!(w.workspace(ws1).unwrap().pane_count(), 2);
     // On ws1 only a is visible now.
     w.switch_workspace(ws1).unwrap();
     assert_eq!(w.visible_windows(), vec![a]);

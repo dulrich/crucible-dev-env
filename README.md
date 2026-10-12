@@ -87,7 +87,8 @@ hotkeys. Defaults (Phase 3 will make these configurable):
 |-------|------|
 | `Super+Return` | Spawn a terminal into the focused pane |
 | `Super+Shift+Return` | Spawn a terminal **stacked** into the current pane |
-| `Super+Q` | Quit the compositor |
+| `Super+Shift+Q` | Quit the compositor |
+| `Super+W` | Close the focused pane (only if empty and not the last pane; never closes windows) |
 | `Super+H` / `J` / `K` / `L` | Focus pane left / down / up / right |
 | `Super+Shift+H` / `J` / `K` / `L` | Move (swap) the focused pane left / down / up / right |
 | `Super+\` | Split right (new pane to the right) |

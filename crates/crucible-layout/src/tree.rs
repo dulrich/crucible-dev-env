@@ -312,6 +312,24 @@ impl<L: Copy + PartialEq> SplitTree<L> {
         true
     }
 
+    /// Removes the leaf carrying `value` like [`remove`](Self::remove), returning the promoted
+    /// sibling's leaf nearest the removed leaf's former position (the leaf that "took its place").
+    ///
+    /// Returns `None` (and changes nothing) when [`remove`](Self::remove) would refuse.
+    pub(crate) fn remove_and_promote(&mut self, value: L) -> Option<L> {
+        let leaf = self.find_leaf(value)?;
+        let parent = self.parent_of(leaf)?;
+        let side = self.side_of(parent, leaf);
+        // Descend the sibling toward the shared boundary: if the removed leaf was the first child,
+        // its nearest survivor is the sibling's first-most leaf, and vice versa.
+        let mut node = self.child(parent, side.opposite());
+        while let Node::Split { .. } = self.node(node) {
+            node = self.child(node, side);
+        }
+        let survivor = self.leaf_value(node);
+        self.remove(value).then_some(survivor)
+    }
+
     /// Resolves the neighbouring leaf of `from` in direction `dir`, if any.
     ///
     /// Ascends to the nearest ancestor split on `dir`'s axis where `from`'s subtree sits on the side

@@ -56,7 +56,7 @@ impl World {
 
     /// Moves `window` from its current pane to the focused pane of `target` workspace.
     ///
-    /// The window is removed from its source pane (collapsing it if that empties a non-last pane) and
+    /// The window is removed from its source pane (which persists, possibly empty) and
     /// pushed onto and focused in the target workspace's focused pane. Errors if the window or target
     /// is unknown, or the window already lives on `target`.
     pub fn move_window_to_workspace(
@@ -86,9 +86,6 @@ impl World {
             pane.focused = 0;
         } else if pane.focused >= pane.windows.len() {
             pane.focused = pane.windows.len() - 1;
-        }
-        if pane.windows.is_empty() {
-            self.collapse_empty_pane(location.workspace, location.pane);
         }
 
         // Attach to the target workspace's focused pane.

@@ -40,6 +40,12 @@ pub enum LayoutError {
     /// Attempted to remove the only/last output; at least one output must always exist.
     #[error("cannot remove the last output")]
     LastOutput,
+    /// close-pane refused: the focused pane still holds windows (close-pane never closes windows).
+    #[error("pane is not empty")]
+    PaneNotEmpty,
+    /// close-pane refused: the focused pane is the workspace's last pane.
+    #[error("cannot close the last pane of a workspace")]
+    LastPane,
 }
 
 /// The whole layout model: arena maps + the focused output.

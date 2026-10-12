@@ -25,8 +25,11 @@ pub const DEFAULT_TERMINALS: &[&str] = &["foot", "alacritty", "kitty", "weston-t
 /// single mutation entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Quit the compositor cleanly (stop the main loop). `Super+Q`.
+    /// Quit the compositor cleanly (stop the main loop). `Super+Shift+Q`.
     Quit,
+    /// Close the focused pane if it is empty and not the workspace's last pane (`World::close_pane`).
+    /// Never closes windows; a refused close is a no-op. `Super+W`.
+    ClosePane,
     /// Spawn a program. `Super+Return` spawns the terminal; it connects via the Wayland socket
     /// and the shell map path (`new_toplevel`) places it in the focused pane automatically.
     Run(String),

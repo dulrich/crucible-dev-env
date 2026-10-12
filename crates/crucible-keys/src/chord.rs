@@ -9,7 +9,8 @@
 //! | Chord                 | [`Action`]                    | Model op                          |
 //! |-----------------------|--------------------------------|-----------------------------------|
 //! | `Super+Return`        | `Run(terminal)`                | spawn terminal (focused pane)     |
-//! | `Super+Q`             | `Quit`                         | stop compositor                   |
+//! | `Super+Shift+Q`       | `Quit`                         | stop compositor                   |
+//! | `Super+W`             | `ClosePane`                    | `World::close_pane()`             |
 //! | `Super+H/J/K/L`       | `Focus(Left/Down/Up/Right)`    | `World::focus(dir)`               |
 //! | `Super+Shift+H/J/K/L` | `Move(Left/Down/Up/Right)`     | `World::move_(dir)`               |
 //! | `Super+Backslash`     | `Split(Right)`                 | `World::split(Right)`             |
@@ -87,8 +88,8 @@ pub fn resolve(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
     match (shift, ctrl, keysym) {
         // ---- plain Super ---------------------------------------------------------------
         (false, false, Keysym::Return) => Some(Action::Run(terminal_command())),
-        // Both lower- and upper-case map to Quit so the bind works regardless of Caps Lock.
-        (false, false, Keysym::q | Keysym::Q) => Some(Action::Quit),
+        // close-pane: Super+W (either case, so the bind works regardless of Caps Lock)
+        (false, false, Keysym::w | Keysym::W) => Some(Action::ClosePane),
 
         // focus: Super+H/J/K/L
         (false, false, Keysym::h) => Some(Action::Focus(Direction::Left)),
@@ -111,6 +112,9 @@ pub fn resolve(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
         // ---- Super+Shift -----------------------------------------------------------
         // spawn into current pane (stack-window): Super+Shift+Return
         (true, false, Keysym::Return) => Some(Action::StackWindow),
+
+        // quit: Super+Shift+Q (deliberately shifted so it is hard to hit by accident)
+        (true, false, Keysym::q | Keysym::Q) => Some(Action::Quit),
 
         // move pane: Super+Shift+H/J/K/L
         (true, false, Keysym::h | Keysym::H) => Some(Action::Move(Direction::Left)),
@@ -187,8 +191,8 @@ mod tests {
     #[test]
     fn every_default_chord_resolves_to_its_action() {
         let plain_super: &[(Keysym, Action)] = &[
-            (Keysym::q, Action::Quit),
-            (Keysym::Q, Action::Quit),
+            (Keysym::w, Action::ClosePane),
+            (Keysym::W, Action::ClosePane),
             (Keysym::h, Action::Focus(Direction::Left)),
             (Keysym::j, Action::Focus(Direction::Down)),
             (Keysym::k, Action::Focus(Direction::Up)),
@@ -211,6 +215,8 @@ mod tests {
 
         let super_shift_chords: &[(Keysym, Action)] = &[
             (Keysym::Return, Action::StackWindow),
+            (Keysym::q, Action::Quit),
+            (Keysym::Q, Action::Quit),
             (Keysym::h, Action::Move(Direction::Left)),
             (Keysym::H, Action::Move(Direction::Left)),
             (Keysym::j, Action::Move(Direction::Down)),
@@ -293,6 +299,12 @@ mod tests {
     #[test]
     fn unmatched_super_chord_is_none() {
         assert_eq!(resolve(super_only(), Keysym::z), None);
+    }
+
+    #[test]
+    fn plain_super_q_no_longer_quits() {
+        assert_eq!(resolve(super_only(), Keysym::q), None);
+        assert_eq!(resolve(super_only(), Keysym::Q), None);
     }
 
     #[test]

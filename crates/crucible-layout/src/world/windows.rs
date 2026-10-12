@@ -28,9 +28,8 @@ impl World {
 
     /// Closes `window`, removing it from whatever pane holds it.
     ///
-    /// If that empties a pane and the pane is not the workspace's last pane, the pane is removed and
-    /// the split tree re-balances (its parent split collapses, promoting the sibling). The last pane
-    /// of a workspace is kept (empty) so the invariant "a focused pane always exists" holds.
+    /// The pane persists even if this empties it: panes are only removed by the explicit
+    /// [`close_pane`](World::close_pane) verb. Focus is unchanged.
     pub fn close_window(&mut self, window: WindowId) -> Result<(), LayoutError> {
         let location = self
             .locate_window(window)
@@ -50,33 +49,35 @@ impl World {
             pane.focused = 0;
         }
 
-        if pane.windows.is_empty() {
-            self.collapse_empty_pane(location.workspace, location.pane);
-        }
-
         Ok(())
     }
 
-    /// Removes an empty pane from its workspace and re-balances the tree.
+    /// Closes the focused pane of the active workspace (the `close-pane` verb).
     ///
-    /// Does nothing if it is the workspace's last pane (kept empty to preserve the focused-pane
-    /// invariant). Re-points `focused_pane` to a surviving pane when the focused pane was removed.
-    pub(super) fn collapse_empty_pane(&mut self, workspace: WorkspaceId, pane: PaneId) {
+    /// Only an empty pane that is not the workspace's last pane is removed; the split tree
+    /// re-balances (its parent split collapses, promoting the sibling) and focus moves to the leaf
+    /// of the promoted sibling that took the removed pane's place. Otherwise nothing changes and
+    /// [`LayoutError::PaneNotEmpty`] or [`LayoutError::LastPane`] is returned.
+    pub fn close_pane(&mut self) -> Result<(), LayoutError> {
+        let workspace = self.active_workspace_id();
+        let pane = self.focused_pane_id();
+        if !self
+            .panes
+            .get(&pane)
+            .expect("focused pane valid")
+            .windows
+            .is_empty()
+        {
+            return Err(LayoutError::PaneNotEmpty);
+        }
         let ws = self.workspaces.get_mut(&workspace).expect("workspace");
-        if ws.tree.leaf_count() <= 1 {
-            return; // keep the last pane (empty) — invariant: a focused pane always exists.
-        }
-        let was_focused = ws.focused_pane == pane;
-        if !ws.tree.remove(pane) {
-            return;
-        }
+        let survivor = ws
+            .tree
+            .remove_and_promote(pane)
+            .ok_or(LayoutError::LastPane)?;
+        ws.focused_pane = survivor;
         self.panes.remove(&pane);
-
-        let ws = self.workspaces.get_mut(&workspace).expect("workspace");
-        if was_focused {
-            // Promote the first surviving leaf as the new focused pane.
-            ws.focused_pane = ws.tree.leaves().first().copied().expect("≥1 pane remains");
-        }
+        Ok(())
     }
 
     /// Splits the focused pane along `dir`, creating a new empty pane that becomes focused.
