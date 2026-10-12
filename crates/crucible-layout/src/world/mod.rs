@@ -10,6 +10,7 @@ use crate::{OutputId, PaneId, WindowId, WorkspaceId, geometry::Rect, ids::IdGen,
 use std::collections::BTreeMap;
 
 mod outputs;
+mod panes;
 mod projection;
 mod types;
 mod windows;
@@ -30,6 +31,9 @@ pub enum LayoutError {
     /// The referenced window id is not in the model.
     #[error("unknown window {0:?}")]
     UnknownWindow(WindowId),
+    /// The referenced pane id is not in the model.
+    #[error("unknown pane {0:?}")]
+    UnknownPane(PaneId),
     /// The requested move/switch target is the same workspace the window already lives on.
     #[error("window already on target workspace")]
     SameWorkspace,

@@ -18,7 +18,7 @@ use tracing::{info, warn};
 
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
-use crate::state::{Backend, CrucibleState, HoverTarget, hover_entered};
+use crate::state::{Backend, CrucibleState, HoverTarget, hover_entered, hover_pane_key};
 
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Maps absolute winit pointer motion into the output and delivers it to the seat.
@@ -216,7 +216,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// [`WindowId`](crucible_layout::WindowId)) is focused through the model
     /// ([`crucible_layout::World::focus_window`] via `with_model`), so the model's output,
     /// workspace, pane and stack position follow the click and splits/new windows act there.
-    /// Clicking empty space routes model focus to the output under the pointer. An unmanaged
+    /// Clicking a pane's area not covered by a window focuses that pane ([`crucible_layout::World::focus_pane`]);
+    /// clicking a gap routes model focus to the output under the pointer. An unmanaged
     /// (override-redirect) element only gets keyboard focus; it is never enrolled in the model.
     fn update_keyboard_focus_under_pointer(&mut self, _serial: Serial) {
         let location = self.pointer.current_location();
@@ -233,8 +234,30 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 // for unmanaged elements and when the model focus did not change.
                 self.focus_window(window);
             }
-            None => self.focus_output_under(location),
+            None => match self.pane_under(location) {
+                Some(pane) => self.focus_pane_in_model(pane, "click"),
+                None => self.focus_output_under(location),
+            },
         }
+    }
+
+    /// Routes model focus to `pane` because of pointer `cause`, then reconciles keyboard focus.
+    ///
+    /// Logs like [`Self::focus_window_in_model`]. Keyboard focus is reconciled explicitly because
+    /// `apply_layout` skips `apply_focus` when the projected focus is unchanged (e.g. empty pane to
+    /// empty pane, or away from an unmanaged element): an empty pane clears keyboard focus, a
+    /// pane with a window focuses that window.
+    fn focus_pane_in_model(&mut self, pane: crucible_layout::PaneId, cause: &str) {
+        let before = self.layout.world.focus_path();
+        if let Err(err) = self.with_model(|world| world.focus_pane(pane)) {
+            warn!(%err, ?pane, cause, "pointer focus on a pane the model does not know");
+            return;
+        }
+        let after = self.layout.world.focus_path();
+        if after != before {
+            info!(cause, focus = %after, "pointer focus");
+        }
+        self.reconcile_keyboard_focus();
     }
 
     /// Routes model focus to managed window `id` because of pointer `cause` (`"click"`/`"hover"`).
@@ -265,12 +288,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Focus-follows-mouse: moves focus when the pointer *enters* a new hover target.
     ///
-    /// The target is the managed window under the pointer, or the output when over empty space;
-    /// unmanaged elements leave the tracker unchanged. Focus moves only when the target differs
-    /// from the last one seen ([`hover_entered`]), so keyboard-driven focus (a split, `Super+H`…)
-    /// is not reverted by a pointer twitch over the same window. While a pointer grab is active
-    /// (button held, drag) the tracker still updates but no focus moves, so releasing a drag over
-    /// a new window does not count as an enter. Does nothing when the option is off.
+    /// The enter key is the **pane** under the pointer — via the managed window over it, or its
+    /// uncovered area — so moving between a window and the empty area around it in the same pane
+    /// is not an enter; gaps and space outside every pane fall back to the output. Unmanaged
+    /// elements leave the tracker unchanged. Focus moves only when the key differs from the last
+    /// one seen ([`hover_entered`]), so keyboard-driven focus (a split, `Super+H`…) is not reverted
+    /// by a pointer twitch. Routing: over a managed window the window is focused; over a pane's
+    /// uncovered area the pane is. While a pointer grab is active (button held, drag) the tracker
+    /// still updates but no focus moves. Does nothing when the option is off.
     fn focus_follows_pointer(&mut self) {
         if !self.focus_follows_mouse {
             return;
@@ -278,13 +303,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let location = self.pointer.current_location();
         let element_under = self.space.element_under(location).map(|(w, _)| w.clone());
         let current = match &element_under {
-            Some(window) => window.window_id().map(HoverTarget::Window),
-            None => self
-                .space
-                .output_under(location)
-                .next()
-                .cloned()
-                .map(HoverTarget::Output),
+            Some(window) => window
+                .window_id()
+                .and_then(|id| hover_pane_key(&self.layout.world, Some(id), None))
+                .map(HoverTarget::Pane),
+            None => match hover_pane_key(&self.layout.world, None, self.pane_under(location)) {
+                Some(pane) => Some(HoverTarget::Pane(pane)),
+                None => self
+                    .space
+                    .output_under(location)
+                    .next()
+                    .cloned()
+                    .map(HoverTarget::Output),
+            },
         };
         let mut stored = self.hover_target.take();
         let entered = hover_entered(&mut stored, current);
@@ -292,8 +323,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if !entered || self.pointer.is_grabbed() {
             return;
         }
-        match (self.hover_target.clone(), element_under) {
-            (Some(HoverTarget::Window(id)), Some(window)) => {
+        let managed = element_under.and_then(|w| w.window_id().map(|id| (id, w)));
+        match (self.hover_target.clone(), managed) {
+            (Some(HoverTarget::Pane(_)), Some((id, window))) => {
                 if !self.focus_window_in_model(id, "hover") {
                     return;
                 }
@@ -307,6 +339,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     self.focus_window(window);
                 }
             }
+            (Some(HoverTarget::Pane(pane)), None) => self.focus_pane_in_model(pane, "hover"),
             // `focus_output` is a no-op when that output is already focused.
             (Some(HoverTarget::Output(output)), _) => self.focus_output(&output),
             _ => {}

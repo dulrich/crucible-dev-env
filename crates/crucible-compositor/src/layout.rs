@@ -50,7 +50,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crucible_layout::{
-    FocusChange, GapConfig, LayoutChange, LayoutError, OutputId, Projection, Rect, WindowId, World,
+    FocusChange, GapConfig, LayoutChange, LayoutError, OutputId, PaneId, Projection, Rect,
+    WindowId, World,
 };
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -272,6 +273,44 @@ fn to_logical(rect: Rect) -> Rectangle<i32, Logical> {
     )
 }
 
+/// The gaps every model-to-screen mapping uses: the projection, the pointer pane hit-test and the
+/// empty-pane focus ring all read this one accessor so they can never disagree.
+#[must_use]
+pub fn layout_gaps() -> GapConfig {
+    GapConfig::default()
+}
+
+/// What keyboard focus must do to match the model after a pointer-driven model focus change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyboardSync {
+    /// Keyboard focus already matches the model.
+    Keep,
+    /// The model focuses an empty pane: clear keyboard focus.
+    Clear,
+    /// Move keyboard focus to this managed window.
+    Focus(WindowId),
+}
+
+/// Decides how to reconcile keyboard focus with the model's focused window.
+///
+/// `keyboard_has_focus` is whether anything (managed or unmanaged) holds keyboard focus;
+/// `keyboard_window` is the managed window id it holds, if any. Needed because `apply_layout` only
+/// re-points keyboard focus when the *projected* focus changes, which focusing an empty pane from
+/// another empty pane (or from an unmanaged element) does not.
+#[must_use]
+pub fn keyboard_sync(
+    model: Option<WindowId>,
+    keyboard_has_focus: bool,
+    keyboard_window: Option<WindowId>,
+) -> KeyboardSync {
+    match model {
+        None if keyboard_has_focus => KeyboardSync::Clear,
+        None => KeyboardSync::Keep,
+        Some(id) if keyboard_window == Some(id) => KeyboardSync::Keep,
+        Some(id) => KeyboardSync::Focus(id),
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Derives the current [`Projection`], applies the difference from the last one, and stores it.
     ///
@@ -280,7 +319,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// and therefore no configures and no focus churn.
     pub fn apply_layout(&mut self) {
         let bindings = self.output_bindings();
-        let next: Projection = self.layout.world.project(&bindings, GapConfig::default());
+        let next: Projection = self.layout.world.project(&bindings, layout_gaps());
         let diff = self.projection.diff(&next);
         if diff.is_empty() {
             return;
@@ -319,7 +358,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ///
     /// Outputs not yet bound to a model id, or with no geometry in the `Space`, are skipped — they
     /// contribute nothing to the projection.
-    fn output_bindings(&self) -> Vec<(OutputId, Rect)> {
+    pub(crate) fn output_bindings(&self) -> Vec<(OutputId, Rect)> {
         self.space
             .outputs()
             .filter_map(|output| {
@@ -328,6 +367,44 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 Some((id, Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h)))
             })
             .collect()
+    }
+
+    /// The pane under global pointer `location` on any bound output's active workspace, using the
+    /// same bindings and gaps as the projection. `None` in gaps or off every output.
+    pub(crate) fn pane_under(&self, location: Point<f64, Logical>) -> Option<PaneId> {
+        self.layout.world.pane_at(
+            &self.output_bindings(),
+            layout_gaps(),
+            location.x.floor() as i32,
+            location.y.floor() as i32,
+        )
+    }
+
+    /// The global rect of the focused pane when it holds no window (for the empty-pane focus
+    /// ring), from the same bindings and gaps as the projection.
+    pub(crate) fn focused_empty_pane_rect(&self) -> Option<Rect> {
+        let pane = self.layout.world.focused_empty_pane()?;
+        self.layout
+            .world
+            .pane_rect(&self.output_bindings(), layout_gaps(), pane)
+    }
+
+    /// Makes keyboard focus match the model's focused window (see [`keyboard_sync`]).
+    pub(crate) fn reconcile_keyboard_focus(&mut self) {
+        let current = self.keyboard_focus();
+        let keyboard_window = match &current {
+            Some(KeyboardFocusTarget::Window(w)) => w.window_id(),
+            _ => None,
+        };
+        match keyboard_sync(
+            self.layout.world.focused_window(),
+            current.is_some(),
+            keyboard_window,
+        ) {
+            KeyboardSync::Keep => {}
+            KeyboardSync::Clear => self.apply_focus(None),
+            KeyboardSync::Focus(id) => self.apply_focus(Some(id)),
+        }
     }
 
     /// Re-points keyboard focus (and X11 focus) at the projection's focused window.
@@ -557,6 +634,28 @@ fn configure_size(element: &WindowElement, size: Size<i32, Logical>) {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn keyboard_sync_clears_for_an_empty_pane_even_from_an_unmanaged_holder() {
+        // An unmanaged element holds keyboard focus (no managed id), the model now focuses an
+        // empty pane: keyboard focus must be cleared (E2's unmanaged detour).
+        assert_eq!(keyboard_sync(None, true, None), KeyboardSync::Clear);
+        // Nothing holds focus already: nothing to do.
+        assert_eq!(keyboard_sync(None, false, None), KeyboardSync::Keep);
+    }
+
+    #[test]
+    fn keyboard_sync_focuses_the_model_window_unless_already_held() {
+        let a = WindowId::from_raw(1);
+        let b = WindowId::from_raw(2);
+        assert_eq!(keyboard_sync(Some(a), true, Some(a)), KeyboardSync::Keep);
+        assert_eq!(
+            keyboard_sync(Some(a), true, Some(b)),
+            KeyboardSync::Focus(a)
+        );
+        assert_eq!(keyboard_sync(Some(a), true, None), KeyboardSync::Focus(a));
+        assert_eq!(keyboard_sync(Some(a), false, None), KeyboardSync::Focus(a));
+    }
     use std::rc::Rc;
 
     /// A stand-in payload: carries the same id-stamping contract as [`WindowElement`] with no
@@ -715,7 +814,7 @@ mod tests {
         let managed = layout.open_managed(TestElement::new(1));
         layout.track_unmanaged(TestElement::new(2));
 
-        let projection = layout.world.project_stored(GapConfig::default());
+        let projection = layout.world.project_stored(layout_gaps());
         assert_eq!(projection.windows().len(), 1);
         assert!(projection.is_visible(managed));
         assert_eq!(projection.focus(), Some(managed));
@@ -723,7 +822,7 @@ mod tests {
         // Re-deriving without touching the model yields an empty diff: applying it is a no-op.
         assert!(
             projection
-                .diff(&layout.world.project_stored(GapConfig::default()))
+                .diff(&layout.world.project_stored(layout_gaps()))
                 .is_empty()
         );
     }

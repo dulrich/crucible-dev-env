@@ -182,6 +182,7 @@ impl CrucibleState<UdevData> {
         let scale = Scale::from(output.current_scale().fractional_scale());
         let output_geo = self.space.output_geometry(&output).unwrap();
         let pointer_location = self.pointer.current_location();
+        let empty_focus_rect = self.focused_empty_pane_rect();
 
         // Select a renderer: same-GPU is a single renderer, cross-GPU needs the scanout format.
         let format = self.backend_data.backends[&node].surfaces[&crtc]
@@ -200,10 +201,14 @@ impl CrucibleState<UdevData> {
         // avoid a whole-`self` borrow conflict with `renderer` (which holds `&mut self.backend_data`).
         // SolidColorRenderElement is renderer-agnostic; no renderer reference is needed.
         let mut chrome: Vec<CustomRenderElements<UdevRenderer<'_>>> =
-            crate::chrome::build_chrome_elements(&self.layout.world, &self.projection)
-                .into_iter()
-                .map(CustomRenderElements::SolidColor)
-                .collect();
+            crate::chrome::build_chrome_elements(
+                &self.layout.world,
+                &self.projection,
+                empty_focus_rect,
+            )
+            .into_iter()
+            .map(CustomRenderElements::SolidColor)
+            .collect();
 
         // Cursor element, drawn only on the output the pointer is over (on top of chrome).
         if output_geo.to_f64().contains(pointer_location) {

@@ -157,6 +157,7 @@ pub fn stack_pips(
 pub fn build_chrome_elements(
     world: &crucible_layout::World,
     projection: &Projection,
+    empty_focus_rect: Option<Rect>,
 ) -> Vec<SolidColorRenderElement> {
     if !ENABLE_CHROME {
         return Vec::new();
@@ -164,18 +165,22 @@ pub fn build_chrome_elements(
 
     let mut elements: Vec<SolidColorRenderElement> = Vec::new();
 
-    // ---- 1. Focus-ring border around the focused window ----
-    if let Some(focused_id) = projection.focus() {
-        if let Some(win_rect) = projection.rect_of(focused_id) {
-            for strip in border_rects(win_rect, BORDER_THICKNESS) {
-                elements.push(SolidColorRenderElement::new(
-                    Id::new(),
-                    strip,
-                    CommitCounter::default(),
-                    BORDER_COLOR,
-                    Kind::Unspecified,
-                ));
-            }
+    // ---- 1. Focus-ring border around the focused window, or the focused empty pane ----
+    // `empty_focus_rect` is the focused pane's rect when it holds no window, computed by the
+    // caller from the same output bindings and gaps as the projection.
+    let ring = projection
+        .focus()
+        .and_then(|id| projection.rect_of(id))
+        .or(empty_focus_rect);
+    if let Some(ring_rect) = ring {
+        for strip in border_rects(ring_rect, BORDER_THICKNESS) {
+            elements.push(SolidColorRenderElement::new(
+                Id::new(),
+                strip,
+                CommitCounter::default(),
+                BORDER_COLOR,
+                Kind::Unspecified,
+            ));
         }
     }
 
@@ -231,7 +236,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ///
     /// Reads live model state (`self.layout.world`) and `self.projection` (the projection last
     /// applied to the `Space`, in global-Space rects) to produce:
-    /// - A focus-ring border (4 strips) around the focused window.
+    /// - A focus-ring border (4 strips) around the focused window, or around the focused pane when
+    ///   it is empty.
     /// - Per-pane stack-position pips for any pane with `> 1` window.
     ///
     /// These elements must be placed **above the windows but below the cursor** in the front-to-back
@@ -246,10 +252,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
             + smithay::backend::renderer::ImportAll
             + smithay::backend::renderer::ImportMem,
     {
-        build_chrome_elements(&self.layout.world, &self.projection)
-            .into_iter()
-            .map(CustomRenderElements::SolidColor)
-            .collect()
+        build_chrome_elements(
+            &self.layout.world,
+            &self.projection,
+            self.focused_empty_pane_rect(),
+        )
+        .into_iter()
+        .map(CustomRenderElements::SolidColor)
+        .collect()
     }
 }
 
