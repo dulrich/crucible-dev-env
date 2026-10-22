@@ -6,7 +6,20 @@
 
 use crucible_compositor::state::CompositorOptions;
 
+const USAGE: &str = "usage: crucible [--winit | --tty-udev] [--no-focus-follows-mouse]\n\n  --winit                  run the nested development compositor\n  --tty-udev               run the DRM/KMS backend on a real TTY (multi-output)\n  --no-focus-follows-mouse turn focus-follows-mouse off (or env CDE_FOCUS_FOLLOWS_MOUSE=0)\n  -h, --help               print this usage and exit 0\n\nWith no backend flag, a one-line banner is printed and nothing is started.\n";
+
+/// True when `--help`/`-h` appears anywhere in the arguments (after the program name).
+/// Help wins over the backend flags, so `--tty-udev --help` never takes the DRM/KMS device.
+fn wants_help(args: &[String]) -> bool {
+    args.iter().skip(1).any(|a| a == "--help" || a == "-h")
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if wants_help(&args) {
+        print!("{USAGE}");
+        return;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -14,7 +27,6 @@ fn main() {
         )
         .init();
 
-    let args: Vec<String> = std::env::args().collect();
     let env = std::env::var("CDE_FOCUS_FOLLOWS_MOUSE").ok();
     let options = parse_options(args.get(2..).unwrap_or(&[]), env.as_deref());
 
@@ -59,6 +71,14 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn help_wins_over_backend_flags() {
+        assert!(wants_help(&args(&["crucible", "--tty-udev", "--help"])));
+        assert!(wants_help(&args(&["crucible", "-h", "--winit"])));
+        assert!(!wants_help(&args(&["crucible", "--winit"])));
+        assert!(!wants_help(&args(&["crucible"])));
     }
 
     #[test]
