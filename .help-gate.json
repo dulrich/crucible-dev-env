@@ -1,1 +1,1 @@
-{ "entrypoints": [], "exclude": [] }
+{ "entrypoints": [{ "path": "scripts/cde.sh" }], "exclude": [] }

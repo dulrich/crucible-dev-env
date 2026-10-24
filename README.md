@@ -56,6 +56,8 @@ services. Keybindings and gaps/borders are currently sensible hardcoded defaults
 
 ## Running
 
+The TTY launcher is `scripts/cde.sh`: it rebuilds first, wraps ghostty so it opens as a separate instance, logs to `/tmp/cde/latest.log`, and can be symlinked as `~/cde.sh`; `scripts/cde.sh --help` lists the env overrides.
+
 Requires a recent stable Rust (1.85+, edition 2024) and a terminal emulator on `$PATH` (defaults to
 `foot`; set `$TERMINAL` to override — e.g. `alacritty`, `kitty`).
 
