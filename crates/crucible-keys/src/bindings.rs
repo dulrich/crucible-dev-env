@@ -1,0 +1,587 @@
+//! The data-driven binding table: [`Chord`] → [`Action`], with config-string parsing.
+//!
+//! [`Bindings::default`] is CDE's built-in `Super`-leader table (see the table in
+//! [`crate::chord`]). [`Bindings::with_overrides`] applies the `(chord, action)` string pairs from
+//! the `binds` block of the config file on top of it, replacing only the chords they name.
+//!
+//! ## Chord grammar
+//!
+//! `Super[+Shift][+Ctrl]+<keysym name>` — modifiers in any order, case-insensitively (`ctrl` and
+//! `control` are synonyms), `Super` mandatory. The keysym name is looked up case-insensitively in a
+//! curated table ([`keysym_from_name`]): `xkeysym` has a keysym-to-name API but no name-to-keysym
+//! one, so the table covers every keysym the default bindings use plus `a`–`z`, `0`–`9`,
+//! `F1`–`F12` and a handful of common navigation/punctuation keys. A letter binds **both cases**
+//! (so the chord also works under Caps Lock), and `Shift+Tab` also binds `ISO_Left_Tab`, the
+//! keysym many layouts deliver for it — mirroring the default table.
+//!
+//! ## Action grammar
+//!
+//! `quit`, `close-pane`, `run-terminal`, `stack-window`, `new-workspace`, `open-picker`,
+//! `rename-workspace`, `focus|move|split|resize <left|right|up|down>`, `cycle-stack <±n>`,
+//! `cycle-workspace <±n>`, `move-window-to-workspace <±n>`, and `none` (unbind the chord).
+
+use std::collections::HashMap;
+
+use crucible_layout::Direction;
+use xkeysym::Keysym;
+
+use crate::action::Action;
+use crate::chord::Modifiers;
+
+/// A keyboard chord: modifier set plus keysym.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Chord {
+    /// The modifiers that must be held (exactly; extra modifiers do not match).
+    pub modifiers: Modifiers,
+    /// The keysym delivered with them.
+    pub keysym: Keysym,
+}
+
+/// Why a `binds` entry was rejected. Every variant names the offending entry.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BindError {
+    /// The chord string does not follow the chord grammar.
+    #[error("bad chord `{chord}`: {reason}")]
+    BadChord {
+        /// The chord string as written.
+        chord: String,
+        /// What is wrong with it.
+        reason: String,
+    },
+    /// The action string does not follow the action grammar.
+    #[error("bad action `{action}` for chord `{chord}`: {reason}")]
+    BadAction {
+        /// The chord the action was bound to.
+        chord: String,
+        /// The action string as written.
+        action: String,
+        /// What is wrong with it.
+        reason: String,
+    },
+}
+
+/// The chord → [`Action`] table consulted by [`crate::chord::resolve`].
+///
+/// `Action::Run` entries hold an empty placeholder command; `resolve` substitutes
+/// [`crate::terminal_command`] when it is hit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bindings {
+    map: HashMap<Chord, Action>,
+}
+
+impl Bindings {
+    /// Looks up the action bound to exactly this chord.
+    #[must_use]
+    pub fn get(&self, modifiers: Modifiers, keysym: Keysym) -> Option<&Action> {
+        self.map.get(&Chord { modifiers, keysym })
+    }
+
+    /// Number of bound chords.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// True when no chord is bound.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// The default table with each `(chord, action)` entry applied in order; later entries win.
+    /// An action of `none` unbinds the chord.
+    ///
+    /// # Errors
+    /// The first malformed entry, as a [`BindError`] naming it.
+    pub fn with_overrides(overrides: &[(String, String)]) -> Result<Self, BindError> {
+        let mut bindings = Self::default();
+        for (chord_text, action_text) in overrides {
+            let chord = parse_chord(chord_text)?;
+            let action = parse_action(chord_text, action_text)?;
+            for keysym in aliases(chord.modifiers, chord.keysym) {
+                let key = Chord { keysym, ..chord };
+                match &action {
+                    Some(action) => {
+                        bindings.map.insert(key, action.clone());
+                    }
+                    None => {
+                        bindings.map.remove(&key);
+                    }
+                }
+            }
+        }
+        Ok(bindings)
+    }
+}
+
+impl Default for Bindings {
+    /// CDE's built-in table, identical to the pre-config `match` (see [`crate::chord`] docs).
+    fn default() -> Self {
+        let sup = Modifiers {
+            logo: true,
+            shift: false,
+            ctrl: false,
+        };
+        let sup_shift = Modifiers { shift: true, ..sup };
+        let sup_ctrl = Modifiers { ctrl: true, ..sup };
+
+        let mut map = HashMap::new();
+        let mut bind = |modifiers: Modifiers, keysyms: &[Keysym], action: Action| {
+            for keysym in keysyms {
+                map.insert(
+                    Chord {
+                        modifiers,
+                        keysym: *keysym,
+                    },
+                    action.clone(),
+                );
+            }
+        };
+
+        // ---- plain Super (note: focus h/j/k/l are lowercase-only, as before) ----
+        bind(sup, &[Keysym::Return], Action::Run(String::new()));
+        bind(sup, &[Keysym::w, Keysym::W], Action::ClosePane);
+        bind(sup, &[Keysym::h], Action::Focus(Direction::Left));
+        bind(sup, &[Keysym::j], Action::Focus(Direction::Down));
+        bind(sup, &[Keysym::k], Action::Focus(Direction::Up));
+        bind(sup, &[Keysym::l], Action::Focus(Direction::Right));
+        bind(sup, &[Keysym::backslash], Action::Split(Direction::Right));
+        bind(sup, &[Keysym::minus], Action::Split(Direction::Down));
+        bind(sup, &[Keysym::Tab], Action::CycleStack(1));
+        bind(sup, &[Keysym::bracketright], Action::CycleWorkspace(1));
+        bind(sup, &[Keysym::bracketleft], Action::CycleWorkspace(-1));
+        bind(sup, &[Keysym::n, Keysym::N], Action::NewWorkspace);
+        bind(sup, &[Keysym::p, Keysym::P], Action::OpenPicker);
+
+        // ---- Super+Shift ----
+        bind(sup_shift, &[Keysym::Return], Action::StackWindow);
+        bind(sup_shift, &[Keysym::q, Keysym::Q], Action::Quit);
+        bind(sup_shift, &[Keysym::r, Keysym::R], Action::RenameWorkspace);
+        bind(
+            sup_shift,
+            &[Keysym::h, Keysym::H],
+            Action::Move(Direction::Left),
+        );
+        bind(
+            sup_shift,
+            &[Keysym::j, Keysym::J],
+            Action::Move(Direction::Down),
+        );
+        bind(
+            sup_shift,
+            &[Keysym::k, Keysym::K],
+            Action::Move(Direction::Up),
+        );
+        bind(
+            sup_shift,
+            &[Keysym::l, Keysym::L],
+            Action::Move(Direction::Right),
+        );
+        bind(
+            sup_shift,
+            &[Keysym::Tab, Keysym::ISO_Left_Tab],
+            Action::CycleStack(-1),
+        );
+        bind(
+            sup_shift,
+            &[Keysym::bracketright],
+            Action::MoveWindowToWorkspace(1),
+        );
+        bind(
+            sup_shift,
+            &[Keysym::bracketleft],
+            Action::MoveWindowToWorkspace(-1),
+        );
+
+        // ---- Super+Ctrl ----
+        bind(
+            sup_ctrl,
+            &[Keysym::h, Keysym::H],
+            Action::Resize(Direction::Left),
+        );
+        bind(
+            sup_ctrl,
+            &[Keysym::j, Keysym::J],
+            Action::Resize(Direction::Down),
+        );
+        bind(
+            sup_ctrl,
+            &[Keysym::k, Keysym::K],
+            Action::Resize(Direction::Up),
+        );
+        bind(
+            sup_ctrl,
+            &[Keysym::l, Keysym::L],
+            Action::Resize(Direction::Right),
+        );
+
+        Self { map }
+    }
+}
+
+/// Every keysym a chord written with `keysym` should bind: both cases of a letter, and
+/// `ISO_Left_Tab` alongside `Shift+Tab`.
+fn aliases(modifiers: Modifiers, keysym: Keysym) -> Vec<Keysym> {
+    let raw = keysym.raw();
+    if let Ok(byte) = u8::try_from(raw)
+        && byte.is_ascii_alphabetic()
+    {
+        return vec![
+            Keysym::new(u32::from(byte.to_ascii_lowercase())),
+            Keysym::new(u32::from(byte.to_ascii_uppercase())),
+        ];
+    }
+    if modifiers.shift && keysym == Keysym::Tab {
+        return vec![Keysym::Tab, Keysym::ISO_Left_Tab];
+    }
+    vec![keysym]
+}
+
+/// Looks up a keysym by X11 name, case-insensitively, in the curated table (see module docs).
+/// Single letters resolve to the lowercase keysym.
+#[must_use]
+pub fn keysym_from_name(name: &str) -> Option<Keysym> {
+    let lower = name.to_ascii_lowercase();
+    if let [byte] = lower.as_bytes()
+        && (byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    {
+        return Some(Keysym::new(u32::from(*byte)));
+    }
+    if let Some(n) = lower.strip_prefix('f')
+        && let Ok(n) = n.parse::<u32>()
+        && (1..=12).contains(&n)
+    {
+        return Some(Keysym::new(Keysym::F1.raw() + n - 1));
+    }
+    const NAMED: &[(&str, Keysym)] = &[
+        ("return", Keysym::Return),
+        ("tab", Keysym::Tab),
+        ("iso_left_tab", Keysym::ISO_Left_Tab),
+        ("backslash", Keysym::backslash),
+        ("minus", Keysym::minus),
+        ("bracketright", Keysym::bracketright),
+        ("bracketleft", Keysym::bracketleft),
+        ("space", Keysym::space),
+        ("escape", Keysym::Escape),
+        ("backspace", Keysym::BackSpace),
+        ("delete", Keysym::Delete),
+        ("home", Keysym::Home),
+        ("end", Keysym::End),
+        ("page_up", Keysym::Page_Up),
+        ("page_down", Keysym::Page_Down),
+        ("left", Keysym::Left),
+        ("right", Keysym::Right),
+        ("up", Keysym::Up),
+        ("down", Keysym::Down),
+        ("equal", Keysym::equal),
+        ("plus", Keysym::plus),
+        ("comma", Keysym::comma),
+        ("period", Keysym::period),
+        ("slash", Keysym::slash),
+        ("semicolon", Keysym::semicolon),
+        ("apostrophe", Keysym::apostrophe),
+        ("grave", Keysym::grave),
+        ("print", Keysym::Print),
+    ];
+    NAMED
+        .iter()
+        .find(|(n, _)| *n == lower)
+        .map(|(_, keysym)| *keysym)
+}
+
+fn bad_chord(chord: &str, reason: impl Into<String>) -> BindError {
+    BindError::BadChord {
+        chord: chord.to_string(),
+        reason: reason.into(),
+    }
+}
+
+/// Parses `Super[+Shift][+Ctrl]+<key>` (see module docs).
+fn parse_chord(text: &str) -> Result<Chord, BindError> {
+    let mut parts: Vec<&str> = text.split('+').map(str::trim).collect();
+    let key = parts.pop().filter(|k| !k.is_empty());
+    let Some(key) = key else {
+        return Err(bad_chord(text, "missing key name"));
+    };
+    let mut modifiers = Modifiers::default();
+    for part in parts {
+        let slot = match part.to_ascii_lowercase().as_str() {
+            "super" => &mut modifiers.logo,
+            "shift" => &mut modifiers.shift,
+            "ctrl" | "control" => &mut modifiers.ctrl,
+            _ => return Err(bad_chord(text, format!("unknown modifier `{part}`"))),
+        };
+        if *slot {
+            return Err(bad_chord(text, format!("modifier `{part}` repeated")));
+        }
+        *slot = true;
+    }
+    if !modifiers.logo {
+        return Err(bad_chord(text, "chords must include Super"));
+    }
+    let keysym = keysym_from_name(key)
+        .ok_or_else(|| bad_chord(text, format!("unknown key name `{key}`")))?;
+    Ok(Chord { modifiers, keysym })
+}
+
+/// Parses an action string; `Ok(None)` is `none` (unbind).
+fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
+    let bad = |reason: String| BindError::BadAction {
+        chord: chord.to_string(),
+        action: text.to_string(),
+        reason,
+    };
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let direction = |arg: Option<&&str>| -> Result<Direction, BindError> {
+        match arg.map(|s| s.to_ascii_lowercase()).as_deref() {
+            Some("left") => Ok(Direction::Left),
+            Some("right") => Ok(Direction::Right),
+            Some("up") => Ok(Direction::Up),
+            Some("down") => Ok(Direction::Down),
+            Some(other) => Err(bad(format!(
+                "`{other}` is not a direction (left, right, up, down)"
+            ))),
+            None => Err(bad("expected a direction (left, right, up, down)".into())),
+        }
+    };
+    let delta = |arg: Option<&&str>| -> Result<i64, BindError> {
+        let arg = arg.ok_or_else(|| bad("expected a signed integer step".into()))?;
+        arg.parse::<i64>()
+            .map_err(|_| bad(format!("`{arg}` is not an integer")))
+    };
+    let nullary = |action: Action| -> Result<Option<Action>, BindError> {
+        match words.get(1) {
+            None => Ok(Some(action)),
+            Some(extra) => Err(bad(format!("unexpected argument `{extra}`"))),
+        }
+    };
+    let unary = |action: Action| -> Result<Option<Action>, BindError> {
+        match words.get(2) {
+            None => Ok(Some(action)),
+            Some(extra) => Err(bad(format!("unexpected argument `{extra}`"))),
+        }
+    };
+
+    let Some(verb) = words.first() else {
+        return Err(bad("empty action".into()));
+    };
+    match verb.to_ascii_lowercase().as_str() {
+        "none" => nullary(Action::Quit).map(|_| None),
+        "quit" => nullary(Action::Quit),
+        "close-pane" => nullary(Action::ClosePane),
+        "run-terminal" => nullary(Action::Run(String::new())),
+        "stack-window" => nullary(Action::StackWindow),
+        "new-workspace" => nullary(Action::NewWorkspace),
+        "open-picker" => nullary(Action::OpenPicker),
+        "rename-workspace" => nullary(Action::RenameWorkspace),
+        "focus" => unary(Action::Focus(direction(words.get(1))?)),
+        "move" => unary(Action::Move(direction(words.get(1))?)),
+        "split" => unary(Action::Split(direction(words.get(1))?)),
+        "resize" => unary(Action::Resize(direction(words.get(1))?)),
+        "cycle-stack" => unary(Action::CycleStack(delta(words.get(1))?)),
+        "cycle-workspace" => unary(Action::CycleWorkspace(delta(words.get(1))?)),
+        "move-window-to-workspace" => unary(Action::MoveWindowToWorkspace(delta(words.get(1))?)),
+        other => Err(bad(format!("unknown action `{other}`"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pair(c: &str, a: &str) -> (String, String) {
+        (c.to_string(), a.to_string())
+    }
+
+    fn sup() -> Modifiers {
+        Modifiers {
+            logo: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn name_lookup_covers_letters_digits_function_and_named_keys() {
+        assert_eq!(keysym_from_name("q"), Some(Keysym::q));
+        assert_eq!(keysym_from_name("Q"), Some(Keysym::q));
+        assert_eq!(keysym_from_name("7"), Some(Keysym::_7));
+        assert_eq!(keysym_from_name("F1"), Some(Keysym::F1));
+        assert_eq!(keysym_from_name("f12"), Some(Keysym::F12));
+        assert_eq!(keysym_from_name("F13"), None);
+        assert_eq!(keysym_from_name("Return"), Some(Keysym::Return));
+        assert_eq!(keysym_from_name("Backslash"), Some(Keysym::backslash));
+        assert_eq!(keysym_from_name("bracketright"), Some(Keysym::bracketright));
+        assert_eq!(keysym_from_name("ISO_Left_Tab"), Some(Keysym::ISO_Left_Tab));
+        assert_eq!(keysym_from_name("nonsense"), None);
+    }
+
+    #[test]
+    fn default_table_has_expected_size() {
+        // The exact table is pinned by the `chord` legacy sweep; only guard against emptiness.
+        assert!(Bindings::default().len() > 40);
+    }
+
+    #[test]
+    fn override_replaces_only_the_named_chord() {
+        let b = Bindings::with_overrides(&[pair("Super+Q", "quit")]).unwrap();
+        let mut expected = Bindings::default();
+        expected.map.insert(
+            Chord {
+                modifiers: sup(),
+                keysym: Keysym::q,
+            },
+            Action::Quit,
+        );
+        expected.map.insert(
+            Chord {
+                modifiers: sup(),
+                keysym: Keysym::Q,
+            },
+            Action::Quit,
+        );
+        assert_eq!(b, expected);
+    }
+
+    #[test]
+    fn modifier_order_and_case_are_free() {
+        let a = Bindings::with_overrides(&[pair("ctrl+SHIFT+super+X", "quit")]).unwrap();
+        let b = Bindings::with_overrides(&[pair("Super+Shift+Control+x", "quit")]).unwrap();
+        assert_eq!(a, b);
+        let mods = Modifiers {
+            logo: true,
+            shift: true,
+            ctrl: true,
+        };
+        assert_eq!(a.get(mods, Keysym::x), Some(&Action::Quit));
+        assert_eq!(a.get(mods, Keysym::X), Some(&Action::Quit));
+    }
+
+    #[test]
+    fn none_unbinds_both_cases_and_iso_left_tab() {
+        let b = Bindings::with_overrides(&[
+            pair("Super+Shift+Q", "none"),
+            pair("Super+Shift+Tab", "none"),
+        ])
+        .unwrap();
+        let ss = Modifiers {
+            logo: true,
+            shift: true,
+            ctrl: false,
+        };
+        assert_eq!(b.get(ss, Keysym::q), None);
+        assert_eq!(b.get(ss, Keysym::Q), None);
+        assert_eq!(b.get(ss, Keysym::Tab), None);
+        assert_eq!(b.get(ss, Keysym::ISO_Left_Tab), None);
+        // Untouched neighbours survive.
+        assert_eq!(b.get(sup(), Keysym::Tab), Some(&Action::CycleStack(1)));
+    }
+
+    #[test]
+    fn later_entries_win_and_rebind_to_new_actions() {
+        let b = Bindings::with_overrides(&[
+            pair("Super+Backslash", "split down"),
+            pair("Super+Backslash", "split left"),
+            pair("Super+F5", "cycle-workspace -2"),
+            pair("Super+Shift+Ctrl+F6", "move-window-to-workspace +3"),
+        ])
+        .unwrap();
+        assert_eq!(
+            b.get(sup(), Keysym::backslash),
+            Some(&Action::Split(Direction::Left))
+        );
+        assert_eq!(b.get(sup(), Keysym::F5), Some(&Action::CycleWorkspace(-2)));
+        let m = Modifiers {
+            logo: true,
+            shift: true,
+            ctrl: true,
+        };
+        assert_eq!(
+            b.get(m, Keysym::F6),
+            Some(&Action::MoveWindowToWorkspace(3))
+        );
+    }
+
+    #[test]
+    fn every_action_form_parses() {
+        let cases: &[(&str, Action)] = &[
+            ("quit", Action::Quit),
+            ("close-pane", Action::ClosePane),
+            ("run-terminal", Action::Run(String::new())),
+            ("stack-window", Action::StackWindow),
+            ("new-workspace", Action::NewWorkspace),
+            ("open-picker", Action::OpenPicker),
+            ("rename-workspace", Action::RenameWorkspace),
+            ("focus left", Action::Focus(Direction::Left)),
+            ("move right", Action::Move(Direction::Right)),
+            ("split up", Action::Split(Direction::Up)),
+            ("resize down", Action::Resize(Direction::Down)),
+            ("cycle-stack -1", Action::CycleStack(-1)),
+            ("cycle-workspace +1", Action::CycleWorkspace(1)),
+            (
+                "move-window-to-workspace 2",
+                Action::MoveWindowToWorkspace(2),
+            ),
+        ];
+        for (text, expected) in cases {
+            let b = Bindings::with_overrides(&[pair("Super+F1", text)]).unwrap();
+            assert_eq!(b.get(sup(), Keysym::F1), Some(expected), "{text}");
+        }
+    }
+
+    #[test]
+    fn bad_chords_are_rejected_and_named() {
+        for chord in [
+            "",
+            "Super+",
+            "Q",
+            "Shift+Q",
+            "Super+Hyper+Q",
+            "Super+Super+Q",
+            "Super+Shift+Shift+Q",
+            "Super+NoSuchKey",
+            "Super+F13",
+        ] {
+            let err = Bindings::with_overrides(&[pair(chord, "quit")]).unwrap_err();
+            assert!(
+                matches!(&err, BindError::BadChord { chord: c, .. } if c == chord),
+                "{chord}: {err}"
+            );
+            assert!(err.to_string().contains(&format!("`{chord}`")));
+        }
+    }
+
+    #[test]
+    fn bad_actions_are_rejected_and_named() {
+        for action in [
+            "",
+            "teleport",
+            "focus",
+            "focus sideways",
+            "focus left now",
+            "cycle-stack",
+            "cycle-stack many",
+            "quit now",
+            "none now",
+            "split 3",
+        ] {
+            let err = Bindings::with_overrides(&[pair("Super+Q", action)]).unwrap_err();
+            assert!(
+                matches!(&err, BindError::BadAction { chord, action: a, .. }
+                    if chord == "Super+Q" && a == action),
+                "{action:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_in_a_later_entry_rejects_the_whole_set() {
+        assert!(
+            Bindings::with_overrides(&[pair("Super+Q", "quit"), pair("Super+Z", "bogus")]).is_err()
+        );
+    }
+
+    #[test]
+    fn no_overrides_is_default() {
+        assert_eq!(Bindings::with_overrides(&[]).unwrap(), Bindings::default());
+    }
+}

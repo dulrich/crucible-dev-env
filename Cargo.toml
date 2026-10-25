@@ -17,10 +17,14 @@ rust-version = "1.85"
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "2"
-kdl = "6"
 tracing = "0.1"
 tracing-subscriber = "0.3"
 serde = { version = "1", features = ["derive"] }
+
+# KDL 2.0 parser for `crucible-config` (phase-3 config file) and `crucible-persist` (workspace
+# files). `default-features` keeps the `span` feature, which the typed errors use for line/column
+# locations.
+kdl = "6"
 
 # X11 protocol bindings used by the XWayland integration (WS-5). Smithay's
 # `x11rb_event_source` feature drives the X11 WM connection from calloop; anvil

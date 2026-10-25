@@ -35,7 +35,7 @@ use tracing::{error, info, warn};
 use crate::{
     drawing::PointerElement,
     render::{CustomRenderElements, render_output},
-    state::{Backend, CompositorOptions, CrucibleState},
+    state::{Backend, CrucibleState},
 };
 
 /// Name advertised for the single output backed by the winit window.
@@ -80,7 +80,7 @@ impl Backend for WinitData {
 /// sending frame callbacks, and flushing clients.
 ///
 /// Returns once the window is closed or a fatal error occurs.
-pub fn run_winit(options: CompositorOptions) {
+pub fn run_winit() {
     let mut event_loop: EventLoop<CrucibleState<WinitData>> = match EventLoop::try_new() {
         Ok(loop_) => loop_,
         Err(err) => {
@@ -130,7 +130,7 @@ pub fn run_winit(options: CompositorOptions) {
     };
 
     let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
-    state.focus_follows_mouse = options.focus_follows_mouse;
+    state.apply_config(crate::config::load_startup_config());
     state
         .shm_state
         .update_formats(state.backend_data.backend.renderer().shm_formats());

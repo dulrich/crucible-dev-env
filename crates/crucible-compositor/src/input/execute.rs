@@ -15,6 +15,7 @@ use crucible_keys::Action;
 use crucible_layout::{LayoutError, World};
 use tracing::{debug, error, info, warn};
 
+use crate::config::pick_terminal;
 use crate::state::{Backend, CrucibleState};
 
 /// Amount by which a single resize keystroke adjusts the split ratio.
@@ -26,7 +27,7 @@ const RESIZE_DELTA: f64 = 0.05;
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Dispatches a resolved [`Action`] to its compositor effect or `World` op.
     ///
-    /// `Quit`/`Run`/`StackWindow`/`VtSwitch` are compositor-level and return immediately; every
+    /// `Quit`/`Run`/`StackWindow`/`OpenPicker`/`RenameWorkspace`/`VtSwitch` are compositor-level and return immediately; every
     /// other verb is a model mutation applied through [`Self::with_model`], the single entry point
     /// (`SameWorkspace` is logged at debug level as an expected no-op; anything else surfaces as a
     /// warning without panicking).
@@ -38,6 +39,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 return;
             }
             Action::Run(cmd) => {
+                let cmd = pick_terminal(self.config.terminal.command.as_deref(), cmd);
                 info!(cmd, "Super+Return: spawning terminal into focused pane");
                 self.spawn_terminal(&cmd);
                 return;
@@ -48,12 +50,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
             // keybind: doing so allocates a `WindowId` with no backing surface. The spawn IS the
             // stack — it stacks into the focused pane automatically.
             Action::StackWindow => {
-                let cmd = crucible_keys::terminal_command();
+                let cmd = pick_terminal(
+                    self.config.terminal.command.as_deref(),
+                    crucible_keys::terminal_command(),
+                );
                 info!(
                     cmd,
                     "Super+Shift+Return: spawning terminal to stack into focused pane"
                 );
                 self.spawn_terminal(&cmd);
+                return;
+            }
+            // WP-5 replaces these two with the picker / rename prompt.
+            Action::OpenPicker | Action::RenameWorkspace => {
+                info!(action = ?action, "picker not available yet");
                 return;
             }
             Action::VtSwitch(vt) => {
@@ -121,7 +131,7 @@ fn dispatch_vt_switch<B: Backend>(backend: &mut B, vt: i32) -> bool {
 /// without any compositor state (see `mod tests`).
 ///
 /// # Panics
-/// Panics if given a non-model [`Action`] (`Quit`, `Run`, `StackWindow`, `VtSwitch`);
+/// Panics if given a non-model [`Action`] (`Quit`, `Run`, `StackWindow`, `OpenPicker`, `RenameWorkspace`, `VtSwitch`);
 /// [`CrucibleState::handle_key_action`] always routes those before this function is reached.
 fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutError> {
     match action {
@@ -160,7 +170,12 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
         }
         Action::MoveWindowToWorkspace(delta) => move_window_to_adjacent_workspace(world, *delta),
         Action::ClosePane => world.close_pane(),
-        Action::Quit | Action::Run(_) | Action::StackWindow | Action::VtSwitch(_) => {
+        Action::Quit
+        | Action::Run(_)
+        | Action::StackWindow
+        | Action::OpenPicker
+        | Action::RenameWorkspace
+        | Action::VtSwitch(_) => {
             unreachable!("compositor-level action; handle_key_action routes it before with_model")
         }
     }

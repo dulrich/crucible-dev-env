@@ -2,7 +2,8 @@
 //!
 //! This is the canonical key policy (`reviews/2026-07-30-tn-code-review.md` F1): the compositor
 //! converts its own `ModifiersState`/`Keysym` types to [`Modifiers`]/[`Keysym`] at the edge and
-//! calls [`resolve`]; it owns no binding table of its own.
+//! calls [`resolve`] with its [`Bindings`]; it owns no binding table of its own. The table is data
+//! ([`Bindings::default`] plus config overrides, see [`crate::bindings`]), not a `match`.
 //!
 //! ## Default binding table
 //!
@@ -24,15 +25,17 @@
 //! | `Super+N`             | `NewWorkspace`                 | `World::new_workspace(auto_name)` |
 //! | `Super+Shift+]`       | `MoveWindowToWorkspace(1)`     | `World::move_window_to_workspace` |
 //! | `Super+Shift+[`       | `MoveWindowToWorkspace(-1)`    | `World::move_window_to_workspace` |
-//! | `Ctrl+Alt+F<n>`       | `VtSwitch(n)`                  | backend VT switch (independent of `Super`) |
+//! | `Super+P`             | `OpenPicker`                   | fuzzy workspace picker (WP-5)     |
+//! | `Super+Shift+R`       | `RenameWorkspace`              | rename the active workspace (WP-5)|
+//! | `Ctrl+Alt+F<n>`       | `VtSwitch(n)`                  | backend VT switch (hard-wired, independent of `Super`) |
 //!
-//! `rename-workspace` and the fuzzy workspace picker are **Phase 3** (no default binding yet).
-//!
-//! The bindings are a readable `match` table (modifier pattern × keysym → action) so **Phase 3**
-//! can replace the lookup with a config-driven one (`crucible-config`) without touching
-//! [`resolve`]'s callers.
+//! Letter chords bind both cases (Caps Lock), except plain `Super+H/J/K/L` which, as always,
+//! match the lowercase keysym only. Any chord except VT switching can be rebound or unbound from
+//! the `binds` block of the config file (`docs/config.md`).
 
 use crate::action::{Action, terminal_command};
+use crate::bindings::Bindings;
+#[cfg(test)]
 use crucible_layout::Direction;
 
 /// Re-export of the keysym type the chord table matches against.
@@ -46,7 +49,7 @@ pub use xkeysym::Keysym;
 ///
 /// Deliberately not the compositor's `ModifiersState`: `crucible-keys` has no Smithay dependency,
 /// so the compositor converts at the edge (see `crucible-compositor::input::keyboard`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct Modifiers {
     /// The `Super` (Mod4 / "logo"/"windows") key. CDE's leader; every default chord requires it
     /// except VT switching (`Ctrl+Alt+F<n>`), which is independent of the leader.
@@ -57,14 +60,16 @@ pub struct Modifiers {
     pub ctrl: bool,
 }
 
-/// Maps a modifier + keysym combination to an [`Action`], or `None` to forward the key.
+/// Maps a modifier + keysym combination to an [`Action`] via `bindings`, or `None` to forward the
+/// key.
 ///
 /// **Pure** (no compositor state) so the `Super`-leader binding table is unit-testable without a
-/// running compositor. Only `Super` (`modifiers.logo`) chords are bound (VT switching is the one
-/// exception, checked first and independent of `Super`); every other key returns `None` and is
-/// forwarded to the focused client.
+/// running compositor. VT switching (`Ctrl+Alt+F<n>` → `XF86_Switch_VT_<n>`) is hard-wired first,
+/// outside the table and independent of `Super`; after that only `Super` (`modifiers.logo`) chords
+/// are looked up, so every non-`Super` key returns `None` and is forwarded to the focused client.
+/// An `Action::Run` hit gets the terminal command from [`terminal_command`] filled in.
 #[must_use]
-pub fn resolve(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
+pub fn resolve(bindings: &Bindings, modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
     // VT switching (`Ctrl+Alt+F<n>`) takes priority over the Super leader and is independent of it.
     // libinput maps `Ctrl+Alt+F<n>` to the `XF86Switch_VT_<n>` keysyms; map those to a VT switch.
     if (Keysym::XF86_Switch_VT_1.raw()..=Keysym::XF86_Switch_VT_12.raw()).contains(&keysym.raw()) {
@@ -77,73 +82,20 @@ pub fn resolve(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
         return None;
     }
 
-    // Decompose modifier flags once for the table below.
-    let shift = modifiers.shift;
-    let ctrl = modifiers.ctrl;
-
-    // --- binding table (Phase 3: replace this match with a config-driven lookup) ---
-    //
-    // Ordering: plain Super first, then Super+Shift, then Super+Ctrl. Within each group, keysyms
-    // are listed in the order they appear in the module-level doc table.
-    match (shift, ctrl, keysym) {
-        // ---- plain Super ---------------------------------------------------------------
-        (false, false, Keysym::Return) => Some(Action::Run(terminal_command())),
-        // close-pane: Super+W (either case, so the bind works regardless of Caps Lock)
-        (false, false, Keysym::w | Keysym::W) => Some(Action::ClosePane),
-
-        // focus: Super+H/J/K/L
-        (false, false, Keysym::h) => Some(Action::Focus(Direction::Left)),
-        (false, false, Keysym::j) => Some(Action::Focus(Direction::Down)),
-        (false, false, Keysym::k) => Some(Action::Focus(Direction::Up)),
-        (false, false, Keysym::l) => Some(Action::Focus(Direction::Right)),
-
-        // split: Super+Backslash (right) / Super+Minus (down)
-        (false, false, Keysym::backslash) => Some(Action::Split(Direction::Right)),
-        (false, false, Keysym::minus) => Some(Action::Split(Direction::Down)),
-
-        // cycle-stack: Super+Tab (next) — Super+Shift+Tab (prev) handled below
-        (false, false, Keysym::Tab) => Some(Action::CycleStack(1)),
-
-        // workspace navigation: Super+] next, Super+[ prev, Super+N new
-        (false, false, Keysym::bracketright) => Some(Action::CycleWorkspace(1)),
-        (false, false, Keysym::bracketleft) => Some(Action::CycleWorkspace(-1)),
-        (false, false, Keysym::n | Keysym::N) => Some(Action::NewWorkspace),
-
-        // ---- Super+Shift -----------------------------------------------------------
-        // spawn into current pane (stack-window): Super+Shift+Return
-        (true, false, Keysym::Return) => Some(Action::StackWindow),
-
-        // quit: Super+Shift+Q (deliberately shifted so it is hard to hit by accident)
-        (true, false, Keysym::q | Keysym::Q) => Some(Action::Quit),
-
-        // move pane: Super+Shift+H/J/K/L
-        (true, false, Keysym::h | Keysym::H) => Some(Action::Move(Direction::Left)),
-        (true, false, Keysym::j | Keysym::J) => Some(Action::Move(Direction::Down)),
-        (true, false, Keysym::k | Keysym::K) => Some(Action::Move(Direction::Up)),
-        (true, false, Keysym::l | Keysym::L) => Some(Action::Move(Direction::Right)),
-
-        // cycle-stack prev: Super+Shift+Tab
-        (true, false, Keysym::Tab | Keysym::ISO_Left_Tab) => Some(Action::CycleStack(-1)),
-
-        // move window to workspace: Super+Shift+] next, Super+Shift+[ prev
-        (true, false, Keysym::bracketright) => Some(Action::MoveWindowToWorkspace(1)),
-        (true, false, Keysym::bracketleft) => Some(Action::MoveWindowToWorkspace(-1)),
-
-        // ---- Super+Ctrl ------------------------------------------------------------
-        // resize: Super+Ctrl+H/J/K/L
-        (false, true, Keysym::h | Keysym::H) => Some(Action::Resize(Direction::Left)),
-        (false, true, Keysym::j | Keysym::J) => Some(Action::Resize(Direction::Down)),
-        (false, true, Keysym::k | Keysym::K) => Some(Action::Resize(Direction::Up)),
-        (false, true, Keysym::l | Keysym::L) => Some(Action::Resize(Direction::Right)),
-
-        // ---- unmatched Super chord → forward to client -----------------------------
-        _ => None,
+    match bindings.get(modifiers, keysym)? {
+        Action::Run(_) => Some(Action::Run(terminal_command())),
+        other => Some(other.clone()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `resolve` against the default table (the pre-config behaviour these tests were written for).
+    fn resolve(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
+        super::resolve(&Bindings::default(), modifiers, keysym)
+    }
 
     /// Builds a [`Modifiers`] with only `logo` (Super) set.
     fn super_only() -> Modifiers {
@@ -317,5 +269,114 @@ mod tests {
         assert_eq!(resolve(no_mods, Keysym::backslash), None);
         assert_eq!(resolve(no_mods, Keysym::Tab), None);
         assert_eq!(resolve(no_mods, Keysym::bracketright), None);
+    }
+
+    // ---- new verbs and the pre-config oracle ------------------------------------------------
+
+    #[test]
+    fn new_verbs_have_default_chords() {
+        assert_eq!(resolve(super_only(), Keysym::p), Some(Action::OpenPicker));
+        assert_eq!(resolve(super_only(), Keysym::P), Some(Action::OpenPicker));
+        assert_eq!(
+            resolve(super_shift(), Keysym::r),
+            Some(Action::RenameWorkspace)
+        );
+        assert_eq!(
+            resolve(super_shift(), Keysym::R),
+            Some(Action::RenameWorkspace)
+        );
+        assert_eq!(resolve(Modifiers::default(), Keysym::p), None);
+    }
+
+    #[test]
+    fn overrides_flow_through_resolve_and_vt_switch_stays_hardwired() {
+        let b = Bindings::with_overrides(&[
+            ("Super+Shift+Q".to_string(), "none".to_string()),
+            ("Super+X".to_string(), "quit".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(super::resolve(&b, super_shift(), Keysym::q), None);
+        assert_eq!(
+            super::resolve(&b, super_only(), Keysym::x),
+            Some(Action::Quit)
+        );
+        // The table is empty, yet VT switching still resolves.
+        let empty = Bindings::with_overrides(&[]).unwrap();
+        assert_eq!(
+            super::resolve(&empty, Modifiers::default(), Keysym::XF86_Switch_VT_3),
+            Some(Action::VtSwitch(3))
+        );
+    }
+
+    /// The pre-config `match` table, verbatim (with `Run` payload elided), kept as an oracle.
+    fn legacy(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
+        if !modifiers.logo {
+            return None;
+        }
+        match (modifiers.shift, modifiers.ctrl, keysym) {
+            (false, false, Keysym::Return) => Some(Action::Run(String::new())),
+            (false, false, Keysym::w | Keysym::W) => Some(Action::ClosePane),
+            (false, false, Keysym::h) => Some(Action::Focus(Direction::Left)),
+            (false, false, Keysym::j) => Some(Action::Focus(Direction::Down)),
+            (false, false, Keysym::k) => Some(Action::Focus(Direction::Up)),
+            (false, false, Keysym::l) => Some(Action::Focus(Direction::Right)),
+            (false, false, Keysym::backslash) => Some(Action::Split(Direction::Right)),
+            (false, false, Keysym::minus) => Some(Action::Split(Direction::Down)),
+            (false, false, Keysym::Tab) => Some(Action::CycleStack(1)),
+            (false, false, Keysym::bracketright) => Some(Action::CycleWorkspace(1)),
+            (false, false, Keysym::bracketleft) => Some(Action::CycleWorkspace(-1)),
+            (false, false, Keysym::n | Keysym::N) => Some(Action::NewWorkspace),
+            (true, false, Keysym::Return) => Some(Action::StackWindow),
+            (true, false, Keysym::q | Keysym::Q) => Some(Action::Quit),
+            (true, false, Keysym::h | Keysym::H) => Some(Action::Move(Direction::Left)),
+            (true, false, Keysym::j | Keysym::J) => Some(Action::Move(Direction::Down)),
+            (true, false, Keysym::k | Keysym::K) => Some(Action::Move(Direction::Up)),
+            (true, false, Keysym::l | Keysym::L) => Some(Action::Move(Direction::Right)),
+            (true, false, Keysym::Tab | Keysym::ISO_Left_Tab) => Some(Action::CycleStack(-1)),
+            (true, false, Keysym::bracketright) => Some(Action::MoveWindowToWorkspace(1)),
+            (true, false, Keysym::bracketleft) => Some(Action::MoveWindowToWorkspace(-1)),
+            (false, true, Keysym::h | Keysym::H) => Some(Action::Resize(Direction::Left)),
+            (false, true, Keysym::j | Keysym::J) => Some(Action::Resize(Direction::Down)),
+            (false, true, Keysym::k | Keysym::K) => Some(Action::Resize(Direction::Up)),
+            (false, true, Keysym::l | Keysym::L) => Some(Action::Resize(Direction::Right)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn default_bindings_equal_the_legacy_match_over_a_full_sweep() {
+        let mut keysyms: Vec<Keysym> = (0x20..0x7f).map(Keysym::new).collect();
+        keysyms.extend([
+            Keysym::Return,
+            Keysym::Tab,
+            Keysym::ISO_Left_Tab,
+            Keysym::Escape,
+            Keysym::Left,
+            Keysym::F1,
+        ]);
+        let mut checked = 0;
+        for logo in [false, true] {
+            for shift in [false, true] {
+                for ctrl in [false, true] {
+                    let mods = Modifiers { logo, shift, ctrl };
+                    for keysym in &keysyms {
+                        let new = resolve(mods, *keysym);
+                        let old = legacy(mods, *keysym);
+                        let is_new_verb =
+                            matches!(new, Some(Action::OpenPicker | Action::RenameWorkspace));
+                        if is_new_verb {
+                            assert_eq!(old, None, "{mods:?} {keysym:?}: new verb shadows old");
+                            continue;
+                        }
+                        match (&new, &old) {
+                            (Some(Action::Run(_)), Some(Action::Run(_))) => {}
+                            _ => assert_eq!(new, old, "{mods:?} {keysym:?}"),
+                        }
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert!(checked > 700, "sweep too small: {checked}");
     }
 }

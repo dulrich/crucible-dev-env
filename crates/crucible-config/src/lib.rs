@@ -1,5 +1,733 @@
 //! Configuration for Crucible Dev Env (CDE).
 //!
 //! CDE is configured by a declarative KDL file (config-file-only for the MVP, settings UI on the
-//! roadmap). This crate handles parsing, validation, and hot-reload (watching the file and emitting
-//! a new config on change). Implementation lands in Phase 3 alongside persistence; see `plans/`.
+//! roadmap) at `$XDG_CONFIG_HOME/cde/config.kdl` (fallback `~/.config/cde/config.kdl`). This crate
+//! parses and validates it into a [`Config`]; a missing file is [`Config::default`], which equals
+//! CDE's pre-config behaviour. An invalid file is a typed [`ConfigError`] carrying the line and
+//! column of the offending node or entry.
+//!
+//! [`parse`] is pure; [`load`] adds exactly one file read. The crate knows nothing about chords or
+//! actions: `binds` entries are carried as raw `(chord, action)` strings and validated by
+//! `crucible-keys` (`Bindings::with_overrides`). Hot reload (WP-5) is the compositor's concern.
+//! The full schema is documented in `docs/config.md`.
+
+use std::path::{Path, PathBuf};
+
+use kdl::{KdlDocument, KdlNode, KdlValue};
+
+/// A 1-based line/column position in the config source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Location {
+    /// 1-based line number.
+    pub line: usize,
+    /// 1-based column (in characters).
+    pub column: usize,
+}
+
+impl std::fmt::Display for Location {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.line, self.column)
+    }
+}
+
+/// Why a config file could not be loaded. Every parse-level variant carries a [`Location`].
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// The file exists but could not be read.
+    #[error("cannot read {}: {source}", path.display())]
+    Io {
+        /// The config path.
+        path: PathBuf,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
+    /// The text is not valid KDL.
+    #[error("{at}: invalid KDL: {message}")]
+    Syntax {
+        /// Where the syntax error is.
+        at: Location,
+        /// The parser's message.
+        message: String,
+    },
+    /// A node name the schema does not define (at the top level or inside `picker`/`binds`).
+    #[error("{at}: unknown node `{name}` in {context}")]
+    UnknownNode {
+        /// Where the node is.
+        at: Location,
+        /// The node name.
+        name: String,
+        /// `"the top level"`, `"picker"` or `"binds"`.
+        context: &'static str,
+    },
+    /// A property the node does not accept.
+    #[error("{at}: unknown property `{name}` on `{node}`")]
+    UnknownProperty {
+        /// Where the property is.
+        at: Location,
+        /// The node it appears on.
+        node: String,
+        /// The property name.
+        name: String,
+    },
+    /// More arguments (or any arguments, where none are allowed) than the node takes.
+    #[error("{at}: unexpected extra argument on `{node}`")]
+    UnexpectedArgument {
+        /// Where the argument is.
+        at: Location,
+        /// The node it appears on.
+        node: String,
+    },
+    /// A required argument is absent.
+    #[error("{at}: `{node}` is missing {expected}")]
+    MissingArgument {
+        /// Where the node is.
+        at: Location,
+        /// The node name.
+        node: String,
+        /// What is missing, e.g. `"a command string"`.
+        expected: &'static str,
+    },
+    /// An argument or property has the wrong KDL type.
+    #[error("{at}: `{node}` {what} must be {expected}")]
+    WrongType {
+        /// Where the value is.
+        at: Location,
+        /// The node it appears on.
+        node: String,
+        /// Which value, e.g. `"argument"` or ``"property `inner`"``.
+        what: String,
+        /// The required type, e.g. `"a string"`.
+        expected: &'static str,
+    },
+    /// A value of the right type but outside what the schema allows (negative or oversized gap,
+    /// empty string).
+    #[error("{at}: `{node}` {what}: {message}")]
+    InvalidValue {
+        /// Where the value is.
+        at: Location,
+        /// The node it appears on.
+        node: String,
+        /// Which value.
+        what: String,
+        /// What is wrong with it.
+        message: String,
+    },
+    /// A single-use node appears twice.
+    #[error("{at}: duplicate `{name}` node")]
+    Duplicate {
+        /// Where the second occurrence is.
+        at: Location,
+        /// The node name.
+        name: String,
+    },
+}
+
+/// The terminal CDE spawns for `Super+Return` / `Super+Shift+Return`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalConfig {
+    /// The command to spawn. `None` keeps the built-in resolution (`$TERMINAL`, else `foot`).
+    pub command: Option<String>,
+    /// The flag a terminal takes to run a program (`-e` for most); used by WP-5/WP-6 launchers.
+    pub exec_flag: String,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        Self {
+            command: None,
+            exec_flag: "-e".to_string(),
+        }
+    }
+}
+
+/// Gaps between tiled panes, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GapsConfig {
+    /// Pixels between two sibling panes.
+    pub inner: u32,
+    /// Pixels around the whole output's tiled area.
+    pub outer: u32,
+}
+
+impl Default for GapsConfig {
+    /// Today's gaps: 6 px inner, 8 px outer (`crucible_layout::GapConfig::default`).
+    fn default() -> Self {
+        Self { inner: 6, outer: 8 }
+    }
+}
+
+/// The parsed CDE configuration. `Default` is CDE's behaviour with no config file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Config {
+    /// Terminal command and exec flag.
+    pub terminal: TerminalConfig,
+    /// Pane gaps.
+    pub gaps: GapsConfig,
+    /// Whether pointer motion moves focus.
+    pub focus_follows_mouse: bool,
+    /// Directories whose immediate subdirectories are workspace-picker candidates.
+    pub picker_roots: Vec<PathBuf>,
+    /// Binding overrides as raw `(chord, action)` strings, in file order.
+    pub binds: Vec<(String, String)>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            terminal: TerminalConfig::default(),
+            gaps: GapsConfig::default(),
+            focus_follows_mouse: true,
+            picker_roots: Vec::new(),
+            binds: Vec::new(),
+        }
+    }
+}
+
+/// Resolves the config path from the two environment values (`None` or empty = unset).
+#[must_use]
+pub fn config_path_from(xdg_config_home: Option<&str>, home: Option<&str>) -> Option<PathBuf> {
+    fn nonempty(v: Option<&str>) -> Option<&str> {
+        v.filter(|s| !s.is_empty())
+    }
+    if let Some(xdg) = nonempty(xdg_config_home) {
+        return Some(Path::new(xdg).join("cde").join("config.kdl"));
+    }
+    nonempty(home).map(|h| Path::new(h).join(".config").join("cde").join("config.kdl"))
+}
+
+/// `$XDG_CONFIG_HOME/cde/config.kdl`, else `$HOME/.config/cde/config.kdl`; `None` when neither
+/// variable is set.
+#[must_use]
+pub fn config_path() -> Option<PathBuf> {
+    config_path_from(
+        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+    )
+}
+
+/// Reads and parses the config at `path`; a missing file is `Ok(Config::default())`.
+///
+/// # Errors
+/// [`ConfigError::Io`] for an unreadable file, otherwise as [`parse`].
+pub fn load(path: &Path) -> Result<Config, ConfigError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => parse(&text),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Err(source) => Err(ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// Parses config text (KDL v2). Pure.
+///
+/// # Errors
+/// A [`ConfigError`] with the line and column of the first problem found.
+pub fn parse(text: &str) -> Result<Config, ConfigError> {
+    let doc = KdlDocument::parse_v2(text).map_err(|err| {
+        let (at, message) = err.diagnostics.first().map_or_else(
+            || (Location { line: 1, column: 1 }, err.to_string()),
+            |d| {
+                (
+                    locate(text, d.span.offset()),
+                    d.message.clone().unwrap_or_else(|| err.to_string()),
+                )
+            },
+        );
+        ConfigError::Syntax { at, message }
+    })?;
+
+    let mut config = Config::default();
+    let mut seen: Vec<&str> = Vec::new();
+    for node in doc.nodes() {
+        let name = node.name().value();
+        let at = locate(text, node.span().offset());
+        if matches!(
+            name,
+            "terminal" | "gaps" | "focus-follows-mouse" | "picker" | "binds"
+        ) && seen.contains(&name)
+        {
+            return Err(ConfigError::Duplicate {
+                at,
+                name: name.to_string(),
+            });
+        }
+        match name {
+            "terminal" => parse_terminal(text, node, &mut config.terminal)?,
+            "gaps" => parse_gaps(text, node, &mut config.gaps)?,
+            "focus-follows-mouse" => {
+                no_properties(text, node)?;
+                config.focus_follows_mouse = single_arg(text, node, "a #true or #false")?
+                    .as_bool()
+                    .ok_or_else(|| wrong_type(text, node, "argument".into(), "#true or #false"))?;
+            }
+            "picker" => config.picker_roots = parse_picker(text, node)?,
+            "binds" => config.binds = parse_binds(text, node)?,
+            other => {
+                return Err(ConfigError::UnknownNode {
+                    at,
+                    name: other.to_string(),
+                    context: "the top level",
+                });
+            }
+        }
+        seen.push(name);
+    }
+    Ok(config)
+}
+
+/// Converts a char offset into a 1-based line/column.
+fn locate(text: &str, offset: usize) -> Location {
+    let (mut line, mut column) = (1, 1);
+    for ch in text.chars().take(offset) {
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    Location { line, column }
+}
+
+fn node_name(node: &KdlNode) -> String {
+    node.name().value().to_string()
+}
+
+fn wrong_type(text: &str, node: &KdlNode, what: String, expected: &'static str) -> ConfigError {
+    ConfigError::WrongType {
+        at: locate(text, node.span().offset()),
+        node: node_name(node),
+        what,
+        expected,
+    }
+}
+
+/// The node's positional arguments with their locations.
+fn args<'a>(text: &str, node: &'a KdlNode) -> Vec<(&'a KdlValue, Location)> {
+    node.entries()
+        .iter()
+        .filter(|e| e.name().is_none())
+        .map(|e| (e.value(), locate(text, e.span().offset())))
+        .collect()
+}
+
+/// Exactly one positional argument.
+fn single_arg<'a>(
+    text: &str,
+    node: &'a KdlNode,
+    expected: &'static str,
+) -> Result<&'a KdlValue, ConfigError> {
+    let mut all = args(text, node).into_iter();
+    let (first, _) = all.next().ok_or_else(|| ConfigError::MissingArgument {
+        at: locate(text, node.span().offset()),
+        node: node_name(node),
+        expected,
+    })?;
+    if let Some((_, at)) = all.next() {
+        return Err(ConfigError::UnexpectedArgument {
+            at,
+            node: node_name(node),
+        });
+    }
+    Ok(first)
+}
+
+/// Rejects any property (for nodes that take none).
+fn no_properties(text: &str, node: &KdlNode) -> Result<(), ConfigError> {
+    allow_properties(text, node, &[])
+}
+
+fn allow_properties(text: &str, node: &KdlNode, allowed: &[&str]) -> Result<(), ConfigError> {
+    for entry in node.entries() {
+        if let Some(key) = entry.name()
+            && !allowed.contains(&key.value())
+        {
+            return Err(ConfigError::UnknownProperty {
+                at: locate(text, entry.span().offset()),
+                node: node_name(node),
+                name: key.value().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A required-string argument at `index` (0-based), exactly `count` arguments total.
+fn string_args<'a>(
+    text: &str,
+    node: &'a KdlNode,
+    labels: &[&'static str],
+) -> Result<Vec<&'a str>, ConfigError> {
+    let all = args(text, node);
+    let mut out = Vec::new();
+    for (i, label) in labels.iter().enumerate() {
+        let Some((value, at)) = all.get(i) else {
+            return Err(ConfigError::MissingArgument {
+                at: locate(text, node.span().offset()),
+                node: node_name(node),
+                expected: label,
+            });
+        };
+        let s = value.as_string().ok_or_else(|| ConfigError::WrongType {
+            at: *at,
+            node: node_name(node),
+            what: format!("argument {}", i + 1),
+            expected: "a string",
+        })?;
+        out.push(s);
+    }
+    if let Some((_, at)) = all.get(labels.len()) {
+        return Err(ConfigError::UnexpectedArgument {
+            at: *at,
+            node: node_name(node),
+        });
+    }
+    Ok(out)
+}
+
+fn nonempty(text: &str, node: &KdlNode, what: &str, s: &str) -> Result<(), ConfigError> {
+    if s.trim().is_empty() {
+        return Err(ConfigError::InvalidValue {
+            at: locate(text, node.span().offset()),
+            node: node_name(node),
+            what: what.to_string(),
+            message: "must not be empty".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_terminal(text: &str, node: &KdlNode, out: &mut TerminalConfig) -> Result<(), ConfigError> {
+    allow_properties(text, node, &["exec-flag"])?;
+    let cmd = string_args(text, node, &["a command string"])?[0];
+    nonempty(text, node, "command", cmd)?;
+    out.command = Some(cmd.to_string());
+    if let Some(entry) = node.entry("exec-flag") {
+        let at = locate(text, entry.span().offset());
+        let flag = entry
+            .value()
+            .as_string()
+            .ok_or_else(|| ConfigError::WrongType {
+                at,
+                node: node_name(node),
+                what: "property `exec-flag`".to_string(),
+                expected: "a string",
+            })?;
+        nonempty(text, node, "property `exec-flag`", flag)?;
+        out.exec_flag = flag.to_string();
+    }
+    Ok(())
+}
+
+fn parse_gaps(text: &str, node: &KdlNode, out: &mut GapsConfig) -> Result<(), ConfigError> {
+    allow_properties(text, node, &["inner", "outer"])?;
+    if let Some((_, at)) = args(text, node).first() {
+        return Err(ConfigError::UnexpectedArgument {
+            at: *at,
+            node: node_name(node),
+        });
+    }
+    for (key, slot) in [("inner", &mut out.inner), ("outer", &mut out.outer)] {
+        let Some(entry) = node.entry(key) else {
+            continue;
+        };
+        let at = locate(text, entry.span().offset());
+        let what = format!("property `{key}`");
+        let n = entry
+            .value()
+            .as_integer()
+            .ok_or_else(|| ConfigError::WrongType {
+                at,
+                node: node_name(node),
+                what: what.clone(),
+                expected: "an integer",
+            })?;
+        *slot = u32::try_from(n).map_err(|_| ConfigError::InvalidValue {
+            at,
+            node: node_name(node),
+            what,
+            message: format!("{n} is outside 0..={}", u32::MAX),
+        })?;
+    }
+    Ok(())
+}
+
+/// Children of a block node, rejecting arguments/properties on the block itself.
+fn block_children<'a>(text: &str, node: &'a KdlNode) -> Result<&'a [KdlNode], ConfigError> {
+    no_properties(text, node)?;
+    if let Some((_, at)) = args(text, node).first() {
+        return Err(ConfigError::UnexpectedArgument {
+            at: *at,
+            node: node_name(node),
+        });
+    }
+    Ok(node.children().map_or(&[][..], KdlDocument::nodes))
+}
+
+fn parse_picker(text: &str, node: &KdlNode) -> Result<Vec<PathBuf>, ConfigError> {
+    let mut roots = Vec::new();
+    for child in block_children(text, node)? {
+        if child.name().value() != "root" {
+            return Err(ConfigError::UnknownNode {
+                at: locate(text, child.span().offset()),
+                name: node_name(child),
+                context: "picker",
+            });
+        }
+        no_properties(text, child)?;
+        let dir = string_args(text, child, &["a directory string"])?[0];
+        nonempty(text, child, "directory", dir)?;
+        roots.push(PathBuf::from(dir));
+    }
+    Ok(roots)
+}
+
+fn parse_binds(text: &str, node: &KdlNode) -> Result<Vec<(String, String)>, ConfigError> {
+    let mut binds = Vec::new();
+    for child in block_children(text, node)? {
+        if child.name().value() != "bind" {
+            return Err(ConfigError::UnknownNode {
+                at: locate(text, child.span().offset()),
+                name: node_name(child),
+                context: "binds",
+            });
+        }
+        no_properties(text, child)?;
+        let a = string_args(text, child, &["a chord string", "an action string"])?;
+        binds.push((a[0].to_string(), a[1].to_string()));
+    }
+    Ok(binds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FULL: &str = r#"
+terminal "/tmp/cde/ghostty-cde" exec-flag="-e"
+gaps inner=4 outer=12
+focus-follows-mouse #false
+picker {
+    root "<code-root>"
+    root "/srv/work"
+}
+binds {
+    bind "Super+P" "open-picker"
+    bind "Super+Backslash" "split right"
+    bind "Super+Shift+Q" "none"
+}
+"#;
+
+    #[test]
+    fn empty_text_is_default() {
+        assert_eq!(parse("").unwrap(), Config::default());
+    }
+
+    #[test]
+    fn defaults_match_todays_behaviour() {
+        let c = Config::default();
+        assert_eq!(c.terminal.command, None);
+        assert_eq!(c.terminal.exec_flag, "-e");
+        assert_eq!(c.gaps, GapsConfig { inner: 6, outer: 8 });
+        assert!(c.focus_follows_mouse);
+        assert!(c.picker_roots.is_empty());
+        assert!(c.binds.is_empty());
+    }
+
+    #[test]
+    fn full_example_parses() {
+        let c = parse(FULL).unwrap();
+        assert_eq!(c.terminal.command.as_deref(), Some("/tmp/cde/ghostty-cde"));
+        assert_eq!(c.terminal.exec_flag, "-e");
+        assert_eq!(
+            c.gaps,
+            GapsConfig {
+                inner: 4,
+                outer: 12
+            }
+        );
+        assert!(!c.focus_follows_mouse);
+        assert_eq!(
+            c.picker_roots,
+            vec![
+                PathBuf::from("<code-root>"),
+                PathBuf::from("/srv/work")
+            ]
+        );
+        assert_eq!(
+            c.binds,
+            vec![
+                ("Super+P".to_string(), "open-picker".to_string()),
+                ("Super+Backslash".to_string(), "split right".to_string()),
+                ("Super+Shift+Q".to_string(), "none".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_files_keep_other_defaults() {
+        let c = parse("gaps inner=0\n").unwrap();
+        assert_eq!(c.gaps, GapsConfig { inner: 0, outer: 8 });
+        assert!(c.focus_follows_mouse);
+        let c = parse("terminal \"alacritty\"\n").unwrap();
+        assert_eq!(c.terminal.exec_flag, "-e");
+        let c = parse("terminal \"wezterm\" exec-flag=\"start\"\n").unwrap();
+        assert_eq!(c.terminal.exec_flag, "start");
+    }
+
+    fn err_at(text: &str) -> (ConfigError, Location) {
+        let err = parse(text).unwrap_err();
+        let at = match &err {
+            ConfigError::Syntax { at, .. }
+            | ConfigError::UnknownNode { at, .. }
+            | ConfigError::UnknownProperty { at, .. }
+            | ConfigError::UnexpectedArgument { at, .. }
+            | ConfigError::MissingArgument { at, .. }
+            | ConfigError::WrongType { at, .. }
+            | ConfigError::InvalidValue { at, .. }
+            | ConfigError::Duplicate { at, .. } => *at,
+            ConfigError::Io { .. } => panic!("unexpected io error"),
+        };
+        (err, at)
+    }
+
+    #[test]
+    fn syntax_error_has_location() {
+        let (err, at) = err_at("gaps inner=4\nterminal \"unterminated\n");
+        assert!(matches!(err, ConfigError::Syntax { .. }), "{err}");
+        assert!(at.line >= 2, "{at}");
+    }
+
+    #[test]
+    fn unknown_top_level_node() {
+        let (err, at) = err_at("gaps inner=1\n\nwallpaper \"x.png\"\n");
+        assert!(
+            matches!(&err, ConfigError::UnknownNode { name, context, .. }
+                if name == "wallpaper" && *context == "the top level"),
+            "{err}"
+        );
+        assert_eq!(at, Location { line: 3, column: 1 });
+    }
+
+    #[test]
+    fn unknown_nodes_inside_blocks() {
+        let (err, at) = err_at("picker {\n    dir \"/x\"\n}\n");
+        assert!(matches!(&err, ConfigError::UnknownNode { context, .. } if *context == "picker"));
+        assert_eq!(at.line, 2);
+        let (err, _) = err_at("binds {\n    key \"Super+P\" \"quit\"\n}\n");
+        assert!(matches!(&err, ConfigError::UnknownNode { context, .. } if *context == "binds"));
+    }
+
+    #[test]
+    fn unknown_property() {
+        let (err, at) = err_at("gaps inner=1 middle=2\n");
+        assert!(
+            matches!(&err, ConfigError::UnknownProperty { name, node, .. }
+                if name == "middle" && node == "gaps"),
+            "{err}"
+        );
+        assert_eq!(
+            at,
+            Location {
+                line: 1,
+                column: 14
+            }
+        );
+        let (err, _) = err_at("terminal \"foot\" flag=\"-e\"\n");
+        assert!(matches!(err, ConfigError::UnknownProperty { .. }));
+    }
+
+    #[test]
+    fn wrong_value_types() {
+        let (err, _) = err_at("gaps inner=\"big\"\n");
+        assert!(
+            matches!(&err, ConfigError::WrongType { expected, .. } if *expected == "an integer")
+        );
+        let (err, _) = err_at("terminal 5\n");
+        assert!(matches!(&err, ConfigError::WrongType { expected, .. } if *expected == "a string"));
+        let (err, _) = err_at("focus-follows-mouse \"yes\"\n");
+        assert!(matches!(&err, ConfigError::WrongType { .. }));
+        let (err, _) = err_at("terminal \"foot\" exec-flag=1\n");
+        assert!(matches!(&err, ConfigError::WrongType { what, .. } if what.contains("exec-flag")));
+        let (err, _) = err_at("binds {\n    bind \"Super+P\" 3\n}\n");
+        assert!(matches!(&err, ConfigError::WrongType { .. }));
+    }
+
+    #[test]
+    fn out_of_range_and_empty_values() {
+        let (err, _) = err_at("gaps outer=-1\n");
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
+        let (err, _) = err_at("gaps outer=99999999999\n");
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
+        let (err, _) = err_at("terminal \"\"\n");
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn missing_and_extra_arguments() {
+        let (err, _) = err_at("terminal\n");
+        assert!(matches!(err, ConfigError::MissingArgument { .. }));
+        let (err, _) = err_at("focus-follows-mouse\n");
+        assert!(matches!(err, ConfigError::MissingArgument { .. }));
+        let (err, _) = err_at("binds {\n    bind \"Super+P\"\n}\n");
+        assert!(matches!(err, ConfigError::MissingArgument { .. }));
+        let (err, at) = err_at("terminal \"a\" \"b\"\n");
+        assert!(matches!(err, ConfigError::UnexpectedArgument { .. }));
+        assert_eq!(at.column, 14);
+        let (err, _) = err_at("gaps 4\n");
+        assert!(matches!(err, ConfigError::UnexpectedArgument { .. }));
+    }
+
+    #[test]
+    fn duplicate_single_use_node() {
+        let (err, at) = err_at("gaps inner=1\ngaps inner=2\n");
+        assert!(matches!(&err, ConfigError::Duplicate { name, .. } if name == "gaps"));
+        assert_eq!(at.line, 2);
+    }
+
+    #[test]
+    fn errors_display_their_location() {
+        let (err, _) = err_at("\n  wallpaper \"x\"\n");
+        let msg = err.to_string();
+        assert!(msg.starts_with("2:3:"), "{msg}");
+    }
+
+    #[test]
+    fn config_path_prefers_xdg_then_home() {
+        assert_eq!(
+            config_path_from(Some("/x"), Some("/h")),
+            Some(PathBuf::from("/x/cde/config.kdl"))
+        );
+        assert_eq!(
+            config_path_from(None, Some("/h")),
+            Some(PathBuf::from("/h/.config/cde/config.kdl"))
+        );
+        assert_eq!(
+            config_path_from(Some(""), Some("/h")),
+            Some(PathBuf::from("/h/.config/cde/config.kdl"))
+        );
+        assert_eq!(config_path_from(None, None), None);
+    }
+
+    #[test]
+    fn load_missing_file_is_default_and_bad_file_errors() {
+        let dir = std::env::temp_dir().join(format!("cde-config-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("absent.kdl");
+        assert_eq!(load(&missing).unwrap(), Config::default());
+
+        let good = dir.join("good.kdl");
+        std::fs::write(&good, "gaps inner=2\n").unwrap();
+        assert_eq!(load(&good).unwrap().gaps.inner, 2);
+
+        let bad = dir.join("bad.kdl");
+        std::fs::write(&bad, "nope\n").unwrap();
+        assert!(matches!(load(&bad), Err(ConfigError::UnknownNode { .. })));
+
+        // A directory in place of the file is an I/O error, not "missing".
+        assert!(matches!(load(&dir), Err(ConfigError::Io { .. })));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

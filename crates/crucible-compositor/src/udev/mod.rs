@@ -75,7 +75,7 @@ use crate::{
     drawing::PointerElement,
     element::WindowElement,
     render::OutputRenderElements,
-    state::{Backend, CompositorOptions, CrucibleState},
+    state::{Backend, CrucibleState},
 };
 
 use self::device::{BackendData, DeviceAddError};
@@ -171,7 +171,7 @@ impl Backend for UdevData {
 /// libinput source, adds every present GPU (primary first), starts XWayland, then runs the calloop
 /// event loop until [`CrucibleState::running`] is cleared. Rendering is driven per-output on VBlank;
 /// see [`CrucibleState::frame_finish`] / [`CrucibleState::render_surface`].
-pub fn run_udev(options: CompositorOptions) {
+pub fn run_udev() {
     let mut event_loop = match EventLoop::try_new() {
         Ok(ev) => ev,
         Err(err) => {
@@ -215,7 +215,7 @@ pub fn run_udev(options: CompositorOptions) {
         keyboards: Vec::new(),
     };
     let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
-    state.focus_follows_mouse = options.focus_follows_mouse;
+    state.apply_config(crate::config::load_startup_config());
 
     // Initialize the udev backend (GPU enumeration + hotplug).
     let udev_backend = match UdevBackend::new(&state.seat_name) {

@@ -281,6 +281,7 @@ dependencies = [
 name = "crucible-compositor"
 version = "0.0.0"
 dependencies = [
+ "crucible-config",
  "crucible-keys",
  "crucible-layout",
  "smithay",
@@ -294,12 +295,17 @@ dependencies = [
 [[package]]
 name = "crucible-config"
 version = "0.0.0"
+dependencies = [
+ "kdl",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "crucible-keys"
 version = "0.0.0"
 dependencies = [
  "crucible-layout",
+ "thiserror 2.0.18",
  "xkeysym",
 ]
 

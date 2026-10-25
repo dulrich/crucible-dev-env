@@ -9,6 +9,7 @@
 //! Each module below owns one durable boundary; `plans/` records how they arrived.
 
 /// Compositor state, Wayland globals, and calloop event-loop wiring.
+pub mod config;
 pub mod state;
 
 /// Nested `winit` development backend.

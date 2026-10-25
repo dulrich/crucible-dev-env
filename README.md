@@ -72,10 +72,9 @@ cargo run -- --tty-udev
 Set `$TERMINAL` before launching if you don't have `foot` installed, e.g. `TERMINAL=alacritty cargo
 run -- --winit`. Logging verbosity is controlled by `RUST_LOG` (e.g. `RUST_LOG=debug`).
 
-Focus follows the mouse by default: hovering a window focuses it, like clicking it. Disable it with
-`--no-focus-follows-mouse` after the backend flag (e.g. `cargo run -- --tty-udev
---no-focus-follows-mouse`) or `CDE_FOCUS_FOLLOWS_MOUSE=0` (`false`/`off` also work). The Phase 3
-config file will replace this switch.
+Focus follows the mouse by default: hovering a window focuses it, like clicking it. Turn it off with
+`focus-follows-mouse #false` in `~/.config/cde/config.kdl`; see [`docs/config.md`](docs/config.md) for the
+full config schema (terminal, gaps, picker roots, rebinding chords).
 
 Once inside, press **`Super+Return`** to spawn your first terminal, then **`Super+\`** to split. See
 the full keymap below.
@@ -83,7 +82,7 @@ the full keymap below.
 ## Keybindings
 
 All bindings are `Super`-prefixed (the `Super`/`Mod4`/"logo" key) and never squat shell/editor
-hotkeys. Defaults (Phase 3 will make these configurable):
+hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 
 | Chord | Verb |
 |-------|------|
@@ -99,6 +98,8 @@ hotkeys. Defaults (Phase 3 will make these configurable):
 | `Super+Ctrl+H` / `J` / `K` / `L` | Resize the focused pane (shift the split divider) |
 | `Super+]` / `Super+[` | Next / previous workspace (on the focused output) |
 | `Super+N` | New workspace (auto-named) |
+| `Super+P` | Open the workspace picker (not available until the picker lands) |
+| `Super+Shift+R` | Rename the active workspace (not available until the picker lands) |
 | `Super+Shift+]` / `Super+Shift+[` | Move the focused window to the next / previous workspace |
 | `Ctrl+Alt+F1`…`F12` | Switch virtual terminal (`--tty-udev` only) |
 

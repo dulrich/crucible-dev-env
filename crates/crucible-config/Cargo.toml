@@ -11,3 +11,5 @@ description = "KDL configuration parsing, validation, and hot-reload for Crucibl
 workspace = true
 
 [dependencies]
+kdl.workspace = true
+thiserror.workspace = true

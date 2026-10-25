@@ -19,8 +19,9 @@ pub const DEFAULT_TERMINALS: &[&str] = &["foot", "alacritty", "kitty", "weston-t
 /// A CDE verb triggered by an intercepted `Super`-leader chord (or, for [`Action::VtSwitch`], a
 /// libinput `Ctrl+Alt+F<n>` chord independent of the leader).
 ///
-/// Produced by [`crate::chord::resolve`]. `Quit`, `Run`, `StackWindow`, and `VtSwitch` are
-/// compositor-level (spawn a process, stop the loop, or ask the backend to switch VTs); every
+/// Produced by [`crate::chord::resolve`]. `Quit`, `Run`, `StackWindow`, `OpenPicker`,
+/// `RenameWorkspace` and `VtSwitch` are
+/// compositor-level (spawn a process, stop the loop, open UI, or ask the backend to switch VTs); every
 /// other variant names a `crucible_layout::World` operation the compositor applies through its
 /// single mutation entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +74,12 @@ pub enum Action {
     ///
     /// No-op when there is no focused window or only one workspace exists.
     MoveWindowToWorkspace(i64),
+
+    /// Open the fuzzy workspace picker. `Super+P`. Implemented by WP-5; until then the compositor
+    /// only logs that it is not available.
+    OpenPicker,
+    /// Rename the active workspace (interactive prompt). `Super+Shift+R`. Implemented by WP-5.
+    RenameWorkspace,
 
     /// Switch to virtual terminal `n` (only meaningful on the udev/DRM backend).
     ///

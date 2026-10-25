@@ -97,7 +97,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                         shift: modifiers.shift,
                         ctrl: modifiers.ctrl,
                     };
-                    let action = crucible_keys::resolve(mods, keysym);
+                    let action = crucible_keys::resolve(&state.bindings, mods, keysym);
                     if action.is_some() {
                         state.suppressed_keys.consume_press(raw_keycode);
                     }

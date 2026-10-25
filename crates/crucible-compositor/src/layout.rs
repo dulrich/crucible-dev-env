@@ -50,8 +50,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crucible_layout::{
-    FocusChange, GapConfig, LayoutChange, LayoutError, OutputId, PaneId, Projection, Rect,
-    WindowId, World,
+    FocusChange, LayoutChange, LayoutError, OutputId, PaneId, Projection, Rect, WindowId, World,
 };
 use smithay::output::Output;
 use smithay::utils::{Logical, Point, Rectangle, Size};
@@ -273,13 +272,6 @@ pub(crate) fn to_logical(rect: Rect) -> Rectangle<i32, Logical> {
     )
 }
 
-/// The gaps every model-to-screen mapping uses: the projection, the pointer pane hit-test and the
-/// empty-pane focus ring all read this one accessor so they can never disagree.
-#[must_use]
-pub fn layout_gaps() -> GapConfig {
-    GapConfig::default()
-}
-
 /// What keyboard focus must do to match the model after a pointer-driven model focus change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyboardSync {
@@ -319,7 +311,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// and therefore no configures and no focus churn.
     pub fn apply_layout(&mut self) {
         let bindings = self.output_bindings();
-        let next: Projection = self.layout.world.project(&bindings, layout_gaps());
+        let next: Projection = self.layout.world.project(&bindings, self.gaps);
         let diff = self.projection.diff(&next);
         if diff.is_empty() {
             return;
@@ -372,7 +364,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(crate) fn pane_under(&self, location: Point<f64, Logical>) -> Option<PaneId> {
         self.layout.world.pane_at(
             &self.output_bindings(),
-            layout_gaps(),
+            self.gaps,
             location.x.floor() as i32,
             location.y.floor() as i32,
         )
@@ -384,7 +376,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let pane = self.layout.world.focused_empty_pane()?;
         self.layout
             .world
-            .pane_rect(&self.output_bindings(), layout_gaps(), pane)
+            .pane_rect(&self.output_bindings(), self.gaps, pane)
     }
 
     /// Makes keyboard focus match the model's focused window (see [`keyboard_sync`]).
@@ -841,7 +833,9 @@ mod tests {
         let managed = layout.open_managed(TestElement::new(1));
         layout.track_unmanaged(TestElement::new(2));
 
-        let projection = layout.world.project_stored(layout_gaps());
+        let projection = layout
+            .world
+            .project_stored(crucible_layout::GapConfig::default());
         assert_eq!(projection.windows().len(), 1);
         assert!(projection.is_visible(managed));
         assert_eq!(projection.focus(), Some(managed));
@@ -849,7 +843,11 @@ mod tests {
         // Re-deriving without touching the model yields an empty diff: applying it is a no-op.
         assert!(
             projection
-                .diff(&layout.world.project_stored(layout_gaps()))
+                .diff(
+                    &layout
+                        .world
+                        .project_stored(crucible_layout::GapConfig::default())
+                )
                 .is_empty()
         );
     }

@@ -21,6 +21,10 @@
 
 use std::sync::{Arc, atomic::AtomicBool};
 
+use crucible_config::Config;
+use crucible_keys::Bindings;
+use crucible_layout::GapConfig;
+
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::delegate_dispatch2;
 use smithay::{
@@ -202,8 +206,16 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub xdisplay: Option<u32>,
     /// Whether pointer motion moves focus onto the managed window (or output) under the cursor.
     ///
-    /// On by default; set from [`CompositorOptions`] by the backend entry points.
+    /// On by default; set from the config (`focus-follows-mouse`) by [`Self::apply_config`].
     pub focus_follows_mouse: bool,
+    /// The active configuration (defaults until a config file is applied); see
+    /// [`Self::apply_config`].
+    pub config: Config,
+    /// The active chord table, rebuilt from `config.binds` by [`Self::apply_config`].
+    pub bindings: Bindings,
+    /// The active pane gaps, from `config.gaps`: the projection, the pointer pane hit-test and the
+    /// empty-pane focus ring all read this one field so they can never disagree.
+    pub gaps: GapConfig,
     /// The last hover target seen by focus-follows-mouse; focus moves only when this changes
     /// (pointer *enter*), so keyboard-driven focus is not undone by a pointer twitch.
     pub hover_target: Option<HoverTarget>,
@@ -304,23 +316,6 @@ mod hover_tests {
     }
 }
 
-/// Runtime options threaded from the binary's CLI/env parsing into the compositor.
-///
-/// A pre-phase-3 stopgap: the phase-3 KDL config replaces these switches.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CompositorOptions {
-    /// Pointer motion focuses the managed window under the cursor (default `true`).
-    pub focus_follows_mouse: bool,
-}
-
-impl Default for CompositorOptions {
-    fn default() -> Self {
-        Self {
-            focus_follows_mouse: true,
-        }
-    }
-}
-
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Builds the compositor state on top of an existing [`Display`] and calloop [`LoopHandle`].
     ///
@@ -418,6 +413,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
             xwm: None,
             xdisplay: None,
             focus_follows_mouse: true,
+            config: Config::default(),
+            bindings: Bindings::default(),
+            gaps: GapConfig::default(),
             hover_target: None,
         }
     }
