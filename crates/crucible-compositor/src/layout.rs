@@ -266,7 +266,7 @@ impl<E: Payload> LayoutState<E> {
 
 /// Converts a model [`Rect`] (global Space coordinates) into a Smithay logical rectangle.
 #[must_use]
-fn to_logical(rect: Rect) -> Rectangle<i32, Logical> {
+pub(crate) fn to_logical(rect: Rect) -> Rectangle<i32, Logical> {
     Rectangle::new(
         Point::from((rect.x, rect.y)),
         Size::from((rect.width.max(0), rect.height.max(0))),

@@ -53,7 +53,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     element::WindowElement,
-    layout::Teardown,
+    layout::{Binding, Teardown, to_logical},
     state::{Backend, CrucibleState},
 };
 
@@ -214,14 +214,16 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
         h: Option<u32>,
         _reorder: Option<Reorder>,
     ) {
-        // Honor size requests but not self-positioning (placement is the compositor's job).
-        let mut geo = window.last_configure();
-        if let Some(w) = w {
-            geo.size.w = w as i32;
-        }
-        if let Some(h) = h {
-            geo.size.h = h as i32;
-        }
+        // Managed windows are sized by the projection alone (ICCCM 4.1.5: the client is told its
+        // real geometry via a synthetic ConfigureNotify); only unmanaged ones honour the size.
+        let placement = match self.layout.resolve(|e| e.x11_surface() == Some(&window)) {
+            Binding::Managed(id) => match self.projection.rect_of(id) {
+                Some(rect) => X11Placement::ManagedVisible(to_logical(rect)),
+                None => X11Placement::ManagedHidden,
+            },
+            Binding::Unmanaged | Binding::None => X11Placement::Unmanaged,
+        };
+        let geo = x11_configure_geometry(placement, w, h, window.last_configure());
         let _ = window.configure(geo);
     }
 
@@ -335,5 +337,78 @@ mod tests {
         assert_eq!(xwayland_scale(Some("0")), 1.0);
         assert_eq!(xwayland_scale(Some("-3")), 1.0);
         assert_eq!(xwayland_scale(Some("")), 1.0);
+    }
+}
+
+/// Where a window that sent an X11 `ConfigureRequest` stands in the layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum X11Placement {
+    /// Managed and in the current projection, at this rect.
+    ManagedVisible(Rectangle<i32, Logical>),
+    /// Managed but hidden (absent from the projection): its last configured geometry stands.
+    ManagedHidden,
+    /// Not bound in the `World` (yet).
+    Unmanaged,
+}
+
+/// The geometry to answer a `ConfigureRequest` with. **Pure** so the rule is unit-testable.
+///
+/// Managed windows ignore the requested size and get their projected rect (visible) or their
+/// last configured geometry (hidden) re-sent. Unmanaged ones keep today's rule: honour the size,
+/// never the position.
+fn x11_configure_geometry(
+    placement: X11Placement,
+    w: Option<u32>,
+    h: Option<u32>,
+    last: Rectangle<i32, Logical>,
+) -> Rectangle<i32, Logical> {
+    match placement {
+        X11Placement::ManagedVisible(rect) => rect,
+        X11Placement::ManagedHidden => last,
+        X11Placement::Unmanaged => {
+            let mut geo = last;
+            if let Some(w) = w {
+                geo.size.w = w as i32;
+            }
+            if let Some(h) = h {
+                geo.size.h = h as i32;
+            }
+            geo
+        }
+    }
+}
+
+#[cfg(test)]
+mod configure_tests {
+    use super::*;
+
+    fn r(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Logical> {
+        Rectangle::new((x, y).into(), (w, h).into())
+    }
+
+    #[test]
+    fn managed_visible_gets_projected_rect_ignoring_request() {
+        let proj = r(10, 20, 300, 200);
+        let got = x11_configure_geometry(
+            X11Placement::ManagedVisible(proj),
+            Some(999),
+            Some(888),
+            r(0, 0, 50, 50),
+        );
+        assert_eq!(got, proj);
+    }
+
+    #[test]
+    fn managed_hidden_resends_last_geometry_ignoring_request() {
+        let last = r(5, 6, 70, 80);
+        let got = x11_configure_geometry(X11Placement::ManagedHidden, Some(999), Some(888), last);
+        assert_eq!(got, last);
+    }
+
+    #[test]
+    fn unmanaged_honours_size_but_never_position() {
+        let last = r(5, 6, 70, 80);
+        let got = x11_configure_geometry(X11Placement::Unmanaged, Some(400), None, last);
+        assert_eq!(got, r(5, 6, 400, 80));
     }
 }

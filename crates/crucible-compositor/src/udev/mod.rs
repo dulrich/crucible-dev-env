@@ -157,6 +157,9 @@ impl Backend for UdevData {
             Ok(()) => true,
             Err(err) => {
                 error!(vt, %err, "Failed to switch VT");
+                warn!(
+                    "VT switch: libseat's logind backend fails without setting errno, so the OS error above (e.g. EAGAIN) is unreliable; see libseat's preceding \"Could not switch session\" log line - common causes are a missing polkit daemon (logind needs it for org.freedesktop.login1.chvt as non-root) or this session not being the active session on seat0"
+                );
                 false
             }
         }
