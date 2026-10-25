@@ -26,6 +26,43 @@ impl World {
         id
     }
 
+    /// Opens a new window into `pane`'s stack at `min(index, len)` without changing the workspace's
+    /// focused pane, the active workspace, or which window the pane has focused.
+    ///
+    /// Inserting before the focused window shifts the focused index so the same window stays
+    /// focused; an empty pane's focus is 0. Used to replay a saved stack order in any map order.
+    /// Errors with [`LayoutError::UnknownPane`] if `pane` is not in the model.
+    pub fn open_window_at(&mut self, pane: PaneId, index: usize) -> Result<WindowId, LayoutError> {
+        let p = self
+            .panes
+            .get_mut(&pane)
+            .ok_or(LayoutError::UnknownPane(pane))?;
+        let id = WindowId::from_raw(self.window_ids.alloc());
+        let at = index.min(p.windows.len());
+        if !p.windows.is_empty() && at <= p.focused {
+            p.focused += 1;
+        }
+        p.windows.insert(at, id);
+        self.windows.insert(id, Window { id });
+        Ok(id)
+    }
+
+    /// Sets `pane`'s focused stack index. Errors with [`LayoutError::UnknownPane`] or, for an index
+    /// not below the stack length, [`LayoutError::StackIndexOutOfRange`] (an empty pane accepts
+    /// only 0).
+    pub fn set_stack_focus(&mut self, pane: PaneId, index: usize) -> Result<(), LayoutError> {
+        let p = self
+            .panes
+            .get_mut(&pane)
+            .ok_or(LayoutError::UnknownPane(pane))?;
+        let len = p.windows.len();
+        if index >= len.max(1) {
+            return Err(LayoutError::StackIndexOutOfRange { pane, index, len });
+        }
+        p.focused = index;
+        Ok(())
+    }
+
     /// Closes `window`, removing it from whatever pane holds it.
     ///
     /// The pane persists even if this empties it: panes are only removed by the explicit

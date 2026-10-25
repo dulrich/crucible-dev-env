@@ -1,0 +1,13 @@
+version 1
+workspace "crucible-dev-env" root="crucible-dev-env" {
+    focused-pane 1            // index in tree order
+    split axis="horizontal" ratio=0.5 {
+        pane focused=0 {
+            terminal cwd="crucible-dev-env" command="cargo test"
+        }
+        split axis="vertical" ratio=0.6 {
+            pane focused=0 { terminal cwd="crucible-dev-env" }
+            pane focused=0 { app app-id="firefox" cmdline="firefox-esr" }
+        }
+    }
+}

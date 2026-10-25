@@ -20,11 +20,14 @@
 
 pub mod geometry;
 mod ids;
+mod snapshot;
 mod tree;
 mod world;
 
 pub use geometry::{GapConfig, Rect};
 pub use ids::{OutputId, PaneId, WindowId, WorkspaceId};
+pub use snapshot::{LayoutNode, WorkspaceLayout};
+pub use tree::Axis;
 pub use world::{
     FocusChange, FocusPath, LayoutChange, LayoutError, Output, Pane, Projection, ProjectionDiff,
     Window, Workspace, World,

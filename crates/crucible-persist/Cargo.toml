@@ -12,3 +12,6 @@ workspace = true
 
 [dependencies]
 crucible-layout = { path = "../crucible-layout" }
+kdl.workspace = true
+thiserror.workspace = true
+

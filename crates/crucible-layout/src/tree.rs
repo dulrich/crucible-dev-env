@@ -13,6 +13,7 @@
 //! whole structure is `Clone` and free of `Rc`/`RefCell`.
 
 use crate::Direction;
+use crate::snapshot::LayoutNode;
 
 /// Orientation of an internal split node.
 ///
@@ -20,7 +21,7 @@ use crate::Direction;
 /// them top and bottom (a *horizontal* divider). This matches `split-right` → horizontal and
 /// `split-down` → vertical.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Axis {
+pub enum Axis {
     /// Children are placed left | right.
     Horizontal,
     /// Children are placed top | bottom.
@@ -120,6 +121,80 @@ impl<L: Copy + PartialEq> SplitTree<L> {
             nodes,
             root: NodeId(0),
             free: Vec::new(),
+        }
+    }
+
+    /// Builds a tree shaped like `node`, allocating each leaf's payload from `next` in tree order.
+    ///
+    /// Returns the tree and the payloads in tree order. The caller validates ratios beforehand.
+    pub(crate) fn from_layout(node: &LayoutNode, mut next: impl FnMut() -> L) -> (Self, Vec<L>) {
+        let mut tree = Self {
+            nodes: Vec::new(),
+            root: NodeId(0),
+            free: Vec::new(),
+        };
+        let mut leaves = Vec::new();
+        let root = tree.build(node, None, &mut next, &mut leaves);
+        tree.root = root;
+        (tree, leaves)
+    }
+
+    fn build(
+        &mut self,
+        node: &LayoutNode,
+        parent: Option<NodeId>,
+        next: &mut impl FnMut() -> L,
+        leaves: &mut Vec<L>,
+    ) -> NodeId {
+        match node {
+            LayoutNode::Pane => {
+                let value = next();
+                leaves.push(value);
+                self.alloc(Node::Leaf { value, parent })
+            }
+            LayoutNode::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                // Reserve the slot first so children can point back at it.
+                self.nodes.push(None);
+                let id = NodeId(self.nodes.len() - 1);
+                let f = self.build(first, Some(id), next, leaves);
+                let s = self.build(second, Some(id), next, leaves);
+                self.nodes[id.0] = Some(Node::Split {
+                    axis: *axis,
+                    ratio: *ratio,
+                    first: f,
+                    second: s,
+                    parent,
+                });
+                id
+            }
+        }
+    }
+
+    /// Snapshots the tree shape with leaves mapped to [`LayoutNode::Pane`].
+    pub(crate) fn to_layout(&self) -> LayoutNode {
+        self.layout_of(self.root)
+    }
+
+    fn layout_of(&self, id: NodeId) -> LayoutNode {
+        match self.node(id) {
+            Node::Leaf { .. } => LayoutNode::Pane,
+            Node::Split {
+                axis,
+                ratio,
+                first,
+                second,
+                ..
+            } => LayoutNode::Split {
+                axis: *axis,
+                ratio: *ratio,
+                first: Box::new(self.layout_of(*first)),
+                second: Box::new(self.layout_of(*second)),
+            },
         }
     }
 

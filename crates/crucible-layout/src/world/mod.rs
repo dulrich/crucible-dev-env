@@ -46,6 +46,22 @@ pub enum LayoutError {
     /// close-pane refused: the focused pane is the workspace's last pane.
     #[error("cannot close the last pane of a workspace")]
     LastPane,
+    /// Another workspace already holds this name (workspace names are unique across the `World`).
+    #[error("workspace name {0:?} is already in use")]
+    DuplicateName(String),
+    /// A stack index was out of range for the pane's window stack.
+    #[error("stack index {index} out of range for pane {pane:?} (len {len})")]
+    StackIndexOutOfRange {
+        /// The pane whose stack was addressed.
+        pane: PaneId,
+        /// The offending index.
+        index: usize,
+        /// The pane's current stack length.
+        len: usize,
+    },
+    /// A snapshot split ratio was not finite or not strictly inside `(0, 1)`.
+    #[error("split ratio must be finite and strictly between 0 and 1")]
+    InvalidRatio,
 }
 
 /// The whole layout model: arena maps + the focused output.
