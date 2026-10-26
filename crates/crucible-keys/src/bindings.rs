@@ -442,6 +442,14 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
                 Ok(Some(Action::Run(rest.to_string())))
             }
         }
+        "run-in-terminal" => {
+            let rest = text.trim().get(verb.len()..).unwrap_or("").trim();
+            if rest.is_empty() {
+                Err(bad("`run-in-terminal` needs a command".into()))
+            } else {
+                Ok(Some(Action::RunInTerminal(rest.to_string())))
+            }
+        }
         "stack-window" => Err(bad(
             "`stack-window` was retired: every launch already stacks into the focused pane; use `run-terminal`".into(),
         )),
@@ -584,6 +592,10 @@ mod tests {
             ("close-pane", Action::ClosePane),
             ("run-terminal", Action::RunTerminal),
             ("run firefox", Action::Run("firefox".into())),
+            (
+                "run-in-terminal htop -d 5",
+                Action::RunInTerminal("htop -d 5".into()),
+            ),
             ("new-workspace", Action::NewWorkspace),
             ("open-picker", Action::OpenPicker),
             ("open-launcher", Action::OpenLauncher),
@@ -675,7 +687,7 @@ mod tests {
 
     #[test]
     fn bare_run_is_rejected() {
-        for text in ["run", "run   "] {
+        for text in ["run", "run   ", "run-in-terminal", "run-in-terminal  "] {
             let err = Bindings::with_overrides(&[pair("Super+F2", text)]).unwrap_err();
             assert!(
                 matches!(&err, BindError::BadAction { reason, .. } if reason.contains("needs a command")),
@@ -742,6 +754,7 @@ mod tests {
         }
         for action in [
             Action::Run("echo 50%:a b".into()),
+            Action::RunInTerminal("echo 50%:a b".into()),
             Action::CycleStack(-1),
             Action::MoveWindowToWorkspace(1),
             Action::OpenSettings,

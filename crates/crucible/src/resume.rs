@@ -1,4 +1,4 @@
-//! `crucible resume --cwd <dir> [-- <command>]` — the restore banner CDE puts in a restored
+//! `crucible resume [--now] --cwd <dir> [-- <command>]` — the restore banner CDE puts in a restored
 //! terminal: the old command waits until Enter; Ctrl+C or EOF gives a plain shell.
 //!
 //! Ctrl+C handling: while waiting, stdin is in raw mode (ISIG off), so Ctrl+C arrives as byte
@@ -18,7 +18,7 @@ use std::process::Command;
 use crate::tty::RawGuard;
 
 /// Usage text for `crucible resume --help`.
-pub const USAGE: &str = "usage: crucible resume --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter. Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
+pub const USAGE: &str = "usage: crucible resume [--now] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
 
 /// Parsed `resume` arguments.
 #[derive(Debug, PartialEq, Eq)]
@@ -27,6 +27,8 @@ pub struct ResumeArgs {
     pub cwd: PathBuf,
     /// The command string, if any.
     pub command: Option<String>,
+    /// `--now`: run the command immediately instead of waiting for Enter (a no-op without one).
+    pub now: bool,
 }
 
 /// Parses the arguments after `resume`.
@@ -35,6 +37,7 @@ pub struct ResumeArgs {
 /// A usage message for a missing `--cwd` value, unknown flags or extra positional arguments.
 pub fn parse_args(args: &[String]) -> Result<ResumeArgs, String> {
     let mut cwd = None;
+    let mut now = false;
     let mut i = 0;
     let mut command = None;
     while i < args.len() {
@@ -45,6 +48,10 @@ pub fn parse_args(args: &[String]) -> Result<ResumeArgs, String> {
                     return Err("--cwd given twice".into());
                 }
                 i += 2;
+            }
+            "--now" => {
+                now = true;
+                i += 1;
             }
             "--" => {
                 match &args[i + 1..] {
@@ -60,6 +67,7 @@ pub fn parse_args(args: &[String]) -> Result<ResumeArgs, String> {
     Ok(ResumeArgs {
         cwd: cwd.ok_or("--cwd <dir> is required")?,
         command,
+        now,
     })
 }
 
@@ -67,6 +75,7 @@ pub fn parse_args(args: &[String]) -> Result<ResumeArgs, String> {
 #[must_use]
 pub fn banner(args: &ResumeArgs) -> String {
     match &args.command {
+        Some(cmd) if args.now => format!("CDE is running: {cmd}"),
         Some(cmd) => format!(
             "CDE restored this terminal. Last command: {cmd}. Press Enter to run it, or Ctrl+C for a shell."
         ),
@@ -125,7 +134,7 @@ pub fn run(args: &[String]) -> i32 {
         return exec_shell(&shell);
     };
     ignore_interrupts_while_resident();
-    if wait_for_choice() == Wait::Run {
+    if parsed.now || wait_for_choice() == Wait::Run {
         run_command(&shell, &cmd);
     }
     exec_shell(&shell)
@@ -245,6 +254,29 @@ mod tests {
     }
 
     #[test]
+    fn now_flag_parses_before_the_separator_only() {
+        let a = parse_args(&v(&["--now", "--cwd", "/p", "--", "htop"])).unwrap();
+        assert!(a.now);
+        assert_eq!(a.command.as_deref(), Some("htop"));
+        let a = parse_args(&v(&["--cwd", "/p", "--now"])).unwrap();
+        assert!(a.now && a.command.is_none());
+        let a = parse_args(&v(&["--cwd", "/p", "--", "--now"])).unwrap();
+        assert!(!a.now);
+        assert_eq!(a.command.as_deref(), Some("--now"));
+        assert!(!parse_args(&v(&["--cwd", "/p"])).unwrap().now);
+    }
+
+    #[test]
+    fn now_banner_does_not_offer_enter() {
+        let a = ResumeArgs {
+            cwd: "/p".into(),
+            command: Some("htop".into()),
+            now: true,
+        };
+        assert_eq!(banner(&a), "CDE is running: htop");
+    }
+
+    #[test]
     fn rejects_bad_usage() {
         assert!(parse_args(&[]).is_err());
         assert!(parse_args(&v(&["--cwd"])).is_err());
@@ -259,6 +291,7 @@ mod tests {
         let with = ResumeArgs {
             cwd: "/p".into(),
             command: Some("cargo test".into()),
+            now: false,
         };
         assert_eq!(
             banner(&with),
@@ -267,6 +300,7 @@ mod tests {
         let without = ResumeArgs {
             cwd: "/p".into(),
             command: None,
+            now: false,
         };
         assert_eq!(banner(&without), "CDE restored this terminal in /p.");
     }

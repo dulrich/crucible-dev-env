@@ -51,7 +51,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
             Action::Run(cmd) => {
                 info!(cmd, "running command into focused pane");
-                self.spawn_command_here(&cmd);
+                if let Err(reason) = self.run_checked(&cmd) {
+                    warn!(cmd, reason, "run keybind not spawned");
+                }
+                return;
+            }
+            Action::RunInTerminal(cmd) => {
+                info!(cmd, "running command in a new terminal");
+                if let Err(reason) = self.run_in_terminal_checked(&cmd) {
+                    warn!(cmd, reason, "run-in-terminal keybind not spawned");
+                }
                 return;
             }
             Action::OpenPicker => {
@@ -165,6 +174,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
         Action::Quit
         | Action::RunTerminal
         | Action::Run(_)
+        | Action::RunInTerminal(_)
         | Action::OpenPicker
         | Action::OpenLauncher
         | Action::OpenSettings

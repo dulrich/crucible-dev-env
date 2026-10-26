@@ -380,6 +380,101 @@ pub fn restore_args(
     ]
 }
 
+/// The terminal arguments for `run-in-terminal`: `<exec-flag> <crucible> resume --now --cwd <dir>
+/// -- <command>` (the command is ONE element).
+#[must_use]
+pub fn run_in_terminal_args(
+    exec_flag: &str,
+    crucible: &Path,
+    cwd: &Path,
+    command: &str,
+) -> Vec<OsString> {
+    vec![
+        exec_flag.into(),
+        crucible.into(),
+        "resume".into(),
+        "--now".into(),
+        "--cwd".into(),
+        cwd.into(),
+        "--".into(),
+        command.into(),
+    ]
+}
+
+/// A spawned child's `PATH`: `exe_dir` prepended to the inherited `PATH`, unless it is already an
+/// entry. An unset inherited `PATH` yields just `exe_dir`.
+#[must_use]
+pub fn child_path(exe_dir: &Path, inherited: Option<&std::ffi::OsStr>) -> OsString {
+    let Some(inherited) = inherited else {
+        return exe_dir.as_os_str().to_os_string();
+    };
+    if std::env::split_paths(inherited).any(|p| p == exe_dir) {
+        return inherited.to_os_string();
+    }
+    let mut entries = vec![exe_dir.to_path_buf()];
+    entries.extend(std::env::split_paths(inherited));
+    std::env::join_paths(entries).unwrap_or_else(|_| inherited.to_os_string())
+}
+
+/// POSIX sh special/regular builtins and reserved words the pre-flight lets through.
+const SH_BUILTINS: &[&str] = &[
+    ".", ":", "break", "cd", "command", "continue", "eval", "exec", "exit", "export", "getopts",
+    "read", "readonly", "return", "set", "shift", "times", "trap", "type", "ulimit", "umask",
+    "unset", "wait", "alias", "bg", "fg", "jobs", "kill", "printf", "echo", "test", "true",
+    "false", "if", "case", "for", "while", "until",
+];
+
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Pre-flight for `run`/`run-in-terminal`: does the command's first shell word resolve? Passes
+/// when the word holds shell syntax the check cannot judge, is a sh builtin/keyword, is a path
+/// (relative to `cwd`) to an existing file, or is an executable file on `path` (relative entries
+/// and empty entries resolve against `cwd`). Never spawns or waits.
+///
+/// # Errors
+/// The unresolved first word.
+pub fn preflight_command(
+    cmd: &str,
+    cwd: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<(), String> {
+    let Some(word) = cmd.split_whitespace().next() else {
+        return Ok(());
+    };
+    let syntax = |c: char| "='\"$`\\~*?[()<>|;&".contains(c);
+    if word.contains(syntax) || word.starts_with(['{', '!']) || SH_BUILTINS.contains(&word) {
+        return Ok(());
+    }
+    let resolve = |p: &Path| {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        }
+    };
+    if word.contains('/') {
+        return if resolve(Path::new(word)).is_file() {
+            Ok(())
+        } else {
+            Err(word.to_string())
+        };
+    }
+    let found = path.is_some_and(|path| {
+        std::env::split_paths(path).any(|dir| {
+            let dir = if dir.as_os_str().is_empty() {
+                cwd.to_path_buf()
+            } else {
+                resolve(&dir)
+            };
+            is_executable_file(&dir.join(word))
+        })
+    });
+    if found { Ok(()) } else { Err(word.to_string()) }
+}
+
 /// The terminal arguments for an app relaunch placeholder: `<exec-flag> <crucible> relaunch
 /// [--app-id <id>] -- <cmdline>` (the cmdline is ONE element).
 #[must_use]
@@ -758,6 +853,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if kind == SpawnKind::Overlay {
             cmd.env(OVERLAY_STYLE_ENV, self.config.overlay.style.as_str());
         }
+        if let Some(path) = Self::spawn_path() {
+            cmd.env("PATH", path);
+        }
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
@@ -774,6 +872,62 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 None
             }
         }
+    }
+
+    /// The `PATH` every spawned child gets: this binary's directory (so `crucible` resolves) in
+    /// front of the compositor's own `PATH`. `None` when the executable path is unknown.
+    fn spawn_path() -> Option<OsString> {
+        let exe = std::env::current_exe().ok()?;
+        let dir = exe.parent()?;
+        Some(child_path(dir, std::env::var_os("PATH").as_deref()))
+    }
+
+    /// Pre-flights `cmd` for workspace `ws`: its first word must resolve against the child's
+    /// `PATH`, relative to the spawn's effective cwd (the workspace root, else the compositor's).
+    fn preflight(&self, cmd: &str, ws: WorkspaceId) -> Result<(), String> {
+        let cwd = self
+            .persist
+            .roots
+            .get(&ws)
+            .cloned()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        preflight_command(cmd, &cwd, Self::spawn_path().as_deref())
+    }
+
+    /// `run`: pre-flights, then [`Self::spawn_command_here`]. `Err` is the IPC reason.
+    ///
+    /// # Errors
+    /// `unknown command <word>` when the pre-flight fails, `spawn failed` when the spawn does.
+    pub fn run_checked(&mut self, cmd: &str) -> Result<u32, String> {
+        let ws = self.layout.world.active_workspace_id();
+        self.preflight(cmd, ws)
+            .map_err(|word| format!("unknown command {word}"))?;
+        self.spawn_command_in(cmd, ws)
+            .ok_or_else(|| "spawn failed".to_string())
+    }
+
+    /// `run-in-terminal`: pre-flights, then spawns the configured terminal running
+    /// `crucible resume --now --cwd <workspace root or $HOME> -- <cmd>`.
+    ///
+    /// # Errors
+    /// As [`Self::run_checked`].
+    pub fn run_in_terminal_checked(&mut self, cmd: &str) -> Result<u32, String> {
+        let ws = self.layout.world.active_workspace_id();
+        self.preflight(cmd, ws)
+            .map_err(|word| format!("unknown command {word}"))?;
+        let crucible = Self::crucible_exe("run-in-terminal").ok_or("spawn failed")?;
+        let dir = self
+            .persist
+            .roots
+            .get(&ws)
+            .cloned()
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let args = run_in_terminal_args(&self.config.terminal.exec_flag, &crucible, &dir, cmd);
+        let program = self.terminal_program();
+        self.spawn_process(&program, &args, Some(&dir), SpawnKind::Terminal)
+            .ok_or_else(|| "spawn failed".to_string())
     }
 
     /// Spawns a terminal into the focused pane, starting in the active workspace's root if any.
@@ -1129,9 +1283,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 Ok(())
             }
             Request::Run(cmd) => {
-                return match self.spawn_command_here(&cmd) {
-                    Some(_) => Response::Ok(String::new()),
-                    None => Response::Err(encode_field("spawn failed")),
+                return match self.run_checked(&cmd) {
+                    Ok(_) => Response::Ok(String::new()),
+                    Err(reason) => Response::Err(reason),
+                };
+            }
+            Request::RunInTerminal(cmd) => {
+                return match self.run_in_terminal_checked(&cmd) {
+                    Ok(_) => Response::Ok(String::new()),
+                    Err(reason) => Response::Err(reason),
                 };
             }
             Request::Open(name) => self.ipc_open(&name),
@@ -1785,5 +1945,113 @@ mod tests {
         assert_eq!(names, ["a", "b"]);
         assert_eq!(got[0].1, root.join("a"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("cde-pre-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn touch(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn child_path_prepends_once() {
+        let dir = Path::new("/opt/cde");
+        assert_eq!(child_path(dir, None), OsString::from("/opt/cde"));
+        assert_eq!(
+            child_path(dir, Some("/usr/bin:/bin".as_ref())),
+            OsString::from("/opt/cde:/usr/bin:/bin")
+        );
+        assert_eq!(
+            child_path(dir, Some("/usr/bin:/opt/cde".as_ref())),
+            OsString::from("/usr/bin:/opt/cde")
+        );
+    }
+
+    #[test]
+    fn run_in_terminal_args_keep_the_command_one_element() {
+        let args = run_in_terminal_args("-e", Path::new("/x/crucible"), Path::new("/w"), "a b; c");
+        let want: Vec<OsString> = [
+            "-e",
+            "/x/crucible",
+            "resume",
+            "--now",
+            "--cwd",
+            "/w",
+            "--",
+            "a b; c",
+        ]
+        .iter()
+        .map(OsString::from)
+        .collect();
+        assert_eq!(args, want);
+    }
+
+    #[test]
+    fn preflight_finds_path_commands_and_names_misses() {
+        let bin = scratch("bin");
+        touch(&bin.join("tool"), 0o755);
+        touch(&bin.join("data"), 0o644);
+        let path = bin.clone().into_os_string();
+        let cwd = Path::new("/");
+        assert_eq!(preflight_command("tool --x", cwd, Some(&path)), Ok(()));
+        assert_eq!(
+            preflight_command("nosuch --x", cwd, Some(&path)),
+            Err("nosuch".to_string())
+        );
+        assert_eq!(
+            preflight_command("data", cwd, Some(&path)),
+            Err("data".to_string())
+        );
+        assert_eq!(
+            preflight_command("tool", cwd, None),
+            Err("tool".to_string())
+        );
+        let _ = std::fs::remove_dir_all(&bin);
+    }
+
+    #[test]
+    fn preflight_resolves_paths_against_the_cwd() {
+        let cwd = scratch("cwd");
+        touch(&cwd.join("x"), 0o755);
+        let abs = cwd.join("x");
+        assert_eq!(
+            preflight_command(abs.to_str().unwrap(), Path::new("/"), None),
+            Ok(())
+        );
+        assert_eq!(preflight_command("./x", &cwd, None), Ok(()));
+        assert_eq!(preflight_command("./y", &cwd, None), Err("./y".to_string()));
+        // A relative PATH entry and an empty one both resolve against the cwd.
+        assert_eq!(preflight_command("x", &cwd, Some(".".as_ref())), Ok(()));
+        assert_eq!(preflight_command("x", &cwd, Some("".as_ref())), Ok(()));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn preflight_passes_what_it_cannot_judge() {
+        let cwd = Path::new("/");
+        for cmd in [
+            "'quoted prog' a",
+            "\"q\" a",
+            "FOO=1 nosuch",
+            "$EDITOR f",
+            "~/bin/x",
+            "(cd /; nosuch)",
+            "cd /tmp && nosuch",
+            "{ nosuch; }",
+            "! nosuch",
+            "echo hi",
+            "exec nosuch",
+            "if true; then :; fi",
+            "",
+        ] {
+            assert_eq!(preflight_command(cmd, cwd, None), Ok(()), "{cmd:?}");
+        }
     }
 }

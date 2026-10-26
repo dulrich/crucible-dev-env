@@ -39,6 +39,9 @@ pub enum Action {
     /// Run a real command line (non-empty) via `/bin/sh -c 'exec <cmd>'` into the focused pane.
     /// The window joins the pane's stack through the shell map path.
     Run(String),
+    /// Run a command line (non-empty) in a new terminal: the configured terminal starts
+    /// `crucible resume --now --cwd <dir> -- <cmd>`. No default chord.
+    RunInTerminal(String),
 
     /// Move pane focus in `Direction` within the active workspace. `Super+H/J/K/L`.
     Focus(Direction),
@@ -104,6 +107,7 @@ impl std::fmt::Display for Action {
             Self::ClosePane => f.write_str("close-pane"),
             Self::RunTerminal => f.write_str("run-terminal"),
             Self::Run(cmd) => write!(f, "run {cmd}"),
+            Self::RunInTerminal(cmd) => write!(f, "run-in-terminal {cmd}"),
             Self::Focus(d) => write!(f, "focus {}", dir(d)),
             Self::Move(d) => write!(f, "move {}", dir(d)),
             Self::Split(d) => write!(f, "split {}", dir(d)),

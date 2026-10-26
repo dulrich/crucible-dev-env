@@ -83,7 +83,8 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `quit` | Stop the compositor |
 | `close-pane` | Close the focused pane (only if empty and not the last) |
 | `run-terminal` | Spawn the terminal |
-| `run <command…>` | Run a command line into the focused pane, spawned via `/bin/sh -c 'exec <command…>'` (the rest of the action text, verbatim; needs a command). `stack-window` is retired and is rejected with an error |
+| `run <command…>` | Run a command line into the focused pane, spawned via `/bin/sh -c 'exec <command…>'` (the rest of the action text, verbatim; needs a command; the first word must resolve against `PATH`, else nothing is spawned and the keybind logs a warning). `stack-window` is retired and is rejected with an error |
+| `run-in-terminal <command…>` | Run a command line in a new terminal (`crucible resume --now --cwd <dir> -- <command…>`, then an interactive shell stays open); same verbatim rule and `PATH` pre-flight as `run`. No default chord |
 | `focus <dir>` | Move pane focus |
 | `move <dir>` | Swap the focused pane with its neighbour |
 | `split <dir>` | Split the focused pane |

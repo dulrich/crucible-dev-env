@@ -114,16 +114,25 @@ pub fn is_shell_program(argv0: &str) -> bool {
 #[must_use]
 pub fn parse_resume_banner(args: &[String]) -> Option<TerminalCapture> {
     let exe = Path::new(args.first()?).file_name()?;
-    if exe != "crucible" || args.get(1)? != "resume" || args.get(2)? != "--cwd" {
+    if exe != "crucible" || args.get(1)? != "resume" {
         return None;
     }
-    let cwd = PathBuf::from(args.get(3)?);
-    match args.len() {
-        4 => Some(TerminalCapture { cwd, command: None }),
-        5 if args[4] == "--" => Some(TerminalCapture { cwd, command: None }),
-        6 if args[4] == "--" => Some(TerminalCapture {
+    // A `run-in-terminal` terminal passes `--now`; a restore still shows the plain banner.
+    let rest = &args[2..];
+    let rest = rest.strip_prefix(&["--now".to_string()]).unwrap_or(rest);
+    let [flag, dir, tail @ ..] = rest else {
+        return None;
+    };
+    if flag != "--cwd" {
+        return None;
+    }
+    let cwd = PathBuf::from(dir);
+    match tail {
+        [] => Some(TerminalCapture { cwd, command: None }),
+        [dd] if dd == "--" => Some(TerminalCapture { cwd, command: None }),
+        [dd, cmd] if dd == "--" => Some(TerminalCapture {
             cwd,
-            command: Some(args[5].clone()),
+            command: Some(cmd.clone()),
         }),
         _ => None,
     }
@@ -557,6 +566,44 @@ mod tests {
         assert!(parse_resume_banner(&[]).is_none());
         let b = parse_resume_banner(&v(&["/bin/crucible", "resume", "--cwd", "/p", "--"])).unwrap();
         assert_eq!(b.command, None);
+    }
+
+    #[test]
+    fn banner_parser_accepts_the_now_form() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let plain = parse_resume_banner(&v(&[
+            "/bin/crucible",
+            "resume",
+            "--cwd",
+            "/p",
+            "--",
+            "htop",
+        ]))
+        .unwrap();
+        let now = parse_resume_banner(&v(&[
+            "/bin/crucible",
+            "resume",
+            "--now",
+            "--cwd",
+            "/p",
+            "--",
+            "htop",
+        ]))
+        .unwrap();
+        assert_eq!(plain, now);
+        assert_eq!(now.command.as_deref(), Some("htop"));
+        assert!(parse_resume_banner(&v(&["/bin/crucible", "resume", "--now"])).is_none());
+        assert!(
+            parse_resume_banner(&v(&[
+                "/bin/crucible",
+                "resume",
+                "--now",
+                "--now",
+                "--cwd",
+                "/p"
+            ]))
+            .is_none()
+        );
     }
 
     #[test]

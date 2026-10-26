@@ -117,6 +117,8 @@ pub enum Request {
     Save,
     /// `run <command>` — run a shell command line (`/bin/sh -c 'exec <command>'`) into the focused pane.
     Run(String),
+    /// `run-in-terminal <command>` — run a shell command line in a new terminal (`crucible resume --now`).
+    RunInTerminal(String),
     /// `relaunch` — swap the calling placeholder window (found by peer PID) for its app.
     Relaunch,
 }
@@ -152,6 +154,7 @@ impl Request {
             "new" => need(arg).map(Request::New),
             "rename" => need(arg).map(Request::Rename),
             "run" => need(arg).map(Request::Run),
+            "run-in-terminal" => need(arg).map(Request::RunInTerminal),
             other => Err(format!("unknown request {other:?}")),
         }
     }
@@ -170,6 +173,7 @@ impl Request {
             Request::New(n) => format!("new {}", encode_field(n)),
             Request::Rename(n) => format!("rename {}", encode_field(n)),
             Request::Run(c) => format!("run {}", encode_field(c)),
+            Request::RunInTerminal(c) => format!("run-in-terminal {}", encode_field(c)),
         }
     }
 }
@@ -501,6 +505,7 @@ mod tests {
             Request::New("n\nl".into()),
             Request::Rename("r\r".into()),
             Request::Run("sh -c 'echo 100%: a\tb'".into()),
+            Request::RunInTerminal("htop -d 5: 100%".into()),
         ];
         for r in reqs {
             assert_eq!(Request::parse(&r.to_line()), Ok(r.clone()));

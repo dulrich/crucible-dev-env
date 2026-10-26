@@ -5,7 +5,7 @@ use crucible_compositor::ipc::{Request, SOCKET_ENV, encode_field};
 use crate::client::{Client, socket_from_env};
 
 /// Usage text for `crucible msg --help`.
-pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | save | open <name> | open-folder <path> | new <name> | rename <name> | run <command...> | relaunch\n\n`run` takes the rest of the arguments as one command line (joined with single spaces) and encodes it for you\n(for example `crucible msg run firefox --new-window`). For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`).\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
+pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | save | open <name> | open-folder <path> | new <name> | rename <name> | run <command...> | run-in-terminal <command...> | relaunch\n\n`run` takes the rest of the arguments as one command line (joined with single spaces) and encodes it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`).\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
 
 /// Joins the arguments into one protocol line and validates it.
 ///
@@ -15,9 +15,9 @@ pub fn build_line(args: &[String]) -> Result<String, String> {
     if args.is_empty() {
         return Err("msg needs a request (try `crucible msg --help`)".into());
     }
-    let line = if args[0] == "run" {
+    let line = if args[0] == "run" || args[0] == "run-in-terminal" {
         // The command is free text: encode it so `:`, `%` and friends survive the wire.
-        format!("run {}", encode_field(&args[1..].join(" ")))
+        format!("{} {}", args[0], encode_field(&args[1..].join(" ")))
     } else {
         args.join(" ")
     };
@@ -100,6 +100,17 @@ mod tests {
         assert_eq!(line, "run echo 50%25%3Ax");
         assert_eq!(Request::parse(&line), Ok(Request::Run("echo 50%:x".into())));
         assert!(build_line(&v(&["run"])).is_err());
+    }
+
+    #[test]
+    fn run_in_terminal_encodes_the_command_line() {
+        let line = build_line(&v(&["run-in-terminal", "htop", "50%:x"])).unwrap();
+        assert_eq!(line, "run-in-terminal htop 50%25%3Ax");
+        assert_eq!(
+            Request::parse(&line),
+            Ok(Request::RunInTerminal("htop 50%:x".into()))
+        );
+        assert!(build_line(&v(&["run-in-terminal"])).is_err());
     }
 
     #[test]
