@@ -6,12 +6,15 @@ use crate::{OutputId, geometry::Rect};
 impl World {
     /// Adds a new output with `rect`, giving it its own independent initial workspace + empty pane.
     ///
-    /// Mirrors what [`World::new`] does for the first output. The new output starts with no windows
+    /// Mirrors what [`World::new`] does for the first output, except the seed workspace is named
+    /// with the first decimal name (`"1"`, `"2"`, ...) not held by any live workspace. The new output starts with no windows
     /// and is **not** made the focused output, so nothing currently visible changes. Returns the new
     /// [`OutputId`].
     pub fn add_output(&mut self, rect: Rect) -> OutputId {
         let output_id = OutputId::from_raw(self.output_ids.alloc());
-        let workspace_id = self.build_workspace("1");
+        let seed_name =
+            first_unused_decimal_name(self.workspaces.values().map(|w| w.name.as_str()));
+        let workspace_id = self.build_workspace(seed_name);
         self.outputs.insert(
             output_id,
             Output {
@@ -91,5 +94,40 @@ impl World {
         }
         self.focused_output = id;
         Ok(())
+    }
+}
+
+/// First decimal name `"1"`, `"2"`, ... not present in `names`.
+fn first_unused_decimal_name<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
+    let taken: std::collections::BTreeSet<&str> = names.into_iter().collect();
+    (1u64..)
+        .map(|n| n.to_string())
+        .find(|n| !taken.contains(n.as_str()))
+        .expect("u64 decimal names are not exhausted")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_unused_name_skips_taken_and_fills_gaps() {
+        assert_eq!(first_unused_decimal_name([]), "1");
+        assert_eq!(first_unused_decimal_name(["1", "2", "x"]), "3");
+        assert_eq!(first_unused_decimal_name(["2", "3"]), "1");
+    }
+
+    #[test]
+    fn add_output_seed_names_are_distinct() {
+        let mut w = World::new();
+        let a = w.add_output(Rect::new(0, 0, 10, 10));
+        let b = w.add_output(Rect::new(10, 0, 10, 10));
+        let name = |o: OutputId| {
+            let ws = w.output(o).unwrap().active_workspace();
+            w.workspace(ws).unwrap().name.clone()
+        };
+        assert_eq!(name(a), "2");
+        assert_eq!(name(b), "3");
+        w.check_invariants();
     }
 }

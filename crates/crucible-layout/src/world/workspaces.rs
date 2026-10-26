@@ -185,6 +185,86 @@ impl World {
         Ok(())
     }
 
+    /// Removes workspace `ws` together with its panes and windows from every arena, returning the
+    /// removed window ids in tree order.
+    ///
+    /// Errors (mutating nothing) with [`LayoutError::UnknownWorkspace`] for an unknown id, or
+    /// [`LayoutError::LastWorkspace`] if it is the only workspace on its output. The owning output's
+    /// `active` keeps pointing at the same workspace when another was active; when the removed one
+    /// was active, the workspace now at the same index (clamped to the end) becomes active. Focus
+    /// follows the active workspace's focused pane.
+    pub fn remove_workspace(&mut self, ws: WorkspaceId) -> Result<Vec<WindowId>, LayoutError> {
+        let owner = self.owner_of(ws)?;
+        self.check_not_last(owner)?;
+        self.detach_workspace(owner, ws);
+        let removed = self.workspaces.remove(&ws).expect("checked");
+        let mut windows = Vec::new();
+        for pane_id in removed.panes() {
+            if let Some(pane) = self.panes.remove(&pane_id) {
+                for w in pane.windows {
+                    self.windows.remove(&w);
+                    windows.push(w);
+                }
+            }
+        }
+        Ok(windows)
+    }
+
+    /// Moves workspace `ws` (with its panes and windows) to the end of `output`'s stack, makes it
+    /// the active workspace there, and makes `output` the focused output.
+    ///
+    /// Errors (mutating nothing) with [`LayoutError::UnknownWorkspace`] / [`LayoutError::UnknownOutput`],
+    /// [`LayoutError::SameOutput`] if it already lives on `output`, or [`LayoutError::LastWorkspace`]
+    /// if it is the only workspace on its source output. The source output's `active` is fixed up
+    /// exactly as in [`World::remove_workspace`].
+    pub fn move_workspace_to_output(
+        &mut self,
+        ws: WorkspaceId,
+        output: OutputId,
+    ) -> Result<(), LayoutError> {
+        let source = self.owner_of(ws)?;
+        if !self.outputs.contains_key(&output) {
+            return Err(LayoutError::UnknownOutput(output));
+        }
+        if source == output {
+            return Err(LayoutError::SameOutput(output));
+        }
+        self.check_not_last(source)?;
+        self.detach_workspace(source, ws);
+        let target = self.outputs.get_mut(&output).expect("checked");
+        target.workspaces.push(ws);
+        target.active = target.workspaces.len() - 1;
+        self.focused_output = output;
+        Ok(())
+    }
+
+    fn owner_of(&self, ws: WorkspaceId) -> Result<OutputId, LayoutError> {
+        self.outputs
+            .values()
+            .find(|o| o.workspaces.contains(&ws))
+            .map(|o| o.id)
+            .ok_or(LayoutError::UnknownWorkspace(ws))
+    }
+
+    fn check_not_last(&self, output: OutputId) -> Result<(), LayoutError> {
+        if self.outputs[&output].workspaces.len() <= 1 {
+            return Err(LayoutError::LastWorkspace(output));
+        }
+        Ok(())
+    }
+
+    /// Removes `ws` from `output`'s stack, fixing `active` (caller guarantees ≥2 workspaces).
+    fn detach_workspace(&mut self, output: OutputId, ws: WorkspaceId) {
+        let o = self.outputs.get_mut(&output).expect("owner");
+        let idx = o.workspaces.iter().position(|w| *w == ws).expect("owned");
+        o.workspaces.remove(idx);
+        if idx < o.active {
+            o.active -= 1;
+        } else if o.active >= o.workspaces.len() {
+            o.active = o.workspaces.len() - 1;
+        }
+    }
+
     /// Creates a fresh empty workspace (one empty pane) and inserts both into the arena maps.
     ///
     /// Shared by [`super::World::new`]-style seeding, [`super::World::add_output`], and
@@ -211,5 +291,162 @@ impl World {
             },
         );
         workspace_id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::Rect;
+
+    /// Focused output with workspaces "1" (initial), plus "a" and "b"; "b" active.
+    fn world3() -> (World, WorkspaceId, WorkspaceId, WorkspaceId) {
+        let mut w = World::new();
+        let first = w.active_workspace_id();
+        let a = w.new_workspace("a");
+        let b = w.new_workspace("b");
+        (w, first, a, b)
+    }
+
+    #[test]
+    fn remove_inactive_before_active_keeps_active_workspace() {
+        let (mut w, first, _a, b) = world3();
+        assert_eq!(w.remove_workspace(first).unwrap(), vec![]);
+        assert_eq!(w.active_workspace_id(), b);
+        w.check_invariants();
+    }
+
+    #[test]
+    fn remove_inactive_after_active_keeps_active_workspace() {
+        let (mut w, first, a, b) = world3();
+        w.switch_workspace(first).unwrap();
+        w.remove_workspace(b).unwrap();
+        assert_eq!(w.active_workspace_id(), first);
+        assert!(w.workspace(b).is_none());
+        w.check_invariants();
+        w.switch_workspace(a).unwrap();
+        w.check_invariants();
+    }
+
+    #[test]
+    fn remove_active_picks_same_index_then_clamps() {
+        let (mut w, first, a, b) = world3();
+        w.switch_workspace(a).unwrap();
+        w.remove_workspace(a).unwrap();
+        assert_eq!(w.active_workspace_id(), b, "same index");
+        w.check_invariants();
+        w.remove_workspace(b).unwrap();
+        assert_eq!(w.active_workspace_id(), first, "clamped to the end");
+        w.check_invariants();
+    }
+
+    #[test]
+    fn remove_returns_windows_in_tree_order_and_purges_arenas() {
+        let (mut w, _first, a, _b) = world3();
+        w.switch_workspace(a).unwrap();
+        let w1 = w.open_window();
+        w.split(crate::Direction::Right);
+        let w2 = w.open_window();
+        let w3 = w.stack_window();
+        assert_eq!(w.window_count(), 3);
+        let removed = w.remove_workspace(a).unwrap();
+        assert_eq!(removed, vec![w1, w2, w3]);
+        assert_eq!(w.window_count(), 0);
+        assert!(w.window(w1).is_none());
+        w.check_invariants();
+    }
+
+    #[test]
+    fn focus_lands_on_new_active_workspaces_focused_pane() {
+        let (mut w, first, _a, b) = world3();
+        w.switch_workspace(first).unwrap();
+        let win = w.open_window();
+        w.switch_workspace(b).unwrap();
+        w.remove_workspace(b).unwrap();
+        // "a" is now active; remove it so "first" takes over.
+        let a_now = w.active_workspace_id();
+        w.remove_workspace(a_now).unwrap();
+        assert_eq!(w.active_workspace_id(), first);
+        assert_eq!(w.focused_window(), Some(win));
+        w.check_invariants();
+    }
+
+    #[test]
+    fn remove_last_workspace_is_refused_without_mutation() {
+        let mut w = World::new();
+        let only = w.active_workspace_id();
+        let before = w.clone();
+        assert_eq!(
+            w.remove_workspace(only),
+            Err(LayoutError::LastWorkspace(w.focused_output()))
+        );
+        assert_eq!(w, before);
+        assert_eq!(
+            w.remove_workspace(WorkspaceId::from_raw(999)),
+            Err(LayoutError::UnknownWorkspace(WorkspaceId::from_raw(999)))
+        );
+        assert_eq!(w, before);
+        w.check_invariants();
+    }
+
+    fn two_outputs() -> (World, OutputId, OutputId) {
+        let mut w = World::new();
+        let o1 = w.focused_output();
+        let o2 = w.add_output(Rect::new(10, 0, 10, 10));
+        (w, o1, o2)
+    }
+
+    #[test]
+    fn move_workspace_fixes_source_target_and_focus() {
+        let (mut w, o1, o2) = two_outputs();
+        let first = w.active_workspace_id();
+        let a = w.new_workspace("a"); // o1: [first, a], a active
+        w.move_workspace_to_output(a, o2).unwrap();
+        assert_eq!(w.output(o1).unwrap().workspaces, vec![first]);
+        assert_eq!(w.output(o1).unwrap().active_workspace(), first);
+        let target = w.output(o2).unwrap();
+        assert_eq!(target.workspaces.len(), 2);
+        assert_eq!(target.active_workspace(), a);
+        assert_eq!(w.focused_output(), o2);
+        assert_eq!(w.active_workspace_id(), a);
+        w.check_invariants();
+    }
+
+    #[test]
+    fn move_inactive_workspace_keeps_source_active() {
+        let (mut w, o1, o2) = two_outputs();
+        let first = w.active_workspace_id();
+        let a = w.new_workspace("a"); // a active
+        w.move_workspace_to_output(first, o2).unwrap();
+        assert_eq!(w.output(o1).unwrap().active_workspace(), a);
+        assert_eq!(w.output(o2).unwrap().active_workspace(), first);
+        w.check_invariants();
+    }
+
+    #[test]
+    fn move_workspace_refusals_do_not_mutate() {
+        let (mut w, o1, o2) = two_outputs();
+        let first = w.active_workspace_id();
+        let before = w.clone();
+        assert_eq!(
+            w.move_workspace_to_output(first, o1),
+            Err(LayoutError::SameOutput(o1))
+        );
+        assert_eq!(
+            w.move_workspace_to_output(first, o2),
+            Err(LayoutError::LastWorkspace(o1))
+        );
+        let bad_ws = WorkspaceId::from_raw(999);
+        assert_eq!(
+            w.move_workspace_to_output(bad_ws, o2),
+            Err(LayoutError::UnknownWorkspace(bad_ws))
+        );
+        let bad_out = OutputId::from_raw(999);
+        assert_eq!(
+            w.move_workspace_to_output(first, bad_out),
+            Err(LayoutError::UnknownOutput(bad_out))
+        );
+        assert_eq!(w, before);
+        w.check_invariants();
     }
 }

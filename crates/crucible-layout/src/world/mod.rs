@@ -40,6 +40,12 @@ pub enum LayoutError {
     /// Attempted to remove the only/last output; at least one output must always exist.
     #[error("cannot remove the last output")]
     LastOutput,
+    /// Refused: the operation would leave this output with zero workspaces.
+    #[error("cannot remove the last workspace of output {0:?}")]
+    LastWorkspace(OutputId),
+    /// Refused: the workspace already lives on this output.
+    #[error("workspace already on output {0:?}")]
+    SameOutput(OutputId),
     /// close-pane refused: the focused pane still holds windows (close-pane never closes windows).
     #[error("pane is not empty")]
     PaneNotEmpty,
