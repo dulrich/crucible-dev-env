@@ -44,3 +44,9 @@ pub mod chrome;
 
 /// Unified render-element type.
 pub mod element;
+
+/// The `CDE_SOCKET` IPC protocol (pure codec shared with the binary) and its socket server.
+pub mod ipc;
+
+/// Workspace persistence in the compositor: auto-save, capture, restore, picker overlay.
+pub mod persist;

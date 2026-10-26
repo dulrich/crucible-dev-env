@@ -50,9 +50,7 @@ working Smithay-based tiling Wayland compositor you can run today.
 - **XWayland** — X11 apps tile alongside native Wayland clients.
 - **Visuals** — a focus-ring border on the focused window plus the stack pips (theming is Phase 3).
 
-**Not yet (Phase 3+):** persistent / fuzzy-pickable workspaces, KDL config + hot-reload, interactive
-workspace rename + the fuzzy picker UI, the status bar, a built-in GPU terminal, and the remaining DE
-services. Keybindings and gaps/borders are currently sensible hardcoded defaults.
+**Not yet:** the status bar, a built-in GPU terminal, and the remaining DE services.
 
 ## Running
 
@@ -98,8 +96,8 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+Ctrl+H` / `J` / `K` / `L` | Resize the focused pane (shift the split divider) |
 | `Super+]` / `Super+[` | Next / previous workspace (on the focused output) |
 | `Super+N` | New workspace (auto-named) |
-| `Super+P` | Open the workspace picker (not available until the picker lands) |
-| `Super+Shift+R` | Rename the active workspace (not available until the picker lands) |
+| `Super+P` | Open the workspace picker (live, saved and folder workspaces) |
+| `Super+Shift+R` | Rename the active workspace (picker in rename mode) |
 | `Super+Shift+]` / `Super+Shift+[` | Move the focused window to the next / previous workspace |
 | `Ctrl+Alt+F1`…`F12` | Switch virtual terminal (`--tty-udev` only) |
 
@@ -107,6 +105,16 @@ Splitting creates an **empty** focused pane; the next terminal you spawn (`Super
 Spawning into a pane that already holds a window **stacks** it (only the focused one is visible —
 cycle with `Super+Tab`). New windows, splits and workspace verbs act where the focused window is —
 the window you last clicked or (with focus-follows-mouse) hovered.
+
+## Workspaces, persistence and the picker
+
+Every workspace is saved automatically (about once a second, when its layout or windows changed) to `$XDG_STATE_HOME/cde/workspaces/<name>.kdl` (default `~/.local/state/cde/workspaces/`), one KDL file per workspace. A workspace with a single empty pane is not written. `Super+Shift+Q` flushes once before quitting. What is saved: the split tree, each pane's window stack, and for every terminal CDE spawned its working directory and foreground command; other apps are recorded for information only and are not relaunched (their panes come back empty).
+
+`Super+P` opens the **picker**: a centred terminal overlay running `crucible pick`, listing live workspaces, then saved ones, then folders under the configured `picker` roots (see `docs/config.md`). Picking a saved workspace restores it: its panes come back and each terminal reopens in its old directory, with its old command waiting behind a "press Enter to run" banner (`crucible resume`). Picking a folder creates a workspace named after it, rooted there: new terminals in it start in that folder. `Super+Shift+R` opens the picker in rename mode for the active workspace (its saved file is renamed too). When saved workspaces exist, the picker opens automatically at startup. Delete a workspace by deleting its file.
+
+The picker talks to the compositor over a Unix socket at `$XDG_RUNTIME_DIR/cde/<wayland-socket>.sock`, exported to every child as `CDE_SOCKET`. The config file (`~/.config/cde/config.kdl`) is re-read when it changes.
+
+**Caveat — one process per terminal window.** Restored terminals are placed back into their panes by matching the PID CDE spawned to the window's client PID (or one of its ancestors). That works for terminals that run one process per window (foot, alacritty, ghostty with `--gtk-single-instance=false`, as `cde.sh` uses). A single-instance terminal daemon breaks the match: restored windows then open in the focused pane instead, and the picker overlay lands in a pane rather than floating.
 
 ## Build & test
 

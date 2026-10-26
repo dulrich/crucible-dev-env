@@ -8,14 +8,14 @@
 //! below without any compositor state — the same spirit as `crate::layout`'s `LayoutState<TestElement>`
 //! tests, minus the payload bindings this logic never needs.
 
-use std::process::Command;
 use std::sync::atomic::Ordering;
 
 use crucible_keys::Action;
 use crucible_layout::{LayoutError, World};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 use crate::config::pick_terminal;
+use crate::persist::new_workspace_name;
 use crate::state::{Backend, CrucibleState};
 
 /// Amount by which a single resize keystroke adjusts the split ratio.
@@ -34,14 +34,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(super) fn handle_key_action(&mut self, action: Action) {
         let model_action = match action {
             Action::Quit => {
-                info!("Super+Shift+Q: quitting");
+                info!("Super+Shift+Q: flushing workspaces and quitting");
+                self.flush_workspaces();
+                self.remove_ipc_socket();
                 self.running.store(false, Ordering::SeqCst);
                 return;
             }
             Action::Run(cmd) => {
                 let cmd = pick_terminal(self.config.terminal.command.as_deref(), cmd);
                 info!(cmd, "Super+Return: spawning terminal into focused pane");
-                self.spawn_terminal(&cmd);
+                self.spawn_terminal_here(&cmd);
                 return;
             }
             // Spawning a terminal causes the client to connect, map a toplevel, and flow through
@@ -50,20 +52,33 @@ impl<B: Backend + 'static> CrucibleState<B> {
             // keybind: doing so allocates a `WindowId` with no backing surface. The spawn IS the
             // stack — it stacks into the focused pane automatically.
             Action::StackWindow => {
-                let cmd = pick_terminal(
-                    self.config.terminal.command.as_deref(),
-                    crucible_keys::terminal_command(),
-                );
+                let cmd = self.terminal_program();
                 info!(
                     cmd,
                     "Super+Shift+Return: spawning terminal to stack into focused pane"
                 );
-                self.spawn_terminal(&cmd);
+                self.spawn_terminal_here(&cmd);
                 return;
             }
-            // WP-5 replaces these two with the picker / rename prompt.
-            Action::OpenPicker | Action::RenameWorkspace => {
-                info!(action = ?action, "picker not available yet");
+            Action::OpenPicker => {
+                self.open_picker(false);
+                return;
+            }
+            Action::RenameWorkspace => {
+                self.open_picker(true);
+                return;
+            }
+            // Auto-names skip live AND saved names, so a fresh "2" never overwrites a saved "2".
+            Action::NewWorkspace => {
+                let saved = crucible_persist::store::list_saved(&self.persist.store_dir)
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .collect();
+                let name = new_workspace_name(&self.layout.world, &saved);
+                info!(name, "Super+N: creating new workspace");
+                self.update_model(|w| {
+                    w.new_workspace(name);
+                });
                 return;
             }
             Action::VtSwitch(vt) => {
@@ -89,22 +104,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Err(err) => {
                 warn!(action = ?model_action, %err, "model action failed");
             }
-        }
-    }
-
-    /// Spawns `cmd` as a child connected to CDE's Wayland socket.
-    ///
-    /// The child inherits the environment but with `WAYLAND_DISPLAY` overridden to CDE's socket
-    /// name so it connects to *this* compositor rather than the host session.
-    fn spawn_terminal(&self, cmd: &str) {
-        let Some(socket) = self.socket_name.clone() else {
-            warn!(cmd, "No wayland socket; cannot spawn terminal");
-            return;
-        };
-        info!(cmd, socket, "Super+Return: spawning terminal");
-        match Command::new(cmd).env("WAYLAND_DISPLAY", &socket).spawn() {
-            Ok(_child) => {}
-            Err(err) => error!(cmd, %err, "Failed to spawn terminal"),
         }
     }
 }
@@ -159,15 +158,6 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
             world.cycle_workspace(*delta);
             Ok(())
         }
-        Action::NewWorkspace => {
-            // Auto-generate a workspace name from the total number of workspaces on the focused
-            // output + 1, so each new workspace gets a unique numeric label (e.g. "2", "3", …).
-            // Phase 3 replaces this with an interactive naming prompt via the fuzzy picker.
-            let name = new_workspace_name(world);
-            info!(name, "Super+N: creating new workspace");
-            world.new_workspace(name);
-            Ok(())
-        }
         Action::MoveWindowToWorkspace(delta) => move_window_to_adjacent_workspace(world, *delta),
         Action::ClosePane => world.close_pane(),
         Action::Quit
@@ -175,20 +165,11 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
         | Action::StackWindow
         | Action::OpenPicker
         | Action::RenameWorkspace
+        | Action::NewWorkspace
         | Action::VtSwitch(_) => {
             unreachable!("compositor-level action; handle_key_action routes it before with_model")
         }
     }
-}
-
-/// Auto-generates the next workspace name for `Action::NewWorkspace`: the current workspace count
-/// on the focused output, plus one (`"2"`, `"3"`, …).
-fn new_workspace_name(world: &World) -> String {
-    let output_id = world.focused_output();
-    let n = world
-        .output(output_id)
-        .map_or(1, |o| o.workspaces.len() + 1);
-    n.to_string()
 }
 
 /// Moves the focused window `delta` workspaces from the active one on the focused output
@@ -311,23 +292,6 @@ mod tests {
         assert_dispatches(world, Action::CycleWorkspace(-1), |w| {
             w.cycle_workspace(-1);
         });
-    }
-
-    #[test]
-    fn new_workspace_dispatches_to_world_new_workspace_with_the_auto_name() {
-        let world = World::new();
-        assert_dispatches(world, Action::NewWorkspace, |w| {
-            let name = new_workspace_name(w);
-            w.new_workspace(name);
-        });
-    }
-
-    #[test]
-    fn new_workspace_name_counts_existing_workspaces_on_the_focused_output() {
-        let mut world = World::new();
-        assert_eq!(new_workspace_name(&world), "2");
-        world.new_workspace("ws2");
-        assert_eq!(new_workspace_name(&world), "3");
     }
 
     #[test]

@@ -131,6 +131,8 @@ pub fn run_winit() {
 
     let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
     state.apply_config(crate::config::load_startup_config());
+    // Persistence: seed rename, IPC socket, 1 s auto-save/config tick, startup picker.
+    state.start_persistence();
     state
         .shm_state
         .update_formats(state.backend_data.backend.renderer().shm_formats());

@@ -216,6 +216,8 @@ pub fn run_udev() {
     };
     let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
     state.apply_config(crate::config::load_startup_config());
+    // Persistence: seed rename, IPC socket, 1 s auto-save/config tick, startup picker.
+    state.start_persistence();
 
     // Initialize the udev backend (GPU enumeration + hotplug).
     let udev_backend = match UdevBackend::new(&state.seat_name) {

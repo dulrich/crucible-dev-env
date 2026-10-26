@@ -284,6 +284,7 @@ dependencies = [
  "crucible-config",
  "crucible-keys",
  "crucible-layout",
+ "crucible-persist",
  "smithay",
  "smithay-drm-extras",
  "thiserror 2.0.18",

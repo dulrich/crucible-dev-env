@@ -219,6 +219,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// The last hover target seen by focus-follows-mouse; focus moves only when this changes
     /// (pointer *enter*), so keyboard-driven focus is not undone by a pointer twitch.
     pub hover_target: Option<HoverTarget>,
+    /// Workspace persistence, IPC and picker state; see [`crate::persist`].
+    pub persist: crate::persist::PersistState,
 }
 
 /// What the pointer hovers, for focus-follows-mouse enter detection.
@@ -417,6 +419,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             bindings: Bindings::default(),
             gaps: GapConfig::default(),
             hover_target: None,
+            persist: crate::persist::PersistState::new(crucible_persist::store::store_dir()),
         }
     }
 }

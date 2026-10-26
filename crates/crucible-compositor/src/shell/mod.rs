@@ -61,12 +61,13 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         // Do NOT configure here: the initial configure of an xdg_surface must be sent during the
         // first commit (see `ensure_initial_configure`), once the surface is otherwise ready.
+        let pid = self.wayland_client_pid(surface.wl_surface());
         let window = WindowElement::new_wayland_window(surface);
 
         // Route the map through the lifecycle controller, which owns the model/binding/Space commit
         // order. The projection — not a centered placeholder — decides where and at what size this
-        // window lands.
-        self.map_managed_window(window);
+        // window lands. A window from a pending restore/picker PID is placed accordingly.
+        self.map_new_window(window, pid);
     }
 
     fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {

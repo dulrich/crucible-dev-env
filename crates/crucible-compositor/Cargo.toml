@@ -14,6 +14,7 @@ workspace = true
 crucible-layout = { path = "../crucible-layout" }
 crucible-keys = { path = "../crucible-keys" }
 crucible-config = { path = "../crucible-config" }
+crucible-persist = { path = "../crucible-persist" }
 tracing.workspace = true
 
 # Error enums for the udev backend's device-add error type (WS-6), mirroring anvil.

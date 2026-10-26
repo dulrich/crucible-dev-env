@@ -201,6 +201,20 @@ impl<E: Payload> LayoutState<E> {
         id
     }
 
+    /// Like [`Self::open_managed`] but opens the window at stack `index` of `pane` (restore
+    /// placement). On a model error nothing is bound and the error is returned.
+    pub fn open_managed_at(
+        &mut self,
+        element: E,
+        pane: PaneId,
+        index: usize,
+    ) -> Result<WindowId, LayoutError> {
+        let id = self.world.open_window_at(pane, index)?;
+        element.set_window_id(id);
+        self.by_id.insert(id, element);
+        Ok(id)
+    }
+
     /// Step 1+2 of the commit order for an **unmap**: close `id` in the model, then release its
     /// binding.
     ///
@@ -458,6 +472,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
         id
     }
 
+    /// Maps a **managed** window into `pane` at stack `index` (a restored window matched to its
+    /// pending placement). Same commit order as [`Self::map_managed_window`]; on a model error
+    /// nothing is bound or mapped.
+    pub fn map_managed_window_at(
+        &mut self,
+        element: WindowElement,
+        pane: PaneId,
+        index: usize,
+    ) -> Result<WindowId, LayoutError> {
+        let id = self.layout.open_managed_at(element, pane, index)?;
+        self.apply_layout();
+        Ok(id)
+    }
+
     /// Maps an **unmanaged** element (X11 override-redirect) at `location`.
     ///
     /// Unmanaged elements place themselves and are deliberately absent from the [`World`], so the
@@ -481,6 +509,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     if let Some(element) = element {
                         self.space.unmap_elem(&element);
                     }
+                    self.persist.forget_window(id);
                     self.apply_layout();
                     Teardown::Managed(id)
                 }
@@ -495,6 +524,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Binding::Unmanaged => {
                 if let Some(element) = self.layout.untrack_unmanaged(&pred) {
                     self.space.unmap_elem(&element);
+                    self.unmanaged_closed(&element);
                 }
                 Teardown::Unmanaged
             }
@@ -708,6 +738,27 @@ mod tests {
 
     fn tagged(tag: u32) -> impl Fn(&TestElement) -> bool {
         move |e: &TestElement| e.tag == tag
+    }
+
+    #[test]
+    fn open_managed_at_places_by_index_and_binds_nothing_on_error() {
+        let mut layout = state();
+        let pane = layout.world.focused_pane_id();
+        let b = layout
+            .open_managed_at(TestElement::new(2), pane, 0)
+            .unwrap();
+        let a = layout
+            .open_managed_at(TestElement::new(1), pane, 0)
+            .unwrap();
+        assert_eq!(layout.world.pane(pane).unwrap().windows, vec![a, b]);
+        assert_eq!(layout.element(a).unwrap().window_id(), Some(a));
+        let bogus = PaneId::from_raw(999);
+        assert!(
+            layout
+                .open_managed_at(TestElement::new(3), bogus, 0)
+                .is_err()
+        );
+        assert_eq!(layout.managed_count(), 2);
     }
 
     fn state() -> LayoutState<TestElement> {

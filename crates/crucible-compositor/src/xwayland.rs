@@ -169,7 +169,8 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
             warn!(%err, "Failed to mark X11 window mapped");
             return;
         }
-        self.map_managed_window(WindowElement::new_x11_window(window));
+        let pid = window.pid();
+        self.map_new_window(WindowElement::new_x11_window(window), pid);
     }
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
