@@ -76,10 +76,10 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `cycle-workspace <n>` | Switch workspace by `n` (wraps) |
 | `new-workspace` | Create and switch to a new workspace |
 | `move-window-to-workspace <n>` | Send the focused window `n` workspaces over |
-| `open-picker` | Open the workspace picker (not available until WP-5) |
+| `open-picker` | Open the workspace picker (`crucible pick`) |
 | `open-launcher` | Open the program launcher (`crucible launch`) |
 | `open-settings` | Open the read-only settings overlay (`crucible keys`): the effective keybindings |
-| `rename-workspace` | Rename the active workspace (not available until WP-5) |
+| `rename-workspace` | Rename the active workspace (the picker in rename mode) |
 | `none` | Unbind the chord |
 
 `<dir>` is `left`, `right`, `up` or `down`; `<n>` is a signed integer such as `1`, `+1` or `-1`.
