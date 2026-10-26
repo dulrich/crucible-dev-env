@@ -101,6 +101,8 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+Shift+R` | Rename the active workspace (picker in rename mode) |
 | `Super+Shift+]` / `Super+Shift+[` | Move the focused window to the next / previous workspace |
 | `Super+Shift+W` | Close the active workspace — saved first, its windows ended; refused on the last one |
+| `Super+1` ... `Super+0` | Switch to the workspace pinned to that slot; a closed or saved one reopens on the monitor it was last viewed on |
+| `Super+Shift+1` ... `Super+Shift+0` | Pin the active workspace to that slot |
 | `Super+Ctrl+]` / `Super+Ctrl+[` | Move the active workspace to the next / previous monitor |
 | `Ctrl+Alt+F1`…`F12` | Switch virtual terminal (`--tty-udev` only) |
 

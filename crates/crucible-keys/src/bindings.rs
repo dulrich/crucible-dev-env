@@ -18,7 +18,9 @@
 //!
 //! `quit`, `close-pane`, `run-terminal`, `run <command…>`, `new-workspace`, `open-picker`, `open-launcher`, `open-settings`,
 //! `rename-workspace`, `focus|move|split|resize <left|right|up|down>`, `cycle-stack <±n>`,
-//! `cycle-workspace <±n>`, `move-window-to-workspace <±n>`, and `none` (unbind the chord).
+//! `cycle-workspace <±n>`, `move-window-to-workspace <±n>`, `slot <0-9>`, `pin-slot <0-9>`, and `none`
+//! (unbind the chord). `Super+Shift+<digit>` also binds the digit's US shifted symbol (`exclam`, ...),
+//! since the compositor delivers the modified keysym.
 
 use std::collections::HashMap;
 
@@ -140,6 +142,14 @@ impl Bindings {
                         keysym: Keysym::Tab,
                         ..**chord
                     }) == Some(*action))
+                    // A shifted digit symbol is the layout-delivered alias of `Shift+<digit>`.
+                    && !(chord.modifiers.shift
+                        && digit_of_shifted_symbol(chord.keysym).is_some_and(|digit| {
+                            self.map.get(&Chord {
+                                keysym: digit,
+                                ..**chord
+                            }) == Some(*action)
+                        }))
             })
             .map(|(chord, action)| (chord.to_string(), action.to_string()))
             .collect();
@@ -255,6 +265,17 @@ impl Default for Bindings {
         );
         bind(sup_shift, &[Keysym::w, Keysym::W], Action::CloseWorkspace);
 
+        // ---- workspace slots: Super+<d> switches, Super+Shift+<d> pins ----
+        for (d, shifted) in SHIFTED_DIGITS.iter().enumerate() {
+            let n = u8::try_from(d).expect("ten digits");
+            bind(sup, &[Keysym::new(0x30 + u32::from(n))], Action::Slot(n));
+            bind(
+                sup_shift,
+                &[Keysym::new(0x30 + u32::from(n)), shifted.1],
+                Action::PinSlot(n),
+            );
+        }
+
         // ---- Super+Ctrl ----
         bind(
             sup_ctrl,
@@ -306,7 +327,38 @@ fn aliases(modifiers: Modifiers, keysym: Keysym) -> Vec<Keysym> {
     if modifiers.shift && keysym == Keysym::Tab {
         return vec![Keysym::Tab, Keysym::ISO_Left_Tab];
     }
+    if modifiers.shift
+        && let Some(shifted) = shifted_digit_symbol(keysym)
+    {
+        return vec![keysym, shifted];
+    }
     vec![keysym]
+}
+
+/// The digits `0`-`9` (index = digit) paired with their US shifted symbols.
+const SHIFTED_DIGITS: [(&str, Keysym); 10] = [
+    ("parenright", Keysym::parenright),
+    ("exclam", Keysym::exclam),
+    ("at", Keysym::at),
+    ("numbersign", Keysym::numbersign),
+    ("dollar", Keysym::dollar),
+    ("percent", Keysym::percent),
+    ("asciicircum", Keysym::asciicircum),
+    ("ampersand", Keysym::ampersand),
+    ("asterisk", Keysym::asterisk),
+    ("parenleft", Keysym::parenleft),
+];
+
+/// The US shifted symbol of a digit keysym (`3` -> `numbersign`), else `None`.
+fn shifted_digit_symbol(keysym: Keysym) -> Option<Keysym> {
+    let digit = keysym.raw().checked_sub(0x30).filter(|d| *d < 10)?;
+    Some(SHIFTED_DIGITS[usize::try_from(digit).ok()?].1)
+}
+
+/// The digit keysym a US shifted symbol stands for (`numbersign` -> `3`), else `None`.
+fn digit_of_shifted_symbol(keysym: Keysym) -> Option<Keysym> {
+    let digit = SHIFTED_DIGITS.iter().position(|(_, k)| *k == keysym)?;
+    Some(Keysym::new(0x30 + u32::try_from(digit).ok()?))
 }
 
 /// Canonical X11 spellings of the named keys; lookup compares lowercased, display prints these.
@@ -339,6 +391,16 @@ const NAMED: &[(&str, Keysym)] = &[
     ("apostrophe", Keysym::apostrophe),
     ("grave", Keysym::grave),
     ("Print", Keysym::Print),
+    ("exclam", Keysym::exclam),
+    ("at", Keysym::at),
+    ("numbersign", Keysym::numbersign),
+    ("dollar", Keysym::dollar),
+    ("percent", Keysym::percent),
+    ("asciicircum", Keysym::asciicircum),
+    ("ampersand", Keysym::ampersand),
+    ("asterisk", Keysym::asterisk),
+    ("parenleft", Keysym::parenleft),
+    ("parenright", Keysym::parenright),
 ];
 /// Looks up a keysym by X11 name, case-insensitively, in the curated table (see module docs).
 /// Single letters resolve to the lowercase keysym.
@@ -423,6 +485,14 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
         arg.parse::<i64>()
             .map_err(|_| bad(format!("`{arg}` is not an integer")))
     };
+    let slot_index = |arg: Option<&&str>| -> Result<u8, BindError> {
+        let arg = arg.ok_or_else(|| bad("expected a slot number 0-9".into()))?;
+        match arg.parse::<u8>() {
+            Ok(n) if n <= 9 => Ok(n),
+            Ok(_) => Err(bad(format!("slot `{arg}` is out of range (0-9)"))),
+            Err(_) => Err(bad(format!("`{arg}` is not a slot number 0-9"))),
+        }
+    };
     let nullary = |action: Action| -> Result<Option<Action>, BindError> {
         match words.get(1) {
             None => Ok(Some(action)),
@@ -478,6 +548,8 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
         "move-window-to-workspace" => unary(Action::MoveWindowToWorkspace(delta(words.get(1))?)),
         "close-workspace" => nullary(Action::CloseWorkspace),
         "move-workspace-to-output" => unary(Action::MoveWorkspaceToOutput(delta(words.get(1))?)),
+        "slot" => unary(Action::Slot(slot_index(words.get(1))?)),
+        "pin-slot" => unary(Action::PinSlot(slot_index(words.get(1))?)),
         other => Err(bad(format!("unknown action `{other}`"))),
     }
 }
@@ -615,6 +687,8 @@ mod tests {
                 "move-workspace-to-output -2",
                 Action::MoveWorkspaceToOutput(-2),
             ),
+            ("slot 3", Action::Slot(3)),
+            ("pin-slot 0", Action::PinSlot(0)),
             ("open-picker", Action::OpenPicker),
             ("open-launcher", Action::OpenLauncher),
             ("open-settings", Action::OpenSettings),
@@ -671,6 +745,11 @@ mod tests {
             "quit now",
             "none now",
             "split 3",
+            "slot",
+            "slot 10",
+            "slot -1",
+            "slot x",
+            "pin-slot 3 4",
         ] {
             let err = Bindings::with_overrides(&[pair("Super+Q", action)]).unwrap_err();
             assert!(
@@ -798,5 +877,56 @@ mod tests {
         let e = o.entries();
         assert!(e.contains(&pair("Super+W", "quit")));
         assert!(!e.iter().any(|(c, _)| c == "Super+N"));
+    }
+
+    fn sup_shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..sup()
+        }
+    }
+
+    #[test]
+    fn default_slot_chords_bind_digit_and_shifted_symbol() {
+        let b = Bindings::default();
+        assert_eq!(b.get(sup(), Keysym::_3), Some(&Action::Slot(3)));
+        assert_eq!(b.get(sup(), Keysym::_0), Some(&Action::Slot(0)));
+        assert_eq!(b.get(sup_shift(), Keysym::_3), Some(&Action::PinSlot(3)));
+        assert_eq!(
+            b.get(sup_shift(), Keysym::numbersign),
+            Some(&Action::PinSlot(3))
+        );
+        assert_eq!(
+            b.get(sup_shift(), Keysym::parenright),
+            Some(&Action::PinSlot(0))
+        );
+        // The shifted symbol is not a plain-Super chord.
+        assert_eq!(b.get(sup(), Keysym::numbersign), None);
+    }
+
+    #[test]
+    fn shift_digit_override_binds_the_shifted_symbol_too() {
+        let b = Bindings::with_overrides(&[pair("Super+Shift+5", "quit")]).unwrap();
+        assert_eq!(b.get(sup_shift(), Keysym::_5), Some(&Action::Quit));
+        assert_eq!(b.get(sup_shift(), Keysym::percent), Some(&Action::Quit));
+        let b = Bindings::with_overrides(&[pair("Super+5", "quit")]).unwrap();
+        assert_eq!(b.get(sup(), Keysym::_5), Some(&Action::Quit));
+        assert_eq!(b.get(sup(), Keysym::percent), None);
+        assert_eq!(
+            b.get(sup_shift(), Keysym::percent),
+            Some(&Action::PinSlot(5))
+        );
+    }
+
+    #[test]
+    fn entries_list_each_pin_chord_once() {
+        let e = Bindings::default().entries();
+        assert!(e.contains(&pair("Super+Shift+3", "pin-slot 3")));
+        assert!(e.contains(&pair("Super+3", "slot 3")));
+        for (chord, _) in &e {
+            for (name, _) in &SHIFTED_DIGITS {
+                assert!(!chord.ends_with(&format!("+{name}")), "{chord}");
+            }
+        }
     }
 }

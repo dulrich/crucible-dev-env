@@ -29,9 +29,14 @@
 //! | `Super+Shift+W`       | `CloseWorkspace`               | save, then `World::remove_workspace` |
 //! | `Super+Ctrl+]`        | `MoveWorkspaceToOutput(1)`     | `World::move_workspace_to_output` |
 //! | `Super+Ctrl+[`        | `MoveWorkspaceToOutput(-1)`    | `World::move_workspace_to_output` |
+//! | `Super+<0-9>`         | `Slot(n)`                      | open the workspace pinned to slot n |
+//! | `Super+Shift+<0-9>`   | `PinSlot(n)`                   | pin the active workspace to slot n |
 //! | `Super+P`             | `OpenPicker`                   | fuzzy workspace picker (WP-5)     |
 //! | `Super+Shift+R`       | `RenameWorkspace`              | rename the active workspace (WP-5)|
 //! | `Ctrl+Alt+F<n>`       | `VtSwitch(n)`                  | backend VT switch (hard-wired, independent of `Super`) |
+//!
+//! `Super+Shift+<0-9>` also binds the US shifted symbol (`exclam`, `at`, ...), which is what the
+//! compositor delivers with Shift held.
 //!
 //! Letter chords bind both cases (Caps Lock), except plain `Super+H/J/K/L` which, as always,
 //! match the lowercase keysym only. Any chord except VT switching can be rebound or unbound from
@@ -154,6 +159,16 @@ mod tests {
             (Keysym::bracketleft, Action::CycleWorkspace(-1)),
             (Keysym::n, Action::NewWorkspace),
             (Keysym::N, Action::NewWorkspace),
+            (Keysym::_0, Action::Slot(0)),
+            (Keysym::_1, Action::Slot(1)),
+            (Keysym::_2, Action::Slot(2)),
+            (Keysym::_3, Action::Slot(3)),
+            (Keysym::_4, Action::Slot(4)),
+            (Keysym::_5, Action::Slot(5)),
+            (Keysym::_6, Action::Slot(6)),
+            (Keysym::_7, Action::Slot(7)),
+            (Keysym::_8, Action::Slot(8)),
+            (Keysym::_9, Action::Slot(9)),
         ];
         for (keysym, expected) in plain_super {
             assert_eq!(
@@ -181,6 +196,26 @@ mod tests {
             (Keysym::bracketleft, Action::MoveWindowToWorkspace(-1)),
             (Keysym::w, Action::CloseWorkspace),
             (Keysym::W, Action::CloseWorkspace),
+            (Keysym::_0, Action::PinSlot(0)),
+            (Keysym::parenright, Action::PinSlot(0)),
+            (Keysym::_1, Action::PinSlot(1)),
+            (Keysym::exclam, Action::PinSlot(1)),
+            (Keysym::_2, Action::PinSlot(2)),
+            (Keysym::at, Action::PinSlot(2)),
+            (Keysym::_3, Action::PinSlot(3)),
+            (Keysym::numbersign, Action::PinSlot(3)),
+            (Keysym::_4, Action::PinSlot(4)),
+            (Keysym::dollar, Action::PinSlot(4)),
+            (Keysym::_5, Action::PinSlot(5)),
+            (Keysym::percent, Action::PinSlot(5)),
+            (Keysym::_6, Action::PinSlot(6)),
+            (Keysym::asciicircum, Action::PinSlot(6)),
+            (Keysym::_7, Action::PinSlot(7)),
+            (Keysym::ampersand, Action::PinSlot(7)),
+            (Keysym::_8, Action::PinSlot(8)),
+            (Keysym::asterisk, Action::PinSlot(8)),
+            (Keysym::_9, Action::PinSlot(9)),
+            (Keysym::parenleft, Action::PinSlot(9)),
         ];
         for (keysym, expected) in super_shift_chords {
             assert_eq!(
@@ -329,6 +364,22 @@ mod tests {
             (false, false, Keysym::bracketright) => Some(Action::CycleWorkspace(1)),
             (false, false, Keysym::bracketleft) => Some(Action::CycleWorkspace(-1)),
             (false, false, Keysym::n | Keysym::N) => Some(Action::NewWorkspace),
+            (false, false, k) if (0x30..=0x39).contains(&k.raw()) => {
+                Some(Action::Slot(u8::try_from(k.raw() - 0x30).unwrap()))
+            }
+            (true, false, k) if (0x30..=0x39).contains(&k.raw()) => {
+                Some(Action::PinSlot(u8::try_from(k.raw() - 0x30).unwrap()))
+            }
+            (true, false, Keysym::parenright) => Some(Action::PinSlot(0)),
+            (true, false, Keysym::exclam) => Some(Action::PinSlot(1)),
+            (true, false, Keysym::at) => Some(Action::PinSlot(2)),
+            (true, false, Keysym::numbersign) => Some(Action::PinSlot(3)),
+            (true, false, Keysym::dollar) => Some(Action::PinSlot(4)),
+            (true, false, Keysym::percent) => Some(Action::PinSlot(5)),
+            (true, false, Keysym::asciicircum) => Some(Action::PinSlot(6)),
+            (true, false, Keysym::ampersand) => Some(Action::PinSlot(7)),
+            (true, false, Keysym::asterisk) => Some(Action::PinSlot(8)),
+            (true, false, Keysym::parenleft) => Some(Action::PinSlot(9)),
             (true, false, Keysym::Return) => Some(Action::RunTerminal),
             (true, false, Keysym::q | Keysym::Q) => Some(Action::Quit),
             (true, false, Keysym::h | Keysym::H) => Some(Action::Move(Direction::Left)),

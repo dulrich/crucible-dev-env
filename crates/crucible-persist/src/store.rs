@@ -93,9 +93,16 @@ fn io(op: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> PersistEr
 /// The text is written to a temp file in `dir`, synced, then renamed over the target, so readers
 /// never see a partial file.
 pub fn save(dir: &Path, record: &WorkspaceRecord) -> Result<PathBuf, PersistError> {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
     let text = record.to_kdl()?;
     let target = dir.join(encode_file_name(&record.name)?);
+    write_atomic(dir, &target, &text)?;
+    Ok(target)
+}
+
+/// Writes `text` to `target` (inside `dir`, created if missing) via a dot-prefixed temp file in
+/// `dir`, synced, then renamed over the target; the temp file is removed on failure.
+pub(crate) fn write_atomic(dir: &Path, target: &Path, text: &str) -> Result<(), PersistError> {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     fs::create_dir_all(dir).map_err(io("create directory", dir))?;
     // Starts with '.', which encoded names never do, so listings skip leftovers.
     let tmp = dir.join(format!(
@@ -112,11 +119,11 @@ pub fn save(dir: &Path, record: &WorkspaceRecord) -> Result<PathBuf, PersistErro
         let _ = fs::remove_file(&tmp);
         return Err(io("write", &tmp)(e));
     }
-    if let Err(e) = fs::rename(&tmp, &target) {
+    if let Err(e) = fs::rename(&tmp, target) {
         let _ = fs::remove_file(&tmp);
-        return Err(io("rename", &target)(e));
+        return Err(io("rename", target)(e));
     }
-    Ok(target)
+    Ok(())
 }
 
 /// Loads and parses the workspace file at `path`.

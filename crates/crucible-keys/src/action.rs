@@ -78,6 +78,11 @@ pub enum Action {
     /// are ended. Refused on the output's last workspace or while a restore is pending.
     /// `Super+Shift+W`.
     CloseWorkspace,
+    /// Switch to the workspace pinned to slot `n` (0-9); an unpinned slot is a no-op.
+    /// `Super+<digit>`.
+    Slot(u8),
+    /// Pin the active workspace to slot `n` (0-9). `Super+Shift+<digit>`.
+    PinSlot(u8),
     /// Move the focused output's active workspace `delta` outputs along the output order
     /// (wraparound). `Super+Ctrl+]` (`1`) / `Super+Ctrl+[` (`-1`). No-op with one output.
     MoveWorkspaceToOutput(i64),
@@ -124,6 +129,8 @@ impl std::fmt::Display for Action {
             Self::NewWorkspace => f.write_str("new-workspace"),
             Self::MoveWindowToWorkspace(n) => write!(f, "move-window-to-workspace {n}"),
             Self::CloseWorkspace => f.write_str("close-workspace"),
+            Self::Slot(n) => write!(f, "slot {n}"),
+            Self::PinSlot(n) => write!(f, "pin-slot {n}"),
             Self::MoveWorkspaceToOutput(n) => write!(f, "move-workspace-to-output {n}"),
             Self::OpenPicker => f.write_str("open-picker"),
             Self::OpenLauncher => f.write_str("open-launcher"),

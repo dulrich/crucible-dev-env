@@ -9,6 +9,7 @@
 //!   `insert_workspace` then replay stacks with `open_window_at` / `set_stack_focus`;
 //! - the KDL workspace file format ([`WorkspaceRecord::to_kdl`] / [`WorkspaceRecord::from_kdl`]);
 //! - the on-disk [`store`] (atomic save, load, list) under `$XDG_STATE_HOME/cde/workspaces/`;
+//! - the named workspace [`slots`] (`Super+<digit>` pins) in `$XDG_STATE_HOME/cde/slots.kdl`, a sibling of the store;
 //! - `/proc` cwd + foreground-command capture ([`capture`]) for external terminals;
 //! - the auto-save throttle ([`should_save`]).
 //!
@@ -22,6 +23,7 @@ mod error;
 mod format;
 mod policy;
 mod record;
+pub mod slots;
 pub mod store;
 
 pub use capture::{

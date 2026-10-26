@@ -20,6 +20,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime};
 
 use crucible_layout::{OutputId, PaneId, Rect, WindowId, WorkspaceId, World};
+use crucible_persist::slots::{Slots, slots_path};
 use crucible_persist::{WindowRecord, WorkspaceRecord, store};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::utils::{Point, Rectangle, Size};
@@ -186,6 +187,9 @@ fn close_element(element: &WindowElement) {
 pub struct PersistState {
     /// Where workspace files live (`$XDG_STATE_HOME/cde/workspaces`).
     pub store_dir: PathBuf,
+    /// Named workspace slot pins (`$XDG_STATE_HOME/cde/slots.kdl`, beside the store dir). Empty
+    /// until [`CrucibleState::start_persistence`] loads them.
+    pub slots: Slots,
     /// The bound IPC socket path, exported to children as `CDE_SOCKET`.
     pub ipc_path: Option<PathBuf>,
     /// Folder roots of workspaces (new terminals start there).
@@ -210,6 +214,7 @@ impl PersistState {
     pub fn new(store_dir: PathBuf) -> Self {
         Self {
             store_dir,
+            slots: Slots::new(),
             ipc_path: None,
             roots: HashMap::new(),
             last_output: HashMap::new(),
@@ -663,6 +668,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// applied: renames the seed workspace off a saved name, binds the IPC socket, arms the 1 s
     /// tick, and opens the picker when saved workspaces exist.
     pub fn start_persistence(&mut self) {
+        match Slots::load(&slots_path(&self.persist.store_dir)) {
+            Ok(slots) => self.persist.slots = slots,
+            Err(err) => warn!(%err, "cannot read the slot pins; starting with none"),
+        }
         let saved = self.persist.saved_names();
         let seed = self.layout.world.active_workspace_id();
         self.rename_seed_off_saved(seed);
@@ -1717,6 +1726,44 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.create_named(name.to_string(), None)
     }
 
+    fn save_slots(&self) {
+        let path = slots_path(&self.persist.store_dir);
+        if let Err(err) = self.persist.slots.save(&path) {
+            warn!(%err, path = %path.display(), "cannot save the slot pins");
+        }
+    }
+
+    /// `Action::PinSlot(n)`: pins the active workspace's name to slot `n` and saves the pins.
+    pub(crate) fn pin_slot(&mut self, n: u8) {
+        let ws = self.layout.world.active_workspace_id();
+        let Some(name) = self.layout.world.workspace(ws).map(|w| w.name.clone()) else {
+            return;
+        };
+        if !self.persist.slots.pin(n, &name) {
+            return;
+        }
+        info!(slot = n, workspace = name, "slot pinned");
+        self.save_slots();
+    }
+
+    /// `Action::Slot(n)`: opens the workspace pinned to slot `n` (live, else restored from disk
+    /// on its last-viewed output). An unpinned slot or a failed open is an `info!` no-op; a stale
+    /// pin is kept.
+    pub(crate) fn slot_open(&mut self, n: u8) {
+        let Some(name) = self.persist.slots.get(n).map(str::to_string) else {
+            info!(slot = n, "slot is not pinned");
+            return;
+        };
+        if let Err(reason) = self.ipc_open(&name) {
+            info!(
+                slot = n,
+                workspace = name,
+                reason,
+                "slot workspace not opened"
+            );
+        }
+    }
+
     fn ipc_rename(&mut self, new: &str) -> Result<(), String> {
         let ws = self.layout.world.active_workspace_id();
         let old = self
@@ -1734,6 +1781,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.persist.file_of(new)?;
         self.with_model(|w| w.rename_workspace(ws, new))
             .map_err(|e| e.to_string())?;
+        // Pins follow a user-driven rename (and only that one).
+        if self.persist.slots.rename(&old, new) {
+            self.save_slots();
+        }
         let old_file = self.persist.file_of(&old).ok();
         let had_file = old_file.as_ref().is_some_and(|f| f.exists());
         self.persist.saved.remove(&old);

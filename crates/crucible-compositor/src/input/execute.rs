@@ -71,6 +71,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.close_workspace();
                 return;
             }
+            Action::Slot(n) => {
+                self.slot_open(n);
+                return;
+            }
+            Action::PinSlot(n) => {
+                self.pin_slot(n);
+                return;
+            }
             Action::MoveWorkspaceToOutput(delta) => {
                 self.move_active_workspace_to_output(delta);
                 return;
@@ -189,6 +197,8 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
         | Action::RenameWorkspace
         | Action::CloseWorkspace
         | Action::MoveWorkspaceToOutput(_)
+        | Action::Slot(_)
+        | Action::PinSlot(_)
         | Action::NewWorkspace
         | Action::VtSwitch(_) => {
             unreachable!("compositor-level action; handle_key_action routes it before with_model")
