@@ -116,6 +116,9 @@ enum OverlayState {
 struct Overlay {
     kind: OverlayKind,
     state: OverlayState,
+    /// The spawned terminal's PID, kept once mapped so the overlay can be ended by killing it
+    /// (a polite close makes the terminal ask "close window?" while the TUI runs).
+    pid: Option<u32>,
 }
 
 /// What opening an overlay of a requested kind does given the slot's current occupant.
@@ -157,6 +160,15 @@ pub fn reap_exited(children: &mut Vec<Child>) -> Vec<u32> {
         }
     });
     reaped
+}
+
+/// Kills the held child `pid` (SIGKILL via its own handle; the next [`reap_exited`] collects it).
+/// Returns `false` when CDE holds no live handle for `pid`.
+pub fn kill_child(children: &mut [Child], pid: u32) -> bool {
+    children
+        .iter_mut()
+        .find(|c| c.id() == pid)
+        .is_some_and(|c| c.kill().is_ok())
 }
 
 /// Asks a window to close (xdg `close` or the X11 equivalent).
@@ -546,6 +558,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some(Overlay {
             state: OverlayState::Launching(pid),
             kind,
+            ..
         }) = self.persist.overlay
         {
             if !self.persist.pending.contains_key(&pid) {
@@ -839,10 +852,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             OpenDecision::ReplaceThenSpawn => {
                 if let Some(Overlay {
                     state: OverlayState::Mapped(old),
+                    pid,
                     ..
                 }) = current
                 {
-                    close_element(&old);
+                    self.end_overlay(&old, pid);
                 }
             }
             OpenDecision::Spawn => {}
@@ -859,6 +873,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.persist.overlay = Some(Overlay {
                 kind,
                 state: OverlayState::Launching(pid),
+                pid: Some(pid),
             });
         }
     }
@@ -888,14 +903,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.map_unmanaged_element(element.clone(), loc);
         self.space.raise_element(&element, true);
         self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element.clone())));
-        let kind = self
+        let (kind, pid) = self
             .persist
             .overlay
             .as_ref()
-            .map_or(OverlayKind::Picker, |o| o.kind);
+            .map_or((OverlayKind::Picker, None), |o| (o.kind, o.pid));
         self.persist.overlay = Some(Overlay {
             kind,
             state: OverlayState::Mapped(element),
+            pid,
         });
     }
 
@@ -910,10 +926,24 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// Asks the mapped overlay (if any) to close; the slot is cleared by [`Self::unmanaged_closed`]
-    /// when its surface goes away.
-    pub(crate) fn close_mapped_overlay(&self) {
-        if let Some(element) = self.mapped_overlay() {
+    /// Ends the mapped overlay (if any); the slot is cleared by [`Self::unmanaged_closed`] when its
+    /// surface goes away.
+    pub(crate) fn close_mapped_overlay(&mut self) {
+        let Some(Overlay {
+            state: OverlayState::Mapped(element),
+            pid,
+            ..
+        }) = self.persist.overlay.clone()
+        else {
+            return;
+        };
+        self.end_overlay(&element, pid);
+    }
+
+    /// Ends an overlay by killing its terminal process, so the terminal never asks to confirm
+    /// closing a window with a running TUI. Falls back to a polite close when CDE holds no handle.
+    fn end_overlay(&mut self, element: &WindowElement, pid: Option<u32>) {
+        if !pid.is_some_and(|p| kill_child(&mut self.persist.children, p)) {
             close_element(element);
         }
     }
@@ -1364,7 +1394,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::reap_exited;
+    use super::{kill_child, reap_exited};
+
+    #[test]
+    fn kill_child_ends_only_a_held_child() {
+        let child = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let mut children = vec![child];
+        assert!(!kill_child(&mut children, pid.wrapping_add(1_000_000)));
+        assert!(kill_child(&mut children, pid));
+        let status = children[0].wait().unwrap();
+        assert!(!status.success(), "killed, not exited cleanly");
+    }
 
     #[test]
     fn reap_exited_drops_only_exited_children() {
