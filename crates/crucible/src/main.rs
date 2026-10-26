@@ -11,10 +11,11 @@ mod keys;
 mod launch;
 mod msg;
 mod pick;
+mod relaunch;
 mod resume;
 mod tty;
 
-const USAGE: &str = "usage: crucible [--winit | --tty-udev]\n       crucible pick [--rename <name>]\n       crucible launch\n       crucible keys\n       crucible resume --cwd <dir> [-- <command>]\n       crucible msg <request...>\n\n  --winit                  run the nested development compositor\n  --tty-udev               run the DRM/KMS backend on a real TTY (multi-output)\n  pick                     the workspace picker (needs $CDE_SOCKET)\n  launch                   the program launcher (needs $CDE_SOCKET)\n  keys                     the read-only settings overlay: effective keybindings (needs $CDE_SOCKET)\n  resume                   restored-terminal banner: Enter runs the old command\n  msg                      send one request line to the compositor and print the reply\n  -h, --help               print this usage and exit 0 (`crucible <subcommand> --help` for details)\n\nWith no backend flag, a one-line banner is printed and nothing is started.\n";
+const USAGE: &str = "usage: crucible [--winit | --tty-udev]\n       crucible pick [--rename <name>]\n       crucible launch\n       crucible keys\n       crucible resume --cwd <dir> [-- <command>]\n       crucible relaunch [--app-id <id>] -- <cmdline>\n       crucible msg <request...>\n\n  --winit                  run the nested development compositor\n  --tty-udev               run the DRM/KMS backend on a real TTY (multi-output)\n  pick                     the workspace picker (needs $CDE_SOCKET)\n  launch                   the program launcher (needs $CDE_SOCKET)\n  keys                     the read-only settings overlay: effective keybindings (needs $CDE_SOCKET)\n  resume                   restored-terminal banner: Enter runs the old command\n  relaunch                 restored-app placeholder: Enter relaunches the app in its slot\n  msg                      send one request line to the compositor and print the reply\n  -h, --help               print this usage and exit 0 (`crucible <subcommand> --help` for details)\n\nWith no backend flag, a one-line banner is printed and nothing is started.\n";
 
 /// True when `--help`/`-h` appears anywhere in the arguments (after the program name).
 /// Help wins over the backend flags, so `--tty-udev --help` never takes the DRM/KMS device.
@@ -33,11 +34,15 @@ fn sub_wants_help(sub: &str, rest: &[String]) -> bool {
     if sub == "msg" {
         return rest.first().is_some_and(is_help);
     }
-    let value_flag = if sub == "resume" { "--cwd" } else { "--rename" };
+    let value_flag = match sub {
+        "resume" => "--cwd",
+        "relaunch" => "--app-id",
+        _ => "--rename",
+    };
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
-            "--" if sub == "resume" => return false,
+            "--" if sub == "resume" || sub == "relaunch" => return false,
             f if f == value_flag => i += 1,
             "--help" | "-h" => return true,
             _ => {}
@@ -56,6 +61,7 @@ fn run_subcommand(args: &[String]) -> Option<i32> {
         "launch" => (launch::USAGE, launch::run),
         "keys" => (keys::USAGE, keys::run),
         "resume" => (resume::USAGE, resume::run),
+        "relaunch" => (relaunch::USAGE, relaunch::run),
         "msg" => (msg::USAGE, msg::run),
         _ => return None,
     };
@@ -129,6 +135,13 @@ mod tests {
             &args(&["--cwd", "/x", "--", "--help"])
         ));
         assert!(!sub_wants_help("resume", &args(&["--cwd", "--help"])));
+        assert!(sub_wants_help("relaunch", &args(&["--help"])));
+        assert!(sub_wants_help("relaunch", &args(&["--app-id", "x", "-h"])));
+        assert!(!sub_wants_help(
+            "relaunch",
+            &args(&["--app-id", "--help", "--", "x"])
+        ));
+        assert!(!sub_wants_help("relaunch", &args(&["--", "--help"])));
         assert!(sub_wants_help("launch", &args(&["--help"])));
         assert!(sub_wants_help("launch", &args(&["x", "-h"])));
         assert!(!sub_wants_help("launch", &args(&[])));

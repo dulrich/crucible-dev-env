@@ -67,6 +67,18 @@ pub enum Target {
         /// Whether it was the pane's focused window.
         focused: bool,
     },
+    /// Into the live slot a relaunch placeholder held: `pane` at `index` (its position in the
+    /// pane's stack when Enter was pressed, never the saved order).
+    Slot {
+        /// The placeholder's pane.
+        pane: PaneId,
+        /// The placeholder's current index in that pane's stack.
+        index: usize,
+        /// Whether the placeholder was the pane's focused window.
+        focused: bool,
+        /// The placeholder's restore placement entry (`placed`), inherited by the app.
+        saved_index: Option<usize>,
+    },
     /// An overlay (picker / launcher; unmanaged, centred, keyboard-focused).
     Overlay,
 }
@@ -231,6 +243,20 @@ pub fn insert_index(placed_saved: impl IntoIterator<Item = usize>, saved_index: 
         .count()
 }
 
+/// The live slot of `target` in a pane stack `windows` whose focused index is `focused`:
+/// `(index, was_focused)`, or `None` when it is not in the stack.
+#[must_use]
+pub fn slot_for(windows: &[WindowId], focused: usize, target: WindowId) -> Option<(usize, bool)> {
+    let index = windows.iter().position(|w| *w == target)?;
+    Some((index, index == focused))
+}
+
+/// The index a relaunched app maps at: the recorded slot, clamped to the live stack length.
+#[must_use]
+pub fn slot_index(index: usize, live_len: usize) -> usize {
+    index.min(live_len)
+}
+
 /// Whether a record is not worth writing: one pane, no windows, no folder root.
 #[must_use]
 pub fn skip_record(record: &WorkspaceRecord) -> bool {
@@ -312,6 +338,25 @@ pub fn restore_args(
         "--".into(),
         command.into(),
     ]
+}
+
+/// The terminal arguments for an app relaunch placeholder: `<exec-flag> <crucible> relaunch
+/// [--app-id <id>] -- <cmdline>` (the cmdline is ONE element).
+#[must_use]
+pub fn relaunch_args(
+    exec_flag: &str,
+    crucible: &Path,
+    app_id: Option<&str>,
+    cmdline: &str,
+) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec![exec_flag.into(), crucible.into(), "relaunch".into()];
+    if let Some(id) = app_id {
+        args.push("--app-id".into());
+        args.push(id.into());
+    }
+    args.push("--".into());
+    args.push(cmdline.into());
+    args
 }
 
 /// The terminal arguments for the picker: `<exec-flag> <crucible> pick [--rename <encoded>]`.
@@ -510,7 +555,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         };
         let panes = w.panes();
         self.persist.pending.values().any(|p| match p.target {
-            Target::Pane { pane, .. } => panes.contains(&pane),
+            Target::Pane { pane, .. } | Target::Slot { pane, .. } => panes.contains(&pane),
             Target::Overlay => false,
         })
     }
@@ -603,6 +648,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let info = self.persist.windows.get(&id).copied();
         let pid = info.and_then(|i| i.pid);
         if let (Some(pid), true) = (pid, info.is_some_and(|i| i.terminal)) {
+            // A relaunch placeholder still waiting for Enter keeps its original app record.
+            if let Some(cap) = crucible_persist::capture_relaunch(proc_root(), pid) {
+                return WindowRecord::App {
+                    app_id: cap.app_id,
+                    cmdline: Some(cap.cmdline),
+                };
+            }
             if let Some(cap) = crucible_persist::capture_terminal(proc_root(), pid) {
                 return WindowRecord::Terminal {
                     cwd: cap.cwd,
@@ -676,6 +728,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Returns the PID.
     pub fn spawn_command_here(&mut self, cmd: &str) -> Option<u32> {
         let ws = self.layout.world.active_workspace_id();
+        self.spawn_command_in(cmd, ws)
+    }
+
+    /// Runs `cmd` via `/bin/sh -c 'exec <cmd>'` (kind `App`) in workspace `ws`'s root, if any.
+    fn spawn_command_in(&mut self, cmd: &str, ws: WorkspaceId) -> Option<u32> {
         let root = self.persist.roots.get(&ws).cloned();
         let args = [OsString::from("-c"), OsString::from(format!("exec {cmd}"))];
         self.spawn_process("/bin/sh", &args, root.as_deref(), SpawnKind::App)
@@ -861,6 +918,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 saved_index,
                 focused,
             }) => self.map_placed(element, pane, saved_index, focused),
+            Some(Target::Slot {
+                pane,
+                index,
+                focused,
+                saved_index,
+            }) => self.map_slot(element, pane, index, focused, saved_index),
             None => self.map_managed_window(element),
         };
         let terminal = pid.is_some_and(|p| is_terminal_spawn(p, &ancestors, &self.persist.spawned));
@@ -887,21 +950,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let index = insert_index(placed.iter().map(|(_, i)| *i), saved_index);
         match self.map_managed_window_at(element.clone(), pane, index) {
             Ok(id) => {
-                self.persist
-                    .placed
-                    .entry(pane)
-                    .or_default()
-                    .push((id, saved_index));
-                if focused {
-                    let pos = self
-                        .layout
-                        .world
-                        .pane(pane)
-                        .and_then(|p| p.windows.iter().position(|w| *w == id));
-                    if let Some(pos) = pos {
-                        let _ = self.with_model(|w| w.set_stack_focus(pane, pos));
-                    }
-                }
+                self.finish_placement(pane, id, Some(saved_index), focused);
                 id
             }
             Err(err) => {
@@ -911,11 +960,65 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
+    /// Records a placed window's saved index (if any) and applies its stack focus.
+    fn finish_placement(
+        &mut self,
+        pane: PaneId,
+        id: WindowId,
+        saved_index: Option<usize>,
+        focused: bool,
+    ) {
+        if let Some(saved_index) = saved_index {
+            self.persist
+                .placed
+                .entry(pane)
+                .or_default()
+                .push((id, saved_index));
+        }
+        if focused {
+            let pos = self
+                .layout
+                .world
+                .pane(pane)
+                .and_then(|p| p.windows.iter().position(|w| *w == id));
+            if let Some(pos) = pos {
+                let _ = self.with_model(|w| w.set_stack_focus(pane, pos));
+            }
+        }
+    }
+
+    /// Maps a relaunched app into the slot its placeholder held (clamped to the live stack).
+    fn map_slot(
+        &mut self,
+        element: WindowElement,
+        pane: PaneId,
+        index: usize,
+        focused: bool,
+        saved_index: Option<usize>,
+    ) -> WindowId {
+        let Some(live_len) = self.layout.world.pane(pane).map(|p| p.windows.len()) else {
+            warn!(?pane, "relaunch pane is gone; using the focused pane");
+            return self.map_managed_window(element);
+        };
+        match self.map_managed_window_at(element.clone(), pane, slot_index(index, live_len)) {
+            Ok(id) => {
+                self.finish_placement(pane, id, saved_index, focused);
+                id
+            }
+            Err(err) => {
+                warn!(%err, "relaunch placement failed; using the focused pane");
+                self.map_managed_window(element)
+            }
+        }
+    }
+
     // ---- IPC -----------------------------------------------------------------------------------
 
-    /// Answers one IPC request.
-    pub fn handle_ipc(&mut self, request: Request) -> Response {
+    /// Answers one IPC request. `peer` is the connecting process's PID (`SO_PEERCRED`); only
+    /// `relaunch` uses it.
+    pub fn handle_ipc(&mut self, request: Request, peer: Option<u32>) -> Response {
         let result = match request {
+            Request::Relaunch => self.ipc_relaunch(peer),
             Request::Candidates => {
                 return Response::Ok(crate::ipc::format_candidates(&self.candidates()));
             }
@@ -941,6 +1044,84 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(()) => Response::Ok(String::new()),
             Err(reason) => Response::Err(reason),
         }
+    }
+
+    /// Swaps the placeholder window run by `peer` for its app: spawn the saved cmdline, register
+    /// the placeholder's live slot as pending, close the placeholder.
+    fn ipc_relaunch(&mut self, peer: Option<u32>) -> Result<(), String> {
+        let peer = peer.ok_or_else(|| "not a relaunch placeholder".to_string())?;
+        let args = std::fs::read(proc_root().join(peer.to_string()).join("cmdline"))
+            .map(|b| crucible_persist::capture::parse_cmdline(&b))
+            .unwrap_or_default();
+        let capture = crucible_persist::parse_relaunch_banner(&args)
+            .ok_or_else(|| "not a relaunch placeholder".to_string())?;
+        let ancestors = crucible_persist::ancestors(proc_root(), peer, ANCESTOR_DEPTH);
+        let windows = &self.persist.windows;
+        let pid = match_pending(peer, &ancestors, |p| {
+            windows.values().any(|i| i.pid == Some(p))
+        })
+        .ok_or_else(|| "no placeholder window".to_string())?;
+        let mut ids: Vec<WindowId> = windows
+            .iter()
+            .filter(|(_, i)| i.pid == Some(pid))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort();
+        let world = &self.layout.world;
+        let (id, pane, index, focused) = ids
+            .into_iter()
+            .find_map(|id| {
+                let pane_id = world.pane_of_window(id)?;
+                let pane = world.pane(pane_id)?;
+                let (index, focused) = slot_for(&pane.windows, pane.focused, id)?;
+                Some((id, pane_id, index, focused))
+            })
+            .ok_or_else(|| "no placeholder window".to_string())?;
+        let ws = self
+            .live_workspaces()
+            .into_iter()
+            .map(|(_, ws)| ws)
+            .find(|ws| {
+                world
+                    .workspace(*ws)
+                    .is_some_and(|w| w.panes().contains(&pane))
+            })
+            .unwrap_or_else(|| world.active_workspace_id());
+        let saved_index = self
+            .persist
+            .placed
+            .get(&pane)
+            .and_then(|v| v.iter().find(|(w, _)| *w == id).map(|(_, i)| *i));
+        let element = self.layout.element(id).cloned();
+        let pid = self
+            .spawn_command_in(&capture.cmdline, ws)
+            .ok_or_else(|| "spawn failed".to_string())?;
+        self.persist.pending.insert(
+            pid,
+            Pending {
+                target: Target::Slot {
+                    pane,
+                    index,
+                    focused,
+                    saved_index,
+                },
+                since: Instant::now(),
+            },
+        );
+        if let Some(element) = element {
+            if let Some(toplevel) = element.toplevel() {
+                toplevel.send_close();
+            }
+            if let Some(x11) = element.x11_surface() {
+                let _ = x11.close();
+            }
+        }
+        info!(
+            pid,
+            cmdline = capture.cmdline,
+            "relaunching app into its placeholder slot"
+        );
+        Ok(())
     }
 
     fn candidates(&self) -> Vec<Candidate> {
@@ -1007,16 +1188,33 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let mut jobs = Vec::new();
         for (pane, pane_record) in panes.iter().zip(record.panes()) {
             for (i, window) in pane_record.windows.iter().enumerate() {
-                if let WindowRecord::Terminal { cwd, command } = window {
-                    let dir =
-                        resolve_cwd(cwd, record.root.as_deref(), home.as_deref(), Path::is_dir);
-                    let args = restore_args(&exec_flag, &crucible, &dir, command.as_deref());
-                    let target = Target::Pane {
-                        pane: *pane,
-                        saved_index: i,
-                        focused: pane_record.focused == i,
-                    };
-                    jobs.push((dir, args, target));
+                let target = Target::Pane {
+                    pane: *pane,
+                    saved_index: i,
+                    focused: pane_record.focused == i,
+                };
+                match window {
+                    WindowRecord::Terminal { cwd, command } => {
+                        let dir =
+                            resolve_cwd(cwd, record.root.as_deref(), home.as_deref(), Path::is_dir);
+                        let args = restore_args(&exec_flag, &crucible, &dir, command.as_deref());
+                        jobs.push((dir, args, target));
+                    }
+                    WindowRecord::App {
+                        app_id,
+                        cmdline: Some(cmdline),
+                    } => {
+                        let root = record.root.as_deref();
+                        let dir = resolve_cwd(
+                            root.unwrap_or(Path::new("")),
+                            root,
+                            home.as_deref(),
+                            Path::is_dir,
+                        );
+                        let args = relaunch_args(&exec_flag, &crucible, app_id.as_deref(), cmdline);
+                        jobs.push((dir, args, target));
+                    }
+                    WindowRecord::App { cmdline: None, .. } => {}
                 }
             }
         }
@@ -1261,6 +1459,77 @@ mod tests {
             PathBuf::from("/h")
         );
         assert_eq!(resolve_cwd(saved, root, home, ok(&[])), PathBuf::from("/"));
+    }
+
+    #[test]
+    fn relaunch_argv_keeps_the_cmdline_as_one_element() {
+        let c = Path::new("/bin/crucible");
+        let strs = |a: Vec<OsString>| -> Vec<String> {
+            a.iter().map(|s| s.to_str().unwrap().to_string()).collect()
+        };
+        assert_eq!(
+            strs(relaunch_args("-e", c, Some("gimp"), "gimp 'a b.png'")),
+            [
+                "-e",
+                "/bin/crucible",
+                "relaunch",
+                "--app-id",
+                "gimp",
+                "--",
+                "gimp 'a b.png'"
+            ]
+        );
+        assert_eq!(
+            strs(relaunch_args("-e", c, None, "xterm")),
+            ["-e", "/bin/crucible", "relaunch", "--", "xterm"]
+        );
+        // The placeholder argv (minus the exec flag) decodes back to the record.
+        let argv = strs(relaunch_args("-e", c, Some("x"), "x --y"));
+        let cap = crucible_persist::parse_relaunch_banner(&argv[1..]).unwrap();
+        assert_eq!(cap.app_id.as_deref(), Some("x"));
+        assert_eq!(cap.cmdline, "x --y");
+    }
+
+    #[test]
+    fn slot_for_reports_current_index_and_focus() {
+        let mut w = World::new();
+        let a = w.open_window();
+        let b = w.open_window();
+        let pane = w.focused_pane_id();
+        let windows = w.pane(pane).unwrap().windows.clone();
+        let focused = w.pane(pane).unwrap().focused;
+        let ia = windows.iter().position(|x| *x == a).unwrap();
+        let ib = windows.iter().position(|x| *x == b).unwrap();
+        assert_eq!(slot_for(&windows, focused, a), Some((ia, ia == focused)));
+        assert_eq!(slot_for(&windows, focused, b), Some((ib, ib == focused)));
+        assert_eq!(slot_for(&[], 0, a), None);
+        assert_eq!(slot_index(5, 2), 2);
+        assert_eq!(slot_index(1, 2), 1);
+    }
+
+    /// Audit E1: the slot is the placeholder's live index, not its saved-order index.
+    #[test]
+    fn relaunch_slot_uses_live_index_not_saved_order() {
+        let mut w = World::new();
+        let pane = w.focused_pane_id();
+        let t1 = w.open_window_at(pane, 0).unwrap();
+        let p = w.open_window_at(pane, 1).unwrap();
+        let t2 = w.open_window_at(pane, 2).unwrap();
+        // L: an ordinary window opened after restore, no `placed` entry, lands before P.
+        let l = w.open_window_at(pane, 1).unwrap();
+        let windows = w.pane(pane).unwrap().windows.clone();
+        assert_eq!(windows, vec![t1, l, p, t2]);
+        let placed = [(t1, 0usize), (p, 1), (t2, 2)];
+        // Saved order would put P at 1 (wrong: before L).
+        let saved_order = insert_index(placed.iter().filter(|(w, _)| *w != p).map(|(_, i)| *i), 1);
+        assert_eq!(saved_order, 1);
+        w.set_stack_focus(pane, 2).unwrap();
+        let (index, focused) = slot_for(&windows, w.pane(pane).unwrap().focused, p).unwrap();
+        assert_eq!((index, focused), (2, true));
+        w.close_window(p).unwrap();
+        let live_len = w.pane(pane).unwrap().windows.len();
+        let app = w.open_window_at(pane, slot_index(index, live_len)).unwrap();
+        assert_eq!(w.pane(pane).unwrap().windows, vec![t1, l, app, t2]);
     }
 
     #[test]

@@ -21,6 +21,10 @@
 //! | `bindings`                 | `ok ` + TAB-separated `chord:action` pairs (fields encoded) |
 //! | `save`                     | `ok`                                                      |
 //! | `run <command>`            | `ok` (spawned) / `err <reason>`                           |
+//! | `relaunch`                 | `ok` (placeholder swapped for its app) / `err <reason>`   |
+//!
+//! `relaunch` is the only request that depends on the caller: the compositor reads the peer PID
+//! (`SO_PEERCRED`) and accepts it only from an app relaunch placeholder (`crucible relaunch`).
 //!
 //! An empty candidate list is answered with a bare `ok`.
 //!
@@ -110,6 +114,8 @@ pub enum Request {
     Save,
     /// `run <command>` — run a shell command line (`/bin/sh -c 'exec <command>'`) into the focused pane.
     Run(String),
+    /// `relaunch` — swap the calling placeholder window (found by peer PID) for its app.
+    Relaunch,
 }
 
 impl Request {
@@ -137,6 +143,7 @@ impl Request {
             "candidates" => none(arg, Request::Candidates),
             "bindings" => none(arg, Request::Bindings),
             "save" => none(arg, Request::Save),
+            "relaunch" => none(arg, Request::Relaunch),
             "open" => need(arg).map(Request::Open),
             "open-folder" => need(arg).map(|p| Request::OpenFolder(PathBuf::from(p))),
             "new" => need(arg).map(Request::New),
@@ -154,6 +161,7 @@ impl Request {
             Request::Candidates => "candidates".into(),
             Request::Bindings => "bindings".into(),
             Request::Save => "save".into(),
+            Request::Relaunch => "relaunch".into(),
             Request::Open(n) => format!("open {}", encode_field(n)),
             Request::OpenFolder(p) => format!("open-folder {}", encode_field(&p.to_string_lossy())),
             Request::New(n) => format!("new {}", encode_field(n)),
@@ -400,6 +408,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return;
         }
         let _ = io.set_write_timeout(Some(Duration::from_millis(200)));
+        let peer = rustix::net::sockopt::socket_peercred(&stream)
+            .ok()
+            .and_then(|c| u32::try_from(c.pid.as_raw_nonzero().get()).ok());
         let mut buf = Vec::new();
         let res = self.handle.insert_source(
             Generic::new(stream, Interest::READ, Mode::Level),
@@ -418,7 +429,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     let response = match Request::parse(&line) {
                         Ok(req) => {
                             debug!(?req, "IPC request");
-                            data.handle_ipc(req)
+                            data.handle_ipc(req, peer)
                         }
                         Err(reason) => Response::Err(reason),
                     };
@@ -481,6 +492,7 @@ mod tests {
             Request::Candidates,
             Request::Bindings,
             Request::Save,
+            Request::Relaunch,
             Request::Open("a:b\tc".into()),
             Request::OpenFolder(PathBuf::from("/tmp/x:y/100%")),
             Request::New("n\nl".into()),
@@ -500,6 +512,10 @@ mod tests {
         assert_eq!(
             Request::parse("bindings x"),
             Err("bindings takes no argument".to_string())
+        );
+        assert_eq!(
+            Request::parse("relaunch x"),
+            Err("relaunch takes no argument".to_string())
         );
         assert!(Request::parse("bogus x").is_err());
         assert!(Request::parse("open %ZZ").is_err());

@@ -129,6 +129,46 @@ pub fn parse_resume_banner(args: &[String]) -> Option<TerminalCapture> {
     }
 }
 
+/// A decoded app relaunch placeholder banner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelaunchCapture {
+    /// The saved app id, if any.
+    pub app_id: Option<String>,
+    /// The saved command line as one shell-quoted string.
+    pub cmdline: String,
+}
+
+/// Recognises CDE's app placeholder banner,
+/// `[<…/crucible>, "relaunch", ("--app-id", <id>)?, "--", <cmdline>]` (the cmdline is ONE
+/// non-empty argv element). Anything else is `None`.
+#[must_use]
+pub fn parse_relaunch_banner(args: &[String]) -> Option<RelaunchCapture> {
+    let exe = Path::new(args.first()?).file_name()?;
+    if exe != "crucible" || args.get(1)? != "relaunch" {
+        return None;
+    }
+    let (app_id, rest) = if args.get(2)? == "--app-id" {
+        (Some(args.get(3)?.clone()), &args[4..])
+    } else {
+        (None, &args[2..])
+    };
+    match rest {
+        [dd, cmdline] if dd == "--" && !cmdline.is_empty() => Some(RelaunchCapture {
+            app_id,
+            cmdline: cmdline.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// Scans the direct children of `terminal_pid` for an app relaunch placeholder banner.
+#[must_use]
+pub fn capture_relaunch(proc_root: &Path, terminal_pid: u32) -> Option<RelaunchCapture> {
+    children_of(proc_root, terminal_pid)
+        .into_iter()
+        .find_map(|c| parse_relaunch_banner(&read_cmdline(proc_root, c)))
+}
+
 fn pid_dir(proc_root: &Path, pid: u32) -> PathBuf {
     proc_root.join(pid.to_string())
 }
@@ -538,5 +578,73 @@ mod tests {
         assert_eq!(ancestors(&p.0, 30, 1), vec![20]);
         assert_eq!(ancestors(&p.0, 30, 0), Vec::<u32>::new());
         assert!(ancestors(&p.0, 999, 5).is_empty());
+    }
+
+    fn sv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn relaunch_banner_round_trips() {
+        let c = parse_relaunch_banner(&sv(&[
+            "/usr/bin/crucible",
+            "relaunch",
+            "--app-id",
+            "firefox",
+            "--",
+            "firefox --new-window",
+        ]))
+        .unwrap();
+        assert_eq!(c.app_id.as_deref(), Some("firefox"));
+        assert_eq!(c.cmdline, "firefox --new-window");
+        let c = parse_relaunch_banner(&sv(&["crucible", "relaunch", "--", "gimp"])).unwrap();
+        assert_eq!(c.app_id, None);
+        assert_eq!(c.cmdline, "gimp");
+    }
+
+    #[test]
+    fn relaunch_banner_rejects_lookalikes() {
+        for bad in [
+            &["/usr/bin/crucible", "resume", "--cwd", "/p", "--", "x"][..],
+            &["/usr/bin/notcrucible", "relaunch", "--", "x"],
+            &["crucible", "relaunch", "--"],
+            &["crucible", "relaunch", "--", ""],
+            &["crucible", "relaunch", "--", "x", "y"],
+            &["crucible", "relaunch", "--app-id"],
+            &["crucible", "relaunch", "--app-id", "a", "x"],
+            &["crucible", "relaunch", "--bogus", "--", "x"],
+            &["crucible", "relaunch", "x"],
+        ] {
+            assert_eq!(parse_relaunch_banner(&sv(bad)), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn capture_relaunch_reads_direct_children() {
+        let p = Proc::new("relaunch");
+        p.add((100, "term", 1), 0, "/", &["term"], &[200]);
+        p.add(
+            (200, "crucible", 100),
+            200,
+            "/",
+            &[
+                "/usr/bin/crucible",
+                "relaunch",
+                "--app-id",
+                "gimp",
+                "--",
+                "gimp a.png",
+            ],
+            &[],
+        );
+        let c = capture_relaunch(&p.0, 100).unwrap();
+        assert_eq!(c.app_id.as_deref(), Some("gimp"));
+        assert_eq!(c.cmdline, "gimp a.png");
+        assert_eq!(capture_relaunch(&p.0, 200), None);
+
+        let p = Proc::new("relaunch2");
+        p.add((100, "term", 1), 0, "/", &["term"], &[200]);
+        p.add((200, "bash", 100), 200, "/", &["bash"], &[]);
+        assert_eq!(capture_relaunch(&p.0, 100), None);
     }
 }

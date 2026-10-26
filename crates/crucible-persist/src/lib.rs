@@ -24,7 +24,10 @@ mod policy;
 mod record;
 pub mod store;
 
-pub use capture::{TerminalCapture, ancestors, capture_terminal, children_of};
+pub use capture::{
+    RelaunchCapture, TerminalCapture, ancestors, capture_relaunch, capture_terminal, children_of,
+    parse_relaunch_banner,
+};
 pub use error::PersistError;
 pub use format::FORMAT_VERSION;
 pub use policy::should_save;

@@ -288,6 +288,7 @@ dependencies = [
  "crucible-keys",
  "crucible-layout",
  "crucible-persist",
+ "rustix 1.1.4",
  "smithay",
  "smithay-drm-extras",
  "thiserror 2.0.18",
