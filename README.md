@@ -85,6 +85,7 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | Chord | Verb |
 |-------|------|
 | `Super+Return` | Open the program launcher (`crucible launch`): desktop applications and `$PATH` executables, launched into the focused pane |
+| `Super+Comma` | Open the settings overlay (`crucible keys`): the effective keybindings, read-only |
 | `Super+Shift+Return` | Spawn a terminal into the focused pane (the window joins the pane's stack) |
 | `Super+Shift+Q` | Quit the compositor |
 | `Super+W` | Close the focused pane (only if empty and not the last pane; never closes windows) |
@@ -120,6 +121,7 @@ The picker talks to the compositor over a Unix socket at `$XDG_RUNTIME_DIR/cde/<
 
 - `crucible pick [--rename <name>]` — the workspace picker TUI (needs `$CDE_SOCKET`); `--rename` is a single-line rename prompt (the name is percent-encoded).
 - `crucible launch` — the program launcher TUI (needs `$CDE_SOCKET`; opened by `Super+Return`): fuzzy-filter installed desktop applications and `$PATH` executables, Enter launches into the focused pane. CDE exports `CDE_TERMINAL` and `CDE_TERMINAL_EXEC_FLAG` (the configured terminal and its exec flag) to every child it spawns; the launcher uses them for `Terminal=true` entries.
+- `crucible keys` — the read-only settings overlay (needs `$CDE_SOCKET`; opened by `Super+Comma`): lists the effective keybindings (config overrides applied, fetched with the `bindings` IPC request) with fuzzy filtering; edit binds in `config.kdl`.
 - `crucible resume --cwd <dir> [-- <command>]` — the restored-terminal banner: Enter runs the old command (then a shell), Ctrl+C or EOF gives a shell; the command never runs without Enter.
 - `crucible msg <request…>` — send one request line to the compositor and print the reply (exit 0 `ok`, 1 `err`, 2 usage). Arguments are sent as typed, so percent-encode `%`, `:`, TAB, LF and CR yourself: `crucible msg open my%3Aname`. `crucible msg run <command…>` runs a command line into the focused pane and encodes it for you: `crucible msg run firefox --new-window`.
 

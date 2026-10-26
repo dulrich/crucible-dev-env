@@ -78,6 +78,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `move-window-to-workspace <n>` | Send the focused window `n` workspaces over |
 | `open-picker` | Open the workspace picker (not available until WP-5) |
 | `open-launcher` | Open the program launcher (`crucible launch`) |
+| `open-settings` | Open the read-only settings overlay (`crucible keys`): the effective keybindings |
 | `rename-workspace` | Rename the active workspace (not available until WP-5) |
 | `none` | Unbind the chord |
 

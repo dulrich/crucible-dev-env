@@ -10,6 +10,7 @@
 //! | Chord                 | [`Action`]                    | Model op                          |
 //! |-----------------------|--------------------------------|-----------------------------------|
 //! | `Super+Return`        | `OpenLauncher`                 | program launcher (overlay)        |
+//! | `Super+comma`         | `OpenSettings`                 | settings overlay (`crucible keys`)|
 //! | `Super+Shift+Q`       | `Quit`                         | stop compositor                   |
 //! | `Super+W`             | `ClosePane`                    | `World::close_pane()`             |
 //! | `Super+H/J/K/L`       | `Focus(Left/Down/Up/Right)`    | `World::focus(dir)`               |
@@ -357,8 +358,12 @@ mod tests {
                     for keysym in &keysyms {
                         let new = resolve(mods, *keysym);
                         let old = legacy(mods, *keysym);
-                        let is_new_verb =
-                            matches!(new, Some(Action::OpenPicker | Action::RenameWorkspace));
+                        let is_new_verb = matches!(
+                            new,
+                            Some(
+                                Action::OpenPicker | Action::RenameWorkspace | Action::OpenSettings
+                            )
+                        );
                         if is_new_verb {
                             assert_eq!(old, None, "{mods:?} {keysym:?}: new verb shadows old");
                             continue;

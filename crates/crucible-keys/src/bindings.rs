@@ -16,7 +16,7 @@
 //!
 //! ## Action grammar
 //!
-//! `quit`, `close-pane`, `run-terminal`, `run <command…>`, `new-workspace`, `open-picker`, `open-launcher`,
+//! `quit`, `close-pane`, `run-terminal`, `run <command…>`, `new-workspace`, `open-picker`, `open-launcher`, `open-settings`,
 //! `rename-workspace`, `focus|move|split|resize <left|right|up|down>`, `cycle-stack <±n>`,
 //! `cycle-workspace <±n>`, `move-window-to-workspace <±n>`, and `none` (unbind the chord).
 
@@ -35,6 +35,43 @@ pub struct Chord {
     pub modifiers: Modifiers,
     /// The keysym delivered with them.
     pub keysym: Keysym,
+}
+
+/// The canonical display name of a keysym: letters uppercase, digits, `F<n>`, the canonical X11
+/// spelling of every named key, else `0x<hex>`. Inverse of [`keysym_from_name`] (up to letter case).
+#[must_use]
+pub fn keysym_name(keysym: Keysym) -> String {
+    let raw = keysym.raw();
+    if let Ok(byte) = u8::try_from(raw) {
+        if byte.is_ascii_alphabetic() {
+            return char::from(byte.to_ascii_uppercase()).to_string();
+        }
+        if byte.is_ascii_digit() {
+            return char::from(byte).to_string();
+        }
+    }
+    let f1 = Keysym::F1.raw();
+    if (f1..f1 + 12).contains(&raw) {
+        return format!("F{}", raw - f1 + 1);
+    }
+    NAMED
+        .iter()
+        .find(|(_, k)| *k == keysym)
+        .map_or_else(|| format!("0x{raw:x}"), |(n, _)| (*n).to_string())
+}
+
+impl std::fmt::Display for Chord {
+    /// `Super[+Shift][+Ctrl]+<Key>`, parseable by the `binds` chord grammar.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Super")?;
+        if self.modifiers.shift {
+            f.write_str("+Shift")?;
+        }
+        if self.modifiers.ctrl {
+            f.write_str("+Ctrl")?;
+        }
+        write!(f, "+{}", keysym_name(self.keysym))
+    }
 }
 
 /// Why a `binds` entry was rejected. Every variant names the offending entry.
@@ -86,6 +123,29 @@ impl Bindings {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+
+    /// The effective table as `(chord display, action display)` pairs, de-duplicated (both cases
+    /// of a letter, and `ISO_Left_Tab` beside `Shift+Tab`, collapse) and sorted by chord display.
+    #[must_use]
+    pub fn entries(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .map
+            .iter()
+            .filter(|(chord, action)| {
+                // `ISO_Left_Tab` is the layout-delivered alias of `Shift+Tab`: hide it when the
+                // `Tab` chord carries the same action.
+                !(chord.keysym == Keysym::ISO_Left_Tab
+                    && self.map.get(&Chord {
+                        keysym: Keysym::Tab,
+                        ..**chord
+                    }) == Some(*action))
+            })
+            .map(|(chord, action)| (chord.to_string(), action.to_string()))
+            .collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// The default table with each `(chord, action)` entry applied in order; later entries win.
@@ -140,6 +200,7 @@ impl Default for Bindings {
 
         // ---- plain Super (note: focus h/j/k/l are lowercase-only, as before) ----
         bind(sup, &[Keysym::Return], Action::OpenLauncher);
+        bind(sup, &[Keysym::comma], Action::OpenSettings);
         bind(sup, &[Keysym::w, Keysym::W], Action::ClosePane);
         bind(sup, &[Keysym::h], Action::Focus(Direction::Left));
         bind(sup, &[Keysym::j], Action::Focus(Direction::Down));
@@ -237,6 +298,37 @@ fn aliases(modifiers: Modifiers, keysym: Keysym) -> Vec<Keysym> {
     vec![keysym]
 }
 
+/// Canonical X11 spellings of the named keys; lookup compares lowercased, display prints these.
+const NAMED: &[(&str, Keysym)] = &[
+    ("Return", Keysym::Return),
+    ("Tab", Keysym::Tab),
+    ("ISO_Left_Tab", Keysym::ISO_Left_Tab),
+    ("backslash", Keysym::backslash),
+    ("minus", Keysym::minus),
+    ("bracketright", Keysym::bracketright),
+    ("bracketleft", Keysym::bracketleft),
+    ("space", Keysym::space),
+    ("Escape", Keysym::Escape),
+    ("BackSpace", Keysym::BackSpace),
+    ("Delete", Keysym::Delete),
+    ("Home", Keysym::Home),
+    ("End", Keysym::End),
+    ("Page_Up", Keysym::Page_Up),
+    ("Page_Down", Keysym::Page_Down),
+    ("Left", Keysym::Left),
+    ("Right", Keysym::Right),
+    ("Up", Keysym::Up),
+    ("Down", Keysym::Down),
+    ("equal", Keysym::equal),
+    ("plus", Keysym::plus),
+    ("comma", Keysym::comma),
+    ("period", Keysym::period),
+    ("slash", Keysym::slash),
+    ("semicolon", Keysym::semicolon),
+    ("apostrophe", Keysym::apostrophe),
+    ("grave", Keysym::grave),
+    ("Print", Keysym::Print),
+];
 /// Looks up a keysym by X11 name, case-insensitively, in the curated table (see module docs).
 /// Single letters resolve to the lowercase keysym.
 #[must_use]
@@ -253,39 +345,10 @@ pub fn keysym_from_name(name: &str) -> Option<Keysym> {
     {
         return Some(Keysym::new(Keysym::F1.raw() + n - 1));
     }
-    const NAMED: &[(&str, Keysym)] = &[
-        ("return", Keysym::Return),
-        ("tab", Keysym::Tab),
-        ("iso_left_tab", Keysym::ISO_Left_Tab),
-        ("backslash", Keysym::backslash),
-        ("minus", Keysym::minus),
-        ("bracketright", Keysym::bracketright),
-        ("bracketleft", Keysym::bracketleft),
-        ("space", Keysym::space),
-        ("escape", Keysym::Escape),
-        ("backspace", Keysym::BackSpace),
-        ("delete", Keysym::Delete),
-        ("home", Keysym::Home),
-        ("end", Keysym::End),
-        ("page_up", Keysym::Page_Up),
-        ("page_down", Keysym::Page_Down),
-        ("left", Keysym::Left),
-        ("right", Keysym::Right),
-        ("up", Keysym::Up),
-        ("down", Keysym::Down),
-        ("equal", Keysym::equal),
-        ("plus", Keysym::plus),
-        ("comma", Keysym::comma),
-        ("period", Keysym::period),
-        ("slash", Keysym::slash),
-        ("semicolon", Keysym::semicolon),
-        ("apostrophe", Keysym::apostrophe),
-        ("grave", Keysym::grave),
-        ("print", Keysym::Print),
-    ];
+
     NAMED
         .iter()
-        .find(|(n, _)| *n == lower)
+        .find(|(n, _)| n.to_ascii_lowercase() == lower)
         .map(|(_, keysym)| *keysym)
 }
 
@@ -385,6 +448,7 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
         "new-workspace" => nullary(Action::NewWorkspace),
         "open-picker" => nullary(Action::OpenPicker),
         "open-launcher" => nullary(Action::OpenLauncher),
+        "open-settings" => nullary(Action::OpenSettings),
         "rename-workspace" => nullary(Action::RenameWorkspace),
         "focus" => unary(Action::Focus(direction(words.get(1))?)),
         "move" => unary(Action::Move(direction(words.get(1))?)),
@@ -523,6 +587,7 @@ mod tests {
             ("new-workspace", Action::NewWorkspace),
             ("open-picker", Action::OpenPicker),
             ("open-launcher", Action::OpenLauncher),
+            ("open-settings", Action::OpenSettings),
             ("rename-workspace", Action::RenameWorkspace),
             ("focus left", Action::Focus(Direction::Left)),
             ("move right", Action::Move(Direction::Right)),
@@ -633,5 +698,74 @@ mod tests {
     fn default_return_chord_opens_the_launcher() {
         let b = Bindings::default();
         assert_eq!(b.get(sup(), Keysym::Return), Some(&Action::OpenLauncher));
+    }
+
+    #[test]
+    fn keysym_names_are_canonical() {
+        assert_eq!(keysym_name(Keysym::w), "W");
+        assert_eq!(keysym_name(Keysym::W), "W");
+        assert_eq!(keysym_name(Keysym::_7), "7");
+        assert_eq!(keysym_name(Keysym::F11), "F11");
+        assert_eq!(keysym_name(Keysym::ISO_Left_Tab), "ISO_Left_Tab");
+        assert_eq!(keysym_name(Keysym::BackSpace), "BackSpace");
+        assert_eq!(keysym_name(Keysym::Page_Up), "Page_Up");
+        assert_eq!(keysym_name(Keysym::new(0x1234)), "0x1234");
+    }
+
+    #[test]
+    fn chord_display_orders_modifiers() {
+        let c = Chord {
+            modifiers: Modifiers {
+                logo: true,
+                shift: true,
+                ctrl: true,
+            },
+            keysym: Keysym::h,
+        };
+        assert_eq!(c.to_string(), "Super+Shift+Ctrl+H");
+    }
+
+    #[test]
+    fn default_table_round_trips_through_display_and_parse() {
+        let defaults = Bindings::default();
+        for (chord, action) in &defaults.map {
+            if matches!(action, Action::VtSwitch(_)) {
+                continue;
+            }
+            let (chord_text, action_text) = (chord.to_string(), action.to_string());
+            let b = Bindings::with_overrides(&[pair(&chord_text, &action_text)]).unwrap();
+            assert_eq!(
+                b.get(chord.modifiers, chord.keysym),
+                Some(action),
+                "{chord_text} -> {action_text}"
+            );
+        }
+        for action in [
+            Action::Run("echo 50%:a b".into()),
+            Action::CycleStack(-1),
+            Action::MoveWindowToWorkspace(1),
+            Action::OpenSettings,
+            Action::Resize(Direction::Up),
+        ] {
+            let b = Bindings::with_overrides(&[pair("Super+F1", &action.to_string())]).unwrap();
+            assert_eq!(b.get(sup(), Keysym::F1), Some(&action));
+        }
+        assert_eq!(Action::VtSwitch(3).to_string(), "vt-switch 3");
+    }
+
+    #[test]
+    fn entries_dedupe_sort_and_show_overrides() {
+        let e = Bindings::default().entries();
+        assert_eq!(e.iter().filter(|(c, _)| c == "Super+W").count(), 1);
+        assert!(e.contains(&pair("Super+comma", "open-settings")));
+        assert!(!e.iter().any(|(c, _)| c.contains("ISO_Left_Tab")));
+        let mut sorted = e.clone();
+        sorted.sort();
+        assert_eq!(e, sorted);
+        let o =
+            Bindings::with_overrides(&[pair("Super+W", "quit"), pair("Super+N", "none")]).unwrap();
+        let e = o.entries();
+        assert!(e.contains(&pair("Super+W", "quit")));
+        assert!(!e.iter().any(|(c, _)| c == "Super+N"));
     }
 }

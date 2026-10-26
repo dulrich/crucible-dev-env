@@ -7,13 +7,14 @@
 
 mod client;
 mod fuzzy;
+mod keys;
 mod launch;
 mod msg;
 mod pick;
 mod resume;
 mod tty;
 
-const USAGE: &str = "usage: crucible [--winit | --tty-udev]\n       crucible pick [--rename <name>]\n       crucible launch\n       crucible resume --cwd <dir> [-- <command>]\n       crucible msg <request...>\n\n  --winit                  run the nested development compositor\n  --tty-udev               run the DRM/KMS backend on a real TTY (multi-output)\n  pick                     the workspace picker (needs $CDE_SOCKET)\n  launch                   the program launcher (needs $CDE_SOCKET)\n  resume                   restored-terminal banner: Enter runs the old command\n  msg                      send one request line to the compositor and print the reply\n  -h, --help               print this usage and exit 0 (`crucible <subcommand> --help` for details)\n\nWith no backend flag, a one-line banner is printed and nothing is started.\n";
+const USAGE: &str = "usage: crucible [--winit | --tty-udev]\n       crucible pick [--rename <name>]\n       crucible launch\n       crucible keys\n       crucible resume --cwd <dir> [-- <command>]\n       crucible msg <request...>\n\n  --winit                  run the nested development compositor\n  --tty-udev               run the DRM/KMS backend on a real TTY (multi-output)\n  pick                     the workspace picker (needs $CDE_SOCKET)\n  launch                   the program launcher (needs $CDE_SOCKET)\n  keys                     the read-only settings overlay: effective keybindings (needs $CDE_SOCKET)\n  resume                   restored-terminal banner: Enter runs the old command\n  msg                      send one request line to the compositor and print the reply\n  -h, --help               print this usage and exit 0 (`crucible <subcommand> --help` for details)\n\nWith no backend flag, a one-line banner is printed and nothing is started.\n";
 
 /// True when `--help`/`-h` appears anywhere in the arguments (after the program name).
 /// Help wins over the backend flags, so `--tty-udev --help` never takes the DRM/KMS device.
@@ -26,7 +27,7 @@ fn wants_help(args: &[String]) -> bool {
 /// `--rename` value, and for `msg` only the first argument (the rest is the request line).
 fn sub_wants_help(sub: &str, rest: &[String]) -> bool {
     let is_help = |a: &String| a == "--help" || a == "-h";
-    if sub == "launch" {
+    if sub == "launch" || sub == "keys" {
         return rest.iter().any(is_help);
     }
     if sub == "msg" {
@@ -53,6 +54,7 @@ fn run_subcommand(args: &[String]) -> Option<i32> {
     let (usage, run): (&str, fn(&[String]) -> i32) = match sub {
         "pick" => (pick::USAGE, pick::run),
         "launch" => (launch::USAGE, launch::run),
+        "keys" => (keys::USAGE, keys::run),
         "resume" => (resume::USAGE, resume::run),
         "msg" => (msg::USAGE, msg::run),
         _ => return None,
@@ -130,6 +132,9 @@ mod tests {
         assert!(sub_wants_help("launch", &args(&["--help"])));
         assert!(sub_wants_help("launch", &args(&["x", "-h"])));
         assert!(!sub_wants_help("launch", &args(&[])));
+        assert!(sub_wants_help("keys", &args(&["--help"])));
+        assert!(sub_wants_help("keys", &args(&["x", "-h"])));
+        assert!(!sub_wants_help("keys", &args(&[])));
         assert!(sub_wants_help("msg", &args(&["--help"])));
         assert!(!sub_wants_help("msg", &args(&["open", "--help"])));
     }

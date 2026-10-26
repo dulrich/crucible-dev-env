@@ -88,6 +88,7 @@ struct WindowInfo {
 enum OverlayKind {
     Picker,
     Launcher,
+    Keys,
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +329,12 @@ pub fn picker_args(exec_flag: &str, crucible: &Path, rename: Option<&str>) -> Ve
 #[must_use]
 pub fn launcher_args(exec_flag: &str, crucible: &Path) -> Vec<OsString> {
     vec![exec_flag.into(), crucible.into(), "launch".into()]
+}
+
+/// The terminal arguments for the settings overlay: `<exec-flag> <crucible> keys`.
+#[must_use]
+pub fn keys_args(exec_flag: &str, crucible: &Path) -> Vec<OsString> {
+    vec![exec_flag.into(), crucible.into(), "keys".into()]
 }
 
 /// Immediate, non-hidden subdirectories of each root as `(basename, path)`, each root's entries
@@ -699,6 +706,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.open_overlay(OverlayKind::Launcher, args);
     }
 
+    /// Opens the read-only settings overlay (`crucible keys`); see [`Self::open_overlay`].
+    pub fn open_settings(&mut self) {
+        let Some(crucible) = Self::crucible_exe("settings") else {
+            return;
+        };
+        let args = keys_args(&self.config.terminal.exec_flag, &crucible);
+        self.open_overlay(OverlayKind::Keys, args);
+    }
+
     fn crucible_exe(what: &str) -> Option<PathBuf> {
         match std::env::current_exe() {
             Ok(p) => Some(p),
@@ -902,6 +918,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let result = match request {
             Request::Candidates => {
                 return Response::Ok(crate::ipc::format_candidates(&self.candidates()));
+            }
+            Request::Bindings => {
+                return Response::Ok(crate::ipc::format_bindings(&self.bindings.entries()));
             }
             Request::Save => {
                 self.flush_workspaces();
@@ -1279,7 +1298,7 @@ mod tests {
 
     #[test]
     fn overlay_open_decision_covers_all_outcomes() {
-        use OverlayKind::{Launcher, Picker};
+        use OverlayKind::{Keys, Launcher, Picker};
         assert_eq!(overlay_open_decision(None, Launcher), OpenDecision::Spawn);
         assert_eq!(
             overlay_open_decision(Some((Picker, true)), Picker),
@@ -1297,6 +1316,20 @@ mod tests {
             overlay_open_decision(Some((Picker, true)), Launcher),
             OpenDecision::ReplaceThenSpawn
         );
+        assert_eq!(
+            overlay_open_decision(Some((Launcher, true)), Keys),
+            OpenDecision::ReplaceThenSpawn
+        );
+        assert_eq!(
+            overlay_open_decision(Some((Keys, true)), Keys),
+            OpenDecision::Refocus
+        );
+    }
+
+    #[test]
+    fn keys_argv_runs_the_keys_subcommand() {
+        let args = keys_args("-e", Path::new("/c"));
+        assert_eq!(args, vec![OsString::from("-e"), "/c".into(), "keys".into()]);
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub const DEFAULT_TERMINALS: &[&str] = &["foot", "alacritty", "kitty", "weston-t
 /// libinput `Ctrl+Alt+F<n>` chord independent of the leader).
 ///
 /// Produced by [`crate::chord::resolve`]. `Quit`, `RunTerminal`, `Run`, `OpenPicker`, `OpenLauncher`,
-/// `RenameWorkspace` and `VtSwitch` are
+/// `OpenSettings`, `RenameWorkspace` and `VtSwitch` are
 /// compositor-level (spawn a process, stop the loop, open UI, or ask the backend to switch VTs); every
 /// other variant names a `crucible_layout::World` operation the compositor applies through its
 /// single mutation entry point.
@@ -77,6 +77,8 @@ pub enum Action {
     OpenPicker,
     /// Open the program launcher (`crucible launch`). `Super+Return`.
     OpenLauncher,
+    /// Open the read-only settings overlay (`crucible keys`). `Super+comma`.
+    OpenSettings,
     /// Rename the active workspace (interactive prompt). `Super+Shift+R`. Implemented by WP-5.
     RenameWorkspace,
 
@@ -86,6 +88,37 @@ pub enum Action {
     /// independently of the `Super` leader. The nested `winit` backend never sees these, so this
     /// verb is routed to a no-op there.
     VtSwitch(i32),
+}
+
+impl std::fmt::Display for Action {
+    /// The exact `binds` action grammar (`parse_action` accepts every form but `vt-switch`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let dir = |d: &Direction| match d {
+            Direction::Left => "left",
+            Direction::Right => "right",
+            Direction::Up => "up",
+            Direction::Down => "down",
+        };
+        match self {
+            Self::Quit => f.write_str("quit"),
+            Self::ClosePane => f.write_str("close-pane"),
+            Self::RunTerminal => f.write_str("run-terminal"),
+            Self::Run(cmd) => write!(f, "run {cmd}"),
+            Self::Focus(d) => write!(f, "focus {}", dir(d)),
+            Self::Move(d) => write!(f, "move {}", dir(d)),
+            Self::Split(d) => write!(f, "split {}", dir(d)),
+            Self::Resize(d) => write!(f, "resize {}", dir(d)),
+            Self::CycleStack(n) => write!(f, "cycle-stack {n}"),
+            Self::CycleWorkspace(n) => write!(f, "cycle-workspace {n}"),
+            Self::NewWorkspace => f.write_str("new-workspace"),
+            Self::MoveWindowToWorkspace(n) => write!(f, "move-window-to-workspace {n}"),
+            Self::OpenPicker => f.write_str("open-picker"),
+            Self::OpenLauncher => f.write_str("open-launcher"),
+            Self::OpenSettings => f.write_str("open-settings"),
+            Self::RenameWorkspace => f.write_str("rename-workspace"),
+            Self::VtSwitch(n) => write!(f, "vt-switch {n}"),
+        }
+    }
 }
 
 /// Resolves the terminal command: `$TERMINAL` if set and non-empty, else the first default.

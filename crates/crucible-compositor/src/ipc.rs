@@ -18,6 +18,7 @@
 //! | `open-folder <path>`       | `ok` / `err <reason>`                                     |
 //! | `new <name>`               | `ok` / `err <reason>`                                     |
 //! | `rename <name>`            | `ok` / `err <reason>`                                     |
+//! | `bindings`                 | `ok ` + TAB-separated `chord:action` pairs (fields encoded) |
 //! | `save`                     | `ok`                                                      |
 //! | `run <command>`            | `ok` (spawned) / `err <reason>`                           |
 //!
@@ -95,6 +96,8 @@ pub fn decode_field(field: &str) -> Option<String> {
 pub enum Request {
     /// `candidates` — list live, saved and folder candidates.
     Candidates,
+    /// `bindings` — list the effective keybindings as `(chord, action)` display pairs.
+    Bindings,
     /// `open <name>` — switch to a live workspace or restore a saved one.
     Open(String),
     /// `open-folder <path>` — create (or reopen) a workspace rooted at a folder.
@@ -132,6 +135,7 @@ impl Request {
         };
         match verb {
             "candidates" => none(arg, Request::Candidates),
+            "bindings" => none(arg, Request::Bindings),
             "save" => none(arg, Request::Save),
             "open" => need(arg).map(Request::Open),
             "open-folder" => need(arg).map(|p| Request::OpenFolder(PathBuf::from(p))),
@@ -148,6 +152,7 @@ impl Request {
     pub fn to_line(&self) -> String {
         match self {
             Request::Candidates => "candidates".into(),
+            Request::Bindings => "bindings".into(),
             Request::Save => "save".into(),
             Request::Open(n) => format!("open {}", encode_field(n)),
             Request::OpenFolder(p) => format!("open-folder {}", encode_field(&p.to_string_lossy())),
@@ -268,6 +273,32 @@ pub fn parse_candidates(payload: &str) -> Option<Vec<Candidate>> {
                 return None;
             }
             Some(Candidate { kind, name, path })
+        })
+        .collect()
+}
+
+/// Formats `(chord, action)` pairs as the `bindings` payload: TAB-separated
+/// `encode_field(chord):encode_field(action)` items.
+#[must_use]
+pub fn format_bindings(entries: &[(String, String)]) -> String {
+    entries
+        .iter()
+        .map(|(c, a)| format!("{}:{}", encode_field(c), encode_field(a)))
+        .collect::<Vec<_>>()
+        .join("\t")
+}
+
+/// Parses a `bindings` payload back into pairs; `None` on any malformed item.
+#[must_use]
+pub fn parse_bindings(payload: &str) -> Option<Vec<(String, String)>> {
+    if payload.is_empty() {
+        return Some(Vec::new());
+    }
+    payload
+        .split('\t')
+        .map(|item| {
+            let (chord, action) = item.split_once(':')?;
+            Some((decode_field(chord)?, decode_field(action)?))
         })
         .collect()
 }
@@ -448,6 +479,7 @@ mod tests {
     fn requests_round_trip_through_the_wire() {
         let reqs = [
             Request::Candidates,
+            Request::Bindings,
             Request::Save,
             Request::Open("a:b\tc".into()),
             Request::OpenFolder(PathBuf::from("/tmp/x:y/100%")),
@@ -465,6 +497,10 @@ mod tests {
         assert!(Request::parse("open").is_err());
         assert!(Request::parse("open ").is_err());
         assert!(Request::parse("save now").is_err());
+        assert_eq!(
+            Request::parse("bindings x"),
+            Err("bindings takes no argument".to_string())
+        );
         assert!(Request::parse("bogus x").is_err());
         assert!(Request::parse("open %ZZ").is_err());
         // The argument is the rest of the line after ONE space: spaces inside are kept.
@@ -485,6 +521,21 @@ mod tests {
         }
         assert_eq!(Response::Ok(String::new()).to_line(), "ok");
         assert_eq!(Response::parse("nope"), None);
+    }
+
+    #[test]
+    fn bindings_round_trip_with_encoded_fields() {
+        let entries = vec![
+            ("Super+comma".to_string(), "open-settings".to_string()),
+            ("Super+F2".to_string(), "run echo 50%:a\tb".to_string()),
+        ];
+        let payload = format_bindings(&entries);
+        assert_eq!(payload.split('\t').count(), 2);
+        assert_eq!(parse_bindings(&payload), Some(entries));
+        assert_eq!(parse_bindings(""), Some(vec![]));
+        assert_eq!(format_bindings(&[]), "");
+        assert_eq!(parse_bindings("nocolon"), None);
+        assert_eq!(parse_bindings("a:%ZZ"), None);
     }
 
     #[test]

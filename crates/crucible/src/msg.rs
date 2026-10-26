@@ -5,7 +5,7 @@ use crucible_compositor::ipc::{Request, SOCKET_ENV, encode_field};
 use crate::client::{Client, socket_from_env};
 
 /// Usage text for `crucible msg --help`.
-pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | save | open <name> | open-folder <path> | new <name> | rename <name> | run <command...>\n\n`run` takes the rest of the arguments as one command line (joined with single spaces) and encodes it for you\n(for example `crucible msg run firefox --new-window`). For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`).\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
+pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | save | open <name> | open-folder <path> | new <name> | rename <name> | run <command...>\n\n`run` takes the rest of the arguments as one command line (joined with single spaces) and encodes it for you\n(for example `crucible msg run firefox --new-window`). For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`).\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
 
 /// Joins the arguments into one protocol line and validates it.
 ///
