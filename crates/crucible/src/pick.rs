@@ -10,6 +10,7 @@ use crucible_compositor::ipc::{
 
 use crate::client::{Client, socket_from_env};
 use crate::fuzzy;
+use crate::style::Style;
 use crate::tty::{RawGuard, window_size};
 
 /// Usage text for `crucible pick --help`.
@@ -299,8 +300,15 @@ impl Picker {
     }
 
     /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings).
+    #[cfg(test)]
     #[must_use]
     pub fn render(&self, cols: u16, rows: u16) -> String {
+        self.render_styled(cols, rows, &Style::Terminal)
+    }
+
+    /// Like [`Self::render`], painted with the overlay `style`.
+    #[must_use]
+    pub fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
         let width = usize::from(cols).max(10);
         let height = usize::from(rows).max(4);
         let prompt = match self.mode {
@@ -315,7 +323,7 @@ impl Picker {
         for (i, row) in all.iter().enumerate().take(end).skip(start) {
             let text = fit(&format!("  {}", self.row_text(row)), width);
             lines.push(if i == self.selected {
-                format!("\x1b[7m{text}\x1b[0m")
+                style.highlight(&text)
             } else {
                 text
             });
@@ -324,7 +332,7 @@ impl Picker {
             lines.push(String::new());
         }
         lines.push(fit(self.status.as_deref().map_or("", |s| s), width));
-        let mut out = String::from("\x1b[H\x1b[2J");
+        let mut out = style.frame_start();
         out.push_str(&lines.join("\r\n"));
         out
     }
@@ -447,13 +455,14 @@ fn fetch_candidates(client: &mut Client) -> Result<Vec<Candidate>, String> {
 }
 
 fn event_loop(picker: &mut Picker, client: &mut Client) -> i32 {
+    let style = Style::from_env();
     let mut pending: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 256];
     let mut stdin = std::io::stdin();
     loop {
         let (cols, rows) = window_size();
         let mut out = std::io::stdout();
-        let _ = out.write_all(picker.render(cols, rows).as_bytes());
+        let _ = out.write_all(picker.render_styled(cols, rows, &style).as_bytes());
         let _ = out.flush();
         let n = match stdin.read(&mut chunk) {
             Ok(0) => return 0,
@@ -709,6 +718,19 @@ mod tests {
         assert_eq!(p.step(Key::Esc), Outcome::Exit);
     }
 
+    #[test]
+    fn render_styled_n1_paints_background_and_reapplies_after_highlight() {
+        let st = Style::parse(Some("n1-dark"));
+        let out = sample().render_styled(40, 8, &st);
+        assert!(out.starts_with(&format!("\x1b[H{}\x1b[2J", st.base())));
+        assert!(out.contains(&st.highlight("")[..20]));
+        assert!(out.contains(&format!("\x1b[0m{}", st.base())));
+        assert!(!out.contains("\x1b[7m"));
+        assert_eq!(
+            sample().render_styled(40, 8, &Style::Terminal),
+            sample().render(40, 8)
+        );
+    }
     #[test]
     fn render_shows_kinds_paths_and_marks_selection() {
         let p = sample();

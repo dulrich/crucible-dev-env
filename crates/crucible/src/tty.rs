@@ -10,7 +10,7 @@ use rustix::termios::{OptionalActions, Termios, tcgetattr, tcgetwinsize, tcsetat
 /// The termios to restore if a panic unwinds past the guard (or aborts the main thread).
 static SAVED: Mutex<Option<Termios>> = Mutex::new(None);
 /// Escape sequences a panic restores in addition to termios (set by the picker).
-static SCREEN_RESTORE: Mutex<&'static str> = Mutex::new("");
+static SCREEN_RESTORE: Mutex<String> = Mutex::new(String::new());
 
 /// Alternate screen on, cursor hidden.
 pub const ENTER_SCREEN: &str = "\x1b[?1049h\x1b[?25l";
@@ -22,6 +22,7 @@ pub const LEAVE_SCREEN: &str = "\x1b[?25h\x1b[?1049l";
 pub struct RawGuard {
     saved: Termios,
     screen: bool,
+    leave: String,
 }
 
 impl RawGuard {
@@ -33,8 +34,9 @@ impl RawGuard {
         raw.make_raw();
         tcsetattr(stdin(), OptionalActions::Flush, &raw).ok()?;
         *SAVED.lock().unwrap_or_else(|e| e.into_inner()) = Some(saved.clone());
+        let leave = format!("{}{LEAVE_SCREEN}", crate::style::Style::from_env().reset());
         if alt_screen {
-            *SCREEN_RESTORE.lock().unwrap_or_else(|e| e.into_inner()) = LEAVE_SCREEN;
+            *SCREEN_RESTORE.lock().unwrap_or_else(|e| e.into_inner()) = leave.clone();
             let mut out = std::io::stdout();
             let _ = out.write_all(ENTER_SCREEN.as_bytes());
             let _ = out.flush();
@@ -43,6 +45,7 @@ impl RawGuard {
         Some(RawGuard {
             saved,
             screen: alt_screen,
+            leave,
         })
     }
 }
@@ -51,12 +54,12 @@ impl Drop for RawGuard {
     fn drop(&mut self) {
         if self.screen {
             let mut out = std::io::stdout();
-            let _ = out.write_all(LEAVE_SCREEN.as_bytes());
+            let _ = out.write_all(self.leave.as_bytes());
             let _ = out.flush();
         }
         let _ = tcsetattr(stdin(), OptionalActions::Flush, &self.saved);
         *SAVED.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *SCREEN_RESTORE.lock().unwrap_or_else(|e| e.into_inner()) = "";
+        *SCREEN_RESTORE.lock().unwrap_or_else(|e| e.into_inner()) = String::new();
     }
 }
 
@@ -66,7 +69,10 @@ fn install_panic_hook() {
     ONCE.call_once(|| {
         let default = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let screen = *SCREEN_RESTORE.lock().unwrap_or_else(|e| e.into_inner());
+            let screen = SCREEN_RESTORE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             if !screen.is_empty() {
                 let mut out = std::io::stdout();
                 let _ = out.write_all(screen.as_bytes());

@@ -14,6 +14,7 @@ use crucible_compositor::ipc::{
 use crate::client::{Client, socket_from_env};
 use crate::fuzzy;
 use crate::pick::{Key, Outcome, decode_keys, fit, sanitize, window};
+use crate::style::Style;
 use crate::tty::{RawGuard, window_size};
 
 /// Usage text for `crucible launch --help`.
@@ -331,8 +332,15 @@ impl Launcher {
     }
 
     /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings).
+    #[cfg(test)]
     #[must_use]
     pub fn render(&self, cols: u16, rows: u16) -> String {
+        self.render_styled(cols, rows, &Style::Terminal)
+    }
+
+    /// Like [`Self::render`], painted with the overlay `style`.
+    #[must_use]
+    pub fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
         let width = usize::from(cols).max(10);
         let height = usize::from(rows).max(4);
         let mut lines: Vec<String> = vec![fit(&format!("run> {}_", sanitize(&self.query)), width)];
@@ -341,7 +349,7 @@ impl Launcher {
         for (i, &idx) in all.iter().enumerate().take(end).skip(start) {
             let text = fit(&format!("  {}", sanitize(&self.items[idx].label)), width);
             lines.push(if i == self.selected {
-                format!("\x1b[7m{text}\x1b[0m")
+                style.highlight(&text)
             } else {
                 text
             });
@@ -350,7 +358,7 @@ impl Launcher {
             lines.push(String::new());
         }
         lines.push(fit(self.status.as_deref().unwrap_or(""), width));
-        let mut out = String::from("\x1b[H\x1b[2J");
+        let mut out = style.frame_start();
         out.push_str(&lines.join("\r\n"));
         out
     }
@@ -411,13 +419,14 @@ pub fn run(args: &[String]) -> i32 {
 }
 
 fn event_loop(launcher: &mut Launcher, client: &mut Client) -> i32 {
+    let style = Style::from_env();
     let mut pending: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 256];
     let mut stdin = std::io::stdin();
     loop {
         let (cols, rows) = window_size();
         let mut out = std::io::stdout();
-        let _ = out.write_all(launcher.render(cols, rows).as_bytes());
+        let _ = out.write_all(launcher.render_styled(cols, rows, &style).as_bytes());
         let _ = out.flush();
         let n = match stdin.read(&mut chunk) {
             Ok(0) => return 0,
@@ -608,6 +617,24 @@ mod tests {
         assert_eq!(l.step(Key::Enter), Outcome::Continue);
     }
 
+    #[test]
+    fn render_styled_n1_paints_background_and_reapplies_after_highlight() {
+        let st = Style::parse(Some("n1-dark"));
+        let out = Launcher::new(build_items(&[entry("a", "a", false)], &[], None))
+            .render_styled(40, 8, &st);
+        assert!(out.starts_with(&format!("\x1b[H{}\x1b[2J", st.base())));
+        assert!(out.contains(&st.highlight("")[..20]));
+        assert!(out.contains(&format!("\x1b[0m{}", st.base())));
+        assert!(!out.contains("\x1b[7m"));
+        assert_eq!(
+            Launcher::new(build_items(&[entry("a", "a", false)], &[], None)).render_styled(
+                40,
+                8,
+                &Style::Terminal
+            ),
+            Launcher::new(build_items(&[entry("a", "a", false)], &[], None)).render(40, 8)
+        );
+    }
     #[test]
     fn render_marks_selection_and_neutralises_controls() {
         let items = build_items(&[entry("A\x1b[31m", "a", false)], &[], None);
