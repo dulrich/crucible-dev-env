@@ -85,6 +85,29 @@ pub fn join_command(args: &[String]) -> String {
         .join(" ")
 }
 
+/// Whether `argv0` names an interactive shell (basename, a login shell's leading `-` ignored).
+#[must_use]
+pub fn is_shell_program(argv0: &str) -> bool {
+    let name = Path::new(argv0)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(argv0);
+    matches!(
+        name.trim_start_matches('-'),
+        "sh" | "bash"
+            | "dash"
+            | "zsh"
+            | "fish"
+            | "ksh"
+            | "mksh"
+            | "tcsh"
+            | "csh"
+            | "nu"
+            | "elvish"
+            | "xonsh"
+    )
+}
+
 /// Recognises CDE's own pending restore banner,
 /// `[<…/crucible>, "resume", "--cwd", <dir>, "--", <command>]` (the command is ONE argv element),
 /// or the same without `--`/command. Returns the encoded `(cwd, command)`.
@@ -174,7 +197,9 @@ pub fn ancestors(proc_root: &Path, pid: u32, max_depth: usize) -> Vec<u32> {
 /// 2. Otherwise the shell is the first child (with several, the first with a set `tpgid`); its
 ///    `tpgid` is the foreground group leader. If that is the shell itself (or unset) the command
 ///    is `None` and the cwd is the shell's; otherwise cwd and command come from the foreground
-///    process, falling back to the shell if it vanished meanwhile.
+///    process, falling back to the shell if it vanished meanwhile. A foreground process that is itself a
+///    shell and a direct child of the session leader (ghostty's `sh -c "bash --posix"` integration
+///    wrapper) is the real interactive shell: the terminal is idle, with that shell's cwd.
 #[must_use]
 pub fn capture_terminal(proc_root: &Path, terminal_pid: u32) -> Option<TerminalCapture> {
     let children = children_of(proc_root, terminal_pid);
@@ -203,7 +228,11 @@ pub fn capture_terminal(proc_root: &Path, terminal_pid: u32) -> Option<TerminalC
         return Some(idle);
     };
     let args = read_cmdline(proc_root, tpgid);
+    let fg_is_wrapped_shell = read_stat(proc_root, tpgid)
+        .is_some_and(|s| s.ppid == i64::from(shell))
+        && args.first().is_some_and(|a| is_shell_program(a));
     match (read_cwd(proc_root, tpgid), args.is_empty()) {
+        (Some(cwd), false) if fg_is_wrapped_shell => Some(TerminalCapture { cwd, command: None }),
         (Some(cwd), false) => Some(TerminalCapture {
             cwd,
             command: Some(join_command(&args)),
@@ -307,6 +336,77 @@ mod tests {
                 command: None
             }
         );
+    }
+
+    /// ghostty's bash integration (measured on host-b 2026-10-26):
+    /// `ghostty → /bin/sh -c "/bin/bash --posix" → /bin/bash --posix`, the inner bash foreground.
+    #[test]
+    fn ghostty_sh_c_wrapped_shell_is_idle_with_the_inner_cwd() {
+        let p = Proc::new("wrapped-idle");
+        p.add((100, "ghostty", 1), 0, "/", &["ghostty"], &[200]);
+        p.add(
+            (200, "sh", 100),
+            300,
+            "/home/u",
+            &["/bin/sh", "-c", "/bin/bash --posix"],
+            &[300],
+        );
+        p.add(
+            (300, "bash", 200),
+            300,
+            "/tmp",
+            &["/bin/bash", "--posix"],
+            &[],
+        );
+        let c = capture_terminal(&p.0, 100).unwrap();
+        assert_eq!(
+            c,
+            TerminalCapture {
+                cwd: "/tmp".into(),
+                command: None
+            }
+        );
+    }
+
+    #[test]
+    fn command_inside_a_wrapped_shell_is_recorded() {
+        let p = Proc::new("wrapped-fg");
+        p.add((100, "ghostty", 1), 0, "/", &["ghostty"], &[200]);
+        p.add(
+            (200, "sh", 100),
+            400,
+            "/home/u",
+            &["/bin/sh", "-c", "/bin/bash --posix"],
+            &[300],
+        );
+        p.add(
+            (300, "bash", 200),
+            400,
+            "/tmp",
+            &["/bin/bash", "--posix"],
+            &[400],
+        );
+        p.add((400, "htop", 300), 400, "/proj", &["htop"], &[]);
+        let c = capture_terminal(&p.0, 100).unwrap();
+        assert_eq!(c.cwd, PathBuf::from("/proj"));
+        assert_eq!(c.command.as_deref(), Some("htop"));
+    }
+
+    #[test]
+    fn shell_program_names() {
+        for s in [
+            "/bin/bash",
+            "bash",
+            "-bash",
+            "/usr/bin/zsh",
+            "fish",
+            "/bin/sh",
+        ] {
+            assert!(is_shell_program(s), "{s}");
+        }
+        for s in ["htop", "/usr/bin/vim", "bashtop", "cargo"] {
+            assert!(!is_shell_program(s), "{s}");
+        }
     }
 
     #[test]
