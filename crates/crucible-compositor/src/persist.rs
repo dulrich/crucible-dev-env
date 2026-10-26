@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime};
 
 use crucible_layout::{OutputId, PaneId, Rect, WindowId, WorkspaceId, World};
@@ -25,7 +25,7 @@ use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::utils::{Point, Rectangle, Size};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::pick_terminal;
 use crate::element::WindowElement;
@@ -144,6 +144,31 @@ fn overlay_open_decision(
     }
 }
 
+/// Reaps exited children through their own handles (`try_wait`), dropping them from `children`
+/// and returning their PIDs. Children still running (or never reaped by anyone else) are kept; a
+/// `try_wait` error drops the child too. Never a reap-any call: XWayland's children are not ours.
+pub fn reap_exited(children: &mut Vec<Child>) -> Vec<u32> {
+    let mut reaped = Vec::new();
+    children.retain_mut(|child| match child.try_wait() {
+        Ok(None) => true,
+        Ok(Some(_)) | Err(_) => {
+            reaped.push(child.id());
+            false
+        }
+    });
+    reaped
+}
+
+/// Asks a window to close (xdg `close` or the X11 equivalent).
+fn close_element(element: &WindowElement) {
+    if let Some(toplevel) = element.toplevel() {
+        toplevel.send_close();
+    }
+    if let Some(x11) = element.x11_surface() {
+        let _ = x11.close();
+    }
+}
+
 /// Compositor-side persistence state (lives in [`CrucibleState::persist`]).
 #[derive(Debug)]
 pub struct PersistState {
@@ -160,6 +185,8 @@ pub struct PersistState {
     pending: HashMap<u32, Pending>,
     placed: HashMap<PaneId, Vec<(WindowId, usize)>>,
     overlay: Option<Overlay>,
+    /// Handles of every CDE-spawned child, kept so exited ones are reaped (never reap-any).
+    children: Vec<Child>,
     config_mtime: Option<SystemTime>,
 }
 
@@ -177,6 +204,7 @@ impl PersistState {
             pending: HashMap::new(),
             placed: HashMap::new(),
             overlay: None,
+            children: Vec::new(),
             config_mtime: None,
         }
     }
@@ -525,6 +553,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.persist.overlay = None;
             }
         }
+        let reaped = reap_exited(&mut self.persist.children);
+        if !reaped.is_empty() {
+            debug!(?reaped, "reaped exited children");
+        }
         self.save_dirty(now, TICK);
         self.poll_config();
     }
@@ -707,6 +739,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 let pid = child.id();
                 info!(program, ?args, ?cwd, pid, "spawned");
                 self.persist.spawned.insert(pid, kind);
+                self.persist.children.push(child);
                 Some(pid)
             }
             Err(err) => {
@@ -809,12 +842,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     ..
                 }) = current
                 {
-                    if let Some(toplevel) = old.toplevel() {
-                        toplevel.send_close();
-                    }
-                    if let Some(x11) = old.x11_surface() {
-                        let _ = x11.close();
-                    }
+                    close_element(&old);
                 }
             }
             OpenDecision::Spawn => {}
@@ -869,6 +897,25 @@ impl<B: Backend + 'static> CrucibleState<B> {
             kind,
             state: OverlayState::Mapped(element),
         });
+    }
+
+    /// The overlay's element, only once it is mapped.
+    pub(crate) fn mapped_overlay(&self) -> Option<&WindowElement> {
+        match &self.persist.overlay {
+            Some(Overlay {
+                state: OverlayState::Mapped(element),
+                ..
+            }) => Some(element),
+            _ => None,
+        }
+    }
+
+    /// Asks the mapped overlay (if any) to close; the slot is cleared by [`Self::unmanaged_closed`]
+    /// when its surface goes away.
+    pub(crate) fn close_mapped_overlay(&self) {
+        if let Some(element) = self.mapped_overlay() {
+            close_element(element);
+        }
     }
 
     /// Called when an unmanaged element was torn down: if it was the mapped overlay, return keyboard
@@ -1109,12 +1156,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             },
         );
         if let Some(element) = element {
-            if let Some(toplevel) = element.toplevel() {
-                toplevel.send_close();
-            }
-            if let Some(x11) = element.x11_surface() {
-                let _ = x11.close();
-            }
+            close_element(&element);
         }
         info!(
             pid,
@@ -1322,6 +1364,34 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
 #[cfg(test)]
 mod tests {
+    use super::reap_exited;
+
+    #[test]
+    fn reap_exited_drops_only_exited_children() {
+        let quick = std::process::Command::new("/bin/true").spawn().unwrap();
+        let quick_pid = quick.id();
+        let slow = std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let slow_pid = slow.id();
+        let mut children = vec![quick, slow];
+        let mut reaped = Vec::new();
+        for _ in 0..40 {
+            reaped = reap_exited(&mut children);
+            if !reaped.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert_eq!(reaped, vec![quick_pid]);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id(), slow_pid);
+        for c in &mut children {
+            c.kill().unwrap();
+            c.wait().unwrap();
+        }
+    }
     use super::*;
     use crucible_persist::{PaneRecord, RecordNode};
 

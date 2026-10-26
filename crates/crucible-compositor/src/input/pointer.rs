@@ -222,6 +222,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
     fn update_keyboard_focus_under_pointer(&mut self, _serial: Serial) {
         let location = self.pointer.current_location();
         let element_under = self.space.element_under(location).map(|(w, _)| w.clone());
+        // Overlays are modal: a click anywhere but on the mapped overlay closes it first. The slot
+        // is cleared later by `unmanaged_closed`, which stays its single owner.
+        let clicked_overlay = match (self.mapped_overlay(), &element_under) {
+            (Some(overlay), Some(under)) => overlay == under,
+            _ => false,
+        };
+        if click_closes_overlay(self.mapped_overlay().is_some(), clicked_overlay) {
+            self.close_mapped_overlay();
+        }
         match element_under {
             Some(window) => {
                 if let Some(id) = window.window_id() {
@@ -295,7 +304,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// one seen ([`hover_entered`]), so keyboard-driven focus (a split, `Super+H`…) is not reverted
     /// by a pointer twitch. Routing: over a managed window the window is focused; over a pane's
     /// uncovered area the pane is. While a pointer grab is active (button held, drag) the tracker
-    /// still updates but no focus moves. Does nothing when the option is off.
+    /// still updates but no focus moves. Overlays are modal ([`hover_moves_focus`]): while one is
+    /// mapped the tracker still updates but hovering never moves focus off it. Does nothing when
+    /// the option is off.
     fn focus_follows_pointer(&mut self) {
         if !self.focus_follows_mouse {
             return;
@@ -320,7 +331,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let mut stored = self.hover_target.take();
         let entered = hover_entered(&mut stored, current);
         self.hover_target = stored;
-        if !entered || self.pointer.is_grabbed() {
+        let overlay_mapped = self.mapped_overlay().is_some();
+        if !hover_moves_focus(entered, self.pointer.is_grabbed(), overlay_mapped) {
             return;
         }
         let managed = element_under.and_then(|w| w.window_id().map(|id| (id, w)));
@@ -359,5 +371,39 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
         }
         self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(window)));
+    }
+}
+
+/// Whether a hover may move focus: only on a fresh enter, with no pointer grab and no modal
+/// overlay mapped.
+#[must_use]
+fn hover_moves_focus(entered: bool, grabbed: bool, overlay_mapped: bool) -> bool {
+    entered && !grabbed && !overlay_mapped
+}
+
+/// Whether a press closes the mapped overlay: an overlay is mapped and the click missed it.
+#[must_use]
+fn click_closes_overlay(overlay_mapped: bool, clicked_overlay: bool) -> bool {
+    overlay_mapped && !clicked_overlay
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hover_moves_focus_only_when_unblocked() {
+        assert!(hover_moves_focus(true, false, false));
+        assert!(!hover_moves_focus(false, false, false), "no enter");
+        assert!(!hover_moves_focus(true, true, false), "grabbed");
+        assert!(!hover_moves_focus(true, false, true), "overlay mapped");
+    }
+
+    #[test]
+    fn click_closes_overlay_only_when_missing_a_mapped_overlay() {
+        assert!(click_closes_overlay(true, false));
+        assert!(!click_closes_overlay(true, true));
+        assert!(!click_closes_overlay(false, false));
+        assert!(!click_closes_overlay(false, true));
     }
 }
