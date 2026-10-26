@@ -12,7 +12,7 @@ Reload: WP-5 reloads on file change; until then restart.
 terminal "<command>" exec-flag="-e"
 ```
 
-The program spawned by `Super+Return` and `Super+Shift+Return` (and the `run-terminal` / `stack-window` actions). Default: unset, which keeps the built-in lookup (`$TERMINAL`, else `foot`). `exec-flag` is the flag the terminal takes to run a program (default `-e`) and is used by later launchers. The command must be non-empty; it is spawned directly (no shell), so give a path or a name on `$PATH`.
+The program spawned by `Super+Return` and `Super+Shift+Return` (and the `run-terminal` action; `stack-window` is retired, every launch already stacks into the focused pane). Default: unset, which keeps the built-in lookup (`$TERMINAL`, else `foot`). `exec-flag` is the flag the terminal takes to run a program (default `-e`) and is used by later launchers. The command must be non-empty; it is spawned directly (no shell), so give a path or a name on `$PATH`.
 
 ### `gaps`
 
@@ -67,7 +67,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `quit` | Stop the compositor |
 | `close-pane` | Close the focused pane (only if empty and not the last) |
 | `run-terminal` | Spawn the terminal |
-| `stack-window` | Spawn a terminal stacked into the focused pane |
+| `run <command…>` | Run a command line into the focused pane, spawned via `/bin/sh -c 'exec <command…>'` (the rest of the action text, verbatim; needs a command). `stack-window` is retired and is rejected with an error |
 | `focus <dir>` | Move pane focus |
 | `move <dir>` | Swap the focused pane with its neighbour |
 | `split <dir>` | Split the focused pane |

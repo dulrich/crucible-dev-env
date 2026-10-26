@@ -84,8 +84,8 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 
 | Chord | Verb |
 |-------|------|
-| `Super+Return` | Spawn a terminal into the focused pane |
-| `Super+Shift+Return` | Spawn a terminal **stacked** into the current pane |
+| `Super+Return` | Spawn a terminal into the focused pane (the window joins the pane's stack) |
+| `Super+Shift+Return` | Spawn a terminal into the focused pane (the window joins the pane's stack) |
 | `Super+Shift+Q` | Quit the compositor |
 | `Super+W` | Close the focused pane (only if empty and not the last pane; never closes windows) |
 | `Super+H` / `J` / `K` / `L` | Focus pane left / down / up / right |
@@ -120,7 +120,7 @@ The picker talks to the compositor over a Unix socket at `$XDG_RUNTIME_DIR/cde/<
 
 - `crucible pick [--rename <name>]` — the workspace picker TUI (needs `$CDE_SOCKET`); `--rename` is a single-line rename prompt (the name is percent-encoded).
 - `crucible resume --cwd <dir> [-- <command>]` — the restored-terminal banner: Enter runs the old command (then a shell), Ctrl+C or EOF gives a shell; the command never runs without Enter.
-- `crucible msg <request…>` — send one request line to the compositor and print the reply (exit 0 `ok`, 1 `err`, 2 usage). Arguments are sent as typed, so percent-encode `%`, `:`, TAB, LF and CR yourself: `crucible msg open my%3Aname`.
+- `crucible msg <request…>` — send one request line to the compositor and print the reply (exit 0 `ok`, 1 `err`, 2 usage). Arguments are sent as typed, so percent-encode `%`, `:`, TAB, LF and CR yourself: `crucible msg open my%3Aname`. `crucible msg run <command…>` runs a command line into the focused pane and encodes it for you: `crucible msg run firefox --new-window`.
 
 ## Build & test
 

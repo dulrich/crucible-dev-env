@@ -8,9 +8,10 @@
 //!
 //! ## Which windows are terminals
 //! By **PID provenance**, not app-id matching: every process CDE spawns through
-//! [`CrucibleState::spawn_process`] is remembered, and a toplevel whose client PID is one of them —
-//! or has one among its `/proc` ancestors — is a terminal, captured with
-//! [`crucible_persist::capture_terminal`]. Everything else is recorded as an `app`.
+//! [`CrucibleState::spawn_process`] is remembered with its [`SpawnKind`], and a toplevel whose client PID
+//! is one of them — or has one among its `/proc` ancestors — of kind [`SpawnKind::Terminal`] is a
+//! terminal, captured with [`crucible_persist::capture_terminal`]. Everything else (apps from
+//! `run`, the picker overlay, unknown clients) is recorded as an `app`.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -37,6 +38,17 @@ use crate::state::{Backend, CrucibleState};
 pub const TICK: Duration = Duration::from_secs(1);
 /// How long a pending placement waits for its window to map.
 pub const PENDING_TTL: Duration = Duration::from_secs(30);
+/// What a CDE-spawned process is, remembered per PID so a mapped window can be classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnKind {
+    /// A terminal (captured with its cwd and foreground command).
+    Terminal,
+    /// An application launched by `run` (recorded as an `app`).
+    App,
+    /// A CDE overlay such as the picker (never captured).
+    Overlay,
+}
+
 /// How far up `/proc` a client PID is walked looking for a spawned/pending ancestor.
 pub const ANCESTOR_DEPTH: usize = 8;
 
@@ -88,7 +100,7 @@ pub struct PersistState {
     /// Last record written per workspace name, and when.
     saved: HashMap<String, (WorkspaceRecord, Instant)>,
     windows: HashMap<WindowId, WindowInfo>,
-    spawned: HashSet<u32>,
+    spawned: HashMap<u32, SpawnKind>,
     pending: HashMap<u32, Pending>,
     placed: HashMap<PaneId, Vec<(WindowId, usize)>>,
     picker: Option<Picker>,
@@ -105,7 +117,7 @@ impl PersistState {
             roots: HashMap::new(),
             saved: HashMap::new(),
             windows: HashMap::new(),
-            spawned: HashSet::new(),
+            spawned: HashMap::new(),
             pending: HashMap::new(),
             placed: HashMap::new(),
             picker: None,
@@ -155,6 +167,14 @@ pub fn match_pending(pid: u32, ancestors: &[u32], has: impl Fn(u32) -> bool) -> 
     std::iter::once(pid)
         .chain(ancestors.iter().copied())
         .find(|p| has(*p))
+}
+
+/// Whether `pid` (or its nearest spawned ancestor) was spawned as a [`SpawnKind::Terminal`].
+#[must_use]
+pub fn is_terminal_spawn(pid: u32, ancestors: &[u32], spawned: &HashMap<u32, SpawnKind>) -> bool {
+    match_pending(pid, ancestors, |k| spawned.contains_key(&k))
+        .and_then(|k| spawned.get(&k))
+        .is_some_and(|kind| *kind == SpawnKind::Terminal)
 }
 
 /// The stack index a restored window takes: the number of already-placed windows in its pane
@@ -548,12 +568,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     /// Spawns `program args…` connected to this compositor (`WAYLAND_DISPLAY`, `CDE_SOCKET`),
-    /// optionally in `cwd`. The PID is remembered as a CDE-spawned terminal. Returns the PID.
+    /// optionally in `cwd`. The PID is remembered as a CDE-spawn of `kind`. Returns the PID.
     pub fn spawn_process(
         &mut self,
         program: &str,
         args: &[OsString],
         cwd: Option<&Path>,
+        kind: SpawnKind,
     ) -> Option<u32> {
         let Some(socket) = self.socket_name.clone() else {
             warn!(program, "no wayland socket; cannot spawn");
@@ -571,7 +592,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(child) => {
                 let pid = child.id();
                 info!(program, ?args, ?cwd, pid, "spawned");
-                self.persist.spawned.insert(pid);
+                self.persist.spawned.insert(pid, kind);
                 Some(pid)
             }
             Err(err) => {
@@ -585,7 +606,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub fn spawn_terminal_here(&mut self, program: &str) {
         let ws = self.layout.world.active_workspace_id();
         let root = self.persist.roots.get(&ws).cloned();
-        self.spawn_process(program, &[], root.as_deref());
+        self.spawn_process(program, &[], root.as_deref(), SpawnKind::Terminal);
+    }
+
+    /// Runs `cmd` (a shell command line) into the focused pane via `/bin/sh -c 'exec <cmd>'`, so the
+    /// window's client PID is the app itself. Starts in the active workspace's root if any.
+    /// Returns the PID.
+    pub fn spawn_command_here(&mut self, cmd: &str) -> Option<u32> {
+        let ws = self.layout.world.active_workspace_id();
+        let root = self.persist.roots.get(&ws).cloned();
+        let args = [OsString::from("-c"), OsString::from(format!("exec {cmd}"))];
+        self.spawn_process("/bin/sh", &args, root.as_deref(), SpawnKind::App)
     }
 
     // ---- picker overlay ------------------------------------------------------------------------
@@ -616,7 +647,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             current.as_deref(),
         );
         let program = self.terminal_program();
-        if let Some(pid) = self.spawn_process(&program, &args, None) {
+        if let Some(pid) = self.spawn_process(&program, &args, None, SpawnKind::Overlay) {
             self.persist.pending.insert(
                 pid,
                 Pending {
@@ -702,9 +733,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }) => self.map_placed(element, pane, saved_index, focused),
             None => self.map_managed_window(element),
         };
-        let terminal = pid.is_some_and(|p| {
-            match_pending(p, &ancestors, |k| self.persist.spawned.contains(&k)).is_some()
-        });
+        let terminal = pid.is_some_and(|p| is_terminal_spawn(p, &ancestors, &self.persist.spawned));
         self.persist
             .windows
             .insert(id, WindowInfo { pid, terminal });
@@ -763,6 +792,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Request::Save => {
                 self.flush_workspaces();
                 Ok(())
+            }
+            Request::Run(cmd) => {
+                return match self.spawn_command_here(&cmd) {
+                    Some(_) => Response::Ok(String::new()),
+                    None => Response::Err(encode_field("spawn failed")),
+                };
             }
             Request::Open(name) => self.ipc_open(&name),
             Request::OpenFolder(path) => self.ipc_open_folder(&path),
@@ -854,7 +889,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         let now = Instant::now();
         for (dir, args, target) in jobs {
-            if let Some(pid) = self.spawn_process(&program, &args, Some(&dir)) {
+            if let Some(pid) = self.spawn_process(&program, &args, Some(&dir), SpawnKind::Terminal)
+            {
                 self.persist
                     .pending
                     .insert(pid, Pending { target, since: now });
@@ -979,6 +1015,24 @@ mod tests {
         assert_eq!(match_pending(10, &[20], has), Some(10));
         assert_eq!(match_pending(5, &[7, 20, 10], has), Some(20));
         assert_eq!(match_pending(5, &[7, 8], has), None);
+    }
+
+    #[test]
+    fn is_terminal_spawn_depends_on_the_matched_kind() {
+        let spawned: HashMap<u32, SpawnKind> = [
+            (10, SpawnKind::Terminal),
+            (20, SpawnKind::App),
+            (30, SpawnKind::Overlay),
+        ]
+        .into();
+        assert!(is_terminal_spawn(10, &[], &spawned));
+        assert!(is_terminal_spawn(5, &[7, 10], &spawned));
+        assert!(!is_terminal_spawn(20, &[], &spawned));
+        assert!(!is_terminal_spawn(5, &[20], &spawned));
+        assert!(!is_terminal_spawn(30, &[], &spawned));
+        assert!(!is_terminal_spawn(5, &[7, 8], &spawned));
+        // the nearest spawned ancestor decides, not any terminal further up
+        assert!(!is_terminal_spawn(5, &[20, 10], &spawned));
     }
 
     #[test]

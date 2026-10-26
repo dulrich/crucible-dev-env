@@ -13,7 +13,7 @@
 //! - [`pointer`] — pointer I/O: absolute/relative motion, buttons, axis frames, and
 //!   click-to-focus.
 //! - [`execute`] — action execution: [`CrucibleState::handle_key_action`] dispatches a resolved
-//!   [`crucible_keys::Action`] to a compositor-level effect (`Quit`/`Run`/`StackWindow`/
+//!   [`crucible_keys::Action`] to a compositor-level effect (`Quit`/`RunTerminal`/`Run`/
 //!   `VtSwitch`) or, for every model verb, through the single model-mutation entry point
 //!   (`update_model`/`with_model`, see [`crate::layout`]) — one execution arm per verb.
 //!

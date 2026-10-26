@@ -1,8 +1,8 @@
 //! Action execution: dispatches a resolved [`crucible_keys::Action`] to the compositor.
 //!
 //! [`CrucibleState::handle_key_action`] is the **one** execution arm per verb the review asked for
-//! (`reviews/2026-07-30-tn-code-review.md` F3): compositor-level verbs (`Quit`, `Run`,
-//! `StackWindow`, `VtSwitch`) are handled directly; every model verb is routed through
+//! (`reviews/2026-07-30-tn-code-review.md` F3): compositor-level verbs (`Quit`, `RunTerminal`,
+//! `Run`, `VtSwitch`) are handled directly; every model verb is routed through
 //! [`apply_model_action`] and the single mutation entry point ([`CrucibleState::with_model`]).
 //! [`apply_model_action`] itself only touches a bare `crucible_layout::World`, so the verb→call mapping is unit-tested
 //! below without any compositor state — the same spirit as `crate::layout`'s `LayoutState<TestElement>`
@@ -14,7 +14,6 @@ use crucible_keys::Action;
 use crucible_layout::{LayoutError, World};
 use tracing::{debug, info, warn};
 
-use crate::config::pick_terminal;
 use crate::persist::new_workspace_name;
 use crate::state::{Backend, CrucibleState};
 
@@ -27,7 +26,7 @@ const RESIZE_DELTA: f64 = 0.05;
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Dispatches a resolved [`Action`] to its compositor effect or `World` op.
     ///
-    /// `Quit`/`Run`/`StackWindow`/`OpenPicker`/`RenameWorkspace`/`VtSwitch` are compositor-level and return immediately; every
+    /// `Quit`/`RunTerminal`/`Run`/`OpenPicker`/`RenameWorkspace`/`VtSwitch` are compositor-level and return immediately; every
     /// other verb is a model mutation applied through [`Self::with_model`], the single entry point
     /// (`SameWorkspace` is logged at debug level as an expected no-op; anything else surfaces as a
     /// warning without panicking).
@@ -40,24 +39,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.running.store(false, Ordering::SeqCst);
                 return;
             }
-            Action::Run(cmd) => {
-                let cmd = pick_terminal(self.config.terminal.command.as_deref(), cmd);
-                info!(cmd, "Super+Return: spawning terminal into focused pane");
+            // Spawning causes the client to connect, map a toplevel, and flow through
+            // `new_toplevel` -> `map_new_window`, which pushes the window onto the focused pane's
+            // stack. We must not call `World::open_window`/`stack_window` directly from a keybind:
+            // doing so allocates a `WindowId` with no backing surface.
+            Action::RunTerminal => {
+                let cmd = self.terminal_program();
+                info!(cmd, "spawning terminal into focused pane");
                 self.spawn_terminal_here(&cmd);
                 return;
             }
-            // Spawning a terminal causes the client to connect, map a toplevel, and flow through
-            // `new_toplevel` → `World::open_window`, which pushes the window onto the focused
-            // pane's stack. We must not call `World::open_window`/`stack_window` directly from a
-            // keybind: doing so allocates a `WindowId` with no backing surface. The spawn IS the
-            // stack — it stacks into the focused pane automatically.
-            Action::StackWindow => {
-                let cmd = self.terminal_program();
-                info!(
-                    cmd,
-                    "Super+Shift+Return: spawning terminal to stack into focused pane"
-                );
-                self.spawn_terminal_here(&cmd);
+            Action::Run(cmd) => {
+                info!(cmd, "running command into focused pane");
+                self.spawn_command_here(&cmd);
                 return;
             }
             Action::OpenPicker => {
@@ -130,7 +124,7 @@ fn dispatch_vt_switch<B: Backend>(backend: &mut B, vt: i32) -> bool {
 /// without any compositor state (see `mod tests`).
 ///
 /// # Panics
-/// Panics if given a non-model [`Action`] (`Quit`, `Run`, `StackWindow`, `OpenPicker`, `RenameWorkspace`, `VtSwitch`);
+/// Panics if given a non-model [`Action`] (`Quit`, `RunTerminal`, `Run`, `OpenPicker`, `RenameWorkspace`, `VtSwitch`);
 /// [`CrucibleState::handle_key_action`] always routes those before this function is reached.
 fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutError> {
     match action {
@@ -161,8 +155,8 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
         Action::MoveWindowToWorkspace(delta) => move_window_to_adjacent_workspace(world, *delta),
         Action::ClosePane => world.close_pane(),
         Action::Quit
+        | Action::RunTerminal
         | Action::Run(_)
-        | Action::StackWindow
         | Action::OpenPicker
         | Action::RenameWorkspace
         | Action::NewWorkspace

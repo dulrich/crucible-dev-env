@@ -19,6 +19,7 @@
 //! | `new <name>`               | `ok` / `err <reason>`                                     |
 //! | `rename <name>`            | `ok` / `err <reason>`                                     |
 //! | `save`                     | `ok`                                                      |
+//! | `run <command>`            | `ok` (spawned) / `err <reason>`                           |
 //!
 //! An empty candidate list is answered with a bare `ok`.
 //!
@@ -98,6 +99,8 @@ pub enum Request {
     Rename(String),
     /// `save` — flush every dirty workspace now.
     Save,
+    /// `run <command>` — run a shell command line (`/bin/sh -c 'exec <command>'`) into the focused pane.
+    Run(String),
 }
 
 impl Request {
@@ -128,6 +131,7 @@ impl Request {
             "open-folder" => need(arg).map(|p| Request::OpenFolder(PathBuf::from(p))),
             "new" => need(arg).map(Request::New),
             "rename" => need(arg).map(Request::Rename),
+            "run" => need(arg).map(Request::Run),
             other => Err(format!("unknown request {other:?}")),
         }
     }
@@ -143,6 +147,7 @@ impl Request {
             Request::OpenFolder(p) => format!("open-folder {}", encode_field(&p.to_string_lossy())),
             Request::New(n) => format!("new {}", encode_field(n)),
             Request::Rename(n) => format!("rename {}", encode_field(n)),
+            Request::Run(c) => format!("run {}", encode_field(c)),
         }
     }
 }
@@ -442,6 +447,7 @@ mod tests {
             Request::OpenFolder(PathBuf::from("/tmp/x:y/100%")),
             Request::New("n\nl".into()),
             Request::Rename("r\r".into()),
+            Request::Run("sh -c 'echo 100%: a\tb'".into()),
         ];
         for r in reqs {
             assert_eq!(Request::parse(&r.to_line()), Ok(r.clone()));

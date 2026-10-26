@@ -16,7 +16,7 @@
 //!
 //! ## Action grammar
 //!
-//! `quit`, `close-pane`, `run-terminal`, `stack-window`, `new-workspace`, `open-picker`,
+//! `quit`, `close-pane`, `run-terminal`, `run <command…>`, `new-workspace`, `open-picker`,
 //! `rename-workspace`, `focus|move|split|resize <left|right|up|down>`, `cycle-stack <±n>`,
 //! `cycle-workspace <±n>`, `move-window-to-workspace <±n>`, and `none` (unbind the chord).
 
@@ -62,8 +62,8 @@ pub enum BindError {
 
 /// The chord → [`Action`] table consulted by [`crate::chord::resolve`].
 ///
-/// `Action::Run` entries hold an empty placeholder command; `resolve` substitutes
-/// [`crate::terminal_command`] when it is hit.
+/// `Super+Return` and `Super+Shift+Return` bind `Action::RunTerminal`; the compositor chooses the
+/// terminal program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bindings {
     map: HashMap<Chord, Action>,
@@ -139,7 +139,7 @@ impl Default for Bindings {
         };
 
         // ---- plain Super (note: focus h/j/k/l are lowercase-only, as before) ----
-        bind(sup, &[Keysym::Return], Action::Run(String::new()));
+        bind(sup, &[Keysym::Return], Action::RunTerminal);
         bind(sup, &[Keysym::w, Keysym::W], Action::ClosePane);
         bind(sup, &[Keysym::h], Action::Focus(Direction::Left));
         bind(sup, &[Keysym::j], Action::Focus(Direction::Down));
@@ -154,7 +154,7 @@ impl Default for Bindings {
         bind(sup, &[Keysym::p, Keysym::P], Action::OpenPicker);
 
         // ---- Super+Shift ----
-        bind(sup_shift, &[Keysym::Return], Action::StackWindow);
+        bind(sup_shift, &[Keysym::Return], Action::RunTerminal);
         bind(sup_shift, &[Keysym::q, Keysym::Q], Action::Quit);
         bind(sup_shift, &[Keysym::r, Keysym::R], Action::RenameWorkspace);
         bind(
@@ -369,8 +369,19 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
         "none" => nullary(Action::Quit).map(|_| None),
         "quit" => nullary(Action::Quit),
         "close-pane" => nullary(Action::ClosePane),
-        "run-terminal" => nullary(Action::Run(String::new())),
-        "stack-window" => nullary(Action::StackWindow),
+        "run-terminal" => nullary(Action::RunTerminal),
+        "run" => {
+            // The command is the rest of the original text after the verb, verbatim.
+            let rest = text.trim().get(verb.len()..).unwrap_or("").trim();
+            if rest.is_empty() {
+                Err(bad("`run` needs a command".into()))
+            } else {
+                Ok(Some(Action::Run(rest.to_string())))
+            }
+        }
+        "stack-window" => Err(bad(
+            "`stack-window` was retired: every launch already stacks into the focused pane; use `run-terminal`".into(),
+        )),
         "new-workspace" => nullary(Action::NewWorkspace),
         "open-picker" => nullary(Action::OpenPicker),
         "rename-workspace" => nullary(Action::RenameWorkspace),
@@ -506,8 +517,8 @@ mod tests {
         let cases: &[(&str, Action)] = &[
             ("quit", Action::Quit),
             ("close-pane", Action::ClosePane),
-            ("run-terminal", Action::Run(String::new())),
-            ("stack-window", Action::StackWindow),
+            ("run-terminal", Action::RunTerminal),
+            ("run firefox", Action::Run("firefox".into())),
             ("new-workspace", Action::NewWorkspace),
             ("open-picker", Action::OpenPicker),
             ("rename-workspace", Action::RenameWorkspace),
@@ -583,5 +594,42 @@ mod tests {
     #[test]
     fn no_overrides_is_default() {
         assert_eq!(Bindings::with_overrides(&[]).unwrap(), Bindings::default());
+    }
+
+    #[test]
+    fn run_verb_keeps_the_rest_of_the_text_verbatim() {
+        let b = Bindings::with_overrides(&[pair("Super+F2", "  run   sh -c  'echo  \"a  b\"'  ")])
+            .unwrap();
+        assert_eq!(
+            b.get(sup(), Keysym::F2),
+            Some(&Action::Run("sh -c  'echo  \"a  b\"'".into()))
+        );
+    }
+
+    #[test]
+    fn bare_run_is_rejected() {
+        for text in ["run", "run   "] {
+            let err = Bindings::with_overrides(&[pair("Super+F2", text)]).unwrap_err();
+            assert!(
+                matches!(&err, BindError::BadAction { reason, .. } if reason.contains("needs a command")),
+                "{text:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn stack_window_is_retired_with_a_pointer_to_run_terminal() {
+        let err = Bindings::with_overrides(&[pair("Super+F2", "stack-window")]).unwrap_err();
+        assert!(
+            matches!(&err, BindError::BadAction { reason, .. }
+                if reason.contains("stack-window") && reason.contains("run-terminal")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn default_return_chord_runs_a_terminal() {
+        let b = Bindings::default();
+        assert_eq!(b.get(sup(), Keysym::Return), Some(&Action::RunTerminal));
     }
 }

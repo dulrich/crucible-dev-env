@@ -19,7 +19,7 @@ pub const DEFAULT_TERMINALS: &[&str] = &["foot", "alacritty", "kitty", "weston-t
 /// A CDE verb triggered by an intercepted `Super`-leader chord (or, for [`Action::VtSwitch`], a
 /// libinput `Ctrl+Alt+F<n>` chord independent of the leader).
 ///
-/// Produced by [`crate::chord::resolve`]. `Quit`, `Run`, `StackWindow`, `OpenPicker`,
+/// Produced by [`crate::chord::resolve`]. `Quit`, `RunTerminal`, `Run`, `OpenPicker`,
 /// `RenameWorkspace` and `VtSwitch` are
 /// compositor-level (spawn a process, stop the loop, open UI, or ask the backend to switch VTs); every
 /// other variant names a `crucible_layout::World` operation the compositor applies through its
@@ -31,17 +31,14 @@ pub enum Action {
     /// Close the focused pane if it is empty and not the workspace's last pane (`World::close_pane`).
     /// Never closes windows; a refused close is a no-op. `Super+W`.
     ClosePane,
-    /// Spawn a program. `Super+Return` spawns the terminal; it connects via the Wayland socket
-    /// and the shell map path (`new_toplevel`) places it in the focused pane automatically.
+    /// Spawn the configured terminal into the focused pane (the window joins the pane's stack). The
+    /// compositor picks the terminal (config `terminal`, then `$TERMINAL`, then a default list).
+    /// Because `World::open_window` is only called from the surface-map path, a keybind never
+    /// fabricates a window: the spawned client's toplevel is placed by the shell map path.
+    RunTerminal,
+    /// Run a real command line (non-empty) via `/bin/sh -c 'exec <cmd>'` into the focused pane.
+    /// The window joins the pane's stack through the shell map path.
     Run(String),
-    /// Stack a new terminal window into the focused pane by spawning it. `Super+Shift+Return`.
-    ///
-    /// Because `World::open_window` is only ever called from the surface-map path (when a client
-    /// connects and maps a toplevel), keybinds must not fabricate a surface-less `WindowId`.
-    /// Instead, this verb spawns the terminal; the shell map path pushes the new window onto the
-    /// focused pane's stack. Plain `Super+Return` does the same thing at the model level — the
-    /// separate verb exists for discoverability and for Phase 3 to bind differently if desired.
-    StackWindow,
 
     /// Move pane focus in `Direction` within the active workspace. `Super+H/J/K/L`.
     Focus(Direction),

@@ -9,14 +9,14 @@
 //!
 //! | Chord                 | [`Action`]                    | Model op                          |
 //! |-----------------------|--------------------------------|-----------------------------------|
-//! | `Super+Return`        | `Run(terminal)`                | spawn terminal (focused pane)     |
+//! | `Super+Return`        | `RunTerminal`                  | spawn terminal (focused pane)     |
 //! | `Super+Shift+Q`       | `Quit`                         | stop compositor                   |
 //! | `Super+W`             | `ClosePane`                    | `World::close_pane()`             |
 //! | `Super+H/J/K/L`       | `Focus(Left/Down/Up/Right)`    | `World::focus(dir)`               |
 //! | `Super+Shift+H/J/K/L` | `Move(Left/Down/Up/Right)`     | `World::move_(dir)`               |
 //! | `Super+Backslash`     | `Split(Right)`                 | `World::split(Right)`             |
 //! | `Super+Minus`         | `Split(Down)`                  | `World::split(Down)`              |
-//! | `Super+Shift+Return`  | `StackWindow`                  | spawn terminal (stacks in pane)   |
+//! | `Super+Shift+Return`  | `RunTerminal`                  | spawn terminal (stacks in pane)   |
 //! | `Super+Tab`           | `CycleStack(1)`                | `World::cycle_stack(1)`           |
 //! | `Super+Shift+Tab`     | `CycleStack(-1)`               | `World::cycle_stack(-1)`          |
 //! | `Super+Ctrl+H/J/K/L`  | `Resize(Left/Down/Up/Right)`   | `World::resize(dir, delta)`       |
@@ -33,7 +33,7 @@
 //! match the lowercase keysym only. Any chord except VT switching can be rebound or unbound from
 //! the `binds` block of the config file (`docs/config.md`).
 
-use crate::action::{Action, terminal_command};
+use crate::action::Action;
 use crate::bindings::Bindings;
 #[cfg(test)]
 use crucible_layout::Direction;
@@ -67,7 +67,7 @@ pub struct Modifiers {
 /// running compositor. VT switching (`Ctrl+Alt+F<n>` → `XF86_Switch_VT_<n>`) is hard-wired first,
 /// outside the table and independent of `Super`; after that only `Super` (`modifiers.logo`) chords
 /// are looked up, so every non-`Super` key returns `None` and is forwarded to the focused client.
-/// An `Action::Run` hit gets the terminal command from [`terminal_command`] filled in.
+/// The bound action is returned unchanged; terminal choice belongs to the compositor.
 #[must_use]
 pub fn resolve(bindings: &Bindings, modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
     // VT switching (`Ctrl+Alt+F<n>`) takes priority over the Super leader and is independent of it.
@@ -82,10 +82,7 @@ pub fn resolve(bindings: &Bindings, modifiers: Modifiers, keysym: Keysym) -> Opt
         return None;
     }
 
-    match bindings.get(modifiers, keysym)? {
-        Action::Run(_) => Some(Action::Run(terminal_command())),
-        other => Some(other.clone()),
-    }
+    bindings.get(modifiers, keysym).cloned()
 }
 
 #[cfg(test)]
@@ -131,13 +128,10 @@ mod tests {
 
     #[test]
     fn super_return_runs_a_terminal() {
-        // `Action::Run`'s payload reads `$TERMINAL` at resolve time, which other tests in this
-        // crate mutate concurrently (see `action::tests`); check the variant shape here instead
-        // of the exact string so this test cannot race on that global.
-        assert!(matches!(
+        assert_eq!(
             resolve(super_only(), Keysym::Return),
-            Some(Action::Run(_))
-        ));
+            Some(Action::RunTerminal)
+        );
     }
 
     #[test]
@@ -166,7 +160,7 @@ mod tests {
         }
 
         let super_shift_chords: &[(Keysym, Action)] = &[
-            (Keysym::Return, Action::StackWindow),
+            (Keysym::Return, Action::RunTerminal),
             (Keysym::q, Action::Quit),
             (Keysym::Q, Action::Quit),
             (Keysym::h, Action::Move(Direction::Left)),
@@ -308,13 +302,13 @@ mod tests {
         );
     }
 
-    /// The pre-config `match` table, verbatim (with `Run` payload elided), kept as an oracle.
+    /// The pre-config `match` table, verbatim kept as an oracle.
     fn legacy(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
         if !modifiers.logo {
             return None;
         }
         match (modifiers.shift, modifiers.ctrl, keysym) {
-            (false, false, Keysym::Return) => Some(Action::Run(String::new())),
+            (false, false, Keysym::Return) => Some(Action::RunTerminal),
             (false, false, Keysym::w | Keysym::W) => Some(Action::ClosePane),
             (false, false, Keysym::h) => Some(Action::Focus(Direction::Left)),
             (false, false, Keysym::j) => Some(Action::Focus(Direction::Down)),
@@ -326,7 +320,7 @@ mod tests {
             (false, false, Keysym::bracketright) => Some(Action::CycleWorkspace(1)),
             (false, false, Keysym::bracketleft) => Some(Action::CycleWorkspace(-1)),
             (false, false, Keysym::n | Keysym::N) => Some(Action::NewWorkspace),
-            (true, false, Keysym::Return) => Some(Action::StackWindow),
+            (true, false, Keysym::Return) => Some(Action::RunTerminal),
             (true, false, Keysym::q | Keysym::Q) => Some(Action::Quit),
             (true, false, Keysym::h | Keysym::H) => Some(Action::Move(Direction::Left)),
             (true, false, Keysym::j | Keysym::J) => Some(Action::Move(Direction::Down)),
@@ -368,10 +362,7 @@ mod tests {
                             assert_eq!(old, None, "{mods:?} {keysym:?}: new verb shadows old");
                             continue;
                         }
-                        match (&new, &old) {
-                            (Some(Action::Run(_)), Some(Action::Run(_))) => {}
-                            _ => assert_eq!(new, old, "{mods:?} {keysym:?}"),
-                        }
+                        assert_eq!(new, old, "{mods:?} {keysym:?}");
                         checked += 1;
                     }
                 }
