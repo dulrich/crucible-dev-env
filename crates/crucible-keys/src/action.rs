@@ -19,7 +19,7 @@ pub const DEFAULT_TERMINALS: &[&str] = &["foot", "alacritty", "kitty", "weston-t
 /// A CDE verb triggered by an intercepted `Super`-leader chord (or, for [`Action::VtSwitch`], a
 /// libinput `Ctrl+Alt+F<n>` chord independent of the leader).
 ///
-/// Produced by [`crate::chord::resolve`]. `Quit`, `RunTerminal`, `Run`, `OpenPicker`,
+/// Produced by [`crate::chord::resolve`]. `Quit`, `RunTerminal`, `Run`, `OpenPicker`, `OpenLauncher`,
 /// `RenameWorkspace` and `VtSwitch` are
 /// compositor-level (spawn a process, stop the loop, open UI, or ask the backend to switch VTs); every
 /// other variant names a `crucible_layout::World` operation the compositor applies through its
@@ -47,7 +47,7 @@ pub enum Action {
     /// Split the focused pane along `Direction`; the new empty pane becomes focused.
     /// `Super+Backslash` (`Right`) / `Super+Minus` (`Down`).
     ///
-    /// The user then spawns a terminal (`Super+Return`) which maps into the now-focused pane.
+    /// The user then spawns a terminal (`Super+Shift+Return`) which maps into the now-focused pane.
     Split(Direction),
     /// Adjust the focused pane's split ratio along `Direction`. `Super+Ctrl+H/J/K/L`.
     ///
@@ -75,6 +75,8 @@ pub enum Action {
     /// Open the fuzzy workspace picker. `Super+P`. Implemented by WP-5; until then the compositor
     /// only logs that it is not available.
     OpenPicker,
+    /// Open the program launcher (`crucible launch`). `Super+Return`.
+    OpenLauncher,
     /// Rename the active workspace (interactive prompt). `Super+Shift+R`. Implemented by WP-5.
     RenameWorkspace,
 

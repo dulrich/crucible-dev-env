@@ -30,7 +30,10 @@ use tracing::{error, info, warn};
 use crate::config::pick_terminal;
 use crate::element::WindowElement;
 use crate::focus::KeyboardFocusTarget;
-use crate::ipc::{Candidate, CandidateKind, Request, Response, SOCKET_ENV, encode_field};
+use crate::ipc::{
+    Candidate, CandidateKind, Request, Response, SOCKET_ENV, TERMINAL_ENV, TERMINAL_EXEC_FLAG_ENV,
+    encode_field,
+};
 use crate::layout::model_output_id;
 use crate::state::{Backend, CrucibleState};
 
@@ -64,7 +67,7 @@ pub enum Target {
         /// Whether it was the pane's focused window.
         focused: bool,
     },
-    /// The picker overlay (unmanaged, centred, keyboard-focused).
+    /// An overlay (picker / launcher; unmanaged, centred, keyboard-focused).
     Overlay,
 }
 
@@ -80,12 +83,52 @@ struct WindowInfo {
     terminal: bool,
 }
 
+/// Which program an overlay slot runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayKind {
+    Picker,
+    Launcher,
+}
+
 #[derive(Debug, Clone)]
-enum Picker {
+enum OverlayState {
     /// Spawned, waiting for its window to map.
     Launching(u32),
     /// Mapped as the overlay.
     Mapped(WindowElement),
+}
+
+/// The single overlay slot's occupant.
+#[derive(Debug, Clone)]
+struct Overlay {
+    kind: OverlayKind,
+    state: OverlayState,
+}
+
+/// What opening an overlay of a requested kind does given the slot's current occupant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenDecision {
+    /// Same kind already mapped: raise and refocus it.
+    Refocus,
+    /// One is still launching: ignore the request.
+    Ignore,
+    /// A different kind is mapped: close it, then spawn.
+    ReplaceThenSpawn,
+    /// The slot is empty: spawn.
+    Spawn,
+}
+
+/// Pure slot decision: `current` is `(kind, mapped)` of the occupant, if any.
+fn overlay_open_decision(
+    current: Option<(OverlayKind, bool)>,
+    requested: OverlayKind,
+) -> OpenDecision {
+    match current {
+        None => OpenDecision::Spawn,
+        Some((_, false)) => OpenDecision::Ignore,
+        Some((kind, true)) if kind == requested => OpenDecision::Refocus,
+        Some((_, true)) => OpenDecision::ReplaceThenSpawn,
+    }
 }
 
 /// Compositor-side persistence state (lives in [`CrucibleState::persist`]).
@@ -103,7 +146,7 @@ pub struct PersistState {
     spawned: HashMap<u32, SpawnKind>,
     pending: HashMap<u32, Pending>,
     placed: HashMap<PaneId, Vec<(WindowId, usize)>>,
-    picker: Option<Picker>,
+    overlay: Option<Overlay>,
     config_mtime: Option<SystemTime>,
 }
 
@@ -120,7 +163,7 @@ impl PersistState {
             spawned: HashMap::new(),
             pending: HashMap::new(),
             placed: HashMap::new(),
-            picker: None,
+            overlay: None,
             config_mtime: None,
         }
     }
@@ -281,6 +324,12 @@ pub fn picker_args(exec_flag: &str, crucible: &Path, rename: Option<&str>) -> Ve
     args
 }
 
+/// The terminal arguments for the launcher: `<exec-flag> <crucible> launch`.
+#[must_use]
+pub fn launcher_args(exec_flag: &str, crucible: &Path) -> Vec<OsString> {
+    vec![exec_flag.into(), crucible.into(), "launch".into()]
+}
+
 /// Immediate, non-hidden subdirectories of each root as `(basename, path)`, each root's entries
 /// sorted by name, roots in order. Unreadable roots and non-UTF-8 names are skipped.
 #[must_use]
@@ -414,10 +463,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.persist
             .pending
             .retain(|_, p| now.saturating_duration_since(p.since) < PENDING_TTL);
-        if let Some(Picker::Launching(pid)) = self.persist.picker {
+        if let Some(Overlay {
+            state: OverlayState::Launching(pid),
+            kind,
+        }) = self.persist.overlay
+        {
             if !self.persist.pending.contains_key(&pid) {
-                warn!(pid, "picker never mapped; giving up on it");
-                self.persist.picker = None;
+                warn!(pid, ?kind, "overlay never mapped; giving up on it");
+                self.persist.overlay = None;
             }
         }
         self.save_dirty(now, TICK);
@@ -585,6 +638,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some(path) = &self.persist.ipc_path {
             cmd.env(SOCKET_ENV, path);
         }
+        cmd.env(TERMINAL_ENV, self.terminal_program())
+            .env(TERMINAL_EXEC_FLAG_ENV, &self.config.terminal.exec_flag);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
@@ -621,24 +676,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     // ---- picker overlay ------------------------------------------------------------------------
 
-    /// Opens the picker (or, with `rename`, the rename prompt). A mapped picker is refocused
-    /// instead; one still launching is left alone.
+    /// Opens the picker (or, with `rename`, the rename prompt); see [`Self::open_overlay`].
     pub fn open_picker(&mut self, rename: bool) {
-        match self.persist.picker.clone() {
-            Some(Picker::Mapped(element)) => {
-                self.space.raise_element(&element, true);
-                self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element)));
-                return;
-            }
-            Some(Picker::Launching(_)) => return,
-            None => {}
-        }
-        let crucible = match std::env::current_exe() {
-            Ok(p) => p,
-            Err(err) => {
-                error!(%err, "cannot resolve the crucible binary; no picker");
-                return;
-            }
+        let Some(crucible) = Self::crucible_exe("picker") else {
+            return;
         };
         let current = rename.then(|| self.layout.world.focus_path().workspace_name);
         let args = picker_args(
@@ -646,6 +687,65 @@ impl<B: Backend + 'static> CrucibleState<B> {
             &crucible,
             current.as_deref(),
         );
+        self.open_overlay(OverlayKind::Picker, args);
+    }
+
+    /// Opens the program launcher; see [`Self::open_overlay`].
+    pub fn open_launcher(&mut self) {
+        let Some(crucible) = Self::crucible_exe("launcher") else {
+            return;
+        };
+        let args = launcher_args(&self.config.terminal.exec_flag, &crucible);
+        self.open_overlay(OverlayKind::Launcher, args);
+    }
+
+    fn crucible_exe(what: &str) -> Option<PathBuf> {
+        match std::env::current_exe() {
+            Ok(p) => Some(p),
+            Err(err) => {
+                error!(%err, "cannot resolve the crucible binary; no {what}");
+                None
+            }
+        }
+    }
+
+    /// Opens an overlay of `kind` running the terminal with `args`. A mapped overlay of the same
+    /// kind is refocused, one still launching is left alone, and a mapped overlay of a different
+    /// kind is asked to close before the new one spawns.
+    fn open_overlay(&mut self, kind: OverlayKind, args: Vec<OsString>) {
+        let current = self.persist.overlay.clone();
+        let summary = current
+            .as_ref()
+            .map(|o| (o.kind, matches!(o.state, OverlayState::Mapped(_))));
+        match overlay_open_decision(summary, kind) {
+            OpenDecision::Ignore => return,
+            OpenDecision::Refocus => {
+                if let Some(Overlay {
+                    state: OverlayState::Mapped(element),
+                    ..
+                }) = current
+                {
+                    self.space.raise_element(&element, true);
+                    self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element)));
+                }
+                return;
+            }
+            OpenDecision::ReplaceThenSpawn => {
+                if let Some(Overlay {
+                    state: OverlayState::Mapped(old),
+                    ..
+                }) = current
+                {
+                    if let Some(toplevel) = old.toplevel() {
+                        toplevel.send_close();
+                    }
+                    if let Some(x11) = old.x11_surface() {
+                        let _ = x11.close();
+                    }
+                }
+            }
+            OpenDecision::Spawn => {}
+        }
         let program = self.terminal_program();
         if let Some(pid) = self.spawn_process(&program, &args, None, SpawnKind::Overlay) {
             self.persist.pending.insert(
@@ -655,7 +755,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     since: Instant::now(),
                 },
             );
-            self.persist.picker = Some(Picker::Launching(pid));
+            self.persist.overlay = Some(Overlay {
+                kind,
+                state: OverlayState::Launching(pid),
+            });
         }
     }
 
@@ -670,7 +773,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             })
     }
 
-    fn map_picker(&mut self, element: WindowElement) {
+    fn map_overlay(&mut self, element: WindowElement) {
         let rect = overlay_rect(self.focused_output_rect());
         let size = Size::from((rect.width, rect.height));
         let loc = Point::from((rect.x, rect.y));
@@ -684,14 +787,25 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.map_unmanaged_element(element.clone(), loc);
         self.space.raise_element(&element, true);
         self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element.clone())));
-        self.persist.picker = Some(Picker::Mapped(element));
+        let kind = self
+            .persist
+            .overlay
+            .as_ref()
+            .map_or(OverlayKind::Picker, |o| o.kind);
+        self.persist.overlay = Some(Overlay {
+            kind,
+            state: OverlayState::Mapped(element),
+        });
     }
 
-    /// Called when an unmanaged element was torn down: if it was the picker, return keyboard focus
-    /// to the layout's focused window.
+    /// Called when an unmanaged element was torn down: if it was the mapped overlay, return keyboard
+    /// focus to the layout's focused window. A stale close of a replaced overlay is ignored.
     pub(crate) fn unmanaged_closed(&mut self, element: &WindowElement) {
-        if matches!(&self.persist.picker, Some(Picker::Mapped(p)) if p == element) {
-            self.persist.picker = None;
+        if matches!(
+            &self.persist.overlay,
+            Some(Overlay { state: OverlayState::Mapped(p), .. }) if p == element
+        ) {
+            self.persist.overlay = None;
             self.set_keyboard_focus(None);
             self.reconcile_keyboard_focus();
         }
@@ -723,7 +837,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .and_then(|k| self.persist.pending.remove(&k));
         let id = match pending.map(|p| p.target) {
             Some(Target::Overlay) => {
-                self.map_picker(element);
+                self.map_overlay(element);
                 return;
             }
             Some(Target::Pane {
@@ -1152,6 +1266,37 @@ mod tests {
             ]
         );
         assert!(restore_args("-e", Path::new("/c"), Path::new("/"), None).is_empty());
+    }
+
+    #[test]
+    fn launcher_argv_runs_crucible_launch() {
+        let args = launcher_args("-e", Path::new("/c"));
+        assert_eq!(
+            args,
+            vec![OsString::from("-e"), "/c".into(), "launch".into()]
+        );
+    }
+
+    #[test]
+    fn overlay_open_decision_covers_all_outcomes() {
+        use OverlayKind::{Launcher, Picker};
+        assert_eq!(overlay_open_decision(None, Launcher), OpenDecision::Spawn);
+        assert_eq!(
+            overlay_open_decision(Some((Picker, true)), Picker),
+            OpenDecision::Refocus
+        );
+        assert_eq!(
+            overlay_open_decision(Some((Picker, false)), Launcher),
+            OpenDecision::Ignore
+        );
+        assert_eq!(
+            overlay_open_decision(Some((Launcher, false)), Launcher),
+            OpenDecision::Ignore
+        );
+        assert_eq!(
+            overlay_open_decision(Some((Picker, true)), Launcher),
+            OpenDecision::ReplaceThenSpawn
+        );
     }
 
     #[test]

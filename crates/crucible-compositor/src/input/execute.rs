@@ -62,6 +62,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.open_picker(true);
                 return;
             }
+            Action::OpenLauncher => {
+                self.open_launcher();
+                return;
+            }
             // Auto-names skip live AND saved names, so a fresh "2" never overwrites a saved "2".
             Action::NewWorkspace => {
                 let saved = crucible_persist::store::list_saved(&self.persist.store_dir)
@@ -158,6 +162,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
         | Action::RunTerminal
         | Action::Run(_)
         | Action::OpenPicker
+        | Action::OpenLauncher
         | Action::RenameWorkspace
         | Action::NewWorkspace
         | Action::VtSwitch(_) => {

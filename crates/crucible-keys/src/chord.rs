@@ -9,7 +9,7 @@
 //!
 //! | Chord                 | [`Action`]                    | Model op                          |
 //! |-----------------------|--------------------------------|-----------------------------------|
-//! | `Super+Return`        | `RunTerminal`                  | spawn terminal (focused pane)     |
+//! | `Super+Return`        | `OpenLauncher`                 | program launcher (overlay)        |
 //! | `Super+Shift+Q`       | `Quit`                         | stop compositor                   |
 //! | `Super+W`             | `ClosePane`                    | `World::close_pane()`             |
 //! | `Super+H/J/K/L`       | `Focus(Left/Down/Up/Right)`    | `World::focus(dir)`               |
@@ -127,10 +127,10 @@ mod tests {
     // change to the table cannot silently drop or misroute a chord.
 
     #[test]
-    fn super_return_runs_a_terminal() {
+    fn super_return_opens_the_launcher() {
         assert_eq!(
             resolve(super_only(), Keysym::Return),
-            Some(Action::RunTerminal)
+            Some(Action::OpenLauncher)
         );
     }
 
@@ -308,7 +308,8 @@ mod tests {
             return None;
         }
         match (modifiers.shift, modifiers.ctrl, keysym) {
-            (false, false, Keysym::Return) => Some(Action::RunTerminal),
+            // Intended change (WP-2): plain Super+Return now opens the launcher.
+            (false, false, Keysym::Return) => Some(Action::OpenLauncher),
             (false, false, Keysym::w | Keysym::W) => Some(Action::ClosePane),
             (false, false, Keysym::h) => Some(Action::Focus(Direction::Left)),
             (false, false, Keysym::j) => Some(Action::Focus(Direction::Down)),

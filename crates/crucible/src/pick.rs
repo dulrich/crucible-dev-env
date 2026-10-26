@@ -355,14 +355,14 @@ impl Picker {
 }
 
 /// Replaces control characters so a name can never inject terminal escapes.
-fn sanitize(s: &str) -> String {
+pub(crate) fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_control() { '?' } else { c })
         .collect()
 }
 
 /// Truncates to `width` characters.
-fn fit(s: &str, width: usize) -> String {
+pub(crate) fn fit(s: &str, width: usize) -> String {
     s.chars().take(width).collect()
 }
 

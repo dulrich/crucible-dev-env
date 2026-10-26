@@ -41,6 +41,12 @@ use crate::state::{Backend, CrucibleState};
 /// Environment variable carrying the IPC socket path to every child CDE spawns.
 pub const SOCKET_ENV: &str = "CDE_SOCKET";
 
+/// Environment variable carrying the terminal program to every child CDE spawns.
+pub const TERMINAL_ENV: &str = "CDE_TERMINAL";
+
+/// Environment variable carrying the terminal's exec flag (`-e`) to every child CDE spawns.
+pub const TERMINAL_EXEC_FLAG_ENV: &str = "CDE_TERMINAL_EXEC_FLAG";
+
 /// Longest request line accepted before the connection is dropped.
 const MAX_LINE: usize = 64 * 1024;
 

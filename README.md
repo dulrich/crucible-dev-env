@@ -74,7 +74,7 @@ Focus follows the mouse by default: hovering a window focuses it, like clicking 
 `focus-follows-mouse #false` in `~/.config/cde/config.kdl`; see [`docs/config.md`](docs/config.md) for the
 full config schema (terminal, gaps, picker roots, rebinding chords).
 
-Once inside, press **`Super+Return`** to spawn your first terminal, then **`Super+\`** to split. See
+Once inside, press **`Super+Shift+Return`** to spawn your first terminal, then **`Super+\`** to split. See
 the full keymap below.
 
 ## Keybindings
@@ -84,7 +84,7 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 
 | Chord | Verb |
 |-------|------|
-| `Super+Return` | Spawn a terminal into the focused pane (the window joins the pane's stack) |
+| `Super+Return` | Open the program launcher (`crucible launch`): desktop applications and `$PATH` executables, launched into the focused pane |
 | `Super+Shift+Return` | Spawn a terminal into the focused pane (the window joins the pane's stack) |
 | `Super+Shift+Q` | Quit the compositor |
 | `Super+W` | Close the focused pane (only if empty and not the last pane; never closes windows) |
@@ -101,7 +101,7 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+Shift+]` / `Super+Shift+[` | Move the focused window to the next / previous workspace |
 | `Ctrl+Alt+F1`…`F12` | Switch virtual terminal (`--tty-udev` only) |
 
-Splitting creates an **empty** focused pane; the next terminal you spawn (`Super+Return`) fills it.
+Splitting creates an **empty** focused pane; the next terminal you spawn (`Super+Shift+Return`) fills it.
 Spawning into a pane that already holds a window **stacks** it (only the focused one is visible —
 cycle with `Super+Tab`). New windows, splits and workspace verbs act where the focused window is —
 the window you last clicked or (with focus-follows-mouse) hovered.
@@ -119,6 +119,7 @@ The picker talks to the compositor over a Unix socket at `$XDG_RUNTIME_DIR/cde/<
 ### CLI
 
 - `crucible pick [--rename <name>]` — the workspace picker TUI (needs `$CDE_SOCKET`); `--rename` is a single-line rename prompt (the name is percent-encoded).
+- `crucible launch` — the program launcher TUI (needs `$CDE_SOCKET`; opened by `Super+Return`): fuzzy-filter installed desktop applications and `$PATH` executables, Enter launches into the focused pane. CDE exports `CDE_TERMINAL` and `CDE_TERMINAL_EXEC_FLAG` (the configured terminal and its exec flag) to every child it spawns; the launcher uses them for `Terminal=true` entries.
 - `crucible resume --cwd <dir> [-- <command>]` — the restored-terminal banner: Enter runs the old command (then a shell), Ctrl+C or EOF gives a shell; the command never runs without Enter.
 - `crucible msg <request…>` — send one request line to the compositor and print the reply (exit 0 `ok`, 1 `err`, 2 usage). Arguments are sent as typed, so percent-encode `%`, `:`, TAB, LF and CR yourself: `crucible msg open my%3Aname`. `crucible msg run <command…>` runs a command line into the focused pane and encodes it for you: `crucible msg run firefox --new-window`.
 

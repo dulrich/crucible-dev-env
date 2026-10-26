@@ -12,7 +12,7 @@ Reload: WP-5 reloads on file change; until then restart.
 terminal "<command>" exec-flag="-e"
 ```
 
-The program spawned by `Super+Return` and `Super+Shift+Return` (and the `run-terminal` action; `stack-window` is retired, every launch already stacks into the focused pane). Default: unset, which keeps the built-in lookup (`$TERMINAL`, else `foot`). `exec-flag` is the flag the terminal takes to run a program (default `-e`) and is used by later launchers. The command must be non-empty; it is spawned directly (no shell), so give a path or a name on `$PATH`.
+The program spawned by `Super+Shift+Return` (the `run-terminal` action; `Super+Return` is now the launcher, `open-launcher`; `stack-window` is retired, every launch already stacks into the focused pane). Default: unset, which keeps the built-in lookup (`$TERMINAL`, else `foot`). `exec-flag` is the flag the terminal takes to run a program (default `-e`) and is used by the program launcher to run `Terminal=true` desktop entries (CDE exports the terminal and flag to children as `CDE_TERMINAL` and `CDE_TERMINAL_EXEC_FLAG`). The command must be non-empty; it is spawned directly (no shell), so give a path or a name on `$PATH`.
 
 ### `gaps`
 
@@ -77,6 +77,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `new-workspace` | Create and switch to a new workspace |
 | `move-window-to-workspace <n>` | Send the focused window `n` workspaces over |
 | `open-picker` | Open the workspace picker (not available until WP-5) |
+| `open-launcher` | Open the program launcher (`crucible launch`) |
 | `rename-workspace` | Rename the active workspace (not available until WP-5) |
 | `none` | Unbind the chord |
 

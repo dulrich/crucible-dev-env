@@ -16,7 +16,7 @@
 //!
 //! ## Action grammar
 //!
-//! `quit`, `close-pane`, `run-terminal`, `run <command…>`, `new-workspace`, `open-picker`,
+//! `quit`, `close-pane`, `run-terminal`, `run <command…>`, `new-workspace`, `open-picker`, `open-launcher`,
 //! `rename-workspace`, `focus|move|split|resize <left|right|up|down>`, `cycle-stack <±n>`,
 //! `cycle-workspace <±n>`, `move-window-to-workspace <±n>`, and `none` (unbind the chord).
 
@@ -62,8 +62,8 @@ pub enum BindError {
 
 /// The chord → [`Action`] table consulted by [`crate::chord::resolve`].
 ///
-/// `Super+Return` and `Super+Shift+Return` bind `Action::RunTerminal`; the compositor chooses the
-/// terminal program.
+/// `Super+Return` binds `Action::OpenLauncher`; `Super+Shift+Return` binds `Action::RunTerminal` (the compositor chooses the
+/// terminal program).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bindings {
     map: HashMap<Chord, Action>,
@@ -139,7 +139,7 @@ impl Default for Bindings {
         };
 
         // ---- plain Super (note: focus h/j/k/l are lowercase-only, as before) ----
-        bind(sup, &[Keysym::Return], Action::RunTerminal);
+        bind(sup, &[Keysym::Return], Action::OpenLauncher);
         bind(sup, &[Keysym::w, Keysym::W], Action::ClosePane);
         bind(sup, &[Keysym::h], Action::Focus(Direction::Left));
         bind(sup, &[Keysym::j], Action::Focus(Direction::Down));
@@ -384,6 +384,7 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
         )),
         "new-workspace" => nullary(Action::NewWorkspace),
         "open-picker" => nullary(Action::OpenPicker),
+        "open-launcher" => nullary(Action::OpenLauncher),
         "rename-workspace" => nullary(Action::RenameWorkspace),
         "focus" => unary(Action::Focus(direction(words.get(1))?)),
         "move" => unary(Action::Move(direction(words.get(1))?)),
@@ -521,6 +522,7 @@ mod tests {
             ("run firefox", Action::Run("firefox".into())),
             ("new-workspace", Action::NewWorkspace),
             ("open-picker", Action::OpenPicker),
+            ("open-launcher", Action::OpenLauncher),
             ("rename-workspace", Action::RenameWorkspace),
             ("focus left", Action::Focus(Direction::Left)),
             ("move right", Action::Move(Direction::Right)),
@@ -628,8 +630,8 @@ mod tests {
     }
 
     #[test]
-    fn default_return_chord_runs_a_terminal() {
+    fn default_return_chord_opens_the_launcher() {
         let b = Bindings::default();
-        assert_eq!(b.get(sup(), Keysym::Return), Some(&Action::RunTerminal));
+        assert_eq!(b.get(sup(), Keysym::Return), Some(&Action::OpenLauncher));
     }
 }
