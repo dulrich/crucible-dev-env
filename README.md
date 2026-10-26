@@ -116,6 +116,12 @@ The picker talks to the compositor over a Unix socket at `$XDG_RUNTIME_DIR/cde/<
 
 **Caveat — one process per terminal window.** Restored terminals are placed back into their panes by matching the PID CDE spawned to the window's client PID (or one of its ancestors). That works for terminals that run one process per window (foot, alacritty, ghostty with `--gtk-single-instance=false`, as `cde.sh` uses). A single-instance terminal daemon breaks the match: restored windows then open in the focused pane instead, and the picker overlay lands in a pane rather than floating.
 
+### CLI
+
+- `crucible pick [--rename <name>]` — the workspace picker TUI (needs `$CDE_SOCKET`); `--rename` is a single-line rename prompt (the name is percent-encoded).
+- `crucible resume --cwd <dir> [-- <command>]` — the restored-terminal banner: Enter runs the old command (then a shell), Ctrl+C or EOF gives a shell; the command never runs without Enter.
+- `crucible msg <request…>` — send one request line to the compositor and print the reply (exit 0 `ok`, 1 `err`, 2 usage). Arguments are sent as typed, so percent-encode `%`, `:`, TAB, LF and CR yourself: `crucible msg open my%3Aname`.
+
 ## Build & test
 
 ```sh

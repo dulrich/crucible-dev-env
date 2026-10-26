@@ -1,1 +1,7 @@
-{ "entrypoints": [{ "path": "scripts/cde.sh" }], "exclude": [] }
+{
+  "entrypoints": [
+    { "path": "scripts/cde.sh" },
+    { "path": "crates/crucible/src/main.rs", "subcommands": ["pick", "resume", "msg"] }
+  ],
+  "exclude": []
+}
