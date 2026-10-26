@@ -28,6 +28,7 @@ fn golden_record() -> WorkspaceRecord {
         name: "crucible-dev-env".into(),
         root: Some(root.into()),
         focused_pane: 1,
+        output: None,
         tree: RecordNode::Split {
             axis: Axis::Horizontal,
             ratio: 0.5,
@@ -67,6 +68,7 @@ fn optional_fields_are_omitted_when_none() {
         name: "w".into(),
         root: None,
         focused_pane: 0,
+        output: None,
         tree: pane(vec![
             term("/a", None),
             WindowRecord::App {
@@ -92,6 +94,7 @@ fn awkward_strings_round_trip() {
         name: nasty.into(),
         root: Some(PathBuf::from("/p with space/\"q\"")),
         focused_pane: 0,
+        output: None,
         tree: pane(vec![term("/c d", Some(nasty))]),
     };
     let text = rec.to_kdl().unwrap();
@@ -104,6 +107,7 @@ fn single_pane_workspace_has_no_split() {
         name: "solo".into(),
         root: None,
         focused_pane: 0,
+        output: None,
         tree: pane(vec![]),
     };
     let text = rec.to_kdl().unwrap();
@@ -138,6 +142,7 @@ fn non_utf8_paths_are_refused_not_mangled() {
         name: "w".into(),
         root: Some(bad),
         focused_pane: 0,
+        output: None,
         tree: pane(vec![]),
     };
     assert!(matches!(rec.to_kdl(), Err(PersistError::NonUtf8Path(_))));
@@ -309,4 +314,24 @@ fn store_round_trip_of_the_golden_record() {
     let path = store::save(&dir, &golden_record()).unwrap();
     assert_eq!(store::load(&path).unwrap(), golden_record());
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn last_viewed_output_round_trips_when_present() {
+    let mut rec = golden_record();
+    rec.output = Some("DP-1".into());
+    let text = rec.to_kdl().unwrap();
+    assert!(text.contains("output="), "{text}");
+    assert_eq!(WorkspaceRecord::from_kdl(&text).unwrap(), rec);
+    // Absent output is omitted entirely.
+    assert!(!golden_record().to_kdl().unwrap().contains("output="));
+}
+
+#[test]
+fn old_format_without_output_loads_with_none() {
+    let old =
+        "version 1\nworkspace \"w\" root=\"/r\" {\n    focused-pane 0\n    pane focused=0\n}\n";
+    let rec = WorkspaceRecord::from_kdl(old).unwrap();
+    assert_eq!(rec.output, None);
+    assert_eq!(rec.root, Some(PathBuf::from("/r")));
 }

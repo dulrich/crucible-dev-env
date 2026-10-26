@@ -227,6 +227,14 @@ impl<E: Payload> LayoutState<E> {
         Ok(self.by_id.remove(&id))
     }
 
+    /// Drops the binding of a window the model has **already** forgotten (e.g. after
+    /// `World::remove_workspace`), returning its payload so the caller can unmap and end it.
+    /// `None` when nothing was bound. After this, a later unmap/destroy of the payload resolves to
+    /// [`Binding::None`] and is ignored.
+    pub fn release_binding(&mut self, id: WindowId) -> Option<E> {
+        self.by_id.remove(&id)
+    }
+
     /// Tracks an unmanaged payload. Returns `false` if it was already tracked (idempotent).
     pub fn track_unmanaged(&mut self, element: E) -> bool {
         if self.unmanaged.contains(&element) {
@@ -326,6 +334,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub fn apply_layout(&mut self) {
         let bindings = self.output_bindings();
         let next: Projection = self.layout.world.project(&bindings, self.gaps);
+        // Last-viewed outputs follow what is shown, so note them even when the diff is empty.
+        self.note_last_viewed_outputs();
         let diff = self.projection.diff(&next);
         if diff.is_empty() {
             return;
@@ -554,9 +564,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
         // The binding decision (adopt the initial model output vs. allocate) is the model half of
         // registration and lives on `LayoutState` so it is testable without a `Space`.
         let bound: HashSet<OutputId> = self.space.outputs().filter_map(model_output_id).collect();
+        let fresh = self.layout.world.output_ids().all(|id| bound.contains(&id));
         let model_id = self.layout.bind_output(&bound, rect);
         set_model_output_id(output, model_id);
         self.apply_layout();
+        if fresh {
+            // A freshly allocated output's seed workspace must not shadow a saved one.
+            if let Some(seed) = self
+                .layout
+                .world
+                .output(model_id)
+                .map(crucible_layout::Output::active_workspace)
+            {
+                self.rename_seed_off_saved(seed);
+            }
+        }
         model_id
     }
 
@@ -789,6 +811,21 @@ mod tests {
         assert_eq!(layout.world.window_count(), 0);
         // The window is gone from both halves, so a repeat resolves to nothing at all.
         assert_eq!(layout.resolve(tagged(1)), Binding::None);
+    }
+
+    #[test]
+    fn release_binding_drops_only_the_binding_of_a_forgotten_window() {
+        let mut layout = state();
+        let id = layout.open_managed(TestElement::new(1));
+        let keep = layout.open_managed(TestElement::new(2));
+        layout.world.close_window(id).unwrap();
+
+        assert_eq!(layout.release_binding(id).map(|e| e.tag), Some(1));
+        assert_eq!(layout.managed_count(), 1);
+        assert_eq!(layout.resolve(tagged(1)), Binding::None);
+        assert_eq!(layout.resolve(tagged(2)), Binding::Managed(keep));
+        // Idempotent.
+        assert!(layout.release_binding(id).is_none());
     }
 
     #[test]

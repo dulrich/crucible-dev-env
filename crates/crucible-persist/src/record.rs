@@ -59,6 +59,9 @@ pub struct WorkspaceRecord {
     pub root: Option<PathBuf>,
     /// Index of the focused pane in tree order.
     pub focused_pane: usize,
+    /// Connector name of the output the workspace was last viewed on, if known. A restore returns
+    /// the workspace there when that output is connected.
+    pub output: Option<String>,
     /// The split tree with pane contents.
     pub tree: RecordNode,
 }
@@ -109,6 +112,7 @@ impl WorkspaceRecord {
             name: workspace.name.clone(),
             root,
             focused_pane: layout.focused_pane,
+            output: None,
             tree,
         })
     }

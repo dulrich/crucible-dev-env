@@ -26,6 +26,9 @@
 //! | `Super+N`             | `NewWorkspace`                 | `World::new_workspace(auto_name)` |
 //! | `Super+Shift+]`       | `MoveWindowToWorkspace(1)`     | `World::move_window_to_workspace` |
 //! | `Super+Shift+[`       | `MoveWindowToWorkspace(-1)`    | `World::move_window_to_workspace` |
+//! | `Super+Shift+W`       | `CloseWorkspace`               | save, then `World::remove_workspace` |
+//! | `Super+Ctrl+]`        | `MoveWorkspaceToOutput(1)`     | `World::move_workspace_to_output` |
+//! | `Super+Ctrl+[`        | `MoveWorkspaceToOutput(-1)`    | `World::move_workspace_to_output` |
 //! | `Super+P`             | `OpenPicker`                   | fuzzy workspace picker (WP-5)     |
 //! | `Super+Shift+R`       | `RenameWorkspace`              | rename the active workspace (WP-5)|
 //! | `Ctrl+Alt+F<n>`       | `VtSwitch(n)`                  | backend VT switch (hard-wired, independent of `Super`) |
@@ -176,6 +179,8 @@ mod tests {
             (Keysym::ISO_Left_Tab, Action::CycleStack(-1)),
             (Keysym::bracketright, Action::MoveWindowToWorkspace(1)),
             (Keysym::bracketleft, Action::MoveWindowToWorkspace(-1)),
+            (Keysym::w, Action::CloseWorkspace),
+            (Keysym::W, Action::CloseWorkspace),
         ];
         for (keysym, expected) in super_shift_chords {
             assert_eq!(
@@ -194,6 +199,8 @@ mod tests {
             (Keysym::K, Action::Resize(Direction::Up)),
             (Keysym::l, Action::Resize(Direction::Right)),
             (Keysym::L, Action::Resize(Direction::Right)),
+            (Keysym::bracketright, Action::MoveWorkspaceToOutput(1)),
+            (Keysym::bracketleft, Action::MoveWorkspaceToOutput(-1)),
         ];
         for (keysym, expected) in super_ctrl_chords {
             assert_eq!(
@@ -331,6 +338,9 @@ mod tests {
             (true, false, Keysym::Tab | Keysym::ISO_Left_Tab) => Some(Action::CycleStack(-1)),
             (true, false, Keysym::bracketright) => Some(Action::MoveWindowToWorkspace(1)),
             (true, false, Keysym::bracketleft) => Some(Action::MoveWindowToWorkspace(-1)),
+            (true, false, Keysym::w | Keysym::W) => Some(Action::CloseWorkspace),
+            (false, true, Keysym::bracketright) => Some(Action::MoveWorkspaceToOutput(1)),
+            (false, true, Keysym::bracketleft) => Some(Action::MoveWorkspaceToOutput(-1)),
             (false, true, Keysym::h | Keysym::H) => Some(Action::Resize(Direction::Left)),
             (false, true, Keysym::j | Keysym::J) => Some(Action::Resize(Direction::Down)),
             (false, true, Keysym::k | Keysym::K) => Some(Action::Resize(Direction::Up)),

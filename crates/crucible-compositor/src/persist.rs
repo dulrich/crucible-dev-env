@@ -190,6 +190,8 @@ pub struct PersistState {
     pub ipc_path: Option<PathBuf>,
     /// Folder roots of workspaces (new terminals start there).
     pub roots: HashMap<WorkspaceId, PathBuf>,
+    /// Connector name of the output each workspace was last viewed on (see [`note_last_viewed`]).
+    last_output: HashMap<WorkspaceId, String>,
     /// Last record written per workspace name, and when.
     saved: HashMap<String, (WorkspaceRecord, Instant)>,
     windows: HashMap<WindowId, WindowInfo>,
@@ -210,6 +212,7 @@ impl PersistState {
             store_dir,
             ipc_path: None,
             roots: HashMap::new(),
+            last_output: HashMap::new(),
             saved: HashMap::new(),
             windows: HashMap::new(),
             spawned: HashMap::new(),
@@ -295,6 +298,46 @@ pub fn slot_for(windows: &[WindowId], focused: usize, target: WindowId) -> Optio
 #[must_use]
 pub fn slot_index(index: usize, live_len: usize) -> usize {
     index.min(live_len)
+}
+
+/// Records each output's **active** workspace as last viewed on that output's connector name.
+/// `viewed` holds one `(model output, active workspace, connector name)` triple per connected,
+/// bound output. Workspaces not active anywhere (e.g. migrated inactive by an unplug) keep their
+/// entry untouched.
+pub fn note_last_viewed(
+    map: &mut HashMap<WorkspaceId, String>,
+    viewed: &[(OutputId, WorkspaceId, String)],
+) {
+    for (_, ws, name) in viewed {
+        if map.get(ws) != Some(name) {
+            map.insert(*ws, name.clone());
+        }
+    }
+}
+
+/// The output a restored workspace lands on: the connected output named `wanted`, else `focused`.
+#[must_use]
+pub fn restore_target(
+    wanted: Option<&str>,
+    connected: &[(String, OutputId)],
+    focused: OutputId,
+) -> OutputId {
+    wanted
+        .and_then(|w| connected.iter().find(|(name, _)| name == w))
+        .map_or(focused, |(_, id)| *id)
+}
+
+/// The output `delta` steps from `current` in `order` (wraparound). `None` when there is only one
+/// output, `current` is not in `order`, or the step lands back on `current`.
+#[must_use]
+pub fn shifted_output(order: &[OutputId], current: OutputId, delta: i64) -> Option<OutputId> {
+    let len = i64::try_from(order.len()).ok()?;
+    if len < 2 {
+        return None;
+    }
+    let at = i64::try_from(order.iter().position(|o| *o == current)?).ok()?;
+    let target = order[usize::try_from((at + delta).rem_euclid(len)).ok()?];
+    (target != current).then_some(target)
 }
 
 /// Whether a record is not worth writing: one pane, no windows, no folder root.
@@ -622,23 +665,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub fn start_persistence(&mut self) {
         let saved = self.persist.saved_names();
         let seed = self.layout.world.active_workspace_id();
-        let seed_name = self
-            .layout
-            .world
-            .workspace(seed)
-            .map(|w| w.name.clone())
-            .unwrap_or_default();
-        if saved.contains(&seed_name) {
-            let name = new_workspace_name(&self.layout.world, &saved);
-            info!(
-                from = seed_name,
-                to = name,
-                "seed workspace name is saved; renaming"
-            );
-            if let Err(err) = self.with_model(|w| w.rename_workspace(seed, name)) {
-                warn!(%err, "seed rename failed");
-            }
-        }
+        self.rename_seed_off_saved(seed);
         self.start_ipc();
         self.persist.config_mtime = config_mtime();
         let timer = self
@@ -652,6 +679,133 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         if !saved.is_empty() {
             self.open_picker(false);
+        }
+    }
+
+    /// Renames seed workspace `ws` to a fresh auto-name when its name is already saved on disk, so
+    /// a later save never overwrites the saved workspace. Called at startup and for every freshly
+    /// allocated output's seed.
+    pub(crate) fn rename_seed_off_saved(&mut self, ws: WorkspaceId) {
+        let saved = self.persist.saved_names();
+        let Some(seed_name) = self.layout.world.workspace(ws).map(|w| w.name.clone()) else {
+            return;
+        };
+        if !saved.contains(&seed_name) {
+            return;
+        }
+        let name = new_workspace_name(&self.layout.world, &saved);
+        info!(
+            from = seed_name,
+            to = name,
+            "seed workspace name is saved; renaming"
+        );
+        if let Err(err) = self.with_model(|w| w.rename_workspace(ws, name)) {
+            warn!(%err, "seed rename failed");
+        }
+    }
+
+    /// Notes every connected, bound output's active workspace as last viewed there. Called by
+    /// `apply_layout`, the only model-to-Space path.
+    pub(crate) fn note_last_viewed_outputs(&mut self) {
+        let world = &self.layout.world;
+        let viewed: Vec<(OutputId, WorkspaceId, String)> = self
+            .space
+            .outputs()
+            .filter_map(|o| {
+                let id = crate::layout::model_output_id(o)?;
+                let ws = world.output(id)?.active_workspace();
+                Some((id, ws, o.name()))
+            })
+            .collect();
+        note_last_viewed(&mut self.persist.last_output, &viewed);
+    }
+
+    /// Closes the focused output's active workspace (`close-workspace`): refuse while a restore is
+    /// pending or on the output's last workspace; flush its record (refuse if the write fails);
+    /// drop it from the model; then end each of its windows (kill the held child, else a polite
+    /// close) after releasing its binding so no late teardown lands elsewhere.
+    pub(crate) fn close_workspace(&mut self) {
+        let world = &self.layout.world;
+        let ws = world.active_workspace_id();
+        // (a) A restore in flight would race the teardown; refuse before any flush.
+        if self.workspace_has_pending(ws) {
+            info!(?ws, "close-workspace: a restore is still pending; refusing");
+            return;
+        }
+        // (b) Never the output's last workspace (checked before flushing anything).
+        let output = world.focused_output();
+        if world.output(output).is_none_or(|o| o.workspaces.len() < 2) {
+            info!(
+                ?ws,
+                "close-workspace: last workspace on this output; refusing"
+            );
+            return;
+        }
+        // (c) Flush first; a failed write refuses the close (never tear down unsaved state).
+        let Some(record) = self.capture_record(ws) else {
+            warn!(?ws, "close-workspace: workspace vanished; refusing");
+            return;
+        };
+        if !skip_record(&record) && !self.write_record(record, Instant::now()) {
+            warn!(?ws, "close-workspace: save failed; refusing to close");
+            return;
+        }
+        // (d) Snapshot what to end, and the panes, before the model forgets them.
+        let world = &self.layout.world;
+        let panes = world.workspace(ws).map(|w| w.panes()).unwrap_or_default();
+        let ends: Vec<(WindowId, Option<WindowElement>, Option<u32>)> = panes
+            .iter()
+            .filter_map(|p| world.pane(*p))
+            .flat_map(|p| p.windows.iter().copied())
+            .map(|id| {
+                let element = self.layout.element(id).cloned();
+                let pid = self.persist.windows.get(&id).and_then(|i| i.pid);
+                (id, element, pid)
+            })
+            .collect();
+        // (e) The model drops the workspace; apply_layout hides its elements.
+        if let Err(err) = self.with_model(|w| w.remove_workspace(ws).map(|_| ())) {
+            info!(%err, ?ws, "close-workspace refused by the model");
+            return;
+        }
+        // (f) Release each binding first, then end the window.
+        for (id, element, pid) in ends {
+            let bound = self.layout.release_binding(id);
+            self.persist.forget_window(id);
+            let Some(element) = bound.or(element) else {
+                continue;
+            };
+            self.space.unmap_elem(&element);
+            if !pid.is_some_and(|p| kill_child(&mut self.persist.children, p)) {
+                close_element(&element);
+            }
+        }
+        // (g) Drop per-workspace bookkeeping.
+        self.persist.roots.remove(&ws);
+        self.persist.last_output.remove(&ws);
+        self.persist.pending.retain(|_, p| match p.target {
+            Target::Pane { pane, .. } | Target::Slot { pane, .. } => !panes.contains(&pane),
+            Target::Overlay => true,
+        });
+        for pane in &panes {
+            self.persist.placed.remove(pane);
+        }
+        info!(?ws, "workspace closed");
+    }
+
+    /// Moves the focused output's active workspace `delta` outputs along the model output order
+    /// (`move-workspace-to-output`). No-op with one output; refused on the source's last workspace.
+    pub(crate) fn move_active_workspace_to_output(&mut self, delta: i64) {
+        let world = &self.layout.world;
+        let order: Vec<OutputId> = world.output_ids().collect();
+        let source = world.focused_output();
+        let Some(target) = shifted_output(&order, source, delta) else {
+            debug!(delta, "move-workspace-to-output: no other output; ignoring");
+            return;
+        };
+        let ws = world.active_workspace_id();
+        if let Err(err) = self.with_model(|w| w.move_workspace_to_output(ws, target)) {
+            info!(%err, ?ws, "move-workspace-to-output refused");
         }
     }
 
@@ -787,12 +941,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 records.insert(*win, self.window_record(*win));
             }
         }
-        WorkspaceRecord::from_world(world, ws, self.persist.roots.get(&ws).cloned(), |id| {
-            records.get(&id).cloned().unwrap_or(WindowRecord::App {
-                app_id: None,
-                cmdline: None,
-            })
-        })
+        let mut record =
+            WorkspaceRecord::from_world(world, ws, self.persist.roots.get(&ws).cloned(), |id| {
+                records.get(&id).cloned().unwrap_or(WindowRecord::App {
+                    app_id: None,
+                    cmdline: None,
+                })
+            })?;
+        record.output = self.persist.last_output.get(&ws).cloned();
+        Some(record)
     }
 
     fn window_record(&self, id: WindowId) -> WindowRecord {
@@ -1422,9 +1579,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     fn restore(&mut self, record: WorkspaceRecord) -> Result<(), String> {
-        let output = self.layout.world.focused_output();
+        let connected: Vec<(String, OutputId)> = self
+            .space
+            .outputs()
+            .filter_map(|o| Some((o.name(), crate::layout::model_output_id(o)?)))
+            .collect();
+        let output = restore_target(
+            record.output.as_deref(),
+            &connected,
+            self.layout.world.focused_output(),
+        );
         let mut created = None;
         self.with_model(|w| {
+            // `switch_workspace` only searches the focused output, so focus the target first.
+            w.set_focused_output(output)?;
             let (ws, panes) = w.insert_workspace(output, record.name.clone(), &record.layout())?;
             w.switch_workspace(ws)?;
             created = Some((ws, panes));
@@ -1432,6 +1600,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
         })
         .map_err(|e| e.to_string())?;
         let (ws, panes) = created.expect("set on success");
+        // Seed the last-viewed output from the record; a viewing event (apply_layout) wins.
+        if let Some(name) = &record.output {
+            self.persist
+                .last_output
+                .entry(ws)
+                .or_insert_with(|| name.clone());
+        }
         if let Some(root) = &record.root {
             self.persist.roots.insert(ws, root.clone());
         }
@@ -1681,6 +1856,7 @@ mod tests {
             name: "w".into(),
             root: root.map(PathBuf::from),
             focused_pane: 0,
+            output: None,
             tree,
         }
     }
@@ -2053,5 +2229,78 @@ mod tests {
         ] {
             assert_eq!(preflight_command(cmd, cwd, None), Ok(()), "{cmd:?}");
         }
+    }
+
+    fn oid(n: u64) -> OutputId {
+        OutputId::from_raw(n)
+    }
+
+    #[test]
+    fn shifted_output_wraps_both_ways_and_skips_single_output() {
+        let order = [oid(1), oid(2), oid(3)];
+        assert_eq!(shifted_output(&order, oid(1), 1), Some(oid(2)));
+        assert_eq!(shifted_output(&order, oid(3), 1), Some(oid(1)));
+        assert_eq!(shifted_output(&order, oid(1), -1), Some(oid(3)));
+        assert_eq!(shifted_output(&order, oid(2), 7), Some(oid(3)));
+        assert_eq!(shifted_output(&order, oid(2), -8), Some(oid(3)));
+        // A full lap lands back on the source: no-op.
+        assert_eq!(shifted_output(&order, oid(2), 3), None);
+        assert_eq!(shifted_output(&[oid(1)], oid(1), 1), None);
+        assert_eq!(shifted_output(&order, oid(9), 1), None);
+    }
+
+    #[test]
+    fn restore_target_prefers_the_connected_last_viewed_output() {
+        let connected = vec![("HDMI-1".to_string(), oid(1)), ("DP-1".to_string(), oid(2))];
+        assert_eq!(restore_target(Some("DP-1"), &connected, oid(1)), oid(2));
+        assert_eq!(restore_target(Some("DP-9"), &connected, oid(1)), oid(1));
+        assert_eq!(restore_target(None, &connected, oid(2)), oid(2));
+    }
+
+    #[test]
+    fn note_last_viewed_records_only_active_workspaces() {
+        let mut map = HashMap::new();
+        let (a, b) = (WorkspaceId::from_raw(1), WorkspaceId::from_raw(2));
+        note_last_viewed(&mut map, &[(oid(1), a, "DP-1".into())]);
+        note_last_viewed(&mut map, &[(oid(1), b, "HDMI-1".into())]);
+        assert_eq!(map.get(&a).map(String::as_str), Some("DP-1"));
+        assert_eq!(map.get(&b).map(String::as_str), Some("HDMI-1"));
+    }
+
+    /// Audit E2: a workspace last viewed on A, migrated inactive onto B by A's unplug, still says A
+    /// and returns to A once it reconnects.
+    #[test]
+    fn unplug_migration_keeps_the_last_viewed_output() {
+        let mut world = World::new();
+        let a = world.focused_output();
+        let b = world.add_output(crucible_layout::Rect::new(1920, 0, 1920, 1080));
+        let on_a = world.active_workspace_id();
+        let on_b = world.output(b).unwrap().active_workspace();
+        let mut map = HashMap::new();
+        let viewed =
+            |w: &World, outs: &[(OutputId, &str)]| -> Vec<(OutputId, WorkspaceId, String)> {
+                outs.iter()
+                    .map(|(o, n)| {
+                        (
+                            *o,
+                            w.output(*o).unwrap().active_workspace(),
+                            (*n).to_string(),
+                        )
+                    })
+                    .collect()
+            };
+        note_last_viewed(&mut map, &viewed(&world, &[(a, "DP-1"), (b, "HDMI-1")]));
+        world.remove_output(a).unwrap();
+        assert!(world.output(b).unwrap().workspaces.contains(&on_a));
+        assert_eq!(world.output(b).unwrap().active_workspace(), on_b);
+        note_last_viewed(&mut map, &viewed(&world, &[(b, "HDMI-1")]));
+        assert_eq!(map.get(&on_a).map(String::as_str), Some("DP-1"));
+        // A reconnects as a fresh model output; the record (output = DP-1) targets it.
+        let a2 = world.add_output(crucible_layout::Rect::new(0, 0, 1920, 1080));
+        let connected = vec![("HDMI-1".to_string(), b), ("DP-1".to_string(), a2)];
+        assert_eq!(
+            restore_target(map.get(&on_a).map(String::as_str), &connected, b),
+            a2
+        );
     }
 }

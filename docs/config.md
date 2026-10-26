@@ -93,6 +93,8 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `cycle-workspace <n>` | Switch workspace by `n` (wraps) |
 | `new-workspace` | Create and switch to a new workspace |
 | `move-window-to-workspace <n>` | Send the focused window `n` workspaces over |
+| `close-workspace` | Save, then close the active workspace and end its windows (refused on the output's last workspace) |
+| `move-workspace-to-output <n>` | Send the active workspace `n` outputs over (wraparound) |
 | `open-picker` | Open the workspace picker (`crucible pick`) |
 | `open-launcher` | Open the program launcher (`crucible launch`) |
 | `open-settings` | Open the read-only settings overlay (`crucible keys`): the effective keybindings |

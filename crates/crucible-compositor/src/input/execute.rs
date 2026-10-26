@@ -67,6 +67,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.open_picker(false);
                 return;
             }
+            Action::CloseWorkspace => {
+                self.close_workspace();
+                return;
+            }
+            Action::MoveWorkspaceToOutput(delta) => {
+                self.move_active_workspace_to_output(delta);
+                return;
+            }
             Action::RenameWorkspace => {
                 self.open_picker(true);
                 return;
@@ -179,6 +187,8 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
         | Action::OpenLauncher
         | Action::OpenSettings
         | Action::RenameWorkspace
+        | Action::CloseWorkspace
+        | Action::MoveWorkspaceToOutput(_)
         | Action::NewWorkspace
         | Action::VtSwitch(_) => {
             unreachable!("compositor-level action; handle_key_action routes it before with_model")

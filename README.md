@@ -100,12 +100,14 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+P` | Open the workspace picker (live, saved and folder workspaces) |
 | `Super+Shift+R` | Rename the active workspace (picker in rename mode) |
 | `Super+Shift+]` / `Super+Shift+[` | Move the focused window to the next / previous workspace |
+| `Super+Shift+W` | Close the active workspace — saved first, its windows ended; refused on the last one |
+| `Super+Ctrl+]` / `Super+Ctrl+[` | Move the active workspace to the next / previous monitor |
 | `Ctrl+Alt+F1`…`F12` | Switch virtual terminal (`--tty-udev` only) |
 
 Splitting creates an **empty** focused pane; the next terminal you spawn (`Super+Shift+Return`) fills it.
 Spawning into a pane that already holds a window **stacks** it (only the focused one is visible —
 cycle with `Super+Tab`). New windows, splits and workspace verbs act where the focused window is —
-the window you last clicked or (with focus-follows-mouse) hovered.
+the window you last clicked or (with focus-follows-mouse) hovered. A restored workspace returns to the monitor it was last viewed on when that monitor is connected.
 
 ## Workspaces, persistence and the picker
 

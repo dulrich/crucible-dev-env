@@ -74,6 +74,13 @@ pub enum Action {
     ///
     /// No-op when there is no focused window or only one workspace exists.
     MoveWindowToWorkspace(i64),
+    /// Close the focused output's active workspace: its record is saved first, then its windows
+    /// are ended. Refused on the output's last workspace or while a restore is pending.
+    /// `Super+Shift+W`.
+    CloseWorkspace,
+    /// Move the focused output's active workspace `delta` outputs along the output order
+    /// (wraparound). `Super+Ctrl+]` (`1`) / `Super+Ctrl+[` (`-1`). No-op with one output.
+    MoveWorkspaceToOutput(i64),
 
     /// Open the fuzzy workspace picker. `Super+P`. Implemented by WP-5; until then the compositor
     /// only logs that it is not available.
@@ -116,6 +123,8 @@ impl std::fmt::Display for Action {
             Self::CycleWorkspace(n) => write!(f, "cycle-workspace {n}"),
             Self::NewWorkspace => f.write_str("new-workspace"),
             Self::MoveWindowToWorkspace(n) => write!(f, "move-window-to-workspace {n}"),
+            Self::CloseWorkspace => f.write_str("close-workspace"),
+            Self::MoveWorkspaceToOutput(n) => write!(f, "move-workspace-to-output {n}"),
             Self::OpenPicker => f.write_str("open-picker"),
             Self::OpenLauncher => f.write_str("open-launcher"),
             Self::OpenSettings => f.write_str("open-settings"),

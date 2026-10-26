@@ -160,6 +160,7 @@ mod tests {
             name: name.into(),
             root: None,
             focused_pane: 0,
+            output: None,
             tree: RecordNode::Pane(PaneRecord {
                 focused: 0,
                 windows: vec![],

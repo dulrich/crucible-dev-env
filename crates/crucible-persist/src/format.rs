@@ -115,6 +115,9 @@ impl WorkspaceRecord {
         if let Some(root) = &self.root {
             prop(&mut ws, "root", path_str(root)?);
         }
+        if let Some(output) = &self.output {
+            prop(&mut ws, "output", output.as_str());
+        }
         let mut focused = KdlNode::new("focused-pane");
         focused
             .entries_mut()
@@ -307,7 +310,7 @@ impl Reader<'_> {
     }
 
     fn workspace(&self, n: &KdlNode) -> Result<WorkspaceRecord> {
-        self.check_entries(n, &["root"], 1)?;
+        self.check_entries(n, &["root", "output"], 1)?;
         let name = n
             .entry(0usize)
             .ok_or_else(|| self.missing(n, "name argument"))?
@@ -316,6 +319,7 @@ impl Reader<'_> {
             .ok_or_else(|| self.invalid(n, "name", "a string"))?
             .to_string();
         let root = self.string_prop(n, "root")?.map(PathBuf::from);
+        let output = self.string_prop(n, "output")?;
 
         let children = n
             .children()
@@ -361,6 +365,7 @@ impl Reader<'_> {
             name,
             root,
             focused_pane,
+            output,
             tree,
         })
     }

@@ -253,8 +253,19 @@ impl Default for Bindings {
             &[Keysym::bracketleft],
             Action::MoveWindowToWorkspace(-1),
         );
+        bind(sup_shift, &[Keysym::w, Keysym::W], Action::CloseWorkspace);
 
         // ---- Super+Ctrl ----
+        bind(
+            sup_ctrl,
+            &[Keysym::bracketright],
+            Action::MoveWorkspaceToOutput(1),
+        );
+        bind(
+            sup_ctrl,
+            &[Keysym::bracketleft],
+            Action::MoveWorkspaceToOutput(-1),
+        );
         bind(
             sup_ctrl,
             &[Keysym::h, Keysym::H],
@@ -465,6 +476,8 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
         "cycle-stack" => unary(Action::CycleStack(delta(words.get(1))?)),
         "cycle-workspace" => unary(Action::CycleWorkspace(delta(words.get(1))?)),
         "move-window-to-workspace" => unary(Action::MoveWindowToWorkspace(delta(words.get(1))?)),
+        "close-workspace" => nullary(Action::CloseWorkspace),
+        "move-workspace-to-output" => unary(Action::MoveWorkspaceToOutput(delta(words.get(1))?)),
         other => Err(bad(format!("unknown action `{other}`"))),
     }
 }
@@ -597,6 +610,11 @@ mod tests {
                 Action::RunInTerminal("htop -d 5".into()),
             ),
             ("new-workspace", Action::NewWorkspace),
+            ("close-workspace", Action::CloseWorkspace),
+            (
+                "move-workspace-to-output -2",
+                Action::MoveWorkspaceToOutput(-2),
+            ),
             ("open-picker", Action::OpenPicker),
             ("open-launcher", Action::OpenLauncher),
             ("open-settings", Action::OpenSettings),
