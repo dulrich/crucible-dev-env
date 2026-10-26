@@ -156,6 +156,66 @@ impl Default for GapsConfig {
     }
 }
 
+/// The look of a CDE overlay (picker, launcher, keys): the terminal's own colours or one of the
+/// N1 Console surrounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayStyle {
+    /// The terminal's inherited look.
+    Terminal,
+    /// Opaque dark N1 surround.
+    N1Dark,
+    /// Opaque medium N1 surround (the default).
+    N1Med,
+    /// Opaque light N1 surround.
+    N1Light,
+}
+
+impl OverlayStyle {
+    /// The config / environment spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::N1Dark => "n1-dark",
+            Self::N1Med => "n1-med",
+            Self::N1Light => "n1-light",
+        }
+    }
+
+    /// Parses the exact spelling; anything else is `None`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "terminal" => Some(Self::Terminal),
+            "n1-dark" => Some(Self::N1Dark),
+            "n1-med" => Some(Self::N1Med),
+            "n1-light" => Some(Self::N1Light),
+            _ => None,
+        }
+    }
+}
+
+/// Overlay presentation settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayConfig {
+    /// Whether a border is drawn around the overlay.
+    pub border: bool,
+    /// The overlay style.
+    pub style: OverlayStyle,
+    /// Extra terminal arguments inserted before the exec flag on overlay spawns.
+    pub terminal_args: Vec<String>,
+}
+
+impl Default for OverlayConfig {
+    fn default() -> Self {
+        Self {
+            border: true,
+            style: OverlayStyle::N1Med,
+            terminal_args: Vec::new(),
+        }
+    }
+}
+
 /// The parsed CDE configuration. `Default` is CDE's behaviour with no config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -167,6 +227,8 @@ pub struct Config {
     pub focus_follows_mouse: bool,
     /// Directories whose immediate subdirectories are workspace-picker candidates.
     pub picker_roots: Vec<PathBuf>,
+    /// Overlay border, style and terminal arguments.
+    pub overlay: OverlayConfig,
     /// Binding overrides as raw `(chord, action)` strings, in file order.
     pub binds: Vec<(String, String)>,
 }
@@ -178,6 +240,7 @@ impl Default for Config {
             gaps: GapsConfig::default(),
             focus_follows_mouse: true,
             picker_roots: Vec::new(),
+            overlay: OverlayConfig::default(),
             binds: Vec::new(),
         }
     }
@@ -245,7 +308,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         let at = locate(text, node.span().offset());
         if matches!(
             name,
-            "terminal" | "gaps" | "focus-follows-mouse" | "picker" | "binds"
+            "terminal" | "gaps" | "focus-follows-mouse" | "picker" | "overlay" | "binds"
         ) && seen.contains(&name)
         {
             return Err(ConfigError::Duplicate {
@@ -263,6 +326,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                     .ok_or_else(|| wrong_type(text, node, "argument".into(), "#true or #false"))?;
             }
             "picker" => config.picker_roots = parse_picker(text, node)?,
+            "overlay" => config.overlay = parse_overlay(text, node)?,
             "binds" => config.binds = parse_binds(text, node)?,
             other => {
                 return Err(ConfigError::UnknownNode {
@@ -482,6 +546,61 @@ fn parse_picker(text: &str, node: &KdlNode) -> Result<Vec<PathBuf>, ConfigError>
         roots.push(PathBuf::from(dir));
     }
     Ok(roots)
+}
+
+fn parse_overlay(text: &str, node: &KdlNode) -> Result<OverlayConfig, ConfigError> {
+    let mut out = OverlayConfig::default();
+    let mut seen: Vec<&str> = Vec::new();
+    for child in block_children(text, node)? {
+        let name = child.name().value();
+        let at = locate(text, child.span().offset());
+        if seen.contains(&name) {
+            return Err(ConfigError::Duplicate {
+                at,
+                name: name.to_string(),
+            });
+        }
+        no_properties(text, child)?;
+        match name {
+            "border" => {
+                out.border = single_arg(text, child, "a #true or #false")?
+                    .as_bool()
+                    .ok_or_else(|| wrong_type(text, child, "argument".into(), "#true or #false"))?;
+            }
+            "style" => {
+                let s = string_args(text, child, &["a style string"])?[0];
+                out.style =
+                    OverlayStyle::from_name(s).ok_or_else(|| ConfigError::InvalidValue {
+                        at,
+                        node: node_name(child),
+                        what: "argument".to_string(),
+                        message: format!("`{s}` is not one of terminal, n1-dark, n1-med, n1-light"),
+                    })?;
+            }
+            "terminal-args" => {
+                let mut list = Vec::new();
+                for (value, arg_at) in args(text, child) {
+                    let s = value.as_string().ok_or_else(|| ConfigError::WrongType {
+                        at: arg_at,
+                        node: node_name(child),
+                        what: "argument".to_string(),
+                        expected: "a string",
+                    })?;
+                    list.push(s.to_string());
+                }
+                out.terminal_args = list;
+            }
+            other => {
+                return Err(ConfigError::UnknownNode {
+                    at,
+                    name: other.to_string(),
+                    context: "overlay",
+                });
+            }
+        }
+        seen.push(name);
+    }
+    Ok(out)
 }
 
 fn parse_binds(text: &str, node: &KdlNode) -> Result<Vec<(String, String)>, ConfigError> {
@@ -729,5 +848,72 @@ binds {
         // A directory in place of the file is an I/O error, not "missing".
         assert!(matches!(load(&dir), Err(ConfigError::Io { .. })));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn overlay_defaults_when_absent() {
+        let c = parse("").unwrap();
+        assert!(c.overlay.border);
+        assert_eq!(c.overlay.style, OverlayStyle::N1Med);
+        assert!(c.overlay.terminal_args.is_empty());
+    }
+
+    #[test]
+    fn overlay_parses_all_children() {
+        let c = parse(
+            "overlay {\n border #false\n style \"n1-light\"\n terminal-args \"--a=1\" \"--b\"\n}\n",
+        )
+        .unwrap();
+        assert!(!c.overlay.border);
+        assert_eq!(c.overlay.style, OverlayStyle::N1Light);
+        assert_eq!(c.overlay.terminal_args, vec!["--a=1", "--b"]);
+    }
+
+    #[test]
+    fn overlay_partial_keeps_other_defaults() {
+        let c = parse("overlay {\n style \"terminal\"\n}\n").unwrap();
+        assert!(c.overlay.border);
+        assert_eq!(c.overlay.style, OverlayStyle::Terminal);
+    }
+
+    #[test]
+    fn overlay_every_style_roundtrips() {
+        for style in ["terminal", "n1-dark", "n1-med", "n1-light"] {
+            let c = parse(&format!("overlay {{\n style \"{style}\"\n}}\n")).unwrap();
+            assert_eq!(c.overlay.style.as_str(), style);
+        }
+    }
+
+    #[test]
+    fn overlay_unknown_style_is_error() {
+        let err = parse("overlay {\n style \"N1-Med\"\n}\n").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn overlay_unknown_child_is_error() {
+        let err = parse("overlay {\n frob 1\n}\n").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::UnknownNode {
+                    context: "overlay",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn overlay_border_must_be_bool() {
+        let err = parse("overlay {\n border \"yes\"\n}\n").unwrap_err();
+        assert!(matches!(err, ConfigError::WrongType { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn overlay_terminal_args_must_be_strings() {
+        let err = parse("overlay {\n terminal-args 3\n}\n").unwrap_err();
+        assert!(matches!(err, ConfigError::WrongType { .. }), "{err:?}");
     }
 }

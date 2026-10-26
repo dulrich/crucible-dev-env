@@ -52,6 +52,9 @@ pub const TERMINAL_ENV: &str = "CDE_TERMINAL";
 /// Environment variable carrying the terminal's exec flag (`-e`) to every child CDE spawns.
 pub const TERMINAL_EXEC_FLAG_ENV: &str = "CDE_TERMINAL_EXEC_FLAG";
 
+/// Environment variable carrying the configured overlay style, set on overlay spawns only.
+pub const OVERLAY_STYLE_ENV: &str = "CDE_OVERLAY_STYLE";
+
 /// Longest request line accepted before the connection is dropped.
 const MAX_LINE: usize = 64 * 1024;
 

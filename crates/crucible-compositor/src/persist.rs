@@ -31,8 +31,8 @@ use crate::config::pick_terminal;
 use crate::element::WindowElement;
 use crate::focus::KeyboardFocusTarget;
 use crate::ipc::{
-    Candidate, CandidateKind, Request, Response, SOCKET_ENV, TERMINAL_ENV, TERMINAL_EXEC_FLAG_ENV,
-    encode_field,
+    Candidate, CandidateKind, OVERLAY_STYLE_ENV, Request, Response, SOCKET_ENV, TERMINAL_ENV,
+    TERMINAL_EXEC_FLAG_ENV, encode_field,
 };
 use crate::layout::model_output_id;
 use crate::state::{Backend, CrucibleState};
@@ -422,6 +422,17 @@ pub fn keys_args(exec_flag: &str, crucible: &Path) -> Vec<OsString> {
     vec![exec_flag.into(), crucible.into(), "keys".into()]
 }
 
+/// Prepends the configured overlay `terminal-args` to the overlay terminal arguments, i.e. before
+/// the exec flag: `[terminal-args…, exec-flag, crucible, sub…]`.
+#[must_use]
+pub fn with_terminal_args(terminal_args: &[String], args: Vec<OsString>) -> Vec<OsString> {
+    terminal_args
+        .iter()
+        .map(OsString::from)
+        .chain(args)
+        .collect()
+}
+
 /// Immediate, non-hidden subdirectories of each root as `(basename, path)`, each root's entries
 /// sorted by name, roots in order. Unreadable roots and non-UTF-8 names are skipped.
 #[must_use]
@@ -744,6 +755,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         cmd.env(TERMINAL_ENV, self.terminal_program())
             .env(TERMINAL_EXEC_FLAG_ENV, &self.config.terminal.exec_flag);
+        if kind == SpawnKind::Overlay {
+            cmd.env(OVERLAY_STYLE_ENV, self.config.overlay.style.as_str());
+        }
         if let Some(dir) = cwd {
             cmd.current_dir(dir);
         }
@@ -862,6 +876,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             OpenDecision::Spawn => {}
         }
         let program = self.terminal_program();
+        let args = with_terminal_args(&self.config.overlay.terminal_args, args);
         if let Some(pid) = self.spawn_process(&program, &args, None, SpawnKind::Overlay) {
             self.persist.pending.insert(
                 pid,
@@ -924,6 +939,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }) => Some(element),
             _ => None,
         }
+    }
+
+    /// The mapped overlay's actual global Space geometry, `None` while no overlay is mapped.
+    pub(crate) fn mapped_overlay_rect(&self) -> Option<Rect> {
+        let element = self.mapped_overlay()?;
+        let geo = self.space.element_geometry(element)?;
+        Some(Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h))
     }
 
     /// Ends the mapped overlay (if any); the slot is cleared by [`Self::unmanaged_closed`] when its
@@ -1721,6 +1743,15 @@ mod tests {
         let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(args, ["-e", "/c", "pick", "--rename", "a%3Ab"]);
         assert_eq!(picker_args("-e", Path::new("/c"), None).len(), 3);
+    }
+
+    #[test]
+    fn terminal_args_go_before_the_exec_flag() {
+        let base = picker_args("-e", Path::new("/c"), None);
+        let got = with_terminal_args(&["--a=1".to_string(), "--b".to_string()], base.clone());
+        let got: Vec<&str> = got.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(got, ["--a=1", "--b", "-e", "/c", "pick"]);
+        assert_eq!(with_terminal_args(&[], base.clone()), base);
     }
 
     #[test]

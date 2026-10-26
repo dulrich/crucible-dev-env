@@ -41,6 +41,22 @@ picker {
 
 Directories whose immediate subdirectories become workspace-picker candidates. Zero or more `root` nodes, each one non-empty path string; there is no `~` expansion. Default: none.
 
+### `overlay`
+
+```kdl
+overlay {
+    border #true
+    style "n1-med"
+    terminal-args "--background-opacity=1"
+}
+```
+
+Presentation of the picker, launcher and settings overlays. Every child is optional and may appear once.
+
+- `border` — `#true` (default) or `#false`. Draws a ring outside the overlay; while an overlay is open the pane focus ring and stack pips are not drawn over it.
+- `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` (default) or `"n1-light"`; any other value is a config error. `terminal` keeps the terminal's own look and the teal ring; the N1 styles paint opaque surrounds with an orange ring. The chosen style is passed to overlay programs as `CDE_OVERLAY_STYLE`.
+- `terminal-args` — extra terminal arguments, zero or more strings, inserted before the exec flag on overlay spawns only. Default: none. As a ghostty example only, `terminal-args "--background-opacity=1"` makes the padding strip opaque; `--config-file=<path>` adds to the user config, while `--config-default-files=false` replaces it.
+
 ### `binds`
 
 ```kdl
@@ -96,6 +112,11 @@ gaps inner=8 outer=8
 focus-follows-mouse #true
 picker {
     root "<code-root>"
+}
+overlay {
+    border #true
+    style "n1-med"
+    terminal-args "--background-opacity=1"
 }
 binds {
     bind "Super+P" "open-picker"

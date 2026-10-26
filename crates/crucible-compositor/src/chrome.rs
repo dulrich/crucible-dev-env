@@ -34,6 +34,7 @@ use smithay::{
     utils::{Physical, Rectangle},
 };
 
+use crucible_config::OverlayStyle;
 use crucible_layout::{Projection, Rect};
 
 use crate::{
@@ -153,6 +154,91 @@ pub fn to_output_local(rect: Rect, origin: (i32, i32)) -> Rect {
     }
 }
 
+/// Whether two rects overlap with non-zero area.
+#[must_use]
+pub fn rects_intersect(a: Rect, b: Rect) -> bool {
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+}
+
+/// Border colour for an overlay of `style`: the N1 accent, or [`BORDER_COLOR`] for `terminal`.
+#[must_use]
+pub fn overlay_border_color(style: OverlayStyle) -> [f32; 4] {
+    match style {
+        OverlayStyle::Terminal => BORDER_COLOR,
+        // #ff8a3d
+        OverlayStyle::N1Dark | OverlayStyle::N1Med => [1.0, 138.0 / 255.0, 61.0 / 255.0, 1.0],
+        // #f07714
+        OverlayStyle::N1Light => [240.0 / 255.0, 119.0 / 255.0, 20.0 / 255.0, 1.0],
+    }
+}
+
+/// The mapped overlay's global rect plus its border settings.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverlayChrome {
+    /// The overlay's rect in global Space coordinates.
+    pub rect: Rect,
+    /// Whether to draw the border ring.
+    pub border: bool,
+    /// The overlay style (selects the ring colour).
+    pub style: OverlayStyle,
+}
+
+/// Pure chrome plan: the coloured rects (output-local) for the focus ring, the pips and, while an
+/// overlay is mapped, the overlay ring.
+///
+/// While `overlay` is `Some` the pane focus ring is suppressed and no pip intersecting the overlay
+/// is emitted. With `border` on, a ring of [`BORDER_THICKNESS`] is drawn **outside** the overlay.
+#[must_use]
+pub fn plan_chrome(
+    ring: Option<Rect>,
+    pips: &[(Rect, bool)],
+    overlay: Option<OverlayChrome>,
+    output_origin: (i32, i32),
+) -> Vec<(Rectangle<i32, Physical>, [f32; 4])> {
+    let mut out = Vec::new();
+    if overlay.is_none()
+        && let Some(ring_rect) = ring
+    {
+        for strip in border_rects(to_output_local(ring_rect, output_origin), BORDER_THICKNESS) {
+            out.push((strip, BORDER_COLOR));
+        }
+    }
+    for &(pip, is_focused) in pips {
+        if overlay.is_some_and(|o| rects_intersect(pip, o.rect)) {
+            continue;
+        }
+        let color = if is_focused {
+            PIP_ACTIVE_COLOR
+        } else {
+            PIP_INACTIVE_COLOR
+        };
+        let local = to_output_local(pip, output_origin);
+        out.push((
+            Rectangle::new(
+                (local.x, local.y).into(),
+                (local.width, local.height).into(),
+            ),
+            color,
+        ));
+    }
+    if let Some(o) = overlay
+        && o.border
+    {
+        let t = BORDER_THICKNESS;
+        let outer = Rect {
+            x: o.rect.x - t,
+            y: o.rect.y - t,
+            width: o.rect.width + 2 * t,
+            height: o.rect.height + 2 * t,
+        };
+        let color = overlay_border_color(o.style);
+        for strip in border_rects(to_output_local(outer, output_origin), t) {
+            out.push((strip, color));
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Compositor entry point — reads model state, produces SolidColorRenderElements.
 // ---------------------------------------------------------------------------
@@ -171,13 +257,12 @@ pub fn build_chrome_elements(
     world: &crucible_layout::World,
     projection: &Projection,
     empty_focus_rect: Option<Rect>,
+    overlay: Option<OverlayChrome>,
     output_origin: (i32, i32),
 ) -> Vec<SolidColorRenderElement> {
     if !ENABLE_CHROME {
         return Vec::new();
     }
-
-    let mut elements: Vec<SolidColorRenderElement> = Vec::new();
 
     // ---- 1. Focus-ring border around the focused window, or the focused empty pane ----
     // `empty_focus_rect` is the focused pane's rect when it holds no window, computed by the
@@ -186,19 +271,9 @@ pub fn build_chrome_elements(
         .focus()
         .and_then(|id| projection.rect_of(id))
         .or(empty_focus_rect);
-    if let Some(ring_rect) = ring {
-        for strip in border_rects(to_output_local(ring_rect, output_origin), BORDER_THICKNESS) {
-            elements.push(SolidColorRenderElement::new(
-                Id::new(),
-                strip,
-                CommitCounter::default(),
-                BORDER_COLOR,
-                Kind::Unspecified,
-            ));
-        }
-    }
 
-    // ---- 2. Per-pane stack-position indicators ----
+    // ---- 2. Per-pane stack-position indicators (global rects) ----
+    let mut pips: Vec<(Rect, bool)> = Vec::new();
     // Iterate every output's active workspace panes; for any pane with > 1 window, draw pips
     // anchored at the top-right of that pane's focused-window rect in the projection.
     for (_output_id, output) in world.outputs() {
@@ -221,25 +296,30 @@ pub fn build_chrome_elements(
             let Some(pane_rect) = projection.rect_of(focused_win) else {
                 continue;
             };
-            let pane_rect = to_output_local(pane_rect, output_origin);
             for (rect, is_focused) in stack_pips(pane_rect, pane.focused, len) {
-                let color = if is_focused {
-                    PIP_ACTIVE_COLOR
-                } else {
-                    PIP_INACTIVE_COLOR
+                let global = Rect {
+                    x: rect.loc.x,
+                    y: rect.loc.y,
+                    width: rect.size.w,
+                    height: rect.size.h,
                 };
-                elements.push(SolidColorRenderElement::new(
-                    Id::new(),
-                    rect,
-                    CommitCounter::default(),
-                    color,
-                    Kind::Unspecified,
-                ));
+                pips.push((global, is_focused));
             }
         }
     }
 
-    elements
+    plan_chrome(ring, &pips, overlay, output_origin)
+        .into_iter()
+        .map(|(rect, color)| {
+            SolidColorRenderElement::new(
+                Id::new(),
+                rect,
+                CommitCounter::default(),
+                color,
+                Kind::Unspecified,
+            )
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +327,15 @@ pub fn build_chrome_elements(
 // ---------------------------------------------------------------------------
 
 impl<B: Backend + 'static> CrucibleState<B> {
+    /// The mapped overlay's global rect and border settings; `None` while no overlay is mapped.
+    pub(crate) fn overlay_chrome(&self) -> Option<OverlayChrome> {
+        Some(OverlayChrome {
+            rect: self.mapped_overlay_rect()?,
+            border: self.config.overlay.border,
+            style: self.config.overlay.style,
+        })
+    }
+
     /// Returns the chrome render elements for the current frame.
     ///
     /// Reads live model state (`self.layout.world`) and `self.projection` (the projection last
@@ -271,6 +360,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             &self.layout.world,
             &self.projection,
             self.focused_empty_pane_rect(),
+            self.overlay_chrome(),
             // The winit backend renders its single output at the Space origin.
             (0, 0),
         )
@@ -444,5 +534,89 @@ mod tests {
         assert_eq!(pips.len(), 3);
         let active_count = pips.iter().filter(|(_, f)| *f).count();
         assert_eq!(active_count, 1);
+    }
+
+    // ---- overlay chrome ----
+
+    fn overlay(border: bool, style: OverlayStyle) -> Option<OverlayChrome> {
+        Some(OverlayChrome {
+            rect: rect(100, 100, 400, 300),
+            border,
+            style,
+        })
+    }
+
+    #[test]
+    fn no_overlay_draws_pane_ring_and_all_pips() {
+        let pips = [(rect(100, 100, 8, 8), true), (rect(900, 10, 8, 8), false)];
+        let out = plan_chrome(Some(rect(0, 0, 1000, 800)), &pips, None, (0, 0));
+        // 4 ring strips + 2 pips.
+        assert_eq!(out.len(), 6);
+        assert!(out[..4].iter().all(|(_, c)| *c == BORDER_COLOR));
+    }
+
+    #[test]
+    fn overlay_suppresses_pane_ring() {
+        let out = plan_chrome(
+            Some(rect(0, 0, 1000, 800)),
+            &[],
+            overlay(false, OverlayStyle::N1Med),
+            (0, 0),
+        );
+        assert!(out.is_empty(), "no ring and no overlay border: {out:?}");
+    }
+
+    #[test]
+    fn overlay_drops_intersecting_pips_only() {
+        let pips = [(rect(120, 110, 8, 8), true), (rect(900, 10, 8, 8), false)];
+        let out = plan_chrome(None, &pips, overlay(false, OverlayStyle::N1Med), (0, 0));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.loc.x, 900);
+    }
+
+    #[test]
+    fn overlay_ring_sits_outside_the_rect() {
+        let out = plan_chrome(None, &[], overlay(true, OverlayStyle::N1Med), (0, 0));
+        assert_eq!(out.len(), 4);
+        let t = BORDER_THICKNESS;
+        let inner = rect(100, 100, 400, 300);
+        for (strip, color) in &out {
+            assert_eq!(*color, overlay_border_color(OverlayStyle::N1Med));
+            let as_rect = rect(strip.loc.x, strip.loc.y, strip.size.w, strip.size.h);
+            assert!(!rects_intersect(as_rect, inner), "strip inside: {strip:?}");
+            assert!(strip.loc.x >= 100 - t && strip.loc.y >= 100 - t);
+            assert!(strip.loc.x + strip.size.w <= 500 + t);
+            assert!(strip.loc.y + strip.size.h <= 400 + t);
+        }
+        // Top strip spans the expanded width and sits directly above the rect.
+        assert_eq!(out[0].0.loc.y, 100 - t);
+        assert_eq!(out[0].0.size.w, 400 + 2 * t);
+    }
+
+    #[test]
+    fn overlay_ring_is_translated_per_output() {
+        let out = plan_chrome(None, &[], overlay(true, OverlayStyle::Terminal), (50, 20));
+        assert_eq!(out[0].0.loc.x, 100 - BORDER_THICKNESS - 50);
+        assert_eq!(out[0].0.loc.y, 100 - BORDER_THICKNESS - 20);
+        assert_eq!(out[0].1, BORDER_COLOR);
+    }
+
+    #[test]
+    fn overlay_border_colours_per_style() {
+        assert_eq!(overlay_border_color(OverlayStyle::Terminal), BORDER_COLOR);
+        assert_eq!(
+            overlay_border_color(OverlayStyle::N1Dark),
+            overlay_border_color(OverlayStyle::N1Med)
+        );
+        assert_ne!(
+            overlay_border_color(OverlayStyle::N1Light),
+            overlay_border_color(OverlayStyle::N1Med)
+        );
+    }
+
+    #[test]
+    fn rect_intersection_excludes_touching_edges() {
+        assert!(rects_intersect(rect(0, 0, 10, 10), rect(9, 9, 10, 10)));
+        assert!(!rects_intersect(rect(0, 0, 10, 10), rect(10, 0, 10, 10)));
     }
 }
