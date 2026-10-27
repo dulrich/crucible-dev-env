@@ -53,6 +53,7 @@ use crucible_layout::{
     FocusChange, LayoutChange, LayoutError, OutputId, PaneId, Projection, Rect, WindowId, World,
 };
 use smithay::output::Output;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
 use smithay::utils::{Logical, Point, Rectangle, Size};
 use tracing::{debug, info, warn};
 
@@ -663,10 +664,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
 /// Kept free of `self` so it does not borrow the whole state.
 fn configure_placement(element: &WindowElement, rect: Rectangle<i32, Logical>, resized: bool) {
     if let Some(toplevel) = element.toplevel() {
-        if resized {
-            toplevel.with_pending_state(|state| {
+        // Every managed toplevel is tiled on all four edges so the client fills its tile instead
+        // of drawing floating-window chrome (shadow margins, own sizing). Never `Maximized`.
+        let had_tiled = toplevel.with_pending_state(|state| {
+            let had = has_tiled_states(&state.states);
+            for tiled in TILED_STATES {
+                state.states.set(tiled);
+            }
+            if resized {
                 state.size = Some(rect.size);
-            });
+            }
+            had
+        });
+        if toplevel_needs_configure(resized, had_tiled) {
             toplevel.send_configure();
         }
     } else if let Some(surface) = element.x11_surface()
@@ -674,6 +684,25 @@ fn configure_placement(element: &WindowElement, rect: Rectangle<i32, Logical>, r
     {
         let _ = surface.configure(Some(rect));
     }
+}
+
+/// The xdg states every managed toplevel carries: tiled on all four edges.
+const TILED_STATES: [XdgState; 4] = [
+    XdgState::TiledLeft,
+    XdgState::TiledRight,
+    XdgState::TiledTop,
+    XdgState::TiledBottom,
+];
+
+/// Whether `states` already carries all of [`TILED_STATES`]. **Pure** (no surface needed).
+fn has_tiled_states(states: &smithay::wayland::shell::xdg::ToplevelStateSet) -> bool {
+    TILED_STATES.iter().all(|s| states.contains(*s))
+}
+
+/// Whether a placement must (re)send a toplevel configure: a size change, or the tiled states
+/// being newly applied (a states-only change at the same size still needs one). **Pure**.
+fn toplevel_needs_configure(resized: bool, had_tiled: bool) -> bool {
+    resized || !had_tiled
 }
 
 /// Whether an X11 window whose X geometry is `current` must be configured to reach `target`.
@@ -704,6 +733,29 @@ mod tests {
             at(3840, 0, 1920, 2160),
             at(3840, 0, 1920, 2160)
         ));
+    }
+
+    #[test]
+    fn toplevel_configure_resent_when_only_states_change() {
+        assert!(toplevel_needs_configure(true, true), "resize");
+        assert!(toplevel_needs_configure(false, false), "states-only change");
+        assert!(
+            !toplevel_needs_configure(false, true),
+            "pure move: nothing new"
+        );
+    }
+
+    #[test]
+    fn tiled_states_cover_all_edges_and_never_maximize() {
+        use smithay::wayland::shell::xdg::ToplevelStateSet;
+        let mut set = ToplevelStateSet::default();
+        assert!(!has_tiled_states(&set));
+        for s in TILED_STATES {
+            set.set(s);
+        }
+        assert!(has_tiled_states(&set));
+        assert!(!set.contains(XdgState::Maximized));
+        assert!(!TILED_STATES.contains(&XdgState::Maximized));
     }
 
     #[test]
