@@ -55,7 +55,7 @@ use crate::ipc::{Candidate, CandidateKind};
 use crate::state::{Backend, CrucibleState};
 use overlay::{Overlay, OverlayState};
 use placement::{PENDING_TTL, Pending, Target};
-use spawn::{relaunch_args, restore_args};
+use spawn::prepare_restore;
 use workspace::restore_target;
 
 /// Auto-save / config-poll cadence.
@@ -598,11 +598,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Restores `record` onto the connected output named `wanted` (else the focused output).
     fn restore_on(&mut self, record: WorkspaceRecord, wanted: Option<&str>) -> Result<(), String> {
+        // Every fallible precondition and the spawn plan come first: a failure leaves the model alone.
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let exec_flag = self.config.terminal.exec_flag.clone();
+        let jobs = prepare_restore(
+            &record,
+            std::env::current_exe(),
+            home.as_deref(),
+            &exec_flag,
+            Path::is_dir,
+        )?;
         let connected = self.connected_outputs();
         let output = restore_target(wanted, &connected, self.layout.world.focused_output());
         let mut created = None;
         self.with_model(|w| {
-            // `switch_workspace` only searches the focused output, so focus the target first.
+            // Focus the target output, then show the new workspace there.
             w.set_focused_output(output)?;
             let (ws, panes) = w.insert_workspace(output, record.name.clone(), &record.layout())?;
             w.switch_workspace(ws)?;
@@ -622,45 +632,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some(root) = &record.root {
             self.persist.workspace.roots.insert(ws, root.clone());
         }
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let crucible = std::env::current_exe().map_err(|e| e.to_string())?;
         let program = self.terminal_program();
-        let exec_flag = self.config.terminal.exec_flag.clone();
-        let mut jobs = Vec::new();
-        for (pane, pane_record) in panes.iter().zip(record.panes()) {
-            for (i, window) in pane_record.windows.iter().enumerate() {
-                let target = Target::Pane {
-                    pane: *pane,
-                    saved_index: i,
-                    focused: pane_record.focused == i,
-                };
-                match window {
-                    WindowRecord::Terminal { cwd, command } => {
-                        let dir =
-                            resolve_cwd(cwd, record.root.as_deref(), home.as_deref(), Path::is_dir);
-                        let args = restore_args(&exec_flag, &crucible, &dir, command.as_deref());
-                        jobs.push((dir, args, target, window.clone()));
-                    }
-                    WindowRecord::App {
-                        app_id,
-                        cmdline: Some(cmdline),
-                    } => {
-                        let root = record.root.as_deref();
-                        let dir = resolve_cwd(
-                            root.unwrap_or(Path::new("")),
-                            root,
-                            home.as_deref(),
-                            Path::is_dir,
-                        );
-                        let args = relaunch_args(&exec_flag, &crucible, app_id.as_deref(), cmdline);
-                        jobs.push((dir, args, target, window.clone()));
-                    }
-                    WindowRecord::App { cmdline: None, .. } => {}
-                }
-            }
-        }
         let now = Instant::now();
-        for (dir, args, target, origin) in jobs {
+        for job in jobs {
+            let target = Target::Pane {
+                pane: panes[job.pane_index],
+                saved_index: job.saved_index,
+                focused: job.focused,
+            };
+            let (dir, args, origin) = (job.dir, job.args, job.origin);
             let args = self.with_tiling_args(args);
             if let Some(pid) = self.spawn_process_with(
                 &program,
