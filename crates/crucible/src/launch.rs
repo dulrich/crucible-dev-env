@@ -428,6 +428,7 @@ fn event_loop(launcher: &mut Launcher, client: &mut Client) -> i32 {
         let mut out = std::io::stdout();
         let _ = out.write_all(launcher.render_styled(cols, rows, &style).as_bytes());
         let _ = out.flush();
+        crate::latency::first_frame("launch");
         let n = match stdin.read(&mut chunk) {
             Ok(0) => return 0,
             Ok(n) => n,

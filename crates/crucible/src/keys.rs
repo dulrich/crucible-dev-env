@@ -176,6 +176,7 @@ fn event_loop(keys: &mut Keys) -> i32 {
         let mut out = std::io::stdout();
         let _ = out.write_all(keys.render_styled(cols, rows, &style).as_bytes());
         let _ = out.flush();
+        crate::latency::first_frame("keys");
         let n = match stdin.read(&mut chunk) {
             Ok(0) => return 0,
             Ok(n) => n,

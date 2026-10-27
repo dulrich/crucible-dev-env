@@ -8,6 +8,7 @@
 mod client;
 mod fuzzy;
 mod keys;
+mod latency;
 mod launch;
 mod msg;
 mod pick;

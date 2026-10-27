@@ -32,8 +32,8 @@ use crate::config::pick_terminal;
 use crate::element::WindowElement;
 use crate::focus::KeyboardFocusTarget;
 use crate::ipc::{
-    Candidate, CandidateKind, OVERLAY_STYLE_ENV, Request, Response, SOCKET_ENV, TERMINAL_ENV,
-    TERMINAL_EXEC_FLAG_ENV, encode_field,
+    Candidate, CandidateKind, OVERLAY_STYLE_ENV, Request, Response, SOCKET_ENV, SPAWN_EPOCH_ENV,
+    TERMINAL_ENV, TERMINAL_EXEC_FLAG_ENV, encode_field,
 };
 use crate::layout::model_output_id;
 use crate::state::{Backend, CrucibleState};
@@ -51,6 +51,45 @@ pub enum SpawnKind {
     App,
     /// A CDE overlay such as the picker (never captured).
     Overlay,
+}
+
+/// A CDE-spawned process: what it is, what it ran and when (for the spawn-to-map latency line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpawnRecord {
+    /// What the process is.
+    pub kind: SpawnKind,
+    /// The program it was spawned as.
+    pub program: String,
+    /// Monotonic spawn time.
+    pub at: Instant,
+    /// Wall-clock spawn time, ms since the UNIX epoch.
+    pub epoch_ms: u128,
+}
+
+impl SpawnRecord {
+    /// A record of `program` spawned as `kind` right now.
+    #[must_use]
+    pub fn now(kind: SpawnKind, program: &str) -> Self {
+        Self {
+            kind,
+            program: program.to_owned(),
+            at: Instant::now(),
+            epoch_ms: epoch_ms_now(),
+        }
+    }
+
+    /// Whole milliseconds from the spawn to `now` (0 if `now` is earlier).
+    #[must_use]
+    pub fn ms_until(&self, now: Instant) -> u128 {
+        now.saturating_duration_since(self.at).as_millis()
+    }
+}
+
+/// Wall-clock milliseconds since the UNIX epoch (0 if the clock is before it).
+fn epoch_ms_now() -> u128 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis())
 }
 
 /// How far up `/proc` a client PID is walked looking for a spawned/pending ancestor.
@@ -199,7 +238,7 @@ pub struct PersistState {
     /// Last record written per workspace name, and when.
     saved: HashMap<String, (WorkspaceRecord, Instant)>,
     windows: HashMap<WindowId, WindowInfo>,
-    spawned: HashMap<u32, SpawnKind>,
+    spawned: HashMap<u32, SpawnRecord>,
     pending: HashMap<u32, Pending>,
     placed: HashMap<PaneId, Vec<(WindowId, usize)>>,
     overlay: Option<Overlay>,
@@ -275,10 +314,10 @@ pub fn match_pending(pid: u32, ancestors: &[u32], has: impl Fn(u32) -> bool) -> 
 
 /// Whether `pid` (or its nearest spawned ancestor) was spawned as a [`SpawnKind::Terminal`].
 #[must_use]
-pub fn is_terminal_spawn(pid: u32, ancestors: &[u32], spawned: &HashMap<u32, SpawnKind>) -> bool {
+pub fn is_terminal_spawn(pid: u32, ancestors: &[u32], spawned: &HashMap<u32, SpawnRecord>) -> bool {
     match_pending(pid, ancestors, |k| spawned.contains_key(&k))
         .and_then(|k| spawned.get(&k))
-        .is_some_and(|kind| *kind == SpawnKind::Terminal)
+        .is_some_and(|rec| rec.kind == SpawnKind::Terminal)
 }
 
 /// The stack index a restored window takes: the number of already-placed windows in its pane
@@ -1019,6 +1058,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if kind == SpawnKind::Overlay {
             cmd.env(OVERLAY_STYLE_ENV, self.config.overlay.style.as_str());
         }
+        let record = SpawnRecord::now(kind, program);
+        if kind == SpawnKind::Overlay {
+            cmd.env(SPAWN_EPOCH_ENV, record.epoch_ms.to_string());
+        }
         if let Some(path) = Self::spawn_path() {
             cmd.env("PATH", path);
         }
@@ -1029,7 +1072,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(child) => {
                 let pid = child.id();
                 info!(program, ?args, ?cwd, pid, "spawned");
-                self.persist.spawned.insert(pid, kind);
+                self.persist.spawned.insert(pid, record);
                 self.persist.children.push(child);
                 Some(pid)
             }
@@ -1327,6 +1370,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let pending = pid
             .and_then(|p| match_pending(p, &ancestors, |k| self.persist.pending.contains_key(&k)))
             .and_then(|k| self.persist.pending.remove(&k));
+        if let Some(rec) = pid
+            .and_then(|p| match_pending(p, &ancestors, |k| self.persist.spawned.contains_key(&k)))
+            .and_then(|k| self.persist.spawned.get(&k).map(|rec| (k, rec)))
+            .map(|(k, rec)| (k, rec.clone()))
+        {
+            info!(
+                kind = ?rec.1.kind,
+                program = %rec.1.program,
+                pid = rec.0,
+                spawn_to_map_ms = u64::try_from(rec.1.ms_until(Instant::now())).unwrap_or(u64::MAX),
+                "latency: spawn→map"
+            );
+        }
         let id = match pending.map(|p| p.target) {
             Some(Target::Overlay) => {
                 self.map_overlay(element);
@@ -1871,11 +1927,19 @@ mod tests {
     }
 
     #[test]
+    fn spawn_record_measures_elapsed_ms_and_saturates() {
+        let rec = SpawnRecord::now(SpawnKind::App, "x");
+        assert_eq!(rec.ms_until(rec.at + Duration::from_millis(250)), 250);
+        assert_eq!(rec.ms_until(rec.at), 0);
+        assert!(rec.epoch_ms > 0);
+    }
+
+    #[test]
     fn is_terminal_spawn_depends_on_the_matched_kind() {
-        let spawned: HashMap<u32, SpawnKind> = [
-            (10, SpawnKind::Terminal),
-            (20, SpawnKind::App),
-            (30, SpawnKind::Overlay),
+        let spawned: HashMap<u32, SpawnRecord> = [
+            (10, SpawnRecord::now(SpawnKind::Terminal, "t")),
+            (20, SpawnRecord::now(SpawnKind::App, "a")),
+            (30, SpawnRecord::now(SpawnKind::Overlay, "o")),
         ]
         .into();
         assert!(is_terminal_spawn(10, &[], &spawned));
