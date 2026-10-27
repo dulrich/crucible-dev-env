@@ -1,9 +1,8 @@
 //! `crucible launch` — the program launcher TUI (run inside the compositor's terminal overlay).
-//! Desktop-entry parsing, discovery, `$PATH` scanning, ranking and the key state machine are pure
+//! Desktop-entry parsing, discovery, ranking and the key state machine are pure
 //! (or take explicit paths); only [`run`] touches the terminal, the environment and the socket.
 
 use std::collections::HashSet;
-use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -18,7 +17,7 @@ use crate::style::Style;
 use crate::tty::{RawGuard, window_size};
 
 /// Usage text for `crucible launch --help`.
-pub const USAGE: &str = "usage: crucible launch\n\nThe CDE program launcher (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Return).\nLists installed desktop applications (XDG .desktop entries) and executables on $PATH.\nType to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter launches the selection into the focused\npane; Esc or Ctrl+C closes. Entries marked Terminal=true run in the configured terminal\n($CDE_TERMINAL, $CDE_TERMINAL_EXEC_FLAG, exported by CDE) and are hidden when it is unknown.\n";
+pub const USAGE: &str = "usage: crucible launch\n\nThe CDE program launcher (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Return).\nLists installed desktop applications (XDG .desktop entries) only, each labelled GUI or TUI\n(Terminal=true). Type to filter by name; Up/Down or Ctrl+P/Ctrl+N move; Enter launches the\nselection into the focused pane; Esc or Ctrl+C closes. TUI entries run in the configured terminal\n($CDE_TERMINAL, $CDE_TERMINAL_EXEC_FLAG, exported by CDE) and are hidden when it is unknown.\n\nShell-line mode: start the query with ! to type a shell command instead. Enter runs it in a\nterminal; Alt+Enter runs it detached without a terminal. An empty command does nothing.\n";
 
 /// A launchable desktop entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -188,55 +187,32 @@ pub fn desktop_entries(dirs: &[PathBuf]) -> Vec<DesktopEntry> {
     entries
 }
 
-/// Executable regular-file names on `$PATH` (first occurrence wins), sorted. Missing directories
-/// and non-UTF-8 names are skipped.
-#[must_use]
-pub fn path_executables(path_var: &OsStr) -> Vec<String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut seen: HashSet<String> = HashSet::new();
-    for dir in std::env::split_paths(path_var) {
-        let Ok(read) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in read.filter_map(Result::ok) {
-            let Ok(name) = entry.file_name().into_string() else {
-                continue;
-            };
-            let Ok(meta) = std::fs::metadata(entry.path()) else {
-                continue;
-            };
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
-                seen.insert(name);
-            }
-        }
-    }
-    let mut names: Vec<String> = seen.into_iter().collect();
-    names.sort();
-    names
-}
-
 /// Single-quotes `s` for a POSIX shell.
 #[must_use]
 pub fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// One selectable row: what is matched, what is shown, and the shell command it runs.
+/// One selectable row: the name (matched and shown), its kind and the shell command it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
     filter: String,
     label: String,
+    /// `Terminal=true` (shown as `TUI`, else `GUI`).
+    tui: bool,
     cmd: String,
 }
 
-/// Builds the candidate list: desktop entries first, then `$PATH` executables. `terminal` is the
-/// `(program, exec-flag)` pair; without it `Terminal=true` entries are left out.
+impl Item {
+    fn kind(&self) -> &'static str {
+        if self.tui { "TUI" } else { "GUI" }
+    }
+}
+
+/// Builds the candidate list from desktop entries. `terminal` is the `(program, exec-flag)` pair;
+/// without it `Terminal=true` entries are left out.
 #[must_use]
-pub fn build_items(
-    entries: &[DesktopEntry],
-    execs: &[String],
-    terminal: Option<(&str, &str)>,
-) -> Vec<Item> {
+pub fn build_items(entries: &[DesktopEntry], terminal: Option<(&str, &str)>) -> Vec<Item> {
     let mut items = Vec::new();
     for e in entries {
         let cmd = match (e.terminal, terminal) {
@@ -244,18 +220,11 @@ pub fn build_items(
             (true, Some((prog, flag))) => format!("{} {} {}", sq(prog), sq(flag), e.exec),
             (true, None) => continue,
         };
-        let first = e.exec.split(' ').next().unwrap_or("");
         items.push(Item {
             filter: e.name.clone(),
-            label: format!("{} [{first}]", e.name),
+            label: e.name.clone(),
+            tui: e.terminal,
             cmd,
-        });
-    }
-    for name in execs {
-        items.push(Item {
-            filter: name.clone(),
-            label: name.clone(),
-            cmd: sq(name),
         });
     }
     items
@@ -289,6 +258,12 @@ impl Launcher {
         fuzzy::filter(&self.query, &names)
     }
 
+    /// The shell command typed in `!` mode: `None` outside the mode, `Some("")` while empty.
+    #[must_use]
+    pub fn shell_line(&self) -> Option<&str> {
+        self.query.strip_prefix('!').map(str::trim_start)
+    }
+
     /// Applies one key.
     pub fn step(&mut self, key: Key) -> Outcome {
         match key {
@@ -310,7 +285,19 @@ impl Launcher {
                 self.selected = 0;
                 self.status = None;
             }
-            Key::Enter => {
+            Key::Enter | Key::AltEnter if self.shell_line().is_some() => {
+                let cmd = self.shell_line().unwrap_or("").trim_end();
+                if cmd.is_empty() {
+                    return Outcome::Continue;
+                }
+                let cmd = cmd.to_string();
+                return Outcome::Send(if key == Key::Enter {
+                    Request::RunInTerminal(cmd)
+                } else {
+                    Request::Run(cmd)
+                });
+            }
+            Key::Enter | Key::AltEnter => {
                 return match self.rows().get(self.selected) {
                     Some(&i) => Outcome::Send(Request::Run(self.items[i].cmd.clone())),
                     None => Outcome::Continue,
@@ -344,15 +331,30 @@ impl Launcher {
         let width = usize::from(cols).max(10);
         let height = usize::from(rows).max(4);
         let mut lines: Vec<String> = vec![fit(&format!("run> {}_", sanitize(&self.query)), width)];
-        let all = self.rows();
-        let (start, end) = window(self.selected, all.len(), height - 2);
-        for (i, &idx) in all.iter().enumerate().take(end).skip(start) {
-            let text = fit(&format!("  {}", sanitize(&self.items[idx].label)), width);
-            lines.push(if i == self.selected {
-                style.highlight(&text)
-            } else {
-                text
-            });
+        if let Some(cmd) = self.shell_line() {
+            let text = fit(
+                &format!(
+                    "  SH  {}  [Enter: run in terminal, Alt+Enter: run detached]",
+                    sanitize(cmd)
+                ),
+                width,
+            );
+            lines.push(style.highlight(&text));
+        } else {
+            let all = self.rows();
+            let (start, end) = window(self.selected, all.len(), height - 2);
+            for (i, &idx) in all.iter().enumerate().take(end).skip(start) {
+                let item = &self.items[idx];
+                let text = fit(
+                    &format!("  {}  {}", item.kind(), sanitize(&item.label)),
+                    width,
+                );
+                lines.push(if i == self.selected {
+                    style.highlight(&text)
+                } else {
+                    text
+                });
+            }
         }
         while lines.len() < height - 1 {
             lines.push(String::new());
@@ -400,12 +402,8 @@ pub fn run(args: &[String]) -> i32 {
         std::env::var_os(TERMINAL_EXEC_FLAG_ENV),
     );
     let entries = desktop_entries(&data_dirs_from_env());
-    let execs = std::env::var_os("PATH")
-        .map(|p| path_executables(&p))
-        .unwrap_or_default();
     let items = build_items(
         &entries,
-        &execs,
         terminal.as_ref().map(|(p, f)| (p.as_str(), f.as_str())),
     );
     let mut launcher = Launcher::new(items);
@@ -461,8 +459,6 @@ fn event_loop(launcher: &mut Launcher, client: &mut Client) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
-
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "crucible-launch-test-{}-{name}",
@@ -529,34 +525,12 @@ mod tests {
     }
 
     #[test]
-    fn path_scan_finds_executables_first_wins() {
-        let root = tmp("path");
-        let (d1, d2) = (root.join("d1"), root.join("d2"));
-        std::fs::create_dir_all(&d1).unwrap();
-        std::fs::create_dir_all(&d2).unwrap();
-        for (dir, name, mode) in [
-            (&d1, "zed", 0o755),
-            (&d1, "plain", 0o644),
-            (&d2, "zed", 0o755),
-            (&d2, "alpha", 0o700),
-        ] {
-            let p = dir.join(name);
-            std::fs::write(&p, "#!/bin/sh\n").unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
-        }
-        std::fs::create_dir_all(d1.join("subdir")).unwrap();
-        let var = std::env::join_paths([d1, root.join("nope"), d2]).unwrap();
-        assert_eq!(path_executables(&var), ["alpha", "zed"]);
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
     fn enter_builds_the_run_command_for_each_kind() {
         let entries = [
             entry("Browser", "firefox --new", false),
             entry("Editor", "vim", true),
         ];
-        let items = build_items(&entries, &["it's".into()], Some(("kitty", "-e")));
+        let items = build_items(&entries, Some(("kitty", "-e")));
         let mut l = Launcher::new(items);
         assert_eq!(
             l.step(Key::Enter),
@@ -567,17 +541,16 @@ mod tests {
             l.step(Key::Enter),
             Outcome::Send(Request::Run("'kitty' '-e' vim".into()))
         );
-        l.step(Key::Down);
         assert_eq!(
-            l.step(Key::Enter),
-            Outcome::Send(Request::Run("'it'\\''s'".into()))
+            l.step(Key::AltEnter),
+            Outcome::Send(Request::Run("'kitty' '-e' vim".into()))
         );
     }
 
     #[test]
     fn terminal_entries_are_hidden_without_a_terminal() {
         let entries = [entry("Editor", "vim", true), entry("Browser", "ff", false)];
-        let items = build_items(&entries, &[], None);
+        let items = build_items(&entries, None);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].filter, "Browser");
         assert_eq!(terminal_from_env(Some("k".into()), Some("".into())), None);
@@ -589,15 +562,8 @@ mod tests {
     }
 
     #[test]
-    fn desktop_entries_rank_ahead_of_executables_on_ties() {
-        let items = build_items(&[entry("vim", "vim", false)], &["vim".into()], None);
-        let l = Launcher::new(items);
-        assert_eq!(l.rows(), [0, 1]);
-    }
-
-    #[test]
     fn err_response_stays_open_ok_and_exit_keys_leave() {
-        let items = build_items(&[entry("A", "a", false)], &[], None);
+        let items = build_items(&[entry("A", "a", false)], None);
         let mut l = Launcher::new(items);
         assert_eq!(
             l.on_response(&Response::Err("boom".into())),
@@ -611,7 +577,7 @@ mod tests {
 
     #[test]
     fn enter_without_a_match_does_nothing() {
-        let items = build_items(&[entry("A", "a", false)], &[], None);
+        let items = build_items(&[entry("A", "a", false)], None);
         let mut l = Launcher::new(items);
         l.step(Key::Char('z'));
         l.step(Key::Char('z'));
@@ -621,26 +587,91 @@ mod tests {
     #[test]
     fn render_styled_n1_paints_background_and_reapplies_after_highlight() {
         let st = Style::parse(Some("n1-dark"));
-        let out = Launcher::new(build_items(&[entry("a", "a", false)], &[], None))
-            .render_styled(40, 8, &st);
+        let out =
+            Launcher::new(build_items(&[entry("a", "a", false)], None)).render_styled(40, 8, &st);
         assert!(out.starts_with(&format!("\x1b[H{}\x1b[2J", st.base())));
         assert!(out.contains(&st.highlight("")[..20]));
         assert!(out.contains(&format!("\x1b[0m{}", st.base())));
         assert!(!out.contains("\x1b[7m"));
         assert_eq!(
-            Launcher::new(build_items(&[entry("a", "a", false)], &[], None)).render_styled(
+            Launcher::new(build_items(&[entry("a", "a", false)], None)).render_styled(
                 40,
                 8,
                 &Style::Terminal
             ),
-            Launcher::new(build_items(&[entry("a", "a", false)], &[], None)).render(40, 8)
+            Launcher::new(build_items(&[entry("a", "a", false)], None)).render(40, 8)
         );
     }
     #[test]
     fn render_marks_selection_and_neutralises_controls() {
-        let items = build_items(&[entry("A\x1b[31m", "a", false)], &[], None);
+        let items = build_items(&[entry("A\x1b[31m", "a", false)], None);
         let out = Launcher::new(items).render(40, 8);
         assert!(out.contains("\x1b[7m"));
         assert!(!out.contains("A\x1b[31m"));
+    }
+
+    fn shell_launcher(typed: &str) -> Launcher {
+        let mut l = Launcher::new(build_items(&[entry("A", "a", false)], None));
+        for c in typed.chars() {
+            l.step(Key::Char(c));
+        }
+        l
+    }
+
+    #[test]
+    fn bang_enters_and_leaves_shell_mode() {
+        let mut l = shell_launcher("!");
+        assert_eq!(l.shell_line(), Some(""));
+        assert!(l.render(80, 8).contains("SH"));
+        l.step(Key::Backspace);
+        assert_eq!(l.shell_line(), None);
+        assert!(l.render(80, 8).contains("GUI  A"));
+        assert_eq!(shell_launcher("a!").shell_line(), None);
+    }
+
+    #[test]
+    fn shell_mode_enter_and_alt_enter() {
+        let mut l = shell_launcher("!  ls -l");
+        assert_eq!(l.shell_line(), Some("ls -l"));
+        let out = l.render(80, 8);
+        assert!(out.contains("ls -l") && out.contains("Alt+Enter"));
+        assert_eq!(
+            l.step(Key::Enter),
+            Outcome::Send(Request::RunInTerminal("ls -l".into()))
+        );
+        assert_eq!(
+            l.step(Key::AltEnter),
+            Outcome::Send(Request::Run("ls -l".into()))
+        );
+    }
+
+    #[test]
+    fn shell_mode_empty_command_is_a_no_op() {
+        for typed in ["!", "!   "] {
+            let mut l = shell_launcher(typed);
+            assert_eq!(l.step(Key::Enter), Outcome::Continue);
+            assert_eq!(l.step(Key::AltEnter), Outcome::Continue);
+        }
+    }
+
+    #[test]
+    fn alt_enter_outside_shell_mode_is_enter() {
+        let mut l = shell_launcher("");
+        assert_eq!(
+            l.step(Key::AltEnter),
+            Outcome::Send(Request::Run("a".into()))
+        );
+    }
+
+    #[test]
+    fn rows_are_labelled_gui_or_tui_and_labels_are_not_matched() {
+        let entries = [entry("Browser", "ff", false), entry("Editor", "vim", true)];
+        let mut l = Launcher::new(build_items(&entries, Some(("k", "-e"))));
+        let out = l.render(60, 8);
+        assert!(out.contains("GUI  Browser") && out.contains("TUI  Editor"));
+        for c in "tui".chars() {
+            l.step(Key::Char(c));
+        }
+        assert!(l.rows().is_empty());
     }
 }

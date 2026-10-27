@@ -64,7 +64,7 @@ impl Keys {
         match key {
             Key::Esc | Key::CtrlC => return Outcome::Exit,
             Key::CtrlD if self.query.is_empty() => return Outcome::Exit,
-            Key::CtrlD | Key::Enter => {}
+            Key::CtrlD | Key::Enter | Key::AltEnter => {}
             Key::Up | Key::CtrlP => self.selected = self.selected.saturating_sub(1),
             Key::Down | Key::CtrlN => {
                 let last = self.matches().len().saturating_sub(1);

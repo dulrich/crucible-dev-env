@@ -23,6 +23,8 @@ pub enum Key {
     Char(char),
     /// Enter / Return.
     Enter,
+    /// Alt+Enter (ESC then CR or LF).
+    AltEnter,
     /// A lone Escape.
     Esc,
     /// Backspace.
@@ -64,6 +66,10 @@ pub fn decode_keys(buf: &mut Vec<u8>) -> Vec<Key> {
                         _ => {}
                     }
                     end + 1
+                }
+                Some(b'\r' | b'\n') => {
+                    keys.push(Key::AltEnter);
+                    2
                 }
                 Some(b'O') => {
                     let Some(&f) = buf.get(2) else { break };
@@ -256,7 +262,7 @@ impl Picker {
                 self.selected = 0;
                 self.status = None;
             }
-            Key::Enter => return self.enter(),
+            Key::Enter | Key::AltEnter => return self.enter(),
         }
         Outcome::Continue
     }
@@ -537,6 +543,14 @@ mod tests {
                 Key::CtrlP
             ]
         );
+    }
+
+    #[test]
+    fn decodes_alt_enter_and_keeps_lone_esc() {
+        assert_eq!(keys(b"\x1b\r"), vec![Key::AltEnter]);
+        assert_eq!(keys(b"\x1b\n"), vec![Key::AltEnter]);
+        assert_eq!(keys(b"\x1b"), vec![Key::Esc]);
+        assert_eq!(keys(b"\x1bx"), vec![Key::Esc, Key::Char('x')]);
     }
 
     #[test]
