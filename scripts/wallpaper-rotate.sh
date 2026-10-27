@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Rotate the Wayland desktop background with swaybg (CDE or any wlr-layer-shell compositor).
+# Meant for cron: finds the session's Wayland socket itself, exits 0 quietly when no session is up.
+set -uo pipefail
+
+usage() {
+	cat <<'USAGE'
+Usage: wallpaper-rotate.sh [--help|-h] [--dry-run] [--dir DIR] [--mode MODE]
+
+Pick a random image from DIR and show it on every output with swaybg. The new
+swaybg starts first and the previous one is stopped only once the new one is
+up, so there is no bare-background flash. The last image shown is skipped
+when DIR holds more than one.
+
+Options:
+  --dir DIR    image directory (default: $WALLPAPER_DIR, else
+               <photos-root>/bgs_4k/bgset); jpg/jpeg/png, not recursive
+  --mode MODE  swaybg scaling mode: stretch|fit|fill|center|tile (default: fill)
+  --dry-run    print the socket and image that would be used, change nothing
+
+Environment:
+  WAYLAND_DISPLAY   socket to use; when unset, the first live wayland-* socket
+                    in $XDG_RUNTIME_DIR (default /run/user/<uid>) is used
+  WALLPAPER_DIR     default for --dir
+
+Exit status: 0 on success or when no Wayland session is running; 1 when swaybg
+fails to start (the previous background is left in place); 2 on bad usage.
+State: ${XDG_STATE_HOME:-~/.local/state}/wallpaper-rotate/current (last image).
+
+Cron example (host-b):
+  */5 * * * * <code-root>/the fleet tooling repo/scripts/cron-run wallpaper-rotate --max-age 15m -- crucible-dev-env/scripts/wallpaper-rotate.sh
+USAGE
+}
+
+dir="${WALLPAPER_DIR:-<photos-root>/bgs_4k/bgset}"
+mode=fill
+dry_run=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--help | -h) usage; exit 0 ;;
+	--dry-run) dry_run=1 ;;
+	--dir) [ $# -ge 2 ] || { usage >&2; exit 2; }; dir=$2; shift ;;
+	--mode)
+		[ $# -ge 2 ] || { usage >&2; exit 2; }
+		case "$2" in stretch | fit | fill | center | tile) mode=$2 ;; *) echo "wallpaper-rotate: bad --mode '$2'" >&2; exit 2 ;; esac
+		shift ;;
+	*) echo "wallpaper-rotate: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
+	esac
+	shift
+done
+
+command -v swaybg >/dev/null 2>&1 || { echo "wallpaper-rotate: swaybg not installed" >&2; exit 1; }
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+
+# A socket file can outlive a crashed compositor; when `ss` is available, require a listener.
+socket_live() {
+	[ -S "$1" ] || return 1
+	command -v ss >/dev/null 2>&1 || return 0
+	ss -xlH 2>/dev/null | grep -qF -- " $1 "
+}
+
+if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+	case "$WAYLAND_DISPLAY" in /*) sock=$WAYLAND_DISPLAY ;; *) sock="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ;; esac
+	socket_live "$sock" || sock=
+else
+	sock=
+	for s in "$XDG_RUNTIME_DIR"/wayland-*; do
+		case "$s" in *.lock) continue ;; esac
+		if socket_live "$s"; then sock=$s; break; fi
+	done
+fi
+if [ -z "$sock" ]; then
+	[ "$dry_run" = 1 ] && echo "no live Wayland session in $XDG_RUNTIME_DIR"
+	exit 0
+fi
+export WAYLAND_DISPLAY="${sock##*/}"
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/wallpaper-rotate"
+state="$state_dir/current"
+last=$(cat "$state" 2>/dev/null || true)
+
+images=()
+while IFS= read -r -d '' f; do images+=("$f"); done < <(
+	find -L "$dir" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \) -print0 2>/dev/null
+)
+[ ${#images[@]} -gt 0 ] || { echo "wallpaper-rotate: no images in $dir" >&2; exit 1; }
+
+candidates=()
+for f in "${images[@]}"; do [ "$f" = "$last" ] || candidates+=("$f"); done
+[ ${#candidates[@]} -gt 0 ] || candidates=("${images[@]}")
+img=$(printf '%s\0' "${candidates[@]}" | shuf -z -n 1 | tr -d '\0')
+
+if [ "$dry_run" = 1 ]; then
+	echo "socket: $sock"
+	echo "image:  $img (mode $mode, ${#images[@]} images in $dir)"
+	exit 0
+fi
+
+old_pids=$(pgrep -u "$(id -u)" -x swaybg || true)
+
+# setsid + /dev/null: detach fully so cron does not wait on the long-lived swaybg.
+setsid swaybg -o '*' -i "$img" -m "$mode" </dev/null >/dev/null 2>&1 &
+new_pid=$!
+sleep 1
+if ! kill -0 "$new_pid" 2>/dev/null; then
+	echo "wallpaper-rotate: swaybg exited at startup (image: $img); keeping the previous background" >&2
+	exit 1
+fi
+
+for p in $old_pids; do kill "$p" 2>/dev/null || true; done
+mkdir -p "$state_dir"
+printf '%s\n' "$img" >"$state_dir/current.tmp" && mv "$state_dir/current.tmp" "$state"
+exit 0
