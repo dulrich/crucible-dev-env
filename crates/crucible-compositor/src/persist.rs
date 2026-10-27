@@ -850,6 +850,33 @@ fn app_fallback_record(
     }
 }
 
+/// The record for a CDE-spawned **terminal** whose `/proc` capture found nothing (e.g. saved in
+/// the moment between the window mapping and the terminal starting its shell). It never becomes
+/// a plain `app` — that record would relaunch the terminal as an app forever. A CDE restore
+/// wrapper in its argv decodes as for apps; otherwise it is an idle terminal in the terminal
+/// process's own cwd (empty when unreadable, which restore resolves to the root or `$HOME`).
+fn terminal_fallback_record(
+    argv: Option<&[String]>,
+    exec_flag: &str,
+    terminal_cwd: Option<PathBuf>,
+) -> WindowRecord {
+    use crucible_persist::capture::{CdeWrapper, decode_cde_wrapper};
+    match argv.and_then(|a| decode_cde_wrapper(a, exec_flag)) {
+        Some(CdeWrapper::App(cap)) => WindowRecord::App {
+            app_id: cap.app_id,
+            cmdline: Some(cap.cmdline),
+        },
+        Some(CdeWrapper::Terminal(cap)) => WindowRecord::Terminal {
+            cwd: cap.cwd,
+            command: cap.command,
+        },
+        None => WindowRecord::Terminal {
+            cwd: terminal_cwd.unwrap_or_default(),
+            command: None,
+        },
+    }
+}
+
 fn read_argv(pid: u32) -> Option<Vec<String>> {
     let bytes = std::fs::read(proc_root().join(pid.to_string()).join("cmdline")).ok()?;
     Some(crucible_persist::capture::parse_cmdline(&bytes))
@@ -1397,6 +1424,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     command: cap.command,
                 };
             }
+            return terminal_fallback_record(
+                read_argv(pid).as_deref(),
+                &self.config.terminal.exec_flag,
+                std::fs::read_link(proc_root().join(pid.to_string()).join("cwd")).ok(),
+            );
         }
         let argv = pid.and_then(read_argv);
         app_fallback_record(
@@ -3205,6 +3237,54 @@ mod tests {
             WindowRecord::App {
                 app_id: None,
                 cmdline: None
+            }
+        );
+    }
+
+    #[test]
+    fn uncaptured_terminal_never_becomes_an_app() {
+        let v = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        // A bare terminal saved before its shell started (the host-b 2026-10-27 regression).
+        let bare = v(&["ghostty", "--gtk-single-instance=false"]);
+        assert_eq!(
+            terminal_fallback_record(Some(&bare), "-e", Some("/w".into())),
+            WindowRecord::Terminal {
+                cwd: "/w".into(),
+                command: None
+            }
+        );
+        assert_eq!(
+            terminal_fallback_record(None, "-e", None),
+            WindowRecord::Terminal {
+                cwd: PathBuf::new(),
+                command: None
+            }
+        );
+        // A pending restore banner still decodes to its command.
+        let resume = v(&[
+            "g",
+            "-e",
+            "/x/crucible",
+            "resume",
+            "--cwd",
+            "/p",
+            "--",
+            "htop",
+        ]);
+        assert_eq!(
+            terminal_fallback_record(Some(&resume), "-e", Some("/w".into())),
+            WindowRecord::Terminal {
+                cwd: "/p".into(),
+                command: Some("htop".into())
+            }
+        );
+        // A relaunch placeholder whose child already exited keeps its app record.
+        let relaunch = v(&["g", "-e", "/x/crucible", "relaunch", "--", "firefox"]);
+        assert_eq!(
+            terminal_fallback_record(Some(&relaunch), "-e", Some("/w".into())),
+            WindowRecord::App {
+                app_id: None,
+                cmdline: Some("firefox".into())
             }
         );
     }
