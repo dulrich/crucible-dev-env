@@ -131,7 +131,7 @@ pub fn run_winit() {
 
     let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
     state.apply_config(crate::config::load_startup_config());
-    // Persistence: seed rename, IPC socket, 1 s auto-save/config tick, startup picker.
+    // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
     state.start_persistence();
     state
         .shm_state
@@ -139,6 +139,8 @@ pub fn run_winit() {
     state.space.map_output(&output, (0, 0));
     // Adopt the model's initial output for this single winit output and size it to the real pixels.
     state.register_output(&output, crucible_layout::Rect::new(0, 0, size.w, size.h));
+    // The output exists now: restore the last session or open the cold-start picker.
+    state.start_session();
 
     // Bring up XWayland so X11 apps run alongside Wayland clients. On readiness this exports
     // `DISPLAY` and attaches the X11 window manager; see `crate::xwayland`.

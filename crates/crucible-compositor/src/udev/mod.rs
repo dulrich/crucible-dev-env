@@ -216,7 +216,7 @@ pub fn run_udev() {
     };
     let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
     state.apply_config(crate::config::load_startup_config());
-    // Persistence: seed rename, IPC socket, 1 s auto-save/config tick, startup picker.
+    // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
     state.start_persistence();
 
     // Initialize the udev backend (GPU enumeration + hotplug).
@@ -321,6 +321,11 @@ pub fn run_udev() {
             error!("Skipping device {device_id}: {err}");
         }
     }
+
+    // The initial connectors registered their outputs synchronously above (`device_added` ->
+    // `device_changed` -> `connector_connected` -> `register_output`): restore the last session or
+    // open the cold-start picker now, before hotplug is driven.
+    state.start_session();
 
     // Advertise the primary GPU's SHM formats to clients.
     if let Ok(renderer) = state.backend_data.gpus.single_renderer(&primary_gpu) {

@@ -78,6 +78,9 @@ pub enum Action {
     /// are ended. Refused on the output's last workspace or while a restore is pending.
     /// `Super+Shift+W`.
     CloseWorkspace,
+    /// Save and close every open workspace (as [`Action::CloseWorkspace`] does), leaving one fresh
+    /// seed workspace per output. Unbound by default.
+    CloseAllWorkspaces,
     /// Switch to the workspace pinned to slot `n` (0-9); an unpinned slot is a no-op.
     /// `Super+<digit>`.
     Slot(u8),
@@ -132,6 +135,7 @@ impl std::fmt::Display for Action {
             Self::NewWorkspace => f.write_str("new-workspace"),
             Self::MoveWindowToWorkspace(n) => write!(f, "move-window-to-workspace {n}"),
             Self::CloseWorkspace => f.write_str("close-workspace"),
+            Self::CloseAllWorkspaces => f.write_str("close-all-workspaces"),
             Self::Slot(n) => write!(f, "slot {n}"),
             Self::PinSlot(n) => write!(f, "pin-slot {n}"),
             Self::MoveWorkspaceToOutput(n) => write!(f, "move-workspace-to-output {n}"),

@@ -41,6 +41,14 @@ focus-follows-mouse #false
 
 `#true` (default) or `#false`. When on, moving the pointer into a window or pane focuses it; when off, only clicking does. This replaces the old `--no-focus-follows-mouse` flag and `CDE_FOCUS_FOLLOWS_MOUSE` variable, which are gone.
 
+### `restore-session`
+
+```kdl
+restore-session #false
+```
+
+`#true` (default) or `#false`. When on, CDE records the open workspaces per output and the focused one in `$XDG_STATE_HOME/cde/session.kdl` (beside the `workspaces/` store) and reopens them at startup, with no seed workspace and no picker. Workspaces no longer saved on disk are skipped; workspaces of a disconnected output open on the first output. With nothing restorable, or when off, startup opens a seed workspace and the picker (when saved workspaces exist) as before.
+
 ### `picker`
 
 ```kdl
@@ -125,6 +133,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `new-workspace` | Create and switch to a new workspace |
 | `move-window-to-workspace <n>` | Send the focused window `n` workspaces over |
 | `close-workspace` | Save, then close the active workspace and end its windows (refused on the output's last workspace) |
+| `close-all-workspaces` | Save and close every open workspace, leaving one fresh workspace per output (unbound by default) |
 | `move-workspace-to-output <n>` | Send the active workspace `n` outputs over (wraparound) |
 | `slot <n>` | Switch to the workspace pinned to slot `n` (0-9); a closed or saved one reopens on the monitor it was last viewed on, an unpinned slot does nothing |
 | `pin-slot <n>` | Pin the active workspace to slot `n` (0-9); pins persist in `$XDG_STATE_HOME/cde/slots.kdl` |
@@ -150,6 +159,7 @@ tiling {
     app gap=0 ring=0
 }
 focus-follows-mouse #true
+restore-session #true
 picker {
     root "<code-root>"
 }

@@ -77,6 +77,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.close_workspace();
                 return;
             }
+            Action::CloseAllWorkspaces => {
+                self.close_all_workspaces();
+                return;
+            }
             Action::Slot(n) => {
                 self.slot_open(n);
                 return;
@@ -207,6 +211,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
         | Action::ToggleHeader
         | Action::RenameWorkspace
         | Action::CloseWorkspace
+        | Action::CloseAllWorkspaces
         | Action::MoveWorkspaceToOutput(_)
         | Action::Slot(_)
         | Action::PinSlot(_)

@@ -178,7 +178,7 @@ impl Slots {
 }
 
 /// 1-based (line, column) of a char offset.
-fn line_col(text: &str, offset: usize) -> (usize, usize) {
+pub(crate) fn line_col(text: &str, offset: usize) -> (usize, usize) {
     let mut line = 1;
     let mut col = 1;
     for (i, c) in text.chars().enumerate() {

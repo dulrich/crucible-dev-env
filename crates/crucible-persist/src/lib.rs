@@ -10,6 +10,7 @@
 //! - the KDL workspace file format ([`WorkspaceRecord::to_kdl`] / [`WorkspaceRecord::from_kdl`]);
 //! - the on-disk [`store`] (atomic save, load, list) under `$XDG_STATE_HOME/cde/workspaces/`;
 //! - the named workspace [`slots`] (`Super+<digit>` pins) in `$XDG_STATE_HOME/cde/slots.kdl`, a sibling of the store;
+//! - the [`session`] record (open workspaces per output, focus) in `$XDG_STATE_HOME/cde/session.kdl`, also a sibling;
 //! - `/proc` cwd + foreground-command capture ([`capture`]) for external terminals;
 //! - the auto-save throttle ([`should_save`]).
 //!
@@ -23,6 +24,7 @@ mod error;
 mod format;
 mod policy;
 mod record;
+pub mod session;
 pub mod slots;
 pub mod store;
 

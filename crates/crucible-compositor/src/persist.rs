@@ -20,6 +20,7 @@ use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime};
 
 use crucible_layout::{OutputId, PaneId, Rect, WindowId, WorkspaceId, World};
+use crucible_persist::session::{Session, plan_restore, session_path};
 use crucible_persist::slots::{Slots, slots_path};
 use crucible_persist::{WindowRecord, WorkspaceRecord, store};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
@@ -352,6 +353,10 @@ pub struct PersistState {
     /// Handles of every CDE-spawned child, kept so exited ones are reaped (never reap-any).
     children: Vec<Child>,
     config_mtime: Option<SystemTime>,
+    /// The session record last written (an unchanged session writes nothing).
+    session_written: Option<Session>,
+    /// Whether the startup session step ran (the record is written only afterwards).
+    session_started: bool,
 }
 
 impl PersistState {
@@ -376,6 +381,8 @@ impl PersistState {
             warm_counter: 0,
             children: Vec::new(),
             config_mtime: None,
+            session_written: None,
+            session_started: false,
         }
     }
 
@@ -814,17 +821,14 @@ fn config_mtime() -> Option<SystemTime> {
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
-    /// One-time persistence startup, called by both backends right after the startup config is
-    /// applied: renames the seed workspace off a saved name, binds the IPC socket, arms the 1 s
-    /// tick, and opens the picker when saved workspaces exist.
+    /// One-time persistence init, called by both backends right after the startup config is
+    /// applied (before any output exists): loads the slot pins, binds the IPC socket and arms the
+    /// 1 s tick. The output-dependent half is [`Self::start_session`].
     pub fn start_persistence(&mut self) {
         match Slots::load(&slots_path(&self.persist.store_dir)) {
             Ok(slots) => self.persist.slots = slots,
             Err(err) => warn!(%err, "cannot read the slot pins; starting with none"),
         }
-        let saved = self.persist.saved_names();
-        let seed = self.layout.world.active_workspace_id();
-        self.rename_seed_off_saved(seed);
         self.start_ipc();
         self.persist.config_mtime = config_mtime();
         let timer = self
@@ -836,10 +840,215 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Err(err) = timer {
             error!(%err, "cannot arm the persistence timer; auto-save disabled");
         }
-        if !saved.is_empty() {
+    }
+
+    /// The startup session step, called once by each backend after its initial outputs are
+    /// registered: renames the seed off a saved name, then reopens the last session when
+    /// `restore-session` is on and the record yields a plan; otherwise (cold start) opens the
+    /// picker when saved workspaces exist. Then pre-warms the overlay host. Idempotent.
+    pub fn start_session(&mut self) {
+        if self.persist.session_started {
+            return;
+        }
+        self.persist.session_started = true;
+        let saved = self.persist.saved_names();
+        let seed = self.layout.world.active_workspace_id();
+        self.rename_seed_off_saved(seed);
+        let restored = self.config.restore_session && self.restore_session(&saved);
+        if !restored && !saved.is_empty() {
             self.open_picker(false);
         }
         self.start_warm_overlay();
+        self.write_session();
+    }
+
+    /// Reopens the workspaces named by the session record. `false` (cold start) when there is no
+    /// record, it cannot be read, or none of its workspaces could be restored.
+    fn restore_session(&mut self, saved: &HashSet<String>) -> bool {
+        let record = match Session::load(&session_path(&self.persist.store_dir)) {
+            Ok(Some(record)) => record,
+            Ok(None) => return false,
+            Err(err) => {
+                warn!(%err, "cannot read the session record; cold start");
+                return false;
+            }
+        };
+        let connected = self.connected_outputs();
+        let names: Vec<String> = connected.iter().map(|(n, _)| n.clone()).collect();
+        let Some(plan) = plan_restore(&record, saved, &names) else {
+            if record.outputs.iter().any(|o| !o.workspaces.is_empty()) {
+                warn!("no workspace of the last session is saved; cold start");
+            }
+            return false;
+        };
+        let seeds: Vec<WorkspaceId> = self.live_workspaces().into_iter().map(|(_, w)| w).collect();
+        let mut restored = false;
+        for out in &plan.outputs {
+            for name in &out.workspaces {
+                let outcome = self
+                    .persist
+                    .file_of(name)
+                    .and_then(|p| store::load(&p).map_err(|e| e.to_string()))
+                    .and_then(|r| self.restore_on(r, Some(&out.output)));
+                match outcome {
+                    Ok(()) => restored = true,
+                    Err(reason) => warn!(name, reason, "session workspace not restored"),
+                }
+            }
+        }
+        if !restored {
+            warn!("no workspace of the last session could be restored; cold start");
+            return false;
+        }
+        // Drop the (empty) seeds the restore replaced; an output's last workspace stays.
+        for ws in seeds {
+            let empty = self.layout.world.workspace(ws).is_some_and(|w| {
+                w.panes()
+                    .iter()
+                    .filter_map(|p| self.layout.world.pane(*p))
+                    .all(|p| p.windows.is_empty())
+            });
+            if empty
+                && self
+                    .with_model(|w| w.remove_workspace(ws).map(|_| ()))
+                    .is_ok()
+            {
+                self.persist.roots.remove(&ws);
+                self.persist.last_output.remove(&ws);
+            }
+        }
+        let id_of = |name: &str| connected.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
+        for out in &plan.outputs {
+            let (Some(oid), Some(ws)) = (
+                id_of(&out.output),
+                out.focused
+                    .as_deref()
+                    .and_then(|n| self.layout.world.workspace_by_name(n)),
+            ) else {
+                continue;
+            };
+            if let Err(err) = self.with_model(|w| {
+                w.set_focused_output(oid)?;
+                w.switch_workspace(ws)
+            }) {
+                warn!(%err, "cannot restore an output's focused workspace");
+            }
+        }
+        let focus = plan
+            .focused_output
+            .as_deref()
+            .or(plan.outputs.first().map(|o| o.output.as_str()))
+            .and_then(id_of);
+        if let Some(oid) = focus {
+            if let Err(err) = self.with_model(|w| w.set_focused_output(oid)) {
+                warn!(%err, "cannot restore the focused output");
+            }
+        }
+        info!("last session restored");
+        true
+    }
+
+    /// Connected (Space-mapped, model-bound) outputs as `(connector name, model id)`.
+    fn connected_outputs(&self) -> Vec<(String, OutputId)> {
+        self.space
+            .outputs()
+            .filter_map(|o| Some((o.name(), crate::layout::model_output_id(o)?)))
+            .collect()
+    }
+
+    /// The live session: each connected output's workspaces in stack order and its active one,
+    /// plus the focused output.
+    fn capture_session(&self) -> Session {
+        let world = &self.layout.world;
+        let mut connected = self.connected_outputs();
+        connected.sort_by_key(|(_, id)| *id);
+        let name_of = |ws: WorkspaceId| world.workspace(ws).map(|w| w.name.clone());
+        let outputs = connected
+            .iter()
+            .filter_map(|(name, id)| {
+                let o = world.output(*id)?;
+                Some(crucible_persist::session::OutputSession {
+                    output: name.clone(),
+                    workspaces: o.workspaces.iter().filter_map(|w| name_of(*w)).collect(),
+                    focused: name_of(o.active_workspace()),
+                })
+            })
+            .collect();
+        let focused = world.focused_output();
+        Session {
+            outputs,
+            focused_output: connected
+                .into_iter()
+                .find(|(_, id)| *id == focused)
+                .map(|(n, _)| n),
+        }
+    }
+
+    /// Writes `session.kdl` when the live session differs from the last written one. A no-op
+    /// before [`Self::start_session`] (the startup seed must never replace the last record).
+    fn write_session(&mut self) {
+        if !self.persist.session_started {
+            return;
+        }
+        let session = self.capture_session();
+        if self.persist.session_written.as_ref() == Some(&session) {
+            return;
+        }
+        match session.save(&session_path(&self.persist.store_dir)) {
+            Ok(()) => self.persist.session_written = Some(session),
+            Err(err) => warn!(%err, "cannot write the session record"),
+        }
+    }
+
+    /// Saves and closes every open workspace (`close-all-workspaces`), leaving one fresh seed per
+    /// output. Each output gets its seed first (so none is ever its last workspace), then each other
+    /// workspace is closed exactly as `close-workspace` does; one with a pending restore is skipped.
+    pub(crate) fn close_all_workspaces(&mut self) {
+        self.flush_workspaces();
+        let focused = self.layout.world.focused_output();
+        let outputs: Vec<OutputId> = self.layout.world.output_ids().collect();
+        for output in outputs {
+            if let Err(err) = self.with_model(|w| w.set_focused_output(output)) {
+                warn!(%err, "close-all-workspaces: cannot focus an output");
+                continue;
+            }
+            let saved = self.persist.saved_names();
+            let name = new_workspace_name(&self.layout.world, &saved);
+            let mut seed = None;
+            self.update_model(|w| seed = Some(w.new_workspace(name)));
+            let seed = seed.expect("set");
+            let others: Vec<WorkspaceId> = self
+                .layout
+                .world
+                .output(output)
+                .map(|o| {
+                    o.workspaces
+                        .iter()
+                        .copied()
+                        .filter(|w| *w != seed)
+                        .collect()
+                })
+                .unwrap_or_default();
+            for ws in others {
+                if self.workspace_has_pending(ws) {
+                    info!(
+                        ?ws,
+                        "close-all-workspaces: a restore is still pending; skipping"
+                    );
+                    continue;
+                }
+                if self.with_model(|w| w.switch_workspace(ws)).is_ok() {
+                    self.close_workspace();
+                }
+            }
+            if let Err(err) = self.with_model(|w| w.switch_workspace(seed)) {
+                warn!(%err, "close-all-workspaces: cannot show the fresh seed");
+            }
+        }
+        if let Err(err) = self.with_model(|w| w.set_focused_output(focused)) {
+            warn!(%err, "close-all-workspaces: cannot restore the focused output");
+        }
+        self.write_session();
     }
 
     /// Renames seed workspace `ws` to a fresh auto-name when its name is already saved on disk, so
@@ -992,12 +1201,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         self.warm_reaped(&reaped);
         self.save_dirty(now, TICK);
+        self.write_session();
         self.poll_config();
     }
 
     /// Writes every dirty workspace now, bypassing the interval (`save`, `Super+Shift+Q`).
     pub fn flush_workspaces(&mut self) {
         self.save_dirty(Instant::now(), Duration::ZERO);
+        self.write_session();
     }
 
     /// Removes the IPC socket file (clean quit).
@@ -2057,16 +2268,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     fn restore(&mut self, record: WorkspaceRecord) -> Result<(), String> {
-        let connected: Vec<(String, OutputId)> = self
-            .space
-            .outputs()
-            .filter_map(|o| Some((o.name(), crate::layout::model_output_id(o)?)))
-            .collect();
-        let output = restore_target(
-            record.output.as_deref(),
-            &connected,
-            self.layout.world.focused_output(),
-        );
+        let wanted = record.output.clone();
+        self.restore_on(record, wanted.as_deref())
+    }
+
+    /// Restores `record` onto the connected output named `wanted` (else the focused output).
+    fn restore_on(&mut self, record: WorkspaceRecord, wanted: Option<&str>) -> Result<(), String> {
+        let connected = self.connected_outputs();
+        let output = restore_target(wanted, &connected, self.layout.world.focused_output());
         let mut created = None;
         self.with_model(|w| {
             // `switch_workspace` only searches the focused output, so focus the target first.

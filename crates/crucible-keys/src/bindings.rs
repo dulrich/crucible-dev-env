@@ -549,6 +549,7 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
         "cycle-workspace" => unary(Action::CycleWorkspace(delta(words.get(1))?)),
         "move-window-to-workspace" => unary(Action::MoveWindowToWorkspace(delta(words.get(1))?)),
         "close-workspace" => nullary(Action::CloseWorkspace),
+        "close-all-workspaces" => nullary(Action::CloseAllWorkspaces),
         "move-workspace-to-output" => unary(Action::MoveWorkspaceToOutput(delta(words.get(1))?)),
         "slot" => unary(Action::Slot(slot_index(words.get(1))?)),
         "pin-slot" => unary(Action::PinSlot(slot_index(words.get(1))?)),
@@ -685,6 +686,7 @@ mod tests {
             ),
             ("new-workspace", Action::NewWorkspace),
             ("close-workspace", Action::CloseWorkspace),
+            ("close-all-workspaces", Action::CloseAllWorkspaces),
             (
                 "move-workspace-to-output -2",
                 Action::MoveWorkspaceToOutput(-2),
@@ -869,11 +871,19 @@ mod tests {
             Action::OpenSettings,
             Action::ToggleHeader,
             Action::Resize(Direction::Up),
+            Action::CloseAllWorkspaces,
         ] {
             let b = Bindings::with_overrides(&[pair("Super+F1", &action.to_string())]).unwrap();
             assert_eq!(b.get(sup(), Keysym::F1), Some(&action));
         }
         assert_eq!(Action::VtSwitch(3).to_string(), "vt-switch 3");
+        assert!(
+            !Bindings::default()
+                .entries()
+                .iter()
+                .any(|(_, a)| a == "close-all-workspaces"),
+            "close-all-workspaces is unbound by default"
+        );
     }
 
     #[test]

@@ -367,6 +367,8 @@ pub struct Config {
     pub tiling: TilingConfig,
     /// Whether pointer motion moves focus.
     pub focus_follows_mouse: bool,
+    /// Whether startup reopens the workspaces open at the last exit (`restore-session`).
+    pub restore_session: bool,
     /// Directories whose immediate subdirectories are workspace-picker candidates.
     pub picker_roots: Vec<PathBuf>,
     /// Overlay border, style and terminal arguments.
@@ -383,6 +385,7 @@ impl Default for Config {
             terminal: TerminalConfig::default(),
             tiling: TilingConfig::default(),
             focus_follows_mouse: true,
+            restore_session: true,
             picker_roots: Vec::new(),
             overlay: OverlayConfig::default(),
             header: HeaderConfig::default(),
@@ -456,6 +459,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "terminal"
                 | "tiling"
                 | "focus-follows-mouse"
+                | "restore-session"
                 | "picker"
                 | "overlay"
                 | "header"
@@ -482,6 +486,12 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "focus-follows-mouse" => {
                 no_properties(text, node)?;
                 config.focus_follows_mouse = single_arg(text, node, "a #true or #false")?
+                    .as_bool()
+                    .ok_or_else(|| wrong_type(text, node, "argument".into(), "#true or #false"))?;
+            }
+            "restore-session" => {
+                no_properties(text, node)?;
+                config.restore_session = single_arg(text, node, "a #true or #false")?
                     .as_bool()
                     .ok_or_else(|| wrong_type(text, node, "argument".into(), "#true or #false"))?;
             }
@@ -969,6 +979,19 @@ binds {
         assert!(c.focus_follows_mouse);
         assert!(c.picker_roots.is_empty());
         assert!(c.binds.is_empty());
+    }
+
+    #[test]
+    fn restore_session_defaults_on_parses_and_rejects_non_booleans() {
+        assert!(Config::default().restore_session);
+        assert!(!parse("restore-session #false\n").unwrap().restore_session);
+        assert!(parse("restore-session #true\n").unwrap().restore_session);
+        let (err, _) = err_at("restore-session \"no\"\n");
+        assert!(matches!(err, ConfigError::WrongType { .. }));
+        let (err, _) = err_at("restore-session\n");
+        assert!(matches!(err, ConfigError::MissingArgument { .. }));
+        let (err, _) = err_at("restore-session #true\nrestore-session #false\n");
+        assert!(matches!(err, ConfigError::Duplicate { .. }));
     }
 
     #[test]
