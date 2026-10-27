@@ -1704,6 +1704,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
                     "latency: request→map"
                 );
+                // Pre-warm the next host now, not at close: an overlay replaced directly by
+                // another (keys → launch) would otherwise always take the cold path.
+                self.start_warm_overlay();
                 true
             }
         }
