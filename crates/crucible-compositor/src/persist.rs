@@ -781,6 +781,7 @@ pub fn build_candidates(
             kind: CandidateKind::Live,
             name,
             path,
+            slot: None,
         })
         .collect();
     out.extend(
@@ -791,14 +792,26 @@ pub fn build_candidates(
                 kind: CandidateKind::Saved,
                 name,
                 path: None,
+                slot: None,
             }),
     );
     out.extend(folders.into_iter().map(|(name, path)| Candidate {
         kind: CandidateKind::Folder,
         name,
         path: Some(path),
+        slot: None,
     }));
     out
+}
+
+/// Fills `slot` on live and saved candidates from `slot_of` (folders never carry one).
+pub fn apply_slots(candidates: &mut [Candidate], slot_of: impl Fn(&str) -> Option<u8>) {
+    for c in candidates
+        .iter_mut()
+        .filter(|c| c.kind != CandidateKind::Folder)
+    {
+        c.slot = slot_of(&c.name);
+    }
 }
 
 fn proc_root() -> &'static Path {
@@ -2276,7 +2289,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .into_iter()
             .map(|(n, _)| n)
             .collect();
-        build_candidates(live, saved, folder_entries(&self.config.picker_roots))
+        let mut out = build_candidates(live, saved, folder_entries(&self.config.picker_roots));
+        if self.config.picker_slots {
+            apply_slots(&mut out, |n| self.persist.slots.slot_of(n));
+        }
+        out
     }
 
     fn switch_to_live(&mut self, ws: WorkspaceId) -> Result<(), String> {
@@ -2972,6 +2989,30 @@ mod tests {
                 (CandidateKind::Live, "a"),
                 (CandidateKind::Saved, "z"),
                 (CandidateKind::Folder, "proj"),
+            ]
+        );
+    }
+
+    #[test]
+    fn apply_slots_fills_live_and_saved_but_never_folders() {
+        let mut c = build_candidates(
+            vec![("a".into(), None)],
+            vec!["z".into()],
+            vec![("a".into(), "/code/a".into())],
+        );
+        assert!(c.iter().all(|c| c.slot.is_none()));
+        apply_slots(&mut c, |n| match n {
+            "a" => Some(2),
+            "z" => Some(9),
+            _ => None,
+        });
+        let got: Vec<(CandidateKind, Option<u8>)> = c.iter().map(|c| (c.kind, c.slot)).collect();
+        assert_eq!(
+            got,
+            [
+                (CandidateKind::Live, Some(2)),
+                (CandidateKind::Saved, Some(9)),
+                (CandidateKind::Folder, None),
             ]
         );
     }

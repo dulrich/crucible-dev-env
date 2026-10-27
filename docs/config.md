@@ -67,10 +67,13 @@ CDE implements `ext-session-lock-v1`, so any Wayland locker (swaylock, gtklock, 
 picker {
     root "/home/me/code"
     root "/srv/work"
+    slots #true
 }
 ```
 
 Directories whose immediate subdirectories become workspace-picker candidates. Zero or more `root` nodes, each one non-empty path string; there is no `~` expansion. Default: none.
+
+`slots` takes one boolean (`#true` or `#false`, at most once; default `#false`). When `#true`, picker rows for workspaces pinned to a slot (via `Super+Shift+<n>` or the `pin-slot` action) show a `⌘<n>` badge before the name, e.g. `live   ⌘3 work`; folder rows never carry one, and the badge is not part of the fuzzy-filtered text.
 
 ### `overlay`
 

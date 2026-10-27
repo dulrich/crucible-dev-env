@@ -13,6 +13,9 @@ use crate::fuzzy;
 use crate::style::Style;
 use crate::tty::{RawGuard, window_size};
 
+/// The command-key glyph (`⌘`) prefixing a pinned row's slot number; matches the header's.
+const SUPER_GLYPH: char = '\u{2318}';
+
 /// Usage text for `crucible pick --help`.
 pub const USAGE: &str = "usage: crucible pick [--rename <encoded-name>]\n\nThe CDE workspace picker (needs $CDE_SOCKET; CDE runs it in an overlay on Super+P).\nType to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter opens the selection (or creates a new\nworkspace from the typed name); Esc or Ctrl+C closes.\n\n  --rename <name>   single-line rename prompt prefilled with <name> (percent-encoded: %25 %3A %09 %0A %0D)\n";
 
@@ -353,15 +356,18 @@ impl Picker {
                     CandidateKind::Saved => "saved ",
                     CandidateKind::Folder => "folder",
                 };
+                let badge = c
+                    .slot
+                    .map_or(String::new(), |n| format!("{SUPER_GLYPH}{n} "));
                 match (c.kind, &c.path) {
                     (CandidateKind::Folder, Some(p)) => {
                         format!(
-                            "{kind} {}  {}",
+                            "{kind} {badge}{}  {}",
                             sanitize(&c.name),
                             sanitize(&p.to_string_lossy())
                         )
                     }
-                    _ => format!("{kind} {}", sanitize(&c.name)),
+                    _ => format!("{kind} {badge}{}", sanitize(&c.name)),
                 }
             }
         }
@@ -508,7 +514,21 @@ mod tests {
             kind,
             name: name.into(),
             path: path.map(PathBuf::from),
+            slot: None,
         }
+    }
+
+    #[test]
+    fn row_text_shows_slot_badge_only_when_present() {
+        let mut p = sample();
+        let live = p
+            .rows()
+            .iter()
+            .position(|r| matches!(r, Row::Candidate(0)))
+            .unwrap();
+        assert_eq!(p.row_text(&p.rows()[live]), "live   alpha");
+        p.candidates[0].slot = Some(3);
+        assert_eq!(p.row_text(&p.rows()[live]), "live   \u{2318}3 alpha");
     }
 
     fn sample() -> Picker {

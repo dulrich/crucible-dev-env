@@ -252,15 +252,25 @@ pub struct Candidate {
     pub name: String,
     /// Folder path, or a live workspace's root; `None` otherwise.
     pub path: Option<PathBuf>,
+    /// The `Super+<n>` slot the workspace is pinned to (0-9), when the compositor chose to send
+    /// slots (`picker { slots #true }`); always `None` for folders and when the setting is off.
+    pub slot: Option<u8>,
 }
 
-/// Formats candidates as the `ok` payload: TAB-separated `kind:name[:path]` items.
+/// Formats candidates as the `ok` payload: TAB-separated `kind[#slot]:name[:path]` items. The
+/// optional `#<digit>` rides on the kind token, which never contains encoded content, so it
+/// cannot clash with `:` (escaped by [`encode_field`]) in names or paths.
 #[must_use]
 pub fn format_candidates(items: &[Candidate]) -> String {
     items
         .iter()
         .map(|c| {
-            let mut s = format!("{}:{}", c.kind.as_str(), encode_field(&c.name));
+            let mut s = c.kind.as_str().to_string();
+            if let Some(n) = c.slot {
+                s.push_str(&format!("#{n}"));
+            }
+            s.push(':');
+            s.push_str(&encode_field(&c.name));
             if let Some(p) = &c.path {
                 s.push(':');
                 s.push_str(&encode_field(&p.to_string_lossy()));
@@ -281,7 +291,19 @@ pub fn parse_candidates(payload: &str) -> Option<Vec<Candidate>> {
         .split('\t')
         .map(|item| {
             let mut parts = item.split(':');
-            let kind = match parts.next()? {
+            let head = parts.next()?;
+            let (head, slot) = match head.split_once('#') {
+                Some((k, n)) => {
+                    let mut digits = n.chars();
+                    let d = digits.next()?.to_digit(10)?;
+                    if digits.next().is_some() {
+                        return None;
+                    }
+                    (k, Some(u8::try_from(d).ok()?))
+                }
+                None => (head, None),
+            };
+            let kind = match head {
                 "live" => CandidateKind::Live,
                 "saved" => CandidateKind::Saved,
                 "folder" => CandidateKind::Folder,
@@ -295,7 +317,12 @@ pub fn parse_candidates(payload: &str) -> Option<Vec<Candidate>> {
             if parts.next().is_some() {
                 return None;
             }
-            Some(Candidate { kind, name, path })
+            Some(Candidate {
+                kind,
+                name,
+                path,
+                slot,
+            })
         })
         .collect()
 }
@@ -578,16 +605,19 @@ mod tests {
                 kind: CandidateKind::Live,
                 name: "a:b".into(),
                 path: Some(PathBuf::from("/r\toot")),
+                slot: None,
             },
             Candidate {
                 kind: CandidateKind::Saved,
                 name: "100%".into(),
                 path: None,
+                slot: None,
             },
             Candidate {
                 kind: CandidateKind::Folder,
                 name: "x\ny".into(),
                 path: Some(PathBuf::from("/p:q/x\ny")),
+                slot: None,
             },
         ];
         let payload = format_candidates(&items);
@@ -596,6 +626,33 @@ mod tests {
         assert_eq!(parse_candidates(&payload), Some(items));
         assert_eq!(parse_candidates(""), Some(vec![]));
         assert_eq!(parse_candidates("weird:x"), None);
+    }
+
+    #[test]
+    fn candidates_round_trip_slots_and_accept_legacy_payloads() {
+        let items = vec![
+            Candidate {
+                kind: CandidateKind::Live,
+                name: "a:b#3".into(),
+                path: Some(PathBuf::from("/r:s")),
+                slot: Some(3),
+            },
+            Candidate {
+                kind: CandidateKind::Saved,
+                name: "z".into(),
+                path: None,
+                slot: Some(0),
+            },
+        ];
+        let payload = format_candidates(&items);
+        assert_eq!(payload, "live#3:a%3Ab#3:/r%3As\tsaved#0:z");
+        assert_eq!(parse_candidates(&payload), Some(items));
+        let legacy = parse_candidates("live:a:/r\tsaved:b").unwrap();
+        assert!(legacy.iter().all(|c| c.slot.is_none()));
+        assert_eq!(legacy.len(), 2);
+        assert_eq!(parse_candidates("live#:a"), None);
+        assert_eq!(parse_candidates("live#12:a"), None);
+        assert_eq!(parse_candidates("live#x:a"), None);
     }
 
     #[test]

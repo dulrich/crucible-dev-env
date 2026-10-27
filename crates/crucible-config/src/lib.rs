@@ -374,6 +374,8 @@ pub struct Config {
     pub restore_session: bool,
     /// Directories whose immediate subdirectories are workspace-picker candidates.
     pub picker_roots: Vec<PathBuf>,
+    /// Whether the workspace picker shows `⌘<n>` badges on pinned rows (`picker { slots }`).
+    pub picker_slots: bool,
     /// Overlay border, style and terminal arguments.
     pub overlay: OverlayConfig,
     /// Workspace header strip mode, font and size.
@@ -393,6 +395,7 @@ impl Default for Config {
             focus_follows_mouse: true,
             restore_session: true,
             picker_roots: Vec::new(),
+            picker_slots: false,
             overlay: OverlayConfig::default(),
             header: HeaderConfig::default(),
             binds: Vec::new(),
@@ -503,7 +506,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                     .as_bool()
                     .ok_or_else(|| wrong_type(text, node, "argument".into(), "#true or #false"))?;
             }
-            "picker" => config.picker_roots = parse_picker(text, node)?,
+            "picker" => (config.picker_roots, config.picker_slots) = parse_picker(text, node)?,
             "overlay" => config.overlay = parse_overlay(text, node)?,
             "header" => config.header = parse_header(text, node)?,
             "binds" => config.binds = parse_binds(text, node)?,
@@ -816,22 +819,45 @@ fn block_children<'a>(text: &str, node: &'a KdlNode) -> Result<&'a [KdlNode], Co
     Ok(node.children().map_or(&[][..], KdlDocument::nodes))
 }
 
-fn parse_picker(text: &str, node: &KdlNode) -> Result<Vec<PathBuf>, ConfigError> {
+/// Parses the `picker` block into its `root` directories and the `slots` badge setting.
+fn parse_picker(text: &str, node: &KdlNode) -> Result<(Vec<PathBuf>, bool), ConfigError> {
     let mut roots = Vec::new();
+    let mut slots: Option<bool> = None;
     for child in block_children(text, node)? {
-        if child.name().value() != "root" {
-            return Err(ConfigError::UnknownNode {
-                at: locate(text, child.span().offset()),
-                name: node_name(child),
-                context: "picker",
-            });
+        let at = locate(text, child.span().offset());
+        match child.name().value() {
+            "root" => {
+                no_properties(text, child)?;
+                let dir = string_args(text, child, &["a directory string"])?[0];
+                nonempty(text, child, "directory", dir)?;
+                roots.push(PathBuf::from(dir));
+            }
+            "slots" => {
+                if slots.is_some() {
+                    return Err(ConfigError::Duplicate {
+                        at,
+                        name: "slots".to_string(),
+                    });
+                }
+                no_properties(text, child)?;
+                slots = Some(
+                    single_arg(text, child, "a #true or #false")?
+                        .as_bool()
+                        .ok_or_else(|| {
+                            wrong_type(text, child, "argument".into(), "#true or #false")
+                        })?,
+                );
+            }
+            _ => {
+                return Err(ConfigError::UnknownNode {
+                    at,
+                    name: node_name(child),
+                    context: "picker",
+                });
+            }
         }
-        no_properties(text, child)?;
-        let dir = string_args(text, child, &["a directory string"])?[0];
-        nonempty(text, child, "directory", dir)?;
-        roots.push(PathBuf::from(dir));
     }
-    Ok(roots)
+    Ok((roots, slots.unwrap_or(false)))
 }
 
 fn parse_overlay(text: &str, node: &KdlNode) -> Result<OverlayConfig, ConfigError> {
@@ -1334,6 +1360,20 @@ binds {
             let err = parse(&format!("header {{\n mode \"{bad}\"\n}}\n")).unwrap_err();
             assert!(err.to_string().contains("off, always, toggle"), "{err}");
         }
+    }
+
+    #[test]
+    fn picker_slots_setting() {
+        assert!(!Config::default().picker_slots);
+        assert!(!parse("picker {\n root \"/x\"\n}\n").unwrap().picker_slots);
+        let c = parse("picker {\n slots #true\n root \"/x\"\n}\n").unwrap();
+        assert!(c.picker_slots);
+        assert_eq!(c.picker_roots, vec![PathBuf::from("/x")]);
+        assert!(!parse("picker {\n slots #false\n}\n").unwrap().picker_slots);
+        let err = parse("picker {\n slots \"yes\"\n}\n").unwrap_err();
+        assert!(matches!(err, ConfigError::WrongType { .. }), "{err:?}");
+        let err = parse("picker {\n slots #true\n slots #false\n}\n").unwrap_err();
+        assert!(matches!(err, ConfigError::Duplicate { .. }), "{err:?}");
     }
 
     #[test]
