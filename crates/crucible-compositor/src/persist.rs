@@ -9,9 +9,13 @@
 //! ## Which windows are terminals
 //! By **PID provenance**, not app-id matching: every process CDE spawns through
 //! [`CrucibleState::spawn_process`] is remembered with its [`SpawnKind`], and a toplevel whose client PID
-//! is one of them — or has one among its `/proc` ancestors — of kind [`SpawnKind::Terminal`] is a
-//! terminal, captured with [`crucible_persist::capture_terminal`]. Everything else (apps from
-//! `run`, the picker overlay, unknown clients) is recorded as an `app`.
+//! is one of them (exact pid, no ancestor walk) of kind [`SpawnKind::Terminal`] is a terminal,
+//! captured with [`crucible_persist::capture_terminal`]. Everything else (apps from `run`, the
+//! picker overlay, unknown clients) is recorded as an `app` — with one exception: a non-terminal
+//! window whose own argv is a CDE restore wrapper (`crucible relaunch|resume …`, bare or run by
+//! the terminal after its exec flag) is recorded as the record the wrapper stands for (see
+//! [`crucible_persist::capture::decode_cde_wrapper`]), which may be a `terminal`, so restores
+//! never nest wrappers.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -596,25 +600,28 @@ pub fn restore_args(
     ]
 }
 
-/// The terminal arguments for `run-in-terminal`: `<exec-flag> <crucible> resume --now --cwd <dir>
-/// -- <command>` (the command is ONE element).
+/// The terminal arguments for `run-in-terminal` / `run-tui`: `<exec-flag> <crucible> resume --now
+/// [--exit] --cwd <dir> -- <command>` (the command is ONE element); `exit` (`run-tui`) closes the
+/// terminal when the command exits.
 #[must_use]
 pub fn run_in_terminal_args(
     exec_flag: &str,
     crucible: &Path,
     cwd: &Path,
     command: &str,
+    exit: bool,
 ) -> Vec<OsString> {
-    vec![
+    let mut args: Vec<OsString> = vec![
         exec_flag.into(),
         crucible.into(),
         "resume".into(),
         "--now".into(),
-        "--cwd".into(),
-        cwd.into(),
-        "--".into(),
-        command.into(),
-    ]
+    ];
+    if exit {
+        args.push("--exit".into());
+    }
+    args.extend(["--cwd".into(), cwd.into(), "--".into(), command.into()]);
+    args
 }
 
 /// A spawned child's `PATH`: `exe_dir` prepended to the inherited `PATH`, unless it is already an
@@ -818,10 +825,34 @@ fn proc_root() -> &'static Path {
     Path::new("/proc")
 }
 
-fn read_cmdline(pid: u32) -> Option<String> {
+/// The record for a non-terminal window: a CDE restore wrapper in its raw argv is decoded into the
+/// record it stands for (decode before joining); otherwise the plain `app` with the joined argv.
+fn app_fallback_record(
+    element_app_id: Option<String>,
+    argv: Option<&[String]>,
+    exec_flag: &str,
+) -> WindowRecord {
+    use crucible_persist::capture::{CdeWrapper, decode_cde_wrapper, join_command};
+    let argv = argv.filter(|a| !a.is_empty());
+    match argv.and_then(|a| decode_cde_wrapper(a, exec_flag)) {
+        Some(CdeWrapper::App(cap)) => WindowRecord::App {
+            app_id: cap.app_id.or(element_app_id),
+            cmdline: Some(cap.cmdline),
+        },
+        Some(CdeWrapper::Terminal(cap)) => WindowRecord::Terminal {
+            cwd: cap.cwd,
+            command: cap.command,
+        },
+        None => WindowRecord::App {
+            app_id: element_app_id,
+            cmdline: argv.map(join_command),
+        },
+    }
+}
+
+fn read_argv(pid: u32) -> Option<Vec<String>> {
     let bytes = std::fs::read(proc_root().join(pid.to_string()).join("cmdline")).ok()?;
-    let args = crucible_persist::capture::parse_cmdline(&bytes);
-    (!args.is_empty()).then(|| crucible_persist::capture::join_command(&args))
+    Some(crucible_persist::capture::parse_cmdline(&bytes))
 }
 
 fn element_app_id(element: &WindowElement) -> Option<String> {
@@ -1367,10 +1398,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 };
             }
         }
-        WindowRecord::App {
-            app_id: self.layout.element(id).and_then(element_app_id),
-            cmdline: pid.and_then(read_cmdline),
-        }
+        let argv = pid.and_then(read_argv);
+        app_fallback_record(
+            self.layout.element(id).and_then(element_app_id),
+            argv.as_deref(),
+            &self.config.terminal.exec_flag,
+        )
     }
 
     // ---- spawning ------------------------------------------------------------------------------
@@ -1478,10 +1511,28 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// # Errors
     /// As [`Self::run_checked`].
     pub fn run_in_terminal_checked(&mut self, cmd: &str) -> Result<u32, String> {
+        self.terminal_command_checked(cmd, "run-in-terminal", false)
+    }
+
+    /// `run-tui`: as [`Self::run_in_terminal_checked`], but `resume --exit` closes the terminal
+    /// when the program exits.
+    ///
+    /// # Errors
+    /// As [`Self::run_checked`].
+    pub fn run_tui_checked(&mut self, cmd: &str) -> Result<u32, String> {
+        self.terminal_command_checked(cmd, "run-tui", true)
+    }
+
+    fn terminal_command_checked(
+        &mut self,
+        cmd: &str,
+        label: &str,
+        exit: bool,
+    ) -> Result<u32, String> {
         let ws = self.layout.world.active_workspace_id();
         self.preflight(cmd, ws)
             .map_err(|word| format!("unknown command {word}"))?;
-        let crucible = Self::crucible_exe("run-in-terminal").ok_or("spawn failed")?;
+        let crucible = Self::crucible_exe(label).ok_or("spawn failed")?;
         let dir = self
             .persist
             .roots
@@ -1494,6 +1545,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             &crucible,
             &dir,
             cmd,
+            exit,
         ));
         let program = self.terminal_program();
         self.spawn_process(&program, &args, Some(&dir), SpawnKind::Terminal)
@@ -2179,6 +2231,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
             Request::RunInTerminal(cmd) => {
                 return match self.run_in_terminal_checked(&cmd) {
+                    Ok(_) => Response::Ok(String::new()),
+                    Err(reason) => Response::Err(reason),
+                };
+            }
+            Request::RunTui(cmd) => {
+                return match self.run_tui_checked(&cmd) {
                     Ok(_) => Response::Ok(String::new()),
                     Err(reason) => Response::Err(reason),
                 };
@@ -3061,7 +3119,13 @@ mod tests {
 
     #[test]
     fn run_in_terminal_args_keep_the_command_one_element() {
-        let args = run_in_terminal_args("-e", Path::new("/x/crucible"), Path::new("/w"), "a b; c");
+        let args = run_in_terminal_args(
+            "-e",
+            Path::new("/x/crucible"),
+            Path::new("/w"),
+            "a b; c",
+            false,
+        );
         let want: Vec<OsString> = [
             "-e",
             "/x/crucible",
@@ -3076,6 +3140,73 @@ mod tests {
         .map(OsString::from)
         .collect();
         assert_eq!(args, want);
+        let tui = run_in_terminal_args(
+            "-e",
+            Path::new("/x/crucible"),
+            Path::new("/w"),
+            "a b; c",
+            true,
+        );
+        assert_eq!(
+            tui[3..5],
+            [OsString::from("--now"), OsString::from("--exit")]
+        );
+        assert_eq!(tui.len(), want.len() + 1);
+    }
+
+    #[test]
+    fn app_fallback_decodes_wrappers_before_joining() {
+        let v = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let id = || Some("elem".to_string());
+        let wrapped = v(&[
+            "ghostty",
+            "-e",
+            "/x/crucible",
+            "relaunch",
+            "--",
+            "firefox -p",
+        ]);
+        assert_eq!(
+            app_fallback_record(id(), Some(&wrapped), "-e"),
+            WindowRecord::App {
+                app_id: id(),
+                cmdline: Some("firefox -p".into())
+            }
+        );
+        let tui = v(&[
+            "g",
+            "-e",
+            "/x/crucible",
+            "resume",
+            "--now",
+            "--exit",
+            "--cwd",
+            "/p",
+            "--",
+            "vim",
+        ]);
+        assert_eq!(
+            app_fallback_record(id(), Some(&tui), "-e"),
+            WindowRecord::Terminal {
+                cwd: "/p".into(),
+                command: Some("vim".into())
+            }
+        );
+        let plain = v(&["firefox", "--new"]);
+        assert_eq!(
+            app_fallback_record(id(), Some(&plain), "-e"),
+            WindowRecord::App {
+                app_id: id(),
+                cmdline: Some("firefox --new".into())
+            }
+        );
+        assert_eq!(
+            app_fallback_record(None, None, "-e"),
+            WindowRecord::App {
+                app_id: None,
+                cmdline: None
+            }
+        );
     }
 
     #[test]

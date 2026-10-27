@@ -12,7 +12,7 @@ Reload: WP-5 reloads on file change; until then restart.
 terminal "<command>" exec-flag="-e"
 ```
 
-The program spawned by `Super+Shift+Return` (the `run-terminal` action; `Super+Return` is now the launcher, `open-launcher`; `stack-window` is retired, every launch already stacks into the focused pane). Default: unset, which keeps the built-in lookup (`$TERMINAL`, else `foot`). `exec-flag` is the flag the terminal takes to run a program (default `-e`) and is used by the program launcher to run `Terminal=true` desktop entries (CDE exports the terminal and flag to children as `CDE_TERMINAL` and `CDE_TERMINAL_EXEC_FLAG`). The command must be non-empty; it is spawned directly (no shell), so give a path or a name on `$PATH`.
+The program spawned by `Super+Shift+Return` (the `run-terminal` action; `Super+Return` is now the launcher, `open-launcher`; `stack-window` is retired, every launch already stacks into the focused pane). Default: unset, which keeps the built-in lookup (`$TERMINAL`, else `foot`). `exec-flag` is the flag the terminal takes to run a program (default `-e`) and is used by the program launcher to run `Terminal=true` desktop entries and TUI rows (CDE exports the terminal and flag to children as `CDE_TERMINAL` and `CDE_TERMINAL_EXEC_FLAG`). The command must be non-empty; it is spawned directly (no shell), so give a path or a name on `$PATH`.
 
 ### `tiling`
 
@@ -88,7 +88,7 @@ Adds TUI programs to the program launcher (`Super+Return`), beside its built-in 
 
 Each `tui` node takes one or more string arguments (no properties); each is a bare program name or a glob, non-empty, containing no `/` and no `:`. In a glob, `*` matches any run of characters (possibly empty) and is the only wildcard. Duplicate entries are collapsed; a duplicate `launcher` block or any other child is an error.
 
-A program is listed only when it is found as an executable file on `PATH`; one that is not installed produces no row and no error. `PATH` is the one CDE spawns the launcher with (CDE's own plus the `crucible` executable's directory); there is no `PATH` setting. A glob lists every matching executable, the earlier `PATH` directory winning a duplicate name. Rows run the resolved absolute path in the configured terminal, and are omitted when the terminal is unknown.
+A program is listed only when it is found as an executable file on `PATH`; one that is not installed produces no row and no error. `PATH` is the one CDE spawns the launcher with (CDE's own plus the `crucible` executable's directory); there is no `PATH` setting. A glob lists every matching executable, the earlier `PATH` directory winning a duplicate name. Rows run the resolved absolute path in the configured terminal (CDE wraps it in `crucible resume --now --exit`), which closes when the program exits, and are omitted when the terminal is unknown.
 
 A program is not listed twice: if a desktop entry's `Exec` starts with the same program name (compared by basename, e.g. `Exec=htop`), only the desktop entry is shown. Wrapper commands such as `Exec=env FOO=1 vim` are not recognised, so such a program can appear twice.
 

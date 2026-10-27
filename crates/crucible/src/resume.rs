@@ -1,4 +1,4 @@
-//! `crucible resume [--now] --cwd <dir> [-- <command>]` — the restore banner CDE puts in a restored
+//! `crucible resume [--now] [--exit] --cwd <dir> [-- <command>]` — the restore banner CDE puts in a restored
 //! terminal: the old command waits until Enter; Ctrl+C or EOF gives a plain shell.
 //!
 //! Ctrl+C handling: while waiting, stdin is in raw mode (ISIG off), so Ctrl+C arrives as byte
@@ -8,6 +8,9 @@
 //! CDE's capture still records the command on the next save. `resume` installs no-op SIGINT and
 //! SIGQUIT handlers (caught, not ignored), so a Ctrl+C kills only the command; caught
 //! dispositions reset to default across `exec`, so the command keeps normal Ctrl+C semantics.
+//!
+//! `--exit` (only valid with `--now`, as CDE's `run-tui` sends it): when the command finishes, `resume`
+//! exits with the command's exit code instead of starting a shell, so the terminal window closes.
 
 use std::ffi::OsString;
 use std::io::Read;
@@ -18,7 +21,7 @@ use std::process::Command;
 use crate::tty::RawGuard;
 
 /// Usage text for `crucible resume --help`.
-pub const USAGE: &str = "usage: crucible resume [--now] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
+pub const USAGE: &str = "usage: crucible resume [--now [--exit]] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). With --now, --exit exits with the command's exit code instead of starting a shell afterwards (--exit without --now is a usage error). Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
 
 /// Parsed `resume` arguments.
 #[derive(Debug, PartialEq, Eq)]
@@ -29,6 +32,9 @@ pub struct ResumeArgs {
     pub command: Option<String>,
     /// `--now`: run the command immediately instead of waiting for Enter (a no-op without one).
     pub now: bool,
+    /// `--exit`: exit with the command's status instead of starting a shell (needs `--now`; a no-op
+    /// without a command).
+    pub exit: bool,
 }
 
 /// Parses the arguments after `resume`.
@@ -38,6 +44,7 @@ pub struct ResumeArgs {
 pub fn parse_args(args: &[String]) -> Result<ResumeArgs, String> {
     let mut cwd = None;
     let mut now = false;
+    let mut exit = false;
     let mut i = 0;
     let mut command = None;
     while i < args.len() {
@@ -53,6 +60,10 @@ pub fn parse_args(args: &[String]) -> Result<ResumeArgs, String> {
                 now = true;
                 i += 1;
             }
+            "--exit" => {
+                exit = true;
+                i += 1;
+            }
             "--" => {
                 match &args[i + 1..] {
                     [] => {}
@@ -64,10 +75,14 @@ pub fn parse_args(args: &[String]) -> Result<ResumeArgs, String> {
             other => return Err(format!("unexpected argument {other:?}")),
         }
     }
+    if exit && !now {
+        return Err("--exit requires --now".into());
+    }
     Ok(ResumeArgs {
         cwd: cwd.ok_or("--cwd <dir> is required")?,
         command,
         now,
+        exit,
     })
 }
 
@@ -135,29 +150,36 @@ pub fn run(args: &[String]) -> i32 {
     };
     ignore_interrupts_while_resident();
     if parsed.now || wait_for_choice() == Wait::Run {
-        run_command(&shell, &cmd);
+        let code = run_command(&shell, &cmd);
+        if parsed.exit {
+            return code.unwrap_or(0);
+        }
     }
     exec_shell(&shell)
 }
 
 /// Runs `$shell -c <cmd>` as a child (the command string is one argument, never re-split) and
-/// waits for it. Failures are reported; the caller execs the shell either way.
-fn run_command(shell: &OsString, cmd: &str) {
+/// waits for it. Failures are reported; the caller execs the shell either way (unless `--exit`).
+/// Returns the command's exit code, or `None` when it could not be determined.
+fn run_command(shell: &OsString, cmd: &str) -> Option<i32> {
     match Command::new(shell).arg("-c").arg(cmd).spawn() {
         Ok(mut child) => loop {
             match child.wait() {
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(e) => {
                     eprintln!("crucible resume: waiting for the command failed: {e}");
-                    break;
+                    break None;
                 }
-                Ok(_) => break,
+                Ok(status) => break status.code(),
             }
         },
-        Err(e) => eprintln!(
-            "crucible resume: cannot run {}: {e}",
-            shell.to_string_lossy()
-        ),
+        Err(e) => {
+            eprintln!(
+                "crucible resume: cannot run {}: {e}",
+                shell.to_string_lossy()
+            );
+            None
+        }
     }
 }
 
@@ -267,11 +289,25 @@ mod tests {
     }
 
     #[test]
+    fn exit_flag_parses_like_now_and_needs_now() {
+        let a = parse_args(&v(&["--now", "--exit", "--cwd", "/p", "--", "htop"])).unwrap();
+        assert!(a.now && a.exit);
+        let a = parse_args(&v(&["--exit", "--now", "--exit", "--cwd", "/p"])).unwrap();
+        assert!(a.exit && a.command.is_none());
+        let a = parse_args(&v(&["--now", "--cwd", "/p", "--", "--exit"])).unwrap();
+        assert!(!a.exit);
+        assert_eq!(a.command.as_deref(), Some("--exit"));
+        assert!(!parse_args(&v(&["--now", "--cwd", "/p"])).unwrap().exit);
+        assert!(parse_args(&v(&["--exit", "--cwd", "/p", "--", "htop"])).is_err());
+    }
+
+    #[test]
     fn now_banner_does_not_offer_enter() {
         let a = ResumeArgs {
             cwd: "/p".into(),
             command: Some("htop".into()),
             now: true,
+            exit: false,
         };
         assert_eq!(banner(&a), "CDE is running: htop");
     }
@@ -292,6 +328,7 @@ mod tests {
             cwd: "/p".into(),
             command: Some("cargo test".into()),
             now: false,
+            exit: false,
         };
         assert_eq!(
             banner(&with),
@@ -301,6 +338,7 @@ mod tests {
             cwd: "/p".into(),
             command: None,
             now: false,
+            exit: false,
         };
         assert_eq!(banner(&without), "CDE restored this terminal in /p.");
     }

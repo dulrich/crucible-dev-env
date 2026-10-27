@@ -117,9 +117,18 @@ pub fn parse_resume_banner(args: &[String]) -> Option<TerminalCapture> {
     if exe != "crucible" || args.get(1)? != "resume" {
         return None;
     }
-    // A `run-in-terminal` terminal passes `--now`; a restore still shows the plain banner.
-    let rest = &args[2..];
-    let rest = rest.strip_prefix(&["--now".to_string()]).unwrap_or(rest);
+    // A `run-in-terminal` terminal passes `--now`, a `run-tui` one `--now --exit`; a restore
+    // still shows the plain banner. Each flag is accepted at most once, in either order.
+    let mut rest = &args[2..];
+    let (mut now, mut exit) = (false, false);
+    loop {
+        match rest.first().map(String::as_str) {
+            Some("--now") if !now => now = true,
+            Some("--exit") if !exit => exit = true,
+            _ => break,
+        }
+        rest = &rest[1..];
+    }
     let [flag, dir, tail @ ..] = rest else {
         return None;
     };
@@ -168,6 +177,42 @@ pub fn parse_relaunch_banner(args: &[String]) -> Option<RelaunchCapture> {
         }),
         _ => None,
     }
+}
+
+/// What a CDE restore wrapper found in a window's own argv stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CdeWrapper {
+    /// `crucible relaunch …`: an app placeholder.
+    App(RelaunchCapture),
+    /// `crucible resume …`: a terminal banner.
+    Terminal(TerminalCapture),
+}
+
+/// Decodes a window argv that is CDE's own wrapper (`crucible relaunch|resume …`), either bare at
+/// `argv[0]` or run by a terminal right after the first `exec_flag` element. A wrapper-shaped run
+/// anywhere else is ordinary argument data and yields `None`, as does anything the banner parsers
+/// reject. Decodes one level only.
+#[must_use]
+pub fn decode_cde_wrapper(argv: &[String], exec_flag: &str) -> Option<CdeWrapper> {
+    let start = if is_wrapper_start(argv) {
+        0
+    } else {
+        argv.iter().position(|a| a == exec_flag)? + 1
+    };
+    let wrapper = argv.get(start..)?;
+    if !is_wrapper_start(wrapper) {
+        return None;
+    }
+    match wrapper.get(1).map(String::as_str) {
+        Some("relaunch") => parse_relaunch_banner(wrapper).map(CdeWrapper::App),
+        _ => parse_resume_banner(wrapper).map(CdeWrapper::Terminal),
+    }
+}
+
+fn is_wrapper_start(argv: &[String]) -> bool {
+    argv.first()
+        .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "crucible"))
+        && matches!(argv.get(1).map(String::as_str), Some("relaunch" | "resume"))
 }
 
 /// Scans the direct children of `terminal_pid` for an app relaunch placeholder banner.
@@ -603,6 +648,83 @@ mod tests {
                 "/p"
             ]))
             .is_none()
+        );
+    }
+
+    #[test]
+    fn banner_parser_accepts_now_and_exit_in_either_order() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for flags in [["--now", "--exit"], ["--exit", "--now"]] {
+            let mut a = vec!["/bin/crucible", "resume"];
+            a.extend(flags);
+            a.extend(["--cwd", "/p", "--", "htop"]);
+            let b = parse_resume_banner(&v(&a)).unwrap();
+            assert_eq!(b.cwd, PathBuf::from("/p"));
+            assert_eq!(b.command.as_deref(), Some("htop"));
+        }
+        let twice = ["/bin/crucible", "resume", "--exit", "--exit", "--cwd", "/p"];
+        assert!(parse_resume_banner(&v(&twice)).is_none());
+    }
+
+    #[test]
+    fn wrapper_decoder_recognises_only_executable_positions() {
+        let v = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let app = |id: Option<&str>, c: &str| {
+            Some(CdeWrapper::App(RelaunchCapture {
+                app_id: id.map(str::to_string),
+                cmdline: c.to_string(),
+            }))
+        };
+        let term = |c: Option<&str>| {
+            Some(CdeWrapper::Terminal(TerminalCapture {
+                cwd: PathBuf::from("/p"),
+                command: c.map(str::to_string),
+            }))
+        };
+        let wrapped = v(&[
+            "ghostty",
+            "--gtk-single-instance=false",
+            "-e",
+            "/x/crucible",
+            "relaunch",
+            "--app-id",
+            "a",
+            "--",
+            "firefox",
+        ]);
+        assert_eq!(
+            decode_cde_wrapper(&wrapped, "-e"),
+            app(Some("a"), "firefox")
+        );
+        assert_eq!(
+            decode_cde_wrapper(&v(&["/x/crucible", "relaunch", "--", "x"]), "-e"),
+            app(None, "x")
+        );
+        for flags in [&[][..], &["--now", "--exit"][..]] {
+            let mut a = vec!["ghostty", "-e", "/x/crucible", "resume"];
+            a.extend(flags);
+            a.extend(["--cwd", "/p", "--", "htop"]);
+            assert_eq!(decode_cde_wrapper(&v(&a), "-e"), term(Some("htop")));
+        }
+        assert_eq!(
+            decode_cde_wrapper(&v(&["firefox", "--new-window"]), "-e"),
+            None
+        );
+        assert_eq!(
+            decode_cde_wrapper(&v(&["ghostty", "-e", "/x/crucible", "pick"]), "-e"),
+            None
+        );
+        assert_eq!(
+            decode_cde_wrapper(
+                &v(&["gui", "--", "crucible", "relaunch", "--", "firefox"]),
+                "-e"
+            ),
+            None
+        );
+        // Malformed wrapper the banner parser rejects.
+        assert_eq!(
+            decode_cde_wrapper(&v(&["/x/crucible", "relaunch", "--", ""]), "-e"),
+            None
         );
     }
 

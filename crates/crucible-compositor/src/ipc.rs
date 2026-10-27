@@ -130,6 +130,9 @@ pub enum Request {
     Exec(String),
     /// `run-in-terminal <command>` — run a shell command line in a new terminal (`crucible resume --now`).
     RunInTerminal(String),
+    /// `run-tui <command>` — like `run-in-terminal`, but the terminal closes when the command exits
+    /// (`crucible resume --now --exit`).
+    RunTui(String),
     /// `relaunch` — swap the calling placeholder window (found by peer PID) for its app.
     Relaunch,
 }
@@ -167,6 +170,7 @@ impl Request {
             "run" => need(arg).map(Request::Run),
             "exec" => need(arg).map(Request::Exec),
             "run-in-terminal" => need(arg).map(Request::RunInTerminal),
+            "run-tui" => need(arg).map(Request::RunTui),
             other => Err(format!("unknown request {other:?}")),
         }
     }
@@ -187,6 +191,7 @@ impl Request {
             Request::Run(c) => format!("run {}", encode_field(c)),
             Request::Exec(a) => format!("exec {}", encode_field(a)),
             Request::RunInTerminal(c) => format!("run-in-terminal {}", encode_field(c)),
+            Request::RunTui(c) => format!("run-tui {}", encode_field(c)),
         }
     }
 }
@@ -546,6 +551,7 @@ mod tests {
             Request::Rename("r\r".into()),
             Request::Run("sh -c 'echo 100%: a\tb'".into()),
             Request::RunInTerminal("htop -d 5: 100%".into()),
+            Request::RunTui("'/usr/bin/vim' a:b 100%".into()),
             Request::Exec("split-right".into()),
         ];
         for r in reqs {
