@@ -53,7 +53,7 @@ use tracing::{debug, error, info, trace, warn};
 
 use crate::{
     element::WindowElement,
-    layout::{Binding, Teardown, to_logical},
+    layout::{Binding, Teardown},
     state::{Backend, CrucibleState},
 };
 
@@ -219,11 +219,7 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
         // real geometry via a synthetic ConfigureNotify); only unmanaged ones honour the size.
         let placement = match self.layout.resolve(|e| e.x11_surface() == Some(&window)) {
             Binding::Managed(id) => match self.projection.rect_of(id) {
-                Some(tile) => {
-                    let class = self.window_class(id);
-                    let rect = crate::layout::window_rect(tile, class, &self.config.tiling);
-                    X11Placement::ManagedVisible(to_logical(rect))
-                }
+                Some(tile) => X11Placement::ManagedVisible(self.placed_rect(id, tile)),
                 None => X11Placement::ManagedHidden,
             },
             Binding::Unmanaged | Binding::None => X11Placement::Unmanaged,

@@ -86,12 +86,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if config.tiling != self.config.tiling {
             // Class insets changed: forget the applied projection so every window is re-placed (and
             // re-configured) with the new geometry instead of diffing to nothing.
-            self.projection = crucible_layout::Projection::default();
+            self.invalidate_projection();
         }
         let mut hide_header = false;
         if config.header != self.config.header {
             // The reservation may have changed height: re-place every window.
-            self.projection = crucible_layout::Projection::default();
+            self.invalidate_projection();
             hide_header = config.header.mode != crucible_config::HeaderMode::Toggle;
         }
         // Load lazily (also on the first apply, when the header equals the default): only when

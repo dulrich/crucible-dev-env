@@ -301,7 +301,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return;
         }
         self.header.visible = visible;
-        self.projection = crucible_layout::Projection::default();
+        self.invalidate_projection();
         self.apply_layout();
     }
 
