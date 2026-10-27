@@ -19,8 +19,7 @@ impl World {
             output_id,
             Output {
                 id: output_id,
-                workspaces: vec![workspace_id],
-                active: 0,
+                stack: super::stack::Stack::of(workspace_id),
                 rect,
             },
         );
@@ -63,7 +62,7 @@ impl World {
         // Migrate the removed output's workspaces (with their panes/windows) onto the survivor.
         // They become inactive (the survivor keeps its own active index), so windows are hidden.
         let survivor_output = self.outputs.get_mut(&survivor).expect("survivor present");
-        survivor_output.workspaces.extend(removed.workspaces);
+        survivor_output.stack.extend(removed.stack.into_vec());
 
         // Repoint focus if we just removed the focused output.
         if self.focused_output == id {

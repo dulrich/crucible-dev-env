@@ -139,7 +139,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 .world
                 .output(output)
                 .map(|o| {
-                    o.workspaces
+                    o.workspaces()
                         .iter()
                         .copied()
                         .filter(|w| *w != seed)
@@ -220,7 +220,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         // (b) Never the output's last workspace (checked before flushing anything).
         let output = world.focused_output();
-        if world.output(output).is_none_or(|o| o.workspaces.len() < 2) {
+        if world
+            .output(output)
+            .is_none_or(|o| o.workspaces().len() < 2)
+        {
             info!(
                 ?ws,
                 "close-workspace: last workspace on this output; refusing"
@@ -242,7 +245,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let ends: Vec<(WindowId, Option<WindowElement>, Option<u32>)> = panes
             .iter()
             .filter_map(|p| world.pane(*p))
-            .flat_map(|p| p.windows.iter().copied())
+            .flat_map(|p| p.windows().iter().copied())
             .map(|id| {
                 let element = self.layout.element(id).cloned();
                 let pid = self.persist.placement.windows.get(&id).and_then(|i| i.pid);
@@ -467,7 +470,7 @@ mod tests {
             };
         note_last_viewed(&mut map, &viewed(&world, &[(a, "DP-1"), (b, "HDMI-1")]));
         world.remove_output(a).unwrap();
-        assert!(world.output(b).unwrap().workspaces.contains(&on_a));
+        assert!(world.output(b).unwrap().workspaces().contains(&on_a));
         assert_eq!(world.output(b).unwrap().active_workspace(), on_b);
         note_last_viewed(&mut map, &viewed(&world, &[(b, "HDMI-1")]));
         assert_eq!(map.get(&on_a).map(String::as_str), Some("DP-1"));

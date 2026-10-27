@@ -107,7 +107,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .find_map(|id| {
                 let pane_id = world.pane_of_window(id)?;
                 let pane = world.pane(pane_id)?;
-                let (index, focused) = slot_for(&pane.windows, pane.focused, id)?;
+                let (index, focused) = slot_for(pane.windows(), pane.focused_index(), id)?;
                 Some((id, pane_id, index, focused))
             })
             .ok_or_else(|| "no placeholder window".to_string())?;

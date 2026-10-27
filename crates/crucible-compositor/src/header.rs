@@ -250,7 +250,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 let output = self.layout.world.output(id)?;
                 let strip = strip_rect(rect, height);
                 let (mut names, mut workspaces) = (Vec::new(), Vec::new());
-                for ws in &output.workspaces {
+                for ws in output.workspaces() {
                     let name = &self.layout.world.workspace(*ws)?.name;
                     let slot = if badges {
                         self.persist.slots.slot_of(name)
@@ -275,7 +275,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     strip,
                     names,
                     workspaces,
-                    active: output.active,
+                    active: output.active_index(),
                     segments,
                 })
             })

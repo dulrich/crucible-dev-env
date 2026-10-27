@@ -262,7 +262,7 @@ mod tests {
         let a = layout
             .open_managed_at(TestElement::new(1), pane, 0)
             .unwrap();
-        assert_eq!(layout.world.pane(pane).unwrap().windows, vec![a, b]);
+        assert_eq!(layout.world.pane(pane).unwrap().windows(), vec![a, b]);
         assert_eq!(layout.element(a).unwrap().window_id(), Some(a));
         let bogus = PaneId::from_raw(999);
         assert!(

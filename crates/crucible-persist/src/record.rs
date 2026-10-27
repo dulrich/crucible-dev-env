@@ -128,8 +128,8 @@ impl WorkspaceRecord {
                 let id = panes.next().expect("layout and pane order agree");
                 let pane = world.pane(id).expect("workspace pane exists");
                 RecordNode::Pane(PaneRecord {
-                    focused: pane.focused,
-                    windows: pane.windows.iter().map(|w| window(*w)).collect(),
+                    focused: pane.focused_index(),
+                    windows: pane.windows().iter().map(|w| window(*w)).collect(),
                 })
             }
             LayoutNode::Split {

@@ -501,7 +501,7 @@ pub fn build_chrome_elements(
             let Some(pane) = world.pane(pane_id) else {
                 continue;
             };
-            let len = pane.windows.len();
+            let len = pane.windows().len();
             if len <= 1 {
                 continue;
             }
@@ -517,7 +517,9 @@ pub fn build_chrome_elements(
                 WindowClass::App => classes.tiling.app.gap,
             };
             let margin = pip_margin(i32::try_from(strip).unwrap_or(i32::MAX));
-            for (rect, is_focused) in stack_pips_with_margin(pane_rect, pane.focused, len, margin) {
+            for (rect, is_focused) in
+                stack_pips_with_margin(pane_rect, pane.focused_index(), len, margin)
+            {
                 let global = Rect {
                     x: rect.loc.x,
                     y: rect.loc.y,

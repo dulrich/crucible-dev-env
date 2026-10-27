@@ -81,7 +81,7 @@ impl World {
         let pane = self.focused_pane_id();
         self.panes
             .get(&pane)
-            .filter(|p| p.windows.is_empty())
+            .filter(|p| p.windows().is_empty())
             .map(|_| pane)
     }
 
@@ -98,26 +98,6 @@ impl World {
             .find(|ws| ws.tree.leaves().contains(&pane))
             .map(|ws| ws.id)
             .ok_or(LayoutError::UnknownPane(pane))?;
-        let (output_id, ws_index) = self
-            .outputs
-            .iter()
-            .find_map(|(id, o)| {
-                o.workspaces
-                    .iter()
-                    .position(|ws| *ws == workspace)
-                    .map(|idx| (*id, idx))
-            })
-            .ok_or(LayoutError::UnknownWorkspace(workspace))?;
-
-        self.focused_output = output_id;
-        self.outputs
-            .get_mut(&output_id)
-            .expect("owner output")
-            .active = ws_index;
-        self.workspaces
-            .get_mut(&workspace)
-            .expect("located workspace")
-            .focused_pane = pane;
-        Ok(())
+        self.activate(workspace, Some(pane))
     }
 }

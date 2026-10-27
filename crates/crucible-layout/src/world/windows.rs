@@ -20,8 +20,7 @@ impl World {
 
         let pane_id = self.focused_pane_id();
         let pane = self.panes.get_mut(&pane_id).expect("focused pane valid");
-        pane.windows.push(id);
-        pane.focused = pane.windows.len() - 1;
+        pane.stack.push(id);
 
         id
     }
@@ -38,11 +37,7 @@ impl World {
             .get_mut(&pane)
             .ok_or(LayoutError::UnknownPane(pane))?;
         let id = WindowId::from_raw(self.window_ids.alloc());
-        let at = index.min(p.windows.len());
-        if !p.windows.is_empty() && at <= p.focused {
-            p.focused += 1;
-        }
-        p.windows.insert(at, id);
+        p.stack.insert(index, id);
         self.windows.insert(id, Window { id });
         Ok(id)
     }
@@ -55,18 +50,20 @@ impl World {
             .panes
             .get_mut(&pane)
             .ok_or(LayoutError::UnknownPane(pane))?;
-        let len = p.windows.len();
-        if index >= len.max(1) {
-            return Err(LayoutError::StackIndexOutOfRange { pane, index, len });
-        }
-        p.focused = index;
-        Ok(())
+        p.stack
+            .set_focus(index)
+            .map_err(|e| LayoutError::StackIndexOutOfRange {
+                pane,
+                index,
+                len: e.len,
+            })
     }
 
     /// Closes `window`, removing it from whatever pane holds it.
     ///
     /// The pane persists even if this empties it: panes are only removed by the explicit
-    /// [`close_pane`](World::close_pane) verb. Focus is unchanged.
+    /// [`close_pane`](World::close_pane) verb. Pane focus is unchanged; within the pane's stack the
+    /// focused window stays focused (closing the focused one shows the next at the same index).
     pub fn close_window(&mut self, window: WindowId) -> Result<(), LayoutError> {
         let location = self
             .locate_window(window)
@@ -74,17 +71,8 @@ impl World {
         self.windows.remove(&window);
 
         let pane = self.panes.get_mut(&location.pane).expect("located pane");
-        let idx = pane
-            .windows
-            .iter()
-            .position(|w| *w == window)
-            .expect("window in its pane");
-        pane.windows.remove(idx);
-        if pane.focused >= pane.windows.len() && !pane.windows.is_empty() {
-            pane.focused = pane.windows.len() - 1;
-        } else if pane.windows.is_empty() {
-            pane.focused = 0;
-        }
+        let removed = pane.stack.remove_item(&window);
+        debug_assert!(removed, "window in its pane");
 
         Ok(())
     }
@@ -102,7 +90,7 @@ impl World {
             .panes
             .get(&pane)
             .expect("focused pane valid")
-            .windows
+            .stack
             .is_empty()
         {
             return Err(LayoutError::PaneNotEmpty);
@@ -130,14 +118,7 @@ impl World {
         ws.tree.split(focused_pane, dir, new_pane_id);
         ws.focused_pane = new_pane_id;
 
-        self.panes.insert(
-            new_pane_id,
-            Pane {
-                id: new_pane_id,
-                windows: Vec::new(),
-                focused: 0,
-            },
-        );
+        self.panes.insert(new_pane_id, Pane::empty(new_pane_id));
 
         new_pane_id
     }
@@ -174,32 +155,10 @@ impl World {
         let location = self
             .locate_window(window)
             .ok_or(LayoutError::UnknownWindow(window))?;
-        let (output_id, ws_index) = self
-            .outputs
-            .iter()
-            .find_map(|(id, o)| {
-                o.workspaces
-                    .iter()
-                    .position(|ws| *ws == location.workspace)
-                    .map(|idx| (*id, idx))
-            })
-            .ok_or(LayoutError::UnknownWorkspace(location.workspace))?;
-
-        self.focused_output = output_id;
-        self.outputs
-            .get_mut(&output_id)
-            .expect("owner output")
-            .active = ws_index;
-        self.workspaces
-            .get_mut(&location.workspace)
-            .expect("located workspace")
-            .focused_pane = location.pane;
+        self.activate(location.workspace, Some(location.pane))?;
         let pane = self.panes.get_mut(&location.pane).expect("located pane");
-        pane.focused = pane
-            .windows
-            .iter()
-            .position(|w| *w == window)
-            .expect("window in its pane");
+        let found = pane.stack.focus_item(&window);
+        debug_assert!(found, "window in its pane");
         Ok(())
     }
 
@@ -220,7 +179,7 @@ impl World {
     pub fn cycle_stack(&mut self, delta: i64) {
         let pane_id = self.focused_pane_id();
         if let Some(pane) = self.panes.get_mut(&pane_id) {
-            pane.cycle(delta);
+            pane.stack.cycle(delta);
         }
     }
 
@@ -240,7 +199,7 @@ impl World {
         for ws in self.workspaces.values() {
             for pane_id in ws.tree.leaves() {
                 if let Some(pane) = self.panes.get(&pane_id) {
-                    if pane.windows.contains(&window) {
+                    if pane.windows().contains(&window) {
                         return Some(WindowLocation {
                             workspace: ws.id,
                             pane: pane_id,

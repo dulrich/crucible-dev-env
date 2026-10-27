@@ -1,6 +1,7 @@
 //! Data types (`Window`, `Pane`, `Workspace`, `Output`) and `World`'s read-only accessors.
 
 use super::World;
+use super::stack::Stack;
 use crate::geometry::{GapConfig, Rect, geometry_of_workspace};
 use crate::{OutputId, PaneId, WindowId, WorkspaceId, tree::SplitTree};
 
@@ -14,29 +15,41 @@ pub struct Window {
 
 /// A pane: a screen-geometry slot holding an ordered **stack** of windows, one focused/visible.
 ///
-/// The stack and its focused index mirror an [`Output`]'s workspace stack exactly (decision #3 —
-/// "stack" is one concept reused). [`Pane::cycle`] and [`Output::cycle`] share the same wraparound
-/// logic via [`cycle_index`].
+/// The stack is the same [`Stack`] primitive an [`Output`]'s workspace stack uses (decision #3 —
+/// "stack" is one concept reused).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pane {
     /// Stable identity of this pane.
     pub id: PaneId,
-    /// Windows stacked in this pane, in stack order.
-    pub windows: Vec<WindowId>,
-    /// Index into `windows` of the focused (visible) window.
-    pub focused: usize,
+    /// Windows stacked in this pane, in stack order, with the focused (visible) one.
+    pub(super) stack: Stack<WindowId>,
 }
 
 impl Pane {
+    /// An empty pane.
+    pub(super) fn empty(id: PaneId) -> Self {
+        Self {
+            id,
+            stack: Stack::new(),
+        }
+    }
+
+    /// The windows stacked in this pane, in stack order.
+    #[must_use]
+    pub fn windows(&self) -> &[WindowId] {
+        self.stack.as_slice()
+    }
+
     /// The currently focused/visible window, or `None` if the pane is (transiently) empty.
     #[must_use]
     pub fn focused_window(&self) -> Option<WindowId> {
-        self.windows.get(self.focused).copied()
+        self.stack.focused().copied()
     }
 
-    /// Rotates the stack focus by `delta` steps with wraparound.
-    pub(super) fn cycle(&mut self, delta: i64) {
-        self.focused = cycle_index(self.focused, self.windows.len(), delta);
+    /// Index into [`Pane::windows`] of the focused (visible) window (0 when empty).
+    #[must_use]
+    pub fn focused_index(&self) -> usize {
+        self.stack.focused_index()
     }
 }
 
@@ -68,16 +81,13 @@ impl Workspace {
 
 /// An output (monitor): holds an ordered **stack** of workspaces, one active at a time.
 ///
-/// Symmetric with [`Pane`]'s window stack (decision #3); switching is [`Output::cycle`] /
-/// [`cycle_index`], the same primitive panes use.
+/// Symmetric with [`Pane`]'s window stack (decision #3): both are a [`Stack`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Output {
     /// Stable identity of this output.
     pub id: OutputId,
-    /// Workspaces stacked on this output, in stack order.
-    pub workspaces: Vec<WorkspaceId>,
-    /// Index into `workspaces` of the active workspace.
-    pub active: usize,
+    /// Workspaces stacked on this output, in stack order, with the active one focused.
+    pub(super) stack: Stack<WorkspaceId>,
     /// The output's pixel geometry (position + size in the global/Space coordinate space).
     ///
     /// `World::new()` and `add_output` seed this; the compositor keeps it in sync via
@@ -89,12 +99,19 @@ impl Output {
     /// The active workspace on this output.
     #[must_use]
     pub fn active_workspace(&self) -> WorkspaceId {
-        self.workspaces[self.active]
+        *self.stack.focused().expect("output has ≥1 workspace")
     }
 
-    /// Rotates the active-workspace index by `delta` steps with wraparound.
-    pub(super) fn cycle(&mut self, delta: i64) {
-        self.active = cycle_index(self.active, self.workspaces.len(), delta);
+    /// The workspaces stacked on this output, in stack order.
+    #[must_use]
+    pub fn workspaces(&self) -> &[WorkspaceId] {
+        self.stack.as_slice()
+    }
+
+    /// Index into [`Output::workspaces`] of the active workspace.
+    #[must_use]
+    pub fn active_index(&self) -> usize {
+        self.stack.focused_index()
     }
 }
 
@@ -128,18 +145,6 @@ impl std::fmt::Display for FocusPath {
             None => f.write_str("-"),
         }
     }
-}
-
-/// Shared stack-rotation primitive for both pane window-stacks and output workspace-stacks.
-///
-/// Rotates `current` by `delta` within `[0, len)` with wraparound. Returns `0` for an empty stack.
-fn cycle_index(current: usize, len: usize, delta: i64) -> usize {
-    if len == 0 {
-        return 0;
-    }
-    let len_i = len as i64;
-    let next = (current as i64 + delta).rem_euclid(len_i);
-    next as usize
 }
 
 impl World {
@@ -305,20 +310,5 @@ impl World {
     fn active_workspace_ref(&self) -> &Workspace {
         let ws = self.focused_output_ref().active_workspace();
         self.workspaces.get(&ws).expect("active workspace valid")
-    }
-}
-
-#[cfg(test)]
-mod cycle_tests {
-    use super::cycle_index;
-
-    #[test]
-    fn cycle_wraps_forward_and_back() {
-        assert_eq!(cycle_index(0, 3, 1), 1);
-        assert_eq!(cycle_index(2, 3, 1), 0);
-        assert_eq!(cycle_index(0, 3, -1), 2);
-        assert_eq!(cycle_index(0, 3, 4), 1);
-        assert_eq!(cycle_index(0, 0, 1), 0);
-        assert_eq!(cycle_index(0, 1, 1), 0);
     }
 }

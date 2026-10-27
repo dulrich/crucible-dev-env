@@ -13,8 +13,7 @@ impl World {
         let workspace_id = self.build_workspace(name);
 
         let output = self.outputs.get_mut(&self.focused_output).expect("output");
-        output.workspaces.push(workspace_id);
-        output.active = output.workspaces.len() - 1;
+        output.stack.push(workspace_id);
 
         workspace_id
     }
@@ -90,14 +89,7 @@ impl World {
         let (tree, panes) =
             SplitTree::from_layout(&layout.root, || PaneId::from_raw(pane_ids.alloc()));
         for id in &panes {
-            self.panes.insert(
-                *id,
-                Pane {
-                    id: *id,
-                    windows: Vec::new(),
-                    focused: 0,
-                },
-            );
+            self.panes.insert(*id, Pane::empty(*id));
         }
         let workspace_id = WorkspaceId::from_raw(self.workspace_ids.alloc());
         let focused = panes.get(layout.focused_pane).copied().unwrap_or(panes[0]);
@@ -113,33 +105,50 @@ impl World {
         self.outputs
             .get_mut(&output)
             .expect("checked")
-            .workspaces
-            .push(workspace_id);
+            .stack
+            .extend([workspace_id]);
         Ok((workspace_id, panes))
     }
 
-    /// Switches the focused output to make `target` its active workspace.
+    /// Makes `target` the active workspace of the output that owns it, and focuses that output.
     ///
-    /// `target` must be a workspace stacked on the focused output. Changes which windows are visible
-    /// and where focus lands.
+    /// `target` may live on any output (the owning output becomes the focused one). Changes which
+    /// windows are visible and where focus lands. Errors with [`LayoutError::UnknownWorkspace`]
+    /// (mutating nothing) for an unknown id.
     pub fn switch_workspace(&mut self, target: WorkspaceId) -> Result<(), LayoutError> {
-        if !self.workspaces.contains_key(&target) {
-            return Err(LayoutError::UnknownWorkspace(target));
-        }
-        let output = self.outputs.get_mut(&self.focused_output).expect("output");
-        let pos = output
-            .workspaces
-            .iter()
-            .position(|w| *w == target)
-            .ok_or(LayoutError::UnknownWorkspace(target))?;
-        output.active = pos;
-        Ok(())
+        self.activate(target, None)
     }
 
     /// Switches the focused output's active workspace by `delta` (wraparound).
     pub fn cycle_workspace(&mut self, delta: i64) {
         let output = self.outputs.get_mut(&self.focused_output).expect("output");
-        output.cycle(delta);
+        output.stack.cycle(delta);
+    }
+
+    /// The single activation primitive: focuses the output owning `ws`, makes `ws` its active
+    /// workspace, and (if given) makes `pane` the workspace's focused pane. Errors with
+    /// [`LayoutError::UnknownWorkspace`] (mutating nothing) when no output owns `ws`.
+    pub(super) fn activate(
+        &mut self,
+        ws: WorkspaceId,
+        pane: Option<PaneId>,
+    ) -> Result<(), LayoutError> {
+        let owner = self.owner_of(ws)?;
+        let found = self
+            .outputs
+            .get_mut(&owner)
+            .expect("owner output")
+            .stack
+            .focus_item(&ws);
+        debug_assert!(found, "owner holds ws");
+        self.focused_output = owner;
+        if let Some(pane) = pane {
+            self.workspaces
+                .get_mut(&ws)
+                .expect("owned workspace exists")
+                .focused_pane = pane;
+        }
+        Ok(())
     }
 
     /// Moves `window` from its current pane to the focused pane of `target` workspace.
@@ -164,23 +173,13 @@ impl World {
 
         // Detach from the source pane.
         let pane = self.panes.get_mut(&location.pane).expect("source pane");
-        let idx = pane
-            .windows
-            .iter()
-            .position(|w| *w == window)
-            .expect("window present");
-        pane.windows.remove(idx);
-        if pane.windows.is_empty() {
-            pane.focused = 0;
-        } else if pane.focused >= pane.windows.len() {
-            pane.focused = pane.windows.len() - 1;
-        }
+        let removed = pane.stack.remove_item(&window);
+        debug_assert!(removed, "window present");
 
         // Attach to the target workspace's focused pane.
         let target_pane_id = self.workspaces.get(&target).expect("target").focused_pane;
         let target_pane = self.panes.get_mut(&target_pane_id).expect("target pane");
-        target_pane.windows.push(window);
-        target_pane.focused = target_pane.windows.len() - 1;
+        target_pane.stack.push(window);
 
         Ok(())
     }
@@ -201,7 +200,7 @@ impl World {
         let mut windows = Vec::new();
         for pane_id in removed.panes() {
             if let Some(pane) = self.panes.remove(&pane_id) {
-                for w in pane.windows {
+                for w in pane.stack.into_vec() {
                     self.windows.remove(&w);
                     windows.push(w);
                 }
@@ -231,23 +230,24 @@ impl World {
         }
         self.check_not_last(source)?;
         self.detach_workspace(source, ws);
-        let target = self.outputs.get_mut(&output).expect("checked");
-        target.workspaces.push(ws);
-        target.active = target.workspaces.len() - 1;
-        self.focused_output = output;
-        Ok(())
+        self.outputs
+            .get_mut(&output)
+            .expect("checked")
+            .stack
+            .extend([ws]);
+        self.activate(ws, None)
     }
 
     fn owner_of(&self, ws: WorkspaceId) -> Result<OutputId, LayoutError> {
         self.outputs
             .values()
-            .find(|o| o.workspaces.contains(&ws))
+            .find(|o| o.workspaces().contains(&ws))
             .map(|o| o.id)
             .ok_or(LayoutError::UnknownWorkspace(ws))
     }
 
     fn check_not_last(&self, output: OutputId) -> Result<(), LayoutError> {
-        if self.outputs[&output].workspaces.len() <= 1 {
+        if self.outputs[&output].workspaces().len() <= 1 {
             return Err(LayoutError::LastWorkspace(output));
         }
         Ok(())
@@ -256,13 +256,8 @@ impl World {
     /// Removes `ws` from `output`'s stack, fixing `active` (caller guarantees ≥2 workspaces).
     fn detach_workspace(&mut self, output: OutputId, ws: WorkspaceId) {
         let o = self.outputs.get_mut(&output).expect("owner");
-        let idx = o.workspaces.iter().position(|w| *w == ws).expect("owned");
-        o.workspaces.remove(idx);
-        if idx < o.active {
-            o.active -= 1;
-        } else if o.active >= o.workspaces.len() {
-            o.active = o.workspaces.len() - 1;
-        }
+        let removed = o.stack.remove_item(&ws);
+        debug_assert!(removed, "owned");
     }
 
     /// Creates a fresh empty workspace (one empty pane) and inserts both into the arena maps.
@@ -273,14 +268,7 @@ impl World {
     pub(super) fn build_workspace(&mut self, name: impl Into<String>) -> WorkspaceId {
         let workspace_id = WorkspaceId::from_raw(self.workspace_ids.alloc());
         let pane_id = PaneId::from_raw(self.pane_ids.alloc());
-        self.panes.insert(
-            pane_id,
-            Pane {
-                id: pane_id,
-                windows: Vec::new(),
-                focused: 0,
-            },
-        );
+        self.panes.insert(pane_id, Pane::empty(pane_id));
         self.workspaces.insert(
             workspace_id,
             Workspace {
@@ -402,10 +390,10 @@ mod tests {
         let first = w.active_workspace_id();
         let a = w.new_workspace("a"); // o1: [first, a], a active
         w.move_workspace_to_output(a, o2).unwrap();
-        assert_eq!(w.output(o1).unwrap().workspaces, vec![first]);
+        assert_eq!(w.output(o1).unwrap().workspaces(), &[first]);
         assert_eq!(w.output(o1).unwrap().active_workspace(), first);
         let target = w.output(o2).unwrap();
-        assert_eq!(target.workspaces.len(), 2);
+        assert_eq!(target.workspaces().len(), 2);
         assert_eq!(target.active_workspace(), a);
         assert_eq!(w.focused_output(), o2);
         assert_eq!(w.active_workspace_id(), a);

@@ -234,7 +234,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .layout
             .world
             .pane(pane)
-            .map(|p| p.windows.clone())
+            .map(|p| p.windows().to_vec())
             .unwrap_or_default();
         let placed = self.persist.placement.placed.entry(pane).or_default();
         placed.retain(|(w, _)| live.contains(w));
@@ -272,7 +272,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 .layout
                 .world
                 .pane(pane)
-                .and_then(|p| p.windows.iter().position(|w| *w == id));
+                .and_then(|p| p.windows().iter().position(|w| *w == id));
             if let Some(pos) = pos {
                 let _ = self.with_model(|w| w.set_stack_focus(pane, pos));
             }
@@ -289,7 +289,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         saved_index: Option<usize>,
         info: WindowInfo,
     ) -> WindowId {
-        let Some(live_len) = self.layout.world.pane(pane).map(|p| p.windows.len()) else {
+        let Some(live_len) = self.layout.world.pane(pane).map(|p| p.windows().len()) else {
             warn!(?pane, "relaunch pane is gone; using the focused pane");
             return self.map_managed_window(element, Self::register_info(info));
         };
@@ -346,8 +346,8 @@ mod tests {
         let a = w.open_window();
         let b = w.open_window();
         let pane = w.focused_pane_id();
-        let windows = w.pane(pane).unwrap().windows.clone();
-        let focused = w.pane(pane).unwrap().focused;
+        let windows = w.pane(pane).unwrap().windows().to_vec();
+        let focused = w.pane(pane).unwrap().focused_index();
         let ia = windows.iter().position(|x| *x == a).unwrap();
         let ib = windows.iter().position(|x| *x == b).unwrap();
         assert_eq!(slot_for(&windows, focused, a), Some((ia, ia == focused)));
@@ -367,18 +367,19 @@ mod tests {
         let t2 = w.open_window_at(pane, 2).unwrap();
         // L: an ordinary window opened after restore, no `placed` entry, lands before P.
         let l = w.open_window_at(pane, 1).unwrap();
-        let windows = w.pane(pane).unwrap().windows.clone();
+        let windows = w.pane(pane).unwrap().windows().to_vec();
         assert_eq!(windows, vec![t1, l, p, t2]);
         let placed = [(t1, 0usize), (p, 1), (t2, 2)];
         // Saved order would put P at 1 (wrong: before L).
         let saved_order = insert_index(placed.iter().filter(|(w, _)| *w != p).map(|(_, i)| *i), 1);
         assert_eq!(saved_order, 1);
         w.set_stack_focus(pane, 2).unwrap();
-        let (index, focused) = slot_for(&windows, w.pane(pane).unwrap().focused, p).unwrap();
+        let (index, focused) =
+            slot_for(&windows, w.pane(pane).unwrap().focused_index(), p).unwrap();
         assert_eq!((index, focused), (2, true));
         w.close_window(p).unwrap();
-        let live_len = w.pane(pane).unwrap().windows.len();
+        let live_len = w.pane(pane).unwrap().windows().len();
         let app = w.open_window_at(pane, slot_index(index, live_len)).unwrap();
-        assert_eq!(w.pane(pane).unwrap().windows, vec![t1, l, app, t2]);
+        assert_eq!(w.pane(pane).unwrap().windows(), vec![t1, l, app, t2]);
     }
 }

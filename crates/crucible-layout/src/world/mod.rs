@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 mod outputs;
 mod panes;
 mod projection;
+mod stack;
 mod types;
 mod windows;
 mod workspaces;
@@ -100,11 +101,7 @@ impl World {
         let workspace_id = WorkspaceId::from_raw(workspace_ids.alloc());
         let pane_id = PaneId::from_raw(pane_ids.alloc());
 
-        let pane = Pane {
-            id: pane_id,
-            windows: Vec::new(),
-            focused: 0,
-        };
+        let pane = Pane::empty(pane_id);
         let workspace = Workspace {
             id: workspace_id,
             name: "1".to_string(),
@@ -113,8 +110,7 @@ impl World {
         };
         let output = Output {
             id: output_id,
-            workspaces: vec![workspace_id],
-            active: 0,
+            stack: stack::Stack::of(workspace_id),
             // Placeholder; the compositor calls `set_output_rect` with the real pixel size.
             rect: Rect::new(0, 0, 0, 0),
         };
@@ -147,7 +143,10 @@ impl World {
             .outputs
             .get(&self.focused_output)
             .expect("focused output valid");
-        assert!(output.active < output.workspaces.len(), "active in range");
+        assert!(
+            output.active_index() < output.workspaces().len(),
+            "active in range"
+        );
         let ws_id = output.active_workspace();
         let ws = self.workspaces.get(&ws_id).expect("active workspace valid");
         assert!(
@@ -160,9 +159,9 @@ impl World {
         // Also assert each workspace belongs to exactly one output (no id aliasing after migrate).
         let mut ws_owner: BTreeMap<WorkspaceId, OutputId> = BTreeMap::new();
         for o in self.outputs.values() {
-            assert!(!o.workspaces.is_empty(), "every output has ≥1 workspace");
-            assert!(o.active < o.workspaces.len());
-            for w in &o.workspaces {
+            assert!(!o.workspaces().is_empty(), "every output has ≥1 workspace");
+            assert!(o.active_index() < o.workspaces().len());
+            for w in o.workspaces() {
                 assert!(self.workspaces.contains_key(w), "listed workspace exists");
                 let prev = ws_owner.insert(*w, o.id);
                 assert!(
@@ -188,12 +187,15 @@ impl World {
             w.tree.check_invariants();
             for pid in w.panes() {
                 let pane = self.panes.get(&pid).expect("tree pane exists in arena");
-                if pane.windows.is_empty() {
-                    assert_eq!(pane.focused, 0);
+                if pane.windows().is_empty() {
+                    assert_eq!(pane.focused_index(), 0);
                 } else {
-                    assert!(pane.focused < pane.windows.len(), "pane focus in range");
+                    assert!(
+                        pane.focused_index() < pane.windows().len(),
+                        "pane focus in range"
+                    );
                 }
-                for win in &pane.windows {
+                for win in pane.windows() {
                     assert!(self.windows.contains_key(win), "pane window exists");
                 }
             }
@@ -201,7 +203,7 @@ impl World {
         // Every window lives in exactly one pane.
         let mut counts: BTreeMap<WindowId, usize> = BTreeMap::new();
         for pane in self.panes.values() {
-            for w in &pane.windows {
+            for w in pane.windows() {
                 *counts.entry(*w).or_default() += 1;
             }
         }

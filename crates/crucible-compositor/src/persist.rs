@@ -395,7 +395,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 w.panes()
                     .iter()
                     .filter_map(|p| self.layout.world.pane(*p))
-                    .all(|p| p.windows.is_empty())
+                    .all(|p| p.windows().is_empty())
             });
             if empty
                 && self
@@ -408,7 +408,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         let id_of = |name: &str| connected.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
         for out in &plan.outputs {
-            let (Some(oid), Some(ws)) = (
+            let (Some(_), Some(ws)) = (
                 id_of(&out.output),
                 out.focused
                     .as_deref()
@@ -416,10 +416,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             ) else {
                 continue;
             };
-            if let Err(err) = self.with_model(|w| {
-                w.set_focused_output(oid)?;
-                w.switch_workspace(ws)
-            }) {
+            // `switch_workspace` focuses the owning output itself.
+            if let Err(err) = self.with_model(|w| w.switch_workspace(ws)) {
                 warn!(%err, "cannot restore an output's focused workspace");
             }
         }
@@ -458,7 +456,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 let o = world.output(*id)?;
                 Some(crucible_persist::session::OutputSession {
                     output: name.clone(),
-                    workspaces: o.workspaces.iter().filter_map(|w| name_of(*w)).collect(),
+                    workspaces: o.workspaces().iter().filter_map(|w| name_of(*w)).collect(),
                     focused: name_of(o.active_workspace()),
                 })
             })
@@ -535,7 +533,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let mut outs: Vec<_> = self.layout.world.outputs().collect();
         outs.sort_by_key(|(id, _)| *id);
         outs.into_iter()
-            .flat_map(|(oid, o)| o.workspaces.iter().map(move |ws| (oid, *ws)))
+            .flat_map(|(oid, o)| o.workspaces().iter().map(move |ws| (oid, *ws)))
             .collect()
     }
 
@@ -611,7 +609,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let world = &self.layout.world;
         let mut records = HashMap::new();
         for pane in world.workspace(ws)?.panes() {
-            for win in &world.pane(pane)?.windows {
+            for win in world.pane(pane)?.windows() {
                 records.insert(*win, self.window_record(*win));
             }
         }

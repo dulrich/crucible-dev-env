@@ -240,15 +240,15 @@ fn move_window_to_adjacent_workspace(world: &mut World, delta: i64) -> Result<()
     let Some(output) = world.output(output_id) else {
         return Ok(());
     };
-    let ws_count = output.workspaces.len();
+    let ws_count = output.workspaces().len();
     if ws_count < 2 {
         debug!("move-window-to-workspace: only one workspace; ignoring");
         return Ok(());
     }
-    let active_idx = output.active;
+    let active_idx = output.active_index();
     // Wrap-around index arithmetic: same formula as `cycle_index` in `crucible-layout`.
     let target_idx = ((active_idx as i64 + delta).rem_euclid(ws_count as i64)) as usize;
-    let target_ws = output.workspaces[target_idx];
+    let target_ws = output.workspaces()[target_idx];
 
     world.move_window_to_workspace(window_id, target_ws)
 }
@@ -397,11 +397,11 @@ mod tests {
         let mut world = World::new();
         let window = world.open_window();
         world.new_workspace("ws2"); // now active; output = [ws0, ws2]
-        let ws0 = world.output(world.focused_output()).unwrap().workspaces[0];
+        let ws0 = world.output(world.focused_output()).unwrap().workspaces()[0];
         world.switch_workspace(ws0).unwrap(); // back on ws0, `window` is focused again
 
         assert_dispatches(world, Action::MoveWindowToWorkspace(1), |w| {
-            let target = w.output(w.focused_output()).unwrap().workspaces[1];
+            let target = w.output(w.focused_output()).unwrap().workspaces()[1];
             w.move_window_to_workspace(window, target).unwrap();
         });
     }

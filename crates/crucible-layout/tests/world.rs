@@ -128,7 +128,7 @@ fn split_creates_new_focused_empty_pane() {
     let ws = w.workspace(w.active_workspace_id()).unwrap();
     assert_eq!(ws.pane_count(), 2);
     // New pane is empty until a window opens into it.
-    assert_eq!(w.pane(new_pane).unwrap().windows.len(), 0);
+    assert_eq!(w.pane(new_pane).unwrap().windows().len(), 0);
 }
 
 #[test]
@@ -174,7 +174,7 @@ fn stack_window_pushes_onto_focused_pane() {
     );
     // Only the newly-focused window is visible.
     assert_eq!(w.visible_windows(), vec![b]);
-    assert_eq!(w.pane(w.focused_pane_id()).unwrap().windows, vec![a, b]);
+    assert_eq!(w.pane(w.focused_pane_id()).unwrap().windows(), vec![a, b]);
 }
 
 #[test]
@@ -771,7 +771,7 @@ fn ops_on_focused_output_do_not_disturb_other_outputs() {
     // The second output is byte-for-byte unchanged.
     assert_eq!(w.output(second).unwrap(), &second_before);
     // ...but the first output gained a workspace.
-    assert_eq!(w.output(first).unwrap().workspaces.len(), 2);
+    assert_eq!(w.output(first).unwrap().workspaces().len(), 2);
     w.check_invariants();
 }
 
@@ -791,7 +791,7 @@ fn switching_focused_output_then_ops_affect_only_that_output() {
     // First output untouched.
     assert_eq!(w.output(first).unwrap(), &first_before);
     // Second output now has two workspaces, and the window landed on it.
-    assert_eq!(w.output(second).unwrap().workspaces.len(), 2);
+    assert_eq!(w.output(second).unwrap().workspaces().len(), 2);
     assert!(w.window(win).is_some());
     w.check_invariants();
 }
@@ -841,7 +841,7 @@ fn remove_output_migrates_workspaces_and_windows_without_loss() {
 
     // Refocus first, then remove the second output.
     w.set_focused_output(first).unwrap();
-    let first_ws_before = w.output(first).unwrap().workspaces.len();
+    let first_ws_before = w.output(first).unwrap().workspaces().len();
     w.remove_output(second).unwrap();
 
     // No windows destroyed: both entries still exist in the arena.
@@ -856,7 +856,7 @@ fn remove_output_migrates_workspaces_and_windows_without_loss() {
 
     // Second output's 2 workspaces appended onto the first.
     assert_eq!(
-        w.output(first).unwrap().workspaces.len(),
+        w.output(first).unwrap().workspaces().len(),
         first_ws_before + 2
     );
     assert_eq!(w.output_count(), 1);
@@ -1186,7 +1186,7 @@ fn topology_round_trips_through_insert_workspace() {
     assert_eq!(w.workspace_layout(new_ws).unwrap(), snap);
     // Not switched to, and appended last.
     assert_eq!(w.active_workspace_id(), ws);
-    assert_eq!(w.output(out).unwrap().workspaces.last(), Some(&new_ws));
+    assert_eq!(w.output(out).unwrap().workspaces().last(), Some(&new_ws));
     assert_eq!(w.workspace(new_ws).unwrap().focused_pane, panes[3]);
 }
 
@@ -1274,14 +1274,14 @@ fn open_window_at_preserves_focus_and_active_state() {
     // Empty pane: insert anywhere, focus stays 0.
     let a = w.open_window_at(pane, 99).unwrap();
     w.check_invariants();
-    assert_eq!(w.pane(pane).unwrap().windows, vec![a]);
-    assert_eq!(w.pane(pane).unwrap().focused, 0);
+    assert_eq!(w.pane(pane).unwrap().windows(), vec![a]);
+    assert_eq!(w.pane(pane).unwrap().focused_index(), 0);
     let b = w.open_window_at(pane, 1).unwrap();
     let c = w.open_window_at(pane, 0).unwrap();
     w.check_invariants();
-    assert_eq!(w.pane(pane).unwrap().windows, vec![c, a, b]);
+    assert_eq!(w.pane(pane).unwrap().windows(), vec![c, a, b]);
     // `a` was focused and stays focused though inserted-before shifted its index.
-    assert_eq!(w.pane(pane).unwrap().focused, 1);
+    assert_eq!(w.pane(pane).unwrap().focused_index(), 1);
     assert_eq!(w.focused_window(), Some(a));
 
     // Opening into another workspace's pane changes neither focus nor the active workspace.
@@ -1293,7 +1293,7 @@ fn open_window_at_preserves_focus_and_active_state() {
     assert_eq!(w.active_workspace_id(), ws);
     assert_eq!(w.focused_pane_id(), pane);
     assert_eq!(w.workspace(other).unwrap().focused_pane, panes[0]);
-    assert_eq!(w.pane(panes[0]).unwrap().windows, vec![d]);
+    assert_eq!(w.pane(panes[0]).unwrap().windows(), vec![d]);
     assert_eq!(
         w.open_window_at(PaneId::from_raw(999), 0),
         Err(LayoutError::UnknownPane(PaneId::from_raw(999)))
@@ -1317,13 +1317,64 @@ fn set_stack_focus_validates_range() {
         w.open_window();
     }
     w.set_stack_focus(pane, 1).unwrap();
-    assert_eq!(w.pane(pane).unwrap().focused, 1);
+    assert_eq!(w.pane(pane).unwrap().focused_index(), 1);
     assert!(w.set_stack_focus(pane, 3).is_err());
-    assert_eq!(w.pane(pane).unwrap().focused, 1);
+    assert_eq!(w.pane(pane).unwrap().focused_index(), 1);
     assert_eq!(
         w.set_stack_focus(PaneId::from_raw(999), 0),
         Err(LayoutError::UnknownPane(PaneId::from_raw(999)))
     );
+    w.check_invariants();
+}
+
+/// Review M4: a pane holding a,b,c with b focused; closing a keeps b focused/visible.
+#[test]
+fn close_window_below_focus_keeps_focused_window() {
+    let mut w = world();
+    let pane = w.focused_pane_id();
+    let a = w.open_window();
+    let b = w.open_window();
+    let _c = w.open_window();
+    w.set_stack_focus(pane, 1).unwrap();
+    w.close_window(a).unwrap();
+    assert_eq!(w.focused_window(), Some(b));
+    assert_eq!(w.visible_windows(), vec![b]);
+    w.check_invariants();
+}
+
+/// Review M4, second site: moving a out of that pane keeps b focused.
+#[test]
+fn move_window_below_focus_keeps_focused_window() {
+    let mut w = world();
+    let home = w.active_workspace_id();
+    let pane = w.focused_pane_id();
+    let a = w.open_window();
+    let b = w.open_window();
+    let _c = w.open_window();
+    w.set_stack_focus(pane, 1).unwrap();
+    let other = w.new_workspace("other");
+    w.switch_workspace(home).unwrap();
+    w.move_window_to_workspace(a, other).unwrap();
+    assert_eq!(w.pane(pane).unwrap().focused_window(), Some(b));
+    assert_eq!(w.focused_window(), Some(b));
+    w.check_invariants();
+}
+
+/// `switch_workspace` to a workspace on a non-focused output focuses that output and activates it.
+#[test]
+fn switch_workspace_crosses_outputs() {
+    let mut w = World::new();
+    let first = w.focused_output();
+    let second = w.add_output(R2);
+    let target = w.output(second).unwrap().active_workspace();
+    w.set_focused_output(second).unwrap();
+    let other = w.new_workspace("x");
+    w.set_focused_output(first).unwrap();
+    assert_eq!(w.output(second).unwrap().active_workspace(), other);
+    w.switch_workspace(target).unwrap();
+    assert_eq!(w.focused_output(), second);
+    assert_eq!(w.active_workspace_id(), target);
+    assert_ne!(first, second);
     w.check_invariants();
 }
 
@@ -1351,7 +1402,7 @@ fn stack_replay_in_shuffled_order_reproduces_order_and_focus() {
         .iter()
         .map(|p| {
             let pane = src.pane(*p).unwrap();
-            (pane.windows.len(), pane.focused)
+            (pane.windows().len(), pane.focused_index())
         })
         .collect();
     let snap = src.workspace_layout(ws).unwrap();
@@ -1390,11 +1441,11 @@ fn stack_replay_in_shuffled_order_reproduces_order_and_focus() {
 
     for (pi, (n, focus)) in record.iter().enumerate() {
         let pane = dst.pane(panes[pi]).unwrap();
-        assert_eq!(pane.windows.len(), *n);
-        assert_eq!(pane.focused, *focus);
+        assert_eq!(pane.windows().len(), *n);
+        assert_eq!(pane.focused_index(), *focus);
         let mut expect = ids[pi].clone();
         expect.sort_by_key(|(si, _)| *si);
         let expect: Vec<WindowId> = expect.into_iter().map(|(_, id)| id).collect();
-        assert_eq!(pane.windows, expect, "pane {pi} order");
+        assert_eq!(pane.windows(), expect, "pane {pi} order");
     }
 }
