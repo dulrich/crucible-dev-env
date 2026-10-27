@@ -135,7 +135,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `close-workspace` | Save, then close the active workspace and end its windows (refused on the output's last workspace) |
 | `close-all-workspaces` | Save and close every open workspace, leaving one fresh workspace per output (unbound by default) |
 | `move-workspace-to-output <n>` | Send the active workspace `n` outputs over (wraparound) |
-| `slot <n>` | Switch to the workspace pinned to slot `n` (0-9); a closed or saved one reopens on the monitor it was last viewed on, an unpinned slot does nothing |
+| `slot <n>` | Switch to the workspace pinned to slot `n` (0-9); a closed or saved one reopens on the monitor it was last viewed on, an unpinned slot opens the workspace picker, and the workspace chosen there is pinned to `n` |
 | `pin-slot <n>` | Pin the active workspace to slot `n` (0-9); pins persist in `$XDG_STATE_HOME/cde/slots.kdl` |
 | `open-picker` | Open the workspace picker (`crucible pick`) |
 | `open-launcher` | Open the program launcher (`crucible launch`) |

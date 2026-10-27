@@ -321,6 +321,13 @@ fn close_element(element: &WindowElement) {
     }
 }
 
+/// The pending-pin decision after an open/new/open-folder request: `(slot to pin now, pending pin
+/// afterwards)`. Success pins the pending slot; any outcome clears the pending pin.
+#[must_use]
+fn pin_after(pending: Option<u8>, succeeded: bool) -> (Option<u8>, Option<u8>) {
+    (pending.filter(|_| succeeded), None)
+}
+
 /// Compositor-side persistence state (lives in [`CrucibleState::persist`]).
 #[derive(Debug)]
 pub struct PersistState {
@@ -329,6 +336,9 @@ pub struct PersistState {
     /// Named workspace slot pins (`$XDG_STATE_HOME/cde/slots.kdl`, beside the store dir). Empty
     /// until [`CrucibleState::start_persistence`] loads them.
     pub slots: Slots,
+    /// Slot `n` awaiting a workspace: set when an unpinned `Super+<n>` opens the picker, applied by the
+    /// next successful open/new/open-folder, cleared by any overlay close or other overlay.
+    pub pending_pin: Option<u8>,
     /// The bound IPC socket path, exported to children as `CDE_SOCKET`.
     pub ipc_path: Option<PathBuf>,
     /// Folder roots of workspaces (new terminals start there).
@@ -366,6 +376,7 @@ impl PersistState {
         Self {
             store_dir,
             slots: Slots::new(),
+            pending_pin: None,
             ipc_path: None,
             roots: HashMap::new(),
             last_output: HashMap::new(),
@@ -1193,6 +1204,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             if !self.persist.pending.contains_key(&pid) {
                 warn!(pid, ?kind, "overlay never mapped; giving up on it");
                 self.persist.overlay = None;
+                self.persist.pending_pin = None;
             }
         }
         let reaped = reap_exited(&mut self.persist.children);
@@ -1504,6 +1516,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let Some(crucible) = Self::crucible_exe("picker") else {
             return;
         };
+        if rename {
+            self.persist.pending_pin = None;
+        }
         let current = rename.then(|| self.layout.world.focus_path().workspace_name);
         let args = picker_args(
             &self.config.terminal.exec_flag,
@@ -1515,6 +1530,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Opens the program launcher; see [`Self::open_overlay`].
     pub fn open_launcher(&mut self) {
+        self.persist.pending_pin = None;
         let Some(crucible) = Self::crucible_exe("launcher") else {
             return;
         };
@@ -1524,6 +1540,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Opens the read-only settings overlay (`crucible keys`); see [`Self::open_overlay`].
     pub fn open_settings(&mut self) {
+        self.persist.pending_pin = None;
         let Some(crucible) = Self::crucible_exe("settings") else {
             return;
         };
@@ -1693,6 +1710,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Some(Overlay { state: OverlayState::Mapped(p), .. }) if p == element
         ) {
             self.persist.overlay = None;
+            self.persist.pending_pin = None;
             self.set_keyboard_focus(None);
             self.reconcile_keyboard_focus();
             self.rewarm_after_overlay_close();
@@ -2140,9 +2158,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     Err(reason) => Response::Err(reason),
                 };
             }
-            Request::Open(name) => self.ipc_open(&name),
-            Request::OpenFolder(path) => self.ipc_open_folder(&path),
-            Request::New(name) => self.ipc_new(&name),
+            Request::Open(name) => {
+                let r = self.ipc_open(&name);
+                self.complete_pending_pin(r)
+            }
+            Request::OpenFolder(path) => {
+                let r = self.ipc_open_folder(&path);
+                self.complete_pending_pin(r)
+            }
+            Request::New(name) => {
+                let r = self.ipc_new(&name);
+                self.complete_pending_pin(r)
+            }
             Request::Rename(name) => self.ipc_rename(&name),
         };
         match result {
@@ -2425,12 +2452,28 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.save_slots();
     }
 
+    /// After an open/new/open-folder request: pins the now-active workspace to the pending slot on
+    /// success (see [`pin_after`]) and clears the pending pin either way.
+    fn complete_pending_pin(&mut self, result: Result<(), String>) -> Result<(), String> {
+        let (pin, rest) = pin_after(self.persist.pending_pin, result.is_ok());
+        self.persist.pending_pin = rest;
+        if let Some(n) = pin {
+            self.pin_slot(n);
+        }
+        result
+    }
+
     /// `Action::Slot(n)`: opens the workspace pinned to slot `n` (live, else restored from disk
-    /// on its last-viewed output). An unpinned slot or a failed open is an `info!` no-op; a stale
+    /// on its last-viewed output). An unpinned slot opens the picker in pin mode; a failed open is an `info!` no-op; a stale
     /// pin is kept.
     pub(crate) fn slot_open(&mut self, n: u8) {
         let Some(name) = self.persist.slots.get(n).map(str::to_string) else {
-            info!(slot = n, "slot is not pinned");
+            info!(
+                slot = n,
+                "slot is not pinned; opening the picker in pin mode"
+            );
+            self.persist.pending_pin = Some(n);
+            self.open_picker(false);
             return;
         };
         if let Err(reason) = self.ipc_open(&name) {
@@ -2481,6 +2524,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
 #[cfg(test)]
 mod tests {
+    use super::pin_after;
     use super::{kill_child, reap_exited};
 
     #[test]
@@ -2495,6 +2539,24 @@ mod tests {
         assert!(kill_child(&mut children, pid));
         let status = children[0].wait().unwrap();
         assert!(!status.success(), "killed, not exited cleanly");
+    }
+
+    #[test]
+    fn pin_after_pins_the_pending_slot_on_success_and_clears_it() {
+        // Open, New and OpenFolder all share this decision (`complete_pending_pin`).
+        assert_eq!(pin_after(Some(3), true), (Some(3), None));
+        assert_eq!(pin_after(Some(0), true), (Some(0), None));
+    }
+
+    #[test]
+    fn pin_after_pins_nothing_on_failure_but_still_clears() {
+        assert_eq!(pin_after(Some(3), false), (None, None));
+    }
+
+    #[test]
+    fn pin_after_without_a_pending_pin_never_pins() {
+        assert_eq!(pin_after(None, true), (None, None));
+        assert_eq!(pin_after(None, false), (None, None));
     }
 
     #[test]
