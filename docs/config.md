@@ -47,7 +47,7 @@ Directories whose immediate subdirectories become workspace-picker candidates. Z
 overlay {
     border #true
     style "n1-med"
-    terminal-args "--background-opacity=1"
+    terminal-args "--window-padding-color=extend-always" "--window-padding-balance=true"
 }
 ```
 
@@ -55,7 +55,7 @@ Presentation of the picker, launcher and settings overlays. Every child is optio
 
 - `border` — `#true` (default) or `#false`. Draws a ring outside the overlay; while an overlay is open the pane focus ring and stack pips are not drawn over it.
 - `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` (default) or `"n1-light"`; any other value is a config error. `terminal` keeps the terminal's own look and the teal ring; the N1 styles paint opaque surrounds with an orange ring. The chosen style is passed to overlay programs as `CDE_OVERLAY_STYLE`.
-- `terminal-args` — extra terminal arguments, zero or more strings, inserted before the exec flag on overlay spawns only. Default: none. As a ghostty example only, `terminal-args "--background-opacity=1"` makes the padding strip opaque; `--config-file=<path>` adds to the user config, while `--config-default-files=false` replaces it.
+- `terminal-args` — extra terminal arguments, zero or more strings, inserted before the exec flag on overlay spawns only. Default: none. As a ghostty example only, `terminal-args "--window-padding-color=extend-always" "--window-padding-balance=true"` fills ghostty's window padding (and the leftover strip where the cell grid does not divide the overlay evenly) with the N1 surround and spreads it evenly, so the surround reaches the border on every side (verified on host-b, ghostty 1.3.1; `--background-opacity=1` is not needed); `--config-file=<path>` adds to the user config, while `--config-default-files=false` replaces it.
 
 ### `binds`
 
@@ -121,7 +121,7 @@ picker {
 overlay {
     border #true
     style "n1-med"
-    terminal-args "--background-opacity=1"
+    terminal-args "--window-padding-color=extend-always" "--window-padding-balance=true"
 }
 binds {
     bind "Super+P" "open-picker"
