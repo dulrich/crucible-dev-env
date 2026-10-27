@@ -184,6 +184,7 @@ impl CrucibleState<UdevData> {
         let pointer_location = self.pointer.current_location();
         let empty_focus_rect = self.focused_empty_pane_rect();
         let overlay_chrome = self.overlay_chrome();
+        let chrome_classes = self.chrome_classes();
 
         // Select a renderer: same-GPU is a single renderer, cross-GPU needs the scanout format.
         let format = self.backend_data.backends[&node].surfaces[&crtc]
@@ -208,6 +209,7 @@ impl CrucibleState<UdevData> {
                 empty_focus_rect,
                 overlay_chrome,
                 (output_geo.loc.x, output_geo.loc.y),
+                &chrome_classes,
             )
             .into_iter()
             .map(CustomRenderElements::SolidColor)

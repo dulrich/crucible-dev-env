@@ -14,13 +14,24 @@ terminal "<command>" exec-flag="-e"
 
 The program spawned by `Super+Shift+Return` (the `run-terminal` action; `Super+Return` is now the launcher, `open-launcher`; `stack-window` is retired, every launch already stacks into the focused pane). Default: unset, which keeps the built-in lookup (`$TERMINAL`, else `foot`). `exec-flag` is the flag the terminal takes to run a program (default `-e`) and is used by the program launcher to run `Terminal=true` desktop entries (CDE exports the terminal and flag to children as `CDE_TERMINAL` and `CDE_TERMINAL_EXEC_FLAG`). The command must be non-empty; it is spawned directly (no shell), so give a path or a name on `$PATH`.
 
-### `gaps`
+### `tiling`
 
 ```kdl
-gaps inner=6 outer=8
+tiling {
+    terminal gap=6 ring=3
+    app gap=0 ring=0 fill="#737373"
+    terminal-args "--window-padding-x={gap}" "--window-padding-y={gap}" "--window-padding-color=extend-always" "--window-padding-balance=true"
+}
 ```
 
-Pixel gaps between sibling panes (`inner`) and around the tiled area of each output (`outer`). Both are non-negative integers; either may be omitted. Defaults: `inner=6`, `outer=8`.
+Tiles are edge to edge: they abut and cover the output, so no background shows between them. Each window class then gets its own gap and focus ring (both non-negative integers, in pixels; every key is optional):
+
+- `terminal` — CDE-spawned terminals. The window fills its whole tile; `gap` is the padding the terminal draws itself (see `terminal-args`) and the focus ring (`ring`) is drawn inside the tile, in that padding. Defaults: `gap=6`, `ring=3`.
+- `app` — every other window. The window is inset by `gap` on each side; the focus ring is drawn outside the window, in the gap, and the rest of the gap is painted `fill` (`"#rrggbb"`, default `#737373`) so no background shows. Defaults: `gap=0`, `ring=0` (no ring, nothing drawn).
+- A `ring` larger than its `gap` is clamped to `gap` (logged as a warning).
+- `terminal-args` — zero or more strings inserted before the exec flag on terminal spawns only (`Super+Shift+Return`, `run-in-terminal`, restored terminals; not overlays, which use `overlay.terminal-args`, and not apps). `{gap}` in an argument is replaced by the terminal `gap`. As a ghostty example, the arguments above make ghostty pad `gap` pixels on each side in its own background so the compositor ring never covers a cell. Default: none, in which case the terminal ring is drawn over the terminal's outermost pixels.
+
+The old `gaps` node was removed; a config that still has one is rejected with an error naming `tiling`.
 
 ### `focus-follows-mouse`
 
@@ -113,7 +124,10 @@ See the table in the README.
 
 ```kdl
 terminal "/tmp/cde/ghostty-cde" exec-flag="-e"
-gaps inner=8 outer=8
+tiling {
+    terminal gap=6 ring=3
+    app gap=0 ring=0
+}
 focus-follows-mouse #true
 picker {
     root "<code-root>"

@@ -239,8 +239,8 @@ impl World {
     ///
     /// If `output_id` is unknown, returns an empty `Vec`.
     ///
-    /// See [`GapConfig::default`] for the recommended temporary defaults (Phase 3 will source these
-    /// from `crucible-config`).
+    /// The compositor passes zero gaps here so tiles abut; per-class gaps are applied to windows
+    /// inside their tiles (`tiling` config).
     #[must_use]
     pub fn geometry(
         &self,

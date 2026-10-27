@@ -85,8 +85,9 @@ impl Rect {
 
 /// Gap configuration passed to the geometry pass.
 ///
-/// These are temporary hardcoded defaults. Phase 3 will source them from `crucible-config` (KDL
-/// config file, hot-reloaded). Until then, the defaults here are the live values.
+/// The compositor passes zero gaps, so tiles abut and cover the output; per-class gaps are applied
+/// to windows inside their tiles by the compositor (`tiling` config). The non-zero default below is
+/// only a convenient value for tests and other callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GapConfig {
     /// Pixels of space around the whole output's tiled area (all four sides).
@@ -102,7 +103,7 @@ pub struct GapConfig {
 impl Default for GapConfig {
     /// Returns the recommended default gaps.
     ///
-    /// **Temporary** — these constants will be driven by `crucible-config` in Phase 3.
+    /// Not what the compositor uses (it passes zero gaps); kept as a convenient non-zero value.
     fn default() -> Self {
         Self { outer: 8, inner: 6 }
     }

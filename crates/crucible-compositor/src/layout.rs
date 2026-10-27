@@ -49,8 +49,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crucible_config::TilingConfig;
 use crucible_layout::{
-    FocusChange, LayoutChange, LayoutError, OutputId, PaneId, Projection, Rect, WindowId, World,
+    FocusChange, GapConfig, LayoutChange, LayoutError, OutputId, PaneId, Projection, Rect,
+    WindowId, World,
 };
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
@@ -326,6 +328,39 @@ pub fn keyboard_sync(
     }
 }
 
+/// Layout geometry is edge to edge: tiles abut and cover the output. Per-class gaps are applied
+/// to the *window* inside its tile ([`window_rect`]), never to the tile.
+pub const NO_GAPS: GapConfig = GapConfig::new(0, 0);
+
+/// Whether a managed window is a CDE-spawned terminal or an app (everything else).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowClass {
+    /// A CDE-spawned terminal: fills its tile and draws the gap as its own padding.
+    Terminal,
+    /// Any other managed window: inset inside its tile by the app gap.
+    App,
+}
+
+/// `gap` clamped so that insetting `tile` by it on every side never yields a negative size.
+#[must_use]
+pub fn clamped_gap(tile: Rect, gap: u32) -> i32 {
+    i32::try_from(gap)
+        .unwrap_or(i32::MAX)
+        .min(tile.width / 2)
+        .min(tile.height / 2)
+        .max(0)
+}
+
+/// The rect a window of `class` occupies inside `tile`: a terminal fills the tile, an app is
+/// inset by `tiling.app.gap` on every side (clamped so the size is never negative). **Pure.**
+#[must_use]
+pub fn window_rect(tile: Rect, class: WindowClass, tiling: &TilingConfig) -> Rect {
+    match class {
+        WindowClass::Terminal => tile,
+        WindowClass::App => tile.inset(clamped_gap(tile, tiling.app.gap)),
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Derives the current [`Projection`], applies the difference from the last one, and stores it.
     ///
@@ -334,7 +369,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// and therefore no configures and no focus churn.
     pub fn apply_layout(&mut self) {
         let bindings = self.output_bindings();
-        let next: Projection = self.layout.world.project(&bindings, self.gaps);
+        let next: Projection = self.layout.world.project(&bindings, NO_GAPS);
         // Last-viewed outputs follow what is shown, so note them even when the diff is empty.
         self.note_last_viewed_outputs();
         let diff = self.projection.diff(&next);
@@ -348,7 +383,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     let Some(element) = self.layout.element(*id).cloned() else {
                         continue;
                     };
-                    let logical = to_logical(*rect);
+                    // The projection holds the tile; the window sits inside it per its class.
+                    let class = self.window_class(*id);
+                    let logical = to_logical(window_rect(*rect, class, &self.config.tiling));
                     // Configure first, then position via map_element so the element is mapped (or
                     // re-mapped, for a window returning from hidden) at the right place.
                     configure_placement(&element, logical, *resized);
@@ -385,23 +422,23 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     /// The pane under global pointer `location` on any bound output's active workspace, using the
-    /// same bindings and gaps as the projection. `None` in gaps or off every output.
+    /// same bindings as the projection. `None` off every output.
     pub(crate) fn pane_under(&self, location: Point<f64, Logical>) -> Option<PaneId> {
         self.layout.world.pane_at(
             &self.output_bindings(),
-            self.gaps,
+            NO_GAPS,
             location.x.floor() as i32,
             location.y.floor() as i32,
         )
     }
 
     /// The global rect of the focused pane when it holds no window (for the empty-pane focus
-    /// ring), from the same bindings and gaps as the projection.
+    /// ring), from the same bindings as the projection.
     pub(crate) fn focused_empty_pane_rect(&self) -> Option<Rect> {
         let pane = self.layout.world.focused_empty_pane()?;
         self.layout
             .world
-            .pane_rect(&self.output_bindings(), self.gaps, pane)
+            .pane_rect(&self.output_bindings(), NO_GAPS, pane)
     }
 
     /// Makes keyboard focus match the model's focused window (see [`keyboard_sync`]).
@@ -476,23 +513,32 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Maps a **managed** window: model open, bind the element, apply the projection.
     ///
     /// The projection — not the caller — decides where and at what size the window lands, and
-    /// whether it takes focus. Returns the model [`WindowId`] now bound to `element`.
-    pub fn map_managed_window(&mut self, element: WindowElement) -> WindowId {
+    /// whether it takes focus. `on_open` runs with the new id **before** the first
+    /// [`Self::apply_layout`], so per-window state the placement reads (its class) is registered
+    /// in time. Returns the model [`WindowId`] now bound to `element`.
+    pub fn map_managed_window(
+        &mut self,
+        element: WindowElement,
+        on_open: impl FnOnce(&mut Self, WindowId),
+    ) -> WindowId {
         let id = self.layout.open_managed(element);
+        on_open(self, id);
         self.apply_layout();
         id
     }
 
     /// Maps a **managed** window into `pane` at stack `index` (a restored window matched to its
     /// pending placement). Same commit order as [`Self::map_managed_window`]; on a model error
-    /// nothing is bound or mapped.
+    /// nothing is bound or mapped and `on_open` is not called.
     pub fn map_managed_window_at(
         &mut self,
         element: WindowElement,
         pane: PaneId,
         index: usize,
+        on_open: impl FnOnce(&mut Self, WindowId),
     ) -> Result<WindowId, LayoutError> {
         let id = self.layout.open_managed_at(element, pane, index)?;
+        on_open(self, id);
         self.apply_layout();
         Ok(id)
     }
@@ -733,6 +779,27 @@ mod tests {
             at(3840, 0, 1920, 2160),
             at(3840, 0, 1920, 2160)
         ));
+    }
+
+    #[test]
+    fn terminals_fill_the_tile_and_apps_inset_by_their_gap_clamped() {
+        let tile = Rect::new(10, 20, 400, 300);
+        let mut tiling = TilingConfig::default();
+        assert_eq!(window_rect(tile, WindowClass::Terminal, &tiling), tile);
+        // Default app gap is 0: the app fills the tile too.
+        assert_eq!(window_rect(tile, WindowClass::App, &tiling), tile);
+        tiling.app.gap = 8;
+        assert_eq!(
+            window_rect(tile, WindowClass::App, &tiling),
+            Rect::new(18, 28, 384, 284)
+        );
+        // Terminal gap never insets the window (it is the terminal's own padding).
+        tiling.terminal.gap = 50;
+        assert_eq!(window_rect(tile, WindowClass::Terminal, &tiling), tile);
+        // An oversized gap clamps instead of going negative.
+        tiling.app.gap = 1000;
+        let w = window_rect(Rect::new(0, 0, 40, 10), WindowClass::App, &tiling);
+        assert_eq!(w, Rect::new(5, 5, 30, 0));
     }
 
     #[test]

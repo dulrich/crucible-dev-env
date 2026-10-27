@@ -23,7 +23,6 @@ use std::sync::{Arc, atomic::AtomicBool};
 
 use crucible_config::Config;
 use crucible_keys::Bindings;
-use crucible_layout::GapConfig;
 
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::delegate_dispatch2;
@@ -213,9 +212,6 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub config: Config,
     /// The active chord table, rebuilt from `config.binds` by [`Self::apply_config`].
     pub bindings: Bindings,
-    /// The active pane gaps, from `config.gaps`: the projection, the pointer pane hit-test and the
-    /// empty-pane focus ring all read this one field so they can never disagree.
-    pub gaps: GapConfig,
     /// The last hover target seen by focus-follows-mouse; focus moves only when this changes
     /// (pointer *enter*), so keyboard-driven focus is not undone by a pointer twitch.
     pub hover_target: Option<HoverTarget>,
@@ -417,7 +413,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
             focus_follows_mouse: true,
             config: Config::default(),
             bindings: Bindings::default(),
-            gaps: GapConfig::default(),
             hover_target: None,
             persist: crate::persist::PersistState::new(crucible_persist::store::store_dir()),
         }

@@ -72,7 +72,7 @@ run -- --winit`. Logging verbosity is controlled by `RUST_LOG` (e.g. `RUST_LOG=d
 
 Focus follows the mouse by default: hovering a window focuses it, like clicking it. Turn it off with
 `focus-follows-mouse #false` in `~/.config/cde/config.kdl`; see [`docs/config.md`](docs/config.md) for the
-full config schema (terminal, gaps, picker roots, rebinding chords).
+full config schema (terminal, tiling (per-class gap and focus ring; the old `gaps` node was removed), picker roots, rebinding chords).
 
 Once inside, press **`Super+Shift+Return`** to spawn your first terminal, then **`Super+\`** to split. See
 the full keymap below.

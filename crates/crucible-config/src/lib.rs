@@ -140,19 +140,90 @@ impl Default for TerminalConfig {
     }
 }
 
-/// Gaps between tiled panes, in pixels.
+/// An sRGB colour, parsed from `"#rrggbb"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct GapsConfig {
-    /// Pixels between two sibling panes.
-    pub inner: u32,
-    /// Pixels around the whole output's tiled area.
-    pub outer: u32,
+pub struct Rgb(pub u8, pub u8, pub u8);
+
+impl Rgb {
+    /// Parses exactly `#rrggbb` (hex digits, either case); anything else is `None`.
+    #[must_use]
+    pub fn from_hex(s: &str) -> Option<Self> {
+        let digits = s.strip_prefix('#')?;
+        if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        let byte = |i: usize| u8::from_str_radix(&digits[i..i + 2], 16).ok();
+        Some(Self(byte(0)?, byte(2)?, byte(4)?))
+    }
 }
 
-impl Default for GapsConfig {
-    /// Today's gaps: 6 px inner, 8 px outer (`crucible_layout::GapConfig::default`).
+/// Gap, focus-ring thickness and (for apps) inset fill of one window class, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClassTiling {
+    /// Space between the tile edge and the window content. For terminals the terminal draws it as
+    /// its own padding; for apps CDE insets the window and paints the inset.
+    pub gap: u32,
+    /// Focus-ring thickness; never more than `gap` (clamped at parse time).
+    pub ring: u32,
+    /// Colour painted over the part of an app's inset the ring does not cover. Unused for terminals.
+    pub fill: Rgb,
+}
+
+/// Per-class tiling: terminals fill their tile, apps are inset by their gap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TilingConfig {
+    /// CDE-spawned terminals.
+    pub terminal: ClassTiling,
+    /// Every other managed window.
+    pub app: ClassTiling,
+    /// Extra terminal arguments for terminal spawns (`{gap}` = the terminal gap, see
+    /// [`substitute_gap`]), inserted before the exec flag.
+    pub terminal_args: Vec<String>,
+}
+
+impl Default for TilingConfig {
+    /// Terminal gap 6 / ring 3; app gap 0 / ring 0 with the muted chrome grey (`#737373`, the
+    /// inactive stack-pip colour) as fill.
     fn default() -> Self {
-        Self { inner: 6, outer: 8 }
+        let fill = Rgb(0x73, 0x73, 0x73);
+        Self {
+            terminal: ClassTiling {
+                gap: 6,
+                ring: 3,
+                fill,
+            },
+            app: ClassTiling {
+                gap: 0,
+                ring: 0,
+                fill,
+            },
+            terminal_args: Vec::new(),
+        }
+    }
+}
+
+impl TilingConfig {
+    /// [`Self::terminal_args`] with `{gap}` replaced by the terminal gap.
+    #[must_use]
+    pub fn substituted_terminal_args(&self) -> Vec<String> {
+        substitute_gap(&self.terminal_args, self.terminal.gap)
+    }
+}
+
+/// Replaces every `{gap}` in `args` with `gap`. Pure.
+#[must_use]
+pub fn substitute_gap(args: &[String], gap: u32) -> Vec<String> {
+    let gap = gap.to_string();
+    args.iter().map(|a| a.replace("{gap}", &gap)).collect()
+}
+
+/// `(ring, clamped)`: `ring` limited to `gap`; `clamped` is whether it was reduced. Pure.
+#[must_use]
+pub fn clamp_ring(gap: u32, ring: u32) -> (u32, bool) {
+    if ring > gap {
+        (gap, true)
+    } else {
+        (ring, false)
     }
 }
 
@@ -221,8 +292,8 @@ impl Default for OverlayConfig {
 pub struct Config {
     /// Terminal command and exec flag.
     pub terminal: TerminalConfig,
-    /// Pane gaps.
-    pub gaps: GapsConfig,
+    /// Per-class gap, ring and terminal arguments.
+    pub tiling: TilingConfig,
     /// Whether pointer motion moves focus.
     pub focus_follows_mouse: bool,
     /// Directories whose immediate subdirectories are workspace-picker candidates.
@@ -237,7 +308,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             terminal: TerminalConfig::default(),
-            gaps: GapsConfig::default(),
+            tiling: TilingConfig::default(),
             focus_follows_mouse: true,
             picker_roots: Vec::new(),
             overlay: OverlayConfig::default(),
@@ -308,7 +379,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         let at = locate(text, node.span().offset());
         if matches!(
             name,
-            "terminal" | "gaps" | "focus-follows-mouse" | "picker" | "overlay" | "binds"
+            "terminal" | "tiling" | "focus-follows-mouse" | "picker" | "overlay" | "binds"
         ) && seen.contains(&name)
         {
             return Err(ConfigError::Duplicate {
@@ -318,7 +389,16 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         }
         match name {
             "terminal" => parse_terminal(text, node, &mut config.terminal)?,
-            "gaps" => parse_gaps(text, node, &mut config.gaps)?,
+            "tiling" => config.tiling = parse_tiling(text, node)?,
+            "gaps" => {
+                return Err(ConfigError::InvalidValue {
+                    at,
+                    node: "gaps".to_string(),
+                    what: "node".to_string(),
+                    message: "`gaps` was removed; use `tiling { terminal gap=… ring=…; app gap=… ring=… }`"
+                        .to_string(),
+                });
+            }
             "focus-follows-mouse" => {
                 no_properties(text, node)?;
                 config.focus_follows_mouse = single_arg(text, node, "a #true or #false")?
@@ -485,37 +565,138 @@ fn parse_terminal(text: &str, node: &KdlNode, out: &mut TerminalConfig) -> Resul
     Ok(())
 }
 
-fn parse_gaps(text: &str, node: &KdlNode, out: &mut GapsConfig) -> Result<(), ConfigError> {
-    allow_properties(text, node, &["inner", "outer"])?;
+/// The node's positional arguments, all strings (`terminal-args`).
+fn string_list(text: &str, node: &KdlNode) -> Result<Vec<String>, ConfigError> {
+    let mut list = Vec::new();
+    for (value, arg_at) in args(text, node) {
+        let s = value.as_string().ok_or_else(|| ConfigError::WrongType {
+            at: arg_at,
+            node: node_name(node),
+            what: "argument".to_string(),
+            expected: "a string",
+        })?;
+        list.push(s.to_string());
+    }
+    Ok(list)
+}
+
+/// A non-negative integer property `key`, if present.
+fn u32_prop(text: &str, node: &KdlNode, key: &str) -> Result<Option<u32>, ConfigError> {
+    let Some(entry) = node.entry(key) else {
+        return Ok(None);
+    };
+    let at = locate(text, entry.span().offset());
+    let what = format!("property `{key}`");
+    let n = entry
+        .value()
+        .as_integer()
+        .ok_or_else(|| ConfigError::WrongType {
+            at,
+            node: node_name(node),
+            what: what.clone(),
+            expected: "an integer",
+        })?;
+    u32::try_from(n)
+        .map(Some)
+        .map_err(|_| ConfigError::InvalidValue {
+            at,
+            node: node_name(node),
+            what,
+            message: format!("{n} is outside 0..={}", u32::MAX),
+        })
+}
+
+/// One `terminal` / `app` line of `tiling`: `gap`, `ring` and (apps only) `fill`.
+fn parse_class_tiling(
+    text: &str,
+    node: &KdlNode,
+    out: &mut ClassTiling,
+    allow_fill: bool,
+) -> Result<(), ConfigError> {
+    allow_properties(
+        text,
+        node,
+        if allow_fill {
+            &["gap", "ring", "fill"]
+        } else {
+            &["gap", "ring"]
+        },
+    )?;
     if let Some((_, at)) = args(text, node).first() {
         return Err(ConfigError::UnexpectedArgument {
             at: *at,
             node: node_name(node),
         });
     }
-    for (key, slot) in [("inner", &mut out.inner), ("outer", &mut out.outer)] {
-        let Some(entry) = node.entry(key) else {
-            continue;
-        };
+    if let Some(gap) = u32_prop(text, node, "gap")? {
+        out.gap = gap;
+    }
+    if let Some(ring) = u32_prop(text, node, "ring")? {
+        out.ring = ring;
+    }
+    if let Some(entry) = node.entry("fill") {
         let at = locate(text, entry.span().offset());
-        let what = format!("property `{key}`");
-        let n = entry
+        let s = entry
             .value()
-            .as_integer()
+            .as_string()
             .ok_or_else(|| ConfigError::WrongType {
                 at,
                 node: node_name(node),
-                what: what.clone(),
-                expected: "an integer",
+                what: "property `fill`".to_string(),
+                expected: "a \"#rrggbb\" string",
             })?;
-        *slot = u32::try_from(n).map_err(|_| ConfigError::InvalidValue {
+        out.fill = Rgb::from_hex(s).ok_or_else(|| ConfigError::InvalidValue {
             at,
             node: node_name(node),
-            what,
-            message: format!("{n} is outside 0..={}", u32::MAX),
+            what: "property `fill`".to_string(),
+            message: format!("`{s}` is not a #rrggbb colour"),
         })?;
     }
     Ok(())
+}
+
+fn parse_tiling(text: &str, node: &KdlNode) -> Result<TilingConfig, ConfigError> {
+    let mut out = TilingConfig::default();
+    let mut seen: Vec<&str> = Vec::new();
+    for child in block_children(text, node)? {
+        let name = child.name().value();
+        let at = locate(text, child.span().offset());
+        if seen.contains(&name) {
+            return Err(ConfigError::Duplicate {
+                at,
+                name: name.to_string(),
+            });
+        }
+        match name {
+            "terminal" => parse_class_tiling(text, child, &mut out.terminal, false)?,
+            "app" => parse_class_tiling(text, child, &mut out.app, true)?,
+            "terminal-args" => {
+                no_properties(text, child)?;
+                out.terminal_args = string_list(text, child)?;
+            }
+            other => {
+                return Err(ConfigError::UnknownNode {
+                    at,
+                    name: other.to_string(),
+                    context: "tiling",
+                });
+            }
+        }
+        seen.push(name);
+    }
+    for (class, tiling) in [("terminal", &mut out.terminal), ("app", &mut out.app)] {
+        let (ring, clamped) = clamp_ring(tiling.gap, tiling.ring);
+        if clamped {
+            tracing::warn!(
+                class,
+                gap = tiling.gap,
+                ring = tiling.ring,
+                "tiling ring is larger than gap; clamping ring to gap"
+            );
+            tiling.ring = ring;
+        }
+    }
+    Ok(out)
 }
 
 /// Children of a block node, rejecting arguments/properties on the block itself.
@@ -578,17 +759,7 @@ fn parse_overlay(text: &str, node: &KdlNode) -> Result<OverlayConfig, ConfigErro
                     })?;
             }
             "terminal-args" => {
-                let mut list = Vec::new();
-                for (value, arg_at) in args(text, child) {
-                    let s = value.as_string().ok_or_else(|| ConfigError::WrongType {
-                        at: arg_at,
-                        node: node_name(child),
-                        what: "argument".to_string(),
-                        expected: "a string",
-                    })?;
-                    list.push(s.to_string());
-                }
-                out.terminal_args = list;
+                out.terminal_args = string_list(text, child)?;
             }
             other => {
                 return Err(ConfigError::UnknownNode {
@@ -624,9 +795,13 @@ fn parse_binds(text: &str, node: &KdlNode) -> Result<Vec<(String, String)>, Conf
 mod tests {
     use super::*;
 
-    const FULL: &str = r#"
+    const FULL: &str = r##"
 terminal "/tmp/cde/ghostty-cde" exec-flag="-e"
-gaps inner=4 outer=12
+tiling {
+    terminal gap=4 ring=2
+    app gap=3 ring=1 fill="#102030"
+    terminal-args "--window-padding-x={gap}" "--b"
+}
 focus-follows-mouse #false
 picker {
     root "<code-root>"
@@ -637,7 +812,7 @@ binds {
     bind "Super+Backslash" "split right"
     bind "Super+Shift+Q" "none"
 }
-"#;
+"##;
 
     #[test]
     fn empty_text_is_default() {
@@ -649,7 +824,11 @@ binds {
         let c = Config::default();
         assert_eq!(c.terminal.command, None);
         assert_eq!(c.terminal.exec_flag, "-e");
-        assert_eq!(c.gaps, GapsConfig { inner: 6, outer: 8 });
+        assert_eq!(c.tiling.terminal.gap, 6);
+        assert_eq!(c.tiling.terminal.ring, 3);
+        assert_eq!((c.tiling.app.gap, c.tiling.app.ring), (0, 0));
+        assert_eq!(c.tiling.app.fill, Rgb(0x73, 0x73, 0x73));
+        assert!(c.tiling.terminal_args.is_empty());
         assert!(c.focus_follows_mouse);
         assert!(c.picker_roots.is_empty());
         assert!(c.binds.is_empty());
@@ -660,12 +839,12 @@ binds {
         let c = parse(FULL).unwrap();
         assert_eq!(c.terminal.command.as_deref(), Some("/tmp/cde/ghostty-cde"));
         assert_eq!(c.terminal.exec_flag, "-e");
+        assert_eq!((c.tiling.terminal.gap, c.tiling.terminal.ring), (4, 2));
+        assert_eq!((c.tiling.app.gap, c.tiling.app.ring), (3, 1));
+        assert_eq!(c.tiling.app.fill, Rgb(0x10, 0x20, 0x30));
         assert_eq!(
-            c.gaps,
-            GapsConfig {
-                inner: 4,
-                outer: 12
-            }
+            c.tiling.substituted_terminal_args(),
+            vec!["--window-padding-x=4".to_string(), "--b".to_string()]
         );
         assert!(!c.focus_follows_mouse);
         assert_eq!(
@@ -687,8 +866,9 @@ binds {
 
     #[test]
     fn partial_files_keep_other_defaults() {
-        let c = parse("gaps inner=0\n").unwrap();
-        assert_eq!(c.gaps, GapsConfig { inner: 0, outer: 8 });
+        let c = parse("tiling {\n    terminal gap=0 ring=0\n}\n").unwrap();
+        assert_eq!(c.tiling.terminal.gap, 0);
+        assert_eq!((c.tiling.app.gap, c.tiling.app.ring), (0, 0));
         assert!(c.focus_follows_mouse);
         let c = parse("terminal \"alacritty\"\n").unwrap();
         assert_eq!(c.terminal.exec_flag, "-e");
@@ -714,20 +894,20 @@ binds {
 
     #[test]
     fn syntax_error_has_location() {
-        let (err, at) = err_at("gaps inner=4\nterminal \"unterminated\n");
+        let (err, at) = err_at("tiling {\n}\nterminal \"unterminated\n");
         assert!(matches!(err, ConfigError::Syntax { .. }), "{err}");
         assert!(at.line >= 2, "{at}");
     }
 
     #[test]
     fn unknown_top_level_node() {
-        let (err, at) = err_at("gaps inner=1\n\nwallpaper \"x.png\"\n");
+        let (err, at) = err_at("tiling {\n}\n\nwallpaper \"x.png\"\n");
         assert!(
             matches!(&err, ConfigError::UnknownNode { name, context, .. }
                 if name == "wallpaper" && *context == "the top level"),
             "{err}"
         );
-        assert_eq!(at, Location { line: 3, column: 1 });
+        assert_eq!(at, Location { line: 4, column: 1 });
     }
 
     #[test]
@@ -741,26 +921,31 @@ binds {
 
     #[test]
     fn unknown_property() {
-        let (err, at) = err_at("gaps inner=1 middle=2\n");
+        let (err, at) = err_at("tiling {\n    terminal gap=1 middle=2\n}\n");
         assert!(
             matches!(&err, ConfigError::UnknownProperty { name, node, .. }
-                if name == "middle" && node == "gaps"),
+                if name == "middle" && node == "terminal"),
             "{err}"
         );
         assert_eq!(
             at,
             Location {
-                line: 1,
-                column: 14
+                line: 2,
+                column: 20
             }
         );
+        // `fill` is an app-only property.
+        let (err, _) = err_at("tiling {\n    terminal fill=\"#000000\"\n}\n");
+        assert!(matches!(err, ConfigError::UnknownProperty { .. }));
+        let (err, _) = err_at("tiling {\n    window gap=1\n}\n");
+        assert!(matches!(&err, ConfigError::UnknownNode { context, .. } if *context == "tiling"));
         let (err, _) = err_at("terminal \"foot\" flag=\"-e\"\n");
         assert!(matches!(err, ConfigError::UnknownProperty { .. }));
     }
 
     #[test]
     fn wrong_value_types() {
-        let (err, _) = err_at("gaps inner=\"big\"\n");
+        let (err, _) = err_at("tiling {\n    app gap=\"big\"\n}\n");
         assert!(
             matches!(&err, ConfigError::WrongType { expected, .. } if *expected == "an integer")
         );
@@ -776,9 +961,11 @@ binds {
 
     #[test]
     fn out_of_range_and_empty_values() {
-        let (err, _) = err_at("gaps outer=-1\n");
+        let (err, _) = err_at("tiling {\n    terminal gap=-1\n}\n");
         assert!(matches!(err, ConfigError::InvalidValue { .. }));
-        let (err, _) = err_at("gaps outer=99999999999\n");
+        let (err, _) = err_at("tiling {\n    app ring=99999999999\n}\n");
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
+        let (err, _) = err_at("tiling {\n    app fill=\"red\"\n}\n");
         assert!(matches!(err, ConfigError::InvalidValue { .. }));
         let (err, _) = err_at("terminal \"\"\n");
         assert!(matches!(err, ConfigError::InvalidValue { .. }));
@@ -795,15 +982,35 @@ binds {
         let (err, at) = err_at("terminal \"a\" \"b\"\n");
         assert!(matches!(err, ConfigError::UnexpectedArgument { .. }));
         assert_eq!(at.column, 14);
-        let (err, _) = err_at("gaps 4\n");
+        let (err, _) = err_at("tiling 4\n");
         assert!(matches!(err, ConfigError::UnexpectedArgument { .. }));
     }
 
     #[test]
     fn duplicate_single_use_node() {
-        let (err, at) = err_at("gaps inner=1\ngaps inner=2\n");
-        assert!(matches!(&err, ConfigError::Duplicate { name, .. } if name == "gaps"));
-        assert_eq!(at.line, 2);
+        let (err, at) = err_at("tiling {\n}\ntiling {\n}\n");
+        assert!(matches!(&err, ConfigError::Duplicate { name, .. } if name == "tiling"));
+        assert_eq!(at.line, 3);
+    }
+
+    #[test]
+    fn gaps_node_is_an_error_naming_tiling() {
+        let (err, at) = err_at("gaps inner=4\n");
+        assert!(err.to_string().contains("tiling"), "{err}");
+        assert_eq!(at.line, 1);
+    }
+
+    #[test]
+    fn ring_clamps_to_gap_and_gap_substitutes() {
+        let c = parse("tiling {\n    terminal gap=2 ring=9\n    app gap=1 ring=5\n}\n").unwrap();
+        assert_eq!(c.tiling.terminal.ring, 2);
+        assert_eq!(c.tiling.app.ring, 1);
+        assert_eq!(clamp_ring(6, 3), (3, false));
+        assert_eq!(clamp_ring(2, 9), (2, true));
+        assert_eq!(
+            substitute_gap(&["a={gap}-{gap}".to_string(), "b".to_string()], 7),
+            vec!["a=7-7".to_string(), "b".to_string()]
+        );
     }
 
     #[test]
@@ -838,8 +1045,8 @@ binds {
         assert_eq!(load(&missing).unwrap(), Config::default());
 
         let good = dir.join("good.kdl");
-        std::fs::write(&good, "gaps inner=2\n").unwrap();
-        assert_eq!(load(&good).unwrap().gaps.inner, 2);
+        std::fs::write(&good, "tiling {\n    terminal gap=2 ring=1\n}\n").unwrap();
+        assert_eq!(load(&good).unwrap().tiling.terminal.gap, 2);
 
         let bad = dir.join("bad.kdl");
         std::fs::write(&bad, "nope\n").unwrap();

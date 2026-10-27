@@ -1083,6 +1083,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
+    /// Prepends the substituted `tiling.terminal-args` (before the exec flag) to the arguments of a
+    /// CDE-spawned **terminal**. Overlays use `overlay.terminal-args` only; apps get none.
+    fn with_tiling_args(&self, args: Vec<OsString>) -> Vec<OsString> {
+        with_terminal_args(&self.config.tiling.substituted_terminal_args(), args)
+    }
+
     /// The `PATH` every spawned child gets: this binary's directory (so `crucible` resolves) in
     /// front of the compositor's own `PATH`. `None` when the executable path is unknown.
     fn spawn_path() -> Option<OsString> {
@@ -1133,7 +1139,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .cloned()
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/"));
-        let args = run_in_terminal_args(&self.config.terminal.exec_flag, &crucible, &dir, cmd);
+        let args = self.with_tiling_args(run_in_terminal_args(
+            &self.config.terminal.exec_flag,
+            &crucible,
+            &dir,
+            cmd,
+        ));
         let program = self.terminal_program();
         self.spawn_process(&program, &args, Some(&dir), SpawnKind::Terminal)
             .ok_or_else(|| "spawn failed".to_string())
@@ -1143,7 +1154,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub fn spawn_terminal_here(&mut self, program: &str) {
         let ws = self.layout.world.active_workspace_id();
         let root = self.persist.roots.get(&ws).cloned();
-        self.spawn_process(program, &[], root.as_deref(), SpawnKind::Terminal);
+        let args = self.with_tiling_args(Vec::new());
+        self.spawn_process(program, &args, root.as_deref(), SpawnKind::Terminal);
     }
 
     /// Runs `cmd` (a shell command line) into the focused pane via `/bin/sh -c 'exec <cmd>'`, so the
@@ -1383,28 +1395,57 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 "latency: spawn→map"
             );
         }
-        let id = match pending.map(|p| p.target) {
-            Some(Target::Overlay) => {
-                self.map_overlay(element);
-                return;
-            }
+        // The class must be known before the first placement (every mapping path applies the
+        // layout), so the window's first rect already honours terminal vs app.
+        let terminal = pid.is_some_and(|p| is_terminal_spawn(p, &ancestors, &self.persist.spawned));
+        let info = WindowInfo { pid, terminal };
+        match pending.map(|p| p.target) {
+            Some(Target::Overlay) => self.map_overlay(element),
             Some(Target::Pane {
                 pane,
                 saved_index,
                 focused,
-            }) => self.map_placed(element, pane, saved_index, focused),
+            }) => {
+                self.map_placed(element, pane, saved_index, focused, info);
+            }
             Some(Target::Slot {
                 pane,
                 index,
                 focused,
                 saved_index,
-            }) => self.map_slot(element, pane, index, focused, saved_index),
-            None => self.map_managed_window(element),
-        };
-        let terminal = pid.is_some_and(|p| is_terminal_spawn(p, &ancestors, &self.persist.spawned));
+            }) => {
+                self.map_slot(element, pane, index, focused, saved_index, info);
+            }
+            None => {
+                self.map_managed_window(element, Self::register_info(info));
+            }
+        }
+    }
+
+    /// An `on_open` hook recording `info` for the new window id before its first placement.
+    fn register_info(info: WindowInfo) -> impl FnOnce(&mut Self, WindowId) {
+        move |this, id| {
+            this.persist.windows.insert(id, info);
+        }
+    }
+
+    /// Every managed window classified as a CDE-spawned terminal.
+    pub(crate) fn terminal_window_ids(&self) -> std::collections::HashSet<WindowId> {
         self.persist
             .windows
-            .insert(id, WindowInfo { pid, terminal });
+            .iter()
+            .filter(|(_, i)| i.terminal)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// The placement class of window `id`: a CDE-spawned terminal, else an app.
+    pub(crate) fn window_class(&self, id: WindowId) -> crate::layout::WindowClass {
+        if self.persist.windows.get(&id).is_some_and(|i| i.terminal) {
+            crate::layout::WindowClass::Terminal
+        } else {
+            crate::layout::WindowClass::App
+        }
     }
 
     fn map_placed(
@@ -1413,6 +1454,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         pane: PaneId,
         saved_index: usize,
         focused: bool,
+        info: WindowInfo,
     ) -> WindowId {
         let live: Vec<WindowId> = self
             .layout
@@ -1423,14 +1465,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let placed = self.persist.placed.entry(pane).or_default();
         placed.retain(|(w, _)| live.contains(w));
         let index = insert_index(placed.iter().map(|(_, i)| *i), saved_index);
-        match self.map_managed_window_at(element.clone(), pane, index) {
+        match self.map_managed_window_at(element.clone(), pane, index, Self::register_info(info)) {
             Ok(id) => {
                 self.finish_placement(pane, id, Some(saved_index), focused);
                 id
             }
             Err(err) => {
                 warn!(%err, "restore placement failed; using the focused pane");
-                self.map_managed_window(element)
+                self.map_managed_window(element, Self::register_info(info))
             }
         }
     }
@@ -1470,19 +1512,25 @@ impl<B: Backend + 'static> CrucibleState<B> {
         index: usize,
         focused: bool,
         saved_index: Option<usize>,
+        info: WindowInfo,
     ) -> WindowId {
         let Some(live_len) = self.layout.world.pane(pane).map(|p| p.windows.len()) else {
             warn!(?pane, "relaunch pane is gone; using the focused pane");
-            return self.map_managed_window(element);
+            return self.map_managed_window(element, Self::register_info(info));
         };
-        match self.map_managed_window_at(element.clone(), pane, slot_index(index, live_len)) {
+        match self.map_managed_window_at(
+            element.clone(),
+            pane,
+            slot_index(index, live_len),
+            Self::register_info(info),
+        ) {
             Ok(id) => {
                 self.finish_placement(pane, id, saved_index, focused);
                 id
             }
             Err(err) => {
                 warn!(%err, "relaunch placement failed; using the focused pane");
-                self.map_managed_window(element)
+                self.map_managed_window(element, Self::register_info(info))
             }
         }
     }
@@ -1714,6 +1762,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         let now = Instant::now();
         for (dir, args, target) in jobs {
+            let args = self.with_tiling_args(args);
             if let Some(pid) = self.spawn_process(&program, &args, Some(&dir), SpawnKind::Terminal)
             {
                 self.persist
