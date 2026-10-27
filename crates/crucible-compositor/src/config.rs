@@ -61,6 +61,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ///
     /// Public so WP-5's reload timer can call it; safe to call before any output exists.
     pub fn apply_config(&mut self, config: Config) {
+        let old_overlay_terminal = (
+            self.terminal_program(),
+            self.config.terminal.exec_flag.clone(),
+            self.config.overlay.terminal_args.clone(),
+        );
         let (bindings, bind_error) = plan_bindings(&self.bindings, &config);
         if let Some(err) = bind_error {
             error!(%err, "invalid binds in config; keeping the previous bindings");
@@ -88,6 +93,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         self.focus_follows_mouse = config.focus_follows_mouse;
         self.config = config;
+        if old_overlay_terminal
+            != (
+                self.terminal_program(),
+                self.config.terminal.exec_flag.clone(),
+                self.config.overlay.terminal_args.clone(),
+            )
+        {
+            self.warm_config_changed();
+        }
         if hide_header {
             // Same path as `toggle-header` (resets the projection, re-applies the layout).
             self.set_header_visible(false);

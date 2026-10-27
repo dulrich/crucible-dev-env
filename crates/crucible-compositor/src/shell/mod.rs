@@ -102,6 +102,9 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
         // (not on the `Space`) also covers a toplevel destroyed while hidden on an inactive
         // workspace or behind a pane stack. A repeated destroy resolves to nothing and is a no-op.
         let target = surface.wl_surface().clone();
+        if self.warm_toplevel_destroyed(&target) {
+            return;
+        }
         self.unmap_matching(|element| element.wl_surface().map(|s| *s == target).unwrap_or(false));
     }
 
@@ -206,13 +209,16 @@ impl<B: Backend + 'static> WlrLayerShellHandler for CrucibleState<B> {
 pub fn ensure_initial_configure(
     surface: &WlSurface,
     space: &Space<WindowElement>,
+    warm: Option<WindowElement>,
     popups: &mut PopupManager,
 ) {
-    // Toplevel: send the first configure if relevant.
+    // Toplevel: send the first configure if relevant. `warm` is the hidden pre-warmed overlay
+    // host's toplevel for `surface` (audit E7): it is never in the Space, yet needs its configure.
     if let Some(window) = space
         .elements()
         .find(|window| window.wl_surface().map(|s| &*s == surface).unwrap_or(false))
         .cloned()
+        .or(warm)
     {
         if let Some(toplevel) = window.toplevel() {
             let initial_configure_sent = with_states(surface, |states| {

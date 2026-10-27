@@ -68,6 +68,8 @@ Presentation of the picker, launcher and settings overlays. Every child is optio
 - `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` (default) or `"n1-light"`; any other value is a config error. `terminal` keeps the terminal's own look and the teal ring; the N1 styles paint opaque surrounds with an orange ring. The chosen style is passed to overlay programs as `CDE_OVERLAY_STYLE`.
 - `terminal-args` — extra terminal arguments, zero or more strings, inserted before the exec flag on overlay spawns only. Default: none. As a ghostty example only, `terminal-args "--window-padding-color=extend-always" "--window-padding-balance=true"` fills ghostty's window padding (and the leftover strip where the cell grid does not divide the overlay evenly) with the N1 surround and spreads it evenly, so the surround reaches the border on every side (verified on host-b, ghostty 1.3.1; `--background-opacity=1` is not needed); `--config-file=<path>` adds to the user config, while `--config-default-files=false` replaces it.
 
+Overlay terminals are pre-started: one hidden overlay terminal (running `crucible overlay-host`) is kept ready and is handed the overlay when one opens. It uses the same `terminal` program, exec flag and `overlay.terminal-args`; changing any of them on hot reload restarts it. There is nothing to configure.
+
 ### `header`
 
 ```kdl

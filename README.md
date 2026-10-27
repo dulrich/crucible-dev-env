@@ -122,6 +122,8 @@ Every workspace is saved automatically (about once a second, when its layout or 
 
 Overlays (the picker, the launcher and the settings view) are modal: hovering never moves focus off an open overlay, and clicking outside it or pressing any other `Super` chord (a slot, a workspace or pane verb) closes it before the click or chord takes effect. Opening another overlay replaces it.
 
+Overlays are pre-started: CDE keeps one hidden overlay terminal running `crucible overlay-host` (started at launch and again after each overlay closes), and opening an overlay hands it the mode instead of starting a terminal, which removes the terminal's start-up time. The hidden terminal is never shown until used; if it is not ready, the overlay starts cold as before. Nothing to configure. A non-Wayland (X11) overlay terminal is never pre-started.
+
 The picker talks to the compositor over a Unix socket at `$XDG_RUNTIME_DIR/cde/<wayland-socket>.sock`, exported to every child as `CDE_SOCKET`. The config file (`~/.config/cde/config.kdl`) is re-read when it changes.
 
 **Caveat — one process per terminal window.** Restored terminals are placed back into their panes by matching the PID CDE spawned to the window's client PID (or one of its ancestors). That works for terminals that run one process per window (foot, alacritty, ghostty with `--gtk-single-instance=false`, as `cde.sh` uses). A single-instance terminal daemon breaks the match: restored windows then open in the focused pane instead, and the picker overlay lands in a pane rather than floating.

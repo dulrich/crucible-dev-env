@@ -121,6 +121,8 @@ pub enum Target {
     },
     /// An overlay (picker / launcher; unmanaged, centred, keyboard-focused).
     Overlay,
+    /// A pre-warmed overlay host: stored hidden in the warm slot, never mapped until requested.
+    WarmOverlay,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -187,6 +189,103 @@ fn overlay_open_decision(
     }
 }
 
+/// A pre-warmed overlay terminal running `crucible overlay-host --socket <socket>`.
+#[derive(Debug, Clone)]
+struct WarmHost {
+    /// The spawned terminal's PID (killed to end it, kept as the overlay's PID once used).
+    pid: u32,
+    /// The host's mode socket.
+    socket: PathBuf,
+    /// Its toplevel once it arrived (stored hidden; never in the Space while warm).
+    element: Option<WindowElement>,
+    /// Monotonic spawn time (for the log line when it is used).
+    spawned_at: Instant,
+}
+
+/// What `open_overlay` does with the warm slot when it has to spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WarmUse {
+    /// The warm host is ready: hand it the mode and map it.
+    Use,
+    /// No ready warm host: kill any warm host (`kill`) and cold-spawn as before.
+    Cold {
+        /// Whether a (not ready) warm host exists and must be killed first.
+        kill: bool,
+    },
+}
+
+/// Pure warm-slot decision. `warm` is `None` without a warm host, else whether it is ready: its
+/// toplevel is stored, its initial configure has been sent, and its socket exists.
+fn warm_use_decision(warm: Option<bool>) -> WarmUse {
+    match warm {
+        Some(true) => WarmUse::Use,
+        Some(false) => WarmUse::Cold { kill: true },
+        None => WarmUse::Cold { kill: false },
+    }
+}
+
+/// Pure respawn bound for a warm host that died before use: returns `(respawn, respawn_ok after)`.
+/// One respawn is allowed per overlay close (and at startup); the flag is re-armed only there.
+fn warm_after_death(respawn_ok: bool) -> (bool, bool) {
+    (respawn_ok, false)
+}
+
+/// The warm host's socket path: under `$XDG_RUNTIME_DIR`, else the IPC socket's directory, else the
+/// temp dir; `cde-overlay-host-<compositor pid>-<counter>.sock`.
+#[must_use]
+pub fn warm_socket_path(
+    runtime_dir: Option<&Path>,
+    ipc_path: Option<&Path>,
+    pid: u32,
+    counter: u32,
+) -> PathBuf {
+    let dir = runtime_dir
+        .filter(|d| !d.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| ipc_path.and_then(Path::parent).map(Path::to_path_buf))
+        .unwrap_or_else(std::env::temp_dir);
+    dir.join(format!("cde-overlay-host-{pid}-{counter}.sock"))
+}
+
+/// The overlay host's mode line for overlay terminal `args` (`[exec-flag, crucible, sub, rest…]`,
+/// as built by [`picker_args`] and friends): `<epoch_ms>\t<sub>[\t<rest>…]\n`. `None` when the argv
+/// is too short or a field is not UTF-8 or holds a tab/newline (the caller then spawns cold).
+#[must_use]
+pub fn warm_mode_line(epoch_ms: u128, args: &[OsString]) -> Option<String> {
+    let mode = args.get(2..).filter(|m| !m.is_empty())?;
+    let mut line = epoch_ms.to_string();
+    for field in mode {
+        let field = field.to_str()?;
+        if field.contains(['\t', '\n', '\r']) {
+            return None;
+        }
+        line.push('\t');
+        line.push_str(field);
+    }
+    line.push('\n');
+    Some(line)
+}
+
+/// The terminal arguments for a warm host: `<exec-flag> <crucible> overlay-host --socket <path>`.
+#[must_use]
+pub fn warm_host_args(exec_flag: &str, crucible: &Path, socket: &Path) -> Vec<OsString> {
+    vec![
+        exec_flag.into(),
+        crucible.into(),
+        "overlay-host".into(),
+        "--socket".into(),
+        socket.into(),
+    ]
+}
+
+/// Sends `line` to the warm host's socket, bounded to a few ms (never blocks the event loop).
+fn send_mode_line(socket: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut stream = std::os::unix::net::UnixStream::connect(socket)?;
+    stream.set_write_timeout(Some(Duration::from_millis(5)))?;
+    stream.write_all(line.as_bytes())
+}
+
 /// Reaps exited children through their own handles (`try_wait`), dropping them from `children`
 /// and returning their PIDs. Children still running (or never reaped by anyone else) are kept; a
 /// `try_wait` error drops the child too. Never a reap-any call: XWayland's children are not ours.
@@ -242,6 +341,14 @@ pub struct PersistState {
     pending: HashMap<u32, Pending>,
     placed: HashMap<PaneId, Vec<(WindowId, usize)>>,
     overlay: Option<Overlay>,
+    /// The pre-warmed overlay host, if one is running.
+    warm: Option<WarmHost>,
+    /// Whether a warm host that dies before use may be respawned (once per overlay close).
+    warm_respawn_ok: bool,
+    /// Warming is off for the session (the warm host came up as an X11 window).
+    warm_disabled: bool,
+    /// Counter making each warm host's socket path unique.
+    warm_counter: u32,
     /// Handles of every CDE-spawned child, kept so exited ones are reaped (never reap-any).
     children: Vec<Child>,
     config_mtime: Option<SystemTime>,
@@ -263,6 +370,10 @@ impl PersistState {
             pending: HashMap::new(),
             placed: HashMap::new(),
             overlay: None,
+            warm: None,
+            warm_respawn_ok: false,
+            warm_disabled: false,
+            warm_counter: 0,
             children: Vec::new(),
             config_mtime: None,
         }
@@ -728,6 +839,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if !saved.is_empty() {
             self.open_picker(false);
         }
+        self.start_warm_overlay();
     }
 
     /// Renames seed workspace `ws` to a fresh auto-name when its name is already saved on disk, so
@@ -833,7 +945,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.persist.last_output.remove(&ws);
         self.persist.pending.retain(|_, p| match p.target {
             Target::Pane { pane, .. } | Target::Slot { pane, .. } => !panes.contains(&pane),
-            Target::Overlay => true,
+            Target::Overlay | Target::WarmOverlay => true,
         });
         for pane in &panes {
             self.persist.placed.remove(pane);
@@ -878,6 +990,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if !reaped.is_empty() {
             debug!(?reaped, "reaped exited children");
         }
+        self.warm_reaped(&reaped);
         self.save_dirty(now, TICK);
         self.poll_config();
     }
@@ -909,7 +1022,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let panes = w.panes();
         self.persist.pending.values().any(|p| match p.target {
             Target::Pane { pane, .. } | Target::Slot { pane, .. } => panes.contains(&pane),
-            Target::Overlay => false,
+            Target::Overlay | Target::WarmOverlay => false,
         })
     }
 
@@ -1250,6 +1363,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
             OpenDecision::Spawn => {}
         }
+        let replaced = matches!(
+            overlay_open_decision(summary, kind),
+            OpenDecision::ReplaceThenSpawn
+        );
+        let used_warm = self.try_open_warm(kind, &args);
+        if replaced {
+            // The replaced overlay is closing: that is an overlay close for the warm slot too.
+            self.rewarm_after_overlay_close();
+        }
+        if used_warm {
+            return;
+        }
         let program = self.terminal_program();
         let args = with_terminal_args(&self.config.overlay.terminal_args, args);
         if let Some(pid) = self.spawn_process(&program, &args, None, SpawnKind::Overlay) {
@@ -1286,6 +1411,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some(toplevel) = element.toplevel() {
             // The initial configure goes out on the first commit and carries this pending size.
             toplevel.with_pending_state(|s| s.size = Some(size));
+            // A pre-warmed host was configured while hidden: re-send for the current output.
+            if Self::initial_configure_sent(toplevel) {
+                toplevel.send_pending_configure();
+            }
         }
         if let Some(x11) = element.x11_surface() {
             let _ = x11.configure(Rectangle::new(loc, size));
@@ -1355,6 +1484,238 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.persist.overlay = None;
             self.set_keyboard_focus(None);
             self.reconcile_keyboard_focus();
+            self.rewarm_after_overlay_close();
+        }
+    }
+
+    // ---- pre-warmed overlay host ---------------------------------------------------------------
+
+    /// Starts a warm overlay host at startup (once the compositor can spawn overlays).
+    pub(crate) fn start_warm_overlay(&mut self) {
+        self.persist.warm_respawn_ok = true;
+        self.spawn_warm();
+    }
+
+    /// An overlay closed: re-arm the one-respawn allowance and start a warm host if none runs.
+    fn rewarm_after_overlay_close(&mut self) {
+        self.persist.warm_respawn_ok = true;
+        self.spawn_warm();
+    }
+
+    /// Spawns the warm host (terminal + exec flag + `crucible overlay-host --socket …`, with the
+    /// overlay terminal args and the overlay env) unless warming is off or one already runs.
+    fn spawn_warm(&mut self) {
+        if self.persist.warm_disabled || self.persist.warm.is_some() {
+            return;
+        }
+        let Some(crucible) = Self::crucible_exe("warm overlay host") else {
+            return;
+        };
+        self.persist.warm_counter = self.persist.warm_counter.wrapping_add(1);
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        let socket = warm_socket_path(
+            runtime.as_deref(),
+            self.persist.ipc_path.as_deref(),
+            std::process::id(),
+            self.persist.warm_counter,
+        );
+        let program = self.terminal_program();
+        let args = with_terminal_args(
+            &self.config.overlay.terminal_args,
+            warm_host_args(&self.config.terminal.exec_flag, &crucible, &socket),
+        );
+        if let Some(pid) = self.spawn_process(&program, &args, None, SpawnKind::Overlay) {
+            self.persist.pending.insert(
+                pid,
+                Pending {
+                    target: Target::WarmOverlay,
+                    since: Instant::now(),
+                },
+            );
+            self.persist.warm = Some(WarmHost {
+                pid,
+                socket,
+                element: None,
+                spawned_at: Instant::now(),
+            });
+        }
+    }
+
+    /// Kills the warm host (if any) and clears the slot; never respawns.
+    fn discard_warm(&mut self) {
+        if let Some(warm) = self.persist.warm.take() {
+            self.persist.pending.remove(&warm.pid);
+            if !kill_child(&mut self.persist.children, warm.pid) {
+                if let Some(element) = &warm.element {
+                    close_element(element);
+                }
+            }
+            let _ = std::fs::remove_file(&warm.socket);
+        }
+    }
+
+    /// The warm host died before use (reaped, or its surface was destroyed while hidden): clear the
+    /// slot and respawn at most once per overlay close.
+    fn warm_died(&mut self) {
+        self.discard_warm();
+        let (respawn, ok) = warm_after_death(self.persist.warm_respawn_ok);
+        self.persist.warm_respawn_ok = ok;
+        if respawn {
+            info!("warm overlay host died before use; respawning once");
+            self.spawn_warm();
+        } else {
+            info!("warm overlay host died before use; not respawning until an overlay closes");
+        }
+    }
+
+    /// Called from the 1 s tick with the reaped PIDs.
+    fn warm_reaped(&mut self, reaped: &[u32]) {
+        if self
+            .persist
+            .warm
+            .as_ref()
+            .is_some_and(|w| reaped.contains(&w.pid))
+        {
+            self.warm_died();
+        }
+    }
+
+    /// If `surface` is the hidden warm host's toplevel, treats it as dead and returns `true`.
+    pub(crate) fn warm_toplevel_destroyed(
+        &mut self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) -> bool {
+        let hit = self.warm_element_for(surface).is_some();
+        if hit {
+            // Already gone: drop the element so `discard_warm` does not try to close it.
+            if let Some(w) = self.persist.warm.as_mut() {
+                w.element = None;
+            }
+            self.warm_died();
+        }
+        hit
+    }
+
+    /// The hidden warm toplevel whose root surface is `surface` (E7: it is not in the Space, so
+    /// the commit and initial-configure lookups ask for it here too).
+    pub(crate) fn warm_element_for(
+        &self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+    ) -> Option<WindowElement> {
+        self.persist
+            .warm
+            .as_ref()
+            .and_then(|w| w.element.as_ref())
+            .filter(|e| e.wl_surface().is_some_and(|s| &*s == surface))
+            .cloned()
+    }
+
+    /// Stores a newly arrived warm-host toplevel hidden in the warm slot (never in the Space). An
+    /// X11 window is killed and warming is disabled for the session.
+    fn store_warm(&mut self, element: WindowElement, pid: Option<u32>) {
+        let Some(warm_pid) = self.persist.warm.as_ref().map(|w| w.pid) else {
+            // The slot was discarded meanwhile: end the stray host without showing it.
+            if !pid.is_some_and(|p| kill_child(&mut self.persist.children, p)) {
+                close_element(&element);
+            }
+            return;
+        };
+        if element.x11_surface().is_some() {
+            warn!(
+                pid = warm_pid,
+                "warm overlay host arrived as an X11 window; overlay pre-warming disabled for this session"
+            );
+            self.persist.warm_disabled = true;
+            if !kill_child(&mut self.persist.children, warm_pid) {
+                close_element(&element);
+            }
+            if let Some(w) = self.persist.warm.take() {
+                let _ = std::fs::remove_file(&w.socket);
+            }
+            return;
+        }
+        if let Some(toplevel) = element.toplevel() {
+            let rect = overlay_rect(self.focused_output_rect());
+            // The initial configure goes out on the first commit and carries this pending size.
+            toplevel.with_pending_state(|s| s.size = Some(Size::from((rect.width, rect.height))));
+        }
+        if let Some(w) = self.persist.warm.as_mut() {
+            w.element = Some(element);
+        }
+    }
+
+    /// Whether the warm host is ready: toplevel stored, initial configure sent, socket bound.
+    fn warm_ready(warm: &WarmHost) -> bool {
+        let Some(toplevel) = warm.element.as_ref().and_then(WindowElement::toplevel) else {
+            return false;
+        };
+        Self::initial_configure_sent(toplevel) && warm.socket.exists()
+    }
+
+    /// Whether `toplevel`'s initial configure has gone out.
+    fn initial_configure_sent(toplevel: &smithay::wayland::shell::xdg::ToplevelSurface) -> bool {
+        with_states(toplevel.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .is_some_and(|d| d.lock().is_ok_and(|d| d.initial_configure_sent))
+        })
+    }
+
+    /// On `Spawn`/`ReplaceThenSpawn`: hands the mode to a ready warm host and maps it as the
+    /// overlay; returns `true` when it did. Otherwise kills any warm host (the caller cold-spawns).
+    fn try_open_warm(&mut self, kind: OverlayKind, args: &[OsString]) -> bool {
+        let ready = self.persist.warm.as_ref().map(Self::warm_ready);
+        match warm_use_decision(ready) {
+            WarmUse::Cold { kill } => {
+                if kill {
+                    info!("warm overlay host not ready; cold spawn");
+                    self.discard_warm();
+                }
+                false
+            }
+            WarmUse::Use => {
+                let Some(warm) = self.persist.warm.clone() else {
+                    return false;
+                };
+                let sent = warm_mode_line(epoch_ms_now(), args)
+                    .ok_or_else(|| "unencodable mode".to_string())
+                    .and_then(|line| {
+                        send_mode_line(&warm.socket, &line).map_err(|e| e.to_string())
+                    });
+                let (Ok(()), Some(element)) = (sent.clone(), warm.element.clone()) else {
+                    warn!(err = ?sent.err(), "warm overlay host hand-off failed; cold spawn");
+                    self.discard_warm();
+                    return false;
+                };
+                let started = Instant::now();
+                self.persist.warm = None;
+                self.persist.overlay = Some(Overlay {
+                    kind,
+                    state: OverlayState::Launching(warm.pid),
+                    pid: Some(warm.pid),
+                });
+                self.map_overlay(element);
+                info!(
+                    kind = "warm-overlay",
+                    overlay = ?kind,
+                    pid = warm.pid,
+                    warm_age_ms = u64::try_from(warm.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                    "latency: request→map"
+                );
+                true
+            }
+        }
+    }
+
+    /// Config reload: a changed terminal program, exec flag or overlay terminal args invalidates
+    /// the warm host; it is replaced with a fresh one.
+    pub(crate) fn warm_config_changed(&mut self) {
+        if self.persist.warm.is_some() {
+            info!("overlay terminal config changed; restarting the warm overlay host");
+            self.discard_warm();
+            self.spawn_warm();
         }
     }
 
@@ -1401,6 +1762,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let info = WindowInfo { pid, terminal };
         match pending.map(|p| p.target) {
             Some(Target::Overlay) => self.map_overlay(element),
+            Some(Target::WarmOverlay) => self.store_warm(element, pid),
             Some(Target::Pane {
                 pane,
                 saved_index,
@@ -2228,6 +2590,63 @@ mod tests {
         assert_eq!(
             overlay_open_decision(Some((Keys, true)), Keys),
             OpenDecision::Refocus
+        );
+    }
+
+    #[test]
+    fn warm_slot_uses_only_a_ready_host_and_respawns_once() {
+        assert_eq!(warm_use_decision(Some(true)), WarmUse::Use);
+        assert_eq!(warm_use_decision(Some(false)), WarmUse::Cold { kill: true });
+        assert_eq!(warm_use_decision(None), WarmUse::Cold { kill: false });
+        // Dead before use: one respawn after a close/startup, then none until re-armed.
+        let (respawn, ok) = warm_after_death(true);
+        assert!(respawn);
+        assert_eq!(warm_after_death(ok), (false, false));
+    }
+
+    #[test]
+    fn warm_socket_path_prefers_runtime_dir_then_ipc_dir() {
+        assert_eq!(
+            warm_socket_path(Some(Path::new("/run/u")), Some(Path::new("/i/s")), 7, 2),
+            PathBuf::from("/run/u/cde-overlay-host-7-2.sock")
+        );
+        assert_eq!(
+            warm_socket_path(Some(Path::new("")), Some(Path::new("/i/s")), 7, 3),
+            PathBuf::from("/i/cde-overlay-host-7-3.sock")
+        );
+        assert_eq!(
+            warm_socket_path(None, None, 1, 1),
+            std::env::temp_dir().join("cde-overlay-host-1-1.sock")
+        );
+    }
+
+    #[test]
+    fn warm_mode_line_carries_the_cold_subcommand_argv() {
+        let pick = picker_args("-e", Path::new("/c"), Some("a:b"));
+        assert_eq!(
+            warm_mode_line(42, &pick).as_deref(),
+            Some("42\tpick\t--rename\ta%3Ab\n")
+        );
+        assert_eq!(
+            warm_mode_line(1, &launcher_args("-e", Path::new("/c"))).as_deref(),
+            Some("1\tlaunch\n")
+        );
+        assert_eq!(
+            warm_mode_line(1, &keys_args("-e", Path::new("/c"))).as_deref(),
+            Some("1\tkeys\n")
+        );
+        assert_eq!(warm_mode_line(1, &[OsString::from("-e")]), None);
+        let bad = vec![OsString::from("-e"), "/c".into(), "pick\tx".into()];
+        assert_eq!(warm_mode_line(1, &bad), None);
+        assert_eq!(
+            warm_host_args("-e", Path::new("/c"), Path::new("/s.sock")),
+            vec![
+                OsString::from("-e"),
+                "/c".into(),
+                "overlay-host".into(),
+                "--socket".into(),
+                "/s.sock".into()
+            ]
         );
     }
 

@@ -4,6 +4,7 @@
 //! error is ignored so the TUI is never disturbed.
 
 use std::io::Write;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,6 +29,15 @@ fn format_line(overlay: &str, spawn_epoch_ms: u128, now_ms: u128) -> String {
     )
 }
 
+/// The request epoch a pre-warmed overlay host was handed (see `overlay_host`); when set it wins
+/// over `CDE_SPAWN_EPOCH_MS`, so the logged number is request→usable rather than host-spawn→usable.
+static REQUEST_EPOCH: OnceLock<u128> = OnceLock::new();
+
+/// Sets the request epoch (ms since the UNIX epoch) for [`first_frame`]; the first call wins.
+pub fn set_request_epoch(epoch_ms: u128) {
+    let _ = REQUEST_EPOCH.set(epoch_ms);
+}
+
 /// Call right after the overlay's frame is flushed; logs only the first call per process, and
 /// only when `CDE_SPAWN_EPOCH_MS` parses. Callers reach it after candidate discovery, so the
 /// first frame already shows usable content.
@@ -36,7 +46,11 @@ pub fn first_frame(overlay: &str) {
     if DONE.swap(true, Ordering::Relaxed) {
         return;
     }
-    let Some(spawn) = parse_spawn_epoch(std::env::var(SPAWN_EPOCH_ENV).ok().as_deref()) else {
+    let spawn = REQUEST_EPOCH
+        .get()
+        .copied()
+        .or_else(|| parse_spawn_epoch(std::env::var(SPAWN_EPOCH_ENV).ok().as_deref()));
+    let Some(spawn) = spawn else {
         return;
     };
     let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {

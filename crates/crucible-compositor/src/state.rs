@@ -454,7 +454,11 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
             while let Some(parent) = get_parent(&root) {
                 root = parent;
             }
-            if let Some(window) = self.window_for_surface(&root) {
+            // The hidden warm overlay host is not in the Space (audit E7); it still needs on_commit.
+            if let Some(window) = self
+                .window_for_surface(&root)
+                .or_else(|| self.warm_element_for(&root))
+            {
                 window.on_commit();
             }
         }
@@ -463,7 +467,8 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
         self.popups.commit(surface);
 
         // Send the first configure for whichever role this surface holds, if not yet sent.
-        ensure_initial_configure(surface, &self.space, &mut self.popups);
+        let warm = self.warm_element_for(surface);
+        ensure_initial_configure(surface, &self.space, warm, &mut self.popups);
     }
 }
 
