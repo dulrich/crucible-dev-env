@@ -22,6 +22,9 @@ rustix.workspace = true
 # Error enums for the udev backend's device-add error type (WS-6), mirroring anvil.
 thiserror.workspace = true
 
+# Glyph rasterization for compositor-drawn text (`text.rs`, plan 06 WP-5).
+fontdue.workspace = true
+
 # X11 bindings for the XWayland window-manager connection (WS-5). Paired with
 # Smithay's `x11rb_event_source` feature below, mirroring anvil's xwayland set.
 x11rb.workspace = true

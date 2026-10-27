@@ -15,7 +15,10 @@ use smithay::{
     backend::renderer::{
         Color32F, ImportAll, ImportMem, Renderer,
         damage::{Error as OutputDamageTrackerError, OutputDamageTracker, RenderOutputResult},
-        element::{Wrap, solid::SolidColorRenderElement, surface::WaylandSurfaceRenderElement},
+        element::{
+            Wrap, memory::MemoryRenderBufferRenderElement, solid::SolidColorRenderElement,
+            surface::WaylandSurfaceRenderElement,
+        },
     },
     desktop::space::{Space, SpaceRenderElements},
     output::Output,
@@ -33,6 +36,8 @@ smithay::backend::renderer::element::render_elements! {
     Surface=WaylandSurfaceRenderElement<R>,
     /// Solid-color chrome: focus-ring border strips and per-pane stack-indicator pips.
     SolidColor=SolidColorRenderElement,
+    /// Compositor-drawn text: a rasterized string in a memory buffer (see [`crate::text`]).
+    Text=MemoryRenderBufferRenderElement<R>,
 }
 
 impl<R: Renderer + ImportAll + ImportMem> std::fmt::Debug for CustomRenderElements<R> {
@@ -41,6 +46,7 @@ impl<R: Renderer + ImportAll + ImportMem> std::fmt::Debug for CustomRenderElemen
             Self::Pointer(arg0) => f.debug_tuple("Pointer").field(arg0).finish(),
             Self::Surface(arg0) => f.debug_tuple("Surface").field(arg0).finish(),
             Self::SolidColor(arg0) => f.debug_tuple("SolidColor").field(arg0).finish(),
+            Self::Text(arg0) => f.debug_tuple("Text").field(arg0).finish(),
             Self::_GenericCatcher(arg0) => f.debug_tuple("_GenericCatcher").field(arg0).finish(),
         }
     }

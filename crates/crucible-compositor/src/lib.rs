@@ -50,3 +50,6 @@ pub mod ipc;
 
 /// Workspace persistence in the compositor: auto-save, capture, restore, picker overlay.
 pub mod persist;
+
+/// Compositor-drawn text: font resolution, fontdue rasterization, memory render element.
+pub mod text;

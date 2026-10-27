@@ -48,6 +48,10 @@ x11rb = "0.13"
 # integrations neither side needs.
 xkeysym = { version = "0.2", default-features = false }
 
+# TrueType glyph rasterization + horizontal layout for compositor-drawn text (plan 06 WP-5,
+# header row). Pure Rust; pulls ttf-parser (RUSTSEC-2026-0192 unmaintained — allowed warning).
+fontdue = "0.9"
+
 # Lints are defined once here and inherited by every crate with `[lints]
 # workspace = true`. CI runs `cargo clippy -- -D warnings`.
 [workspace.lints.clippy]
