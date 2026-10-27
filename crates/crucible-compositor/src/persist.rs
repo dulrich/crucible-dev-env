@@ -23,7 +23,7 @@
 //! picker overlay, unknown clients) is recorded as an `app` — with one exception: a non-terminal
 //! window whose own argv is a CDE restore wrapper (`crucible relaunch|resume …`, bare or run by
 //! the terminal after its exec flag) is recorded as the record the wrapper stands for (see
-//! [`crucible_persist::capture::decode_cde_wrapper`]), which may be a `terminal`, so restores
+//! [`crucible_persist::CdeWrapper::decode`]), which may be a `terminal`, so restores
 //! never nest wrappers.
 
 mod ipc;
@@ -239,9 +239,9 @@ fn app_fallback_record(
     argv: Option<&[String]>,
     exec_flag: &str,
 ) -> WindowRecord {
-    use crucible_persist::capture::{CdeWrapper, decode_cde_wrapper, join_command};
+    use crucible_persist::{CdeWrapper, capture::join_command};
     let argv = argv.filter(|a| !a.is_empty());
-    match argv.and_then(|a| decode_cde_wrapper(a, exec_flag)) {
+    match argv.and_then(|a| CdeWrapper::decode(a, exec_flag)) {
         Some(CdeWrapper::App(cap)) => WindowRecord::App {
             app_id: cap.app_id.or(element_app_id),
             cmdline: Some(cap.cmdline),
@@ -267,8 +267,8 @@ fn terminal_fallback_record(
     exec_flag: &str,
     terminal_cwd: Option<PathBuf>,
 ) -> WindowRecord {
-    use crucible_persist::capture::{CdeWrapper, decode_cde_wrapper};
-    match argv.and_then(|a| decode_cde_wrapper(a, exec_flag)) {
+    use crucible_persist::CdeWrapper;
+    match argv.and_then(|a| CdeWrapper::decode(a, exec_flag)) {
         Some(CdeWrapper::App(cap)) => WindowRecord::App {
             app_id: cap.app_id,
             cmdline: Some(cap.cmdline),

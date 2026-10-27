@@ -12,6 +12,7 @@
 //! - the named workspace [`slots`] (`Super+<digit>` pins) in `$XDG_STATE_HOME/cde/slots.kdl`, a sibling of the store;
 //! - the [`session`] record (open workspaces per output, focus) in `$XDG_STATE_HOME/cde/session.kdl`, also a sibling;
 //! - `/proc` cwd + foreground-command capture ([`capture`]) for external terminals;
+//! - the one typed CDE wrapper argv contract ([`wrapper`]: `crucible resume` / `crucible relaunch`);
 //! - the auto-save throttle ([`should_save`]).
 //!
 //! MVP restore fidelity is **layout + cwd + relaunch command** for external terminals; true
@@ -27,12 +28,11 @@ mod record;
 pub mod session;
 pub mod slots;
 pub mod store;
+pub mod wrapper;
 
-pub use capture::{
-    RelaunchCapture, TerminalCapture, ancestors, capture_relaunch, capture_terminal, children_of,
-    parse_relaunch_banner,
-};
+pub use capture::{TerminalCapture, ancestors, capture_relaunch, capture_terminal, children_of};
 pub use error::PersistError;
 pub use format::FORMAT_VERSION;
 pub use policy::should_save;
 pub use record::{PaneRecord, RecordNode, WindowRecord, WorkspaceRecord};
+pub use wrapper::{CdeWrapper, RelaunchWrapper, ResumeWrapper};

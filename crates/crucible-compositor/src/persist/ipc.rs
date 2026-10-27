@@ -87,7 +87,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let args = std::fs::read(proc_root().join(peer.to_string()).join("cmdline"))
             .map(|b| crucible_persist::capture::parse_cmdline(&b))
             .unwrap_or_default();
-        let capture = crucible_persist::parse_relaunch_banner(&args)
+        let capture = crucible_persist::RelaunchWrapper::from_argv(&args)
             .ok_or_else(|| "not a relaunch placeholder".to_string())?;
         let ancestors = crucible_persist::ancestors(proc_root(), peer, ANCESTOR_DEPTH);
         let windows = &self.persist.placement.windows;

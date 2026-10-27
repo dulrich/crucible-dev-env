@@ -195,7 +195,7 @@ fn resume_runs_the_command_on_enter() {
 }
 
 /// While the restored command runs, its parent is still `crucible resume` with the banner argv,
-/// so CDE's capture (`parse_resume_banner`) keeps recording the command across the next restart.
+/// so CDE's capture (`ResumeWrapper::from_argv`) keeps recording the command across the next restart.
 #[test]
 fn resume_stays_resident_and_capturable_while_the_command_runs() {
     use std::io::Write;
@@ -225,7 +225,7 @@ fn resume_stays_resident_and_capturable_while_the_command_runs() {
         .collect();
     assert!(argv.iter().any(|a| a == "resume"), "{argv:?}");
     assert!(argv.iter().any(|a| a == "--cwd"), "{argv:?}");
-    let cap = crucible_persist::capture::parse_resume_banner(&argv).expect("banner argv decodes");
+    let cap = crucible_persist::ResumeWrapper::from_argv(&argv).expect("banner argv decodes");
     assert_eq!(cap.command.as_deref(), Some(cmd));
     assert_eq!(cap.cwd, dir);
     let _ = std::fs::remove_dir_all(&dir);

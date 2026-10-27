@@ -12,10 +12,10 @@
 //! `--exit` (only valid with `--now`, as CDE's `run-tui` sends it): when the command finishes, `resume`
 //! exits with the command's exit code instead of starting a shell, so the terminal window closes.
 
+use crucible_persist::ResumeWrapper;
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
 use std::process::Command;
 
 use crate::tty::RawGuard;
@@ -23,72 +23,9 @@ use crate::tty::RawGuard;
 /// Usage text for `crucible resume --help`.
 pub const USAGE: &str = "usage: crucible resume [--now [--exit]] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). With --now, --exit exits with the command's exit code instead of starting a shell afterwards (--exit without --now is a usage error). Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
 
-/// Parsed `resume` arguments.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ResumeArgs {
-    /// Directory to change into.
-    pub cwd: PathBuf,
-    /// The command string, if any.
-    pub command: Option<String>,
-    /// `--now`: run the command immediately instead of waiting for Enter (a no-op without one).
-    pub now: bool,
-    /// `--exit`: exit with the command's status instead of starting a shell (needs `--now`; a no-op
-    /// without a command).
-    pub exit: bool,
-}
-
-/// Parses the arguments after `resume`.
-///
-/// # Errors
-/// A usage message for a missing `--cwd` value, unknown flags or extra positional arguments.
-pub fn parse_args(args: &[String]) -> Result<ResumeArgs, String> {
-    let mut cwd = None;
-    let mut now = false;
-    let mut exit = false;
-    let mut i = 0;
-    let mut command = None;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--cwd" => {
-                let v = args.get(i + 1).ok_or("--cwd needs a directory")?;
-                if cwd.replace(PathBuf::from(v)).is_some() {
-                    return Err("--cwd given twice".into());
-                }
-                i += 2;
-            }
-            "--now" => {
-                now = true;
-                i += 1;
-            }
-            "--exit" => {
-                exit = true;
-                i += 1;
-            }
-            "--" => {
-                match &args[i + 1..] {
-                    [] => {}
-                    [cmd] => command = Some(cmd.clone()).filter(|c| !c.is_empty()),
-                    _ => return Err("expected at most one command argument after `--`".into()),
-                }
-                break;
-            }
-            other => return Err(format!("unexpected argument {other:?}")),
-        }
-    }
-    if exit && !now {
-        return Err("--exit requires --now".into());
-    }
-    Ok(ResumeArgs {
-        cwd: cwd.ok_or("--cwd <dir> is required")?,
-        command,
-        now,
-        exit,
-    })
-}
-
 /// The banner shown before waiting (or before the immediate shell).
 #[must_use]
-pub fn banner(args: &ResumeArgs) -> String {
+pub fn banner(args: &ResumeWrapper) -> String {
     match &args.command {
         Some(cmd) if args.now => format!("CDE is running: {cmd}"),
         Some(cmd) => format!(
@@ -130,7 +67,7 @@ pub fn classify(byte: Option<u8>) -> Wait {
 
 /// Runs the subcommand. Only returns (with an exit code) when an `exec` fails.
 pub fn run(args: &[String]) -> i32 {
-    let parsed = match parse_args(args) {
+    let parsed = match ResumeWrapper::parse(args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("crucible resume: {e}\n\n{USAGE}");
@@ -244,6 +181,7 @@ fn wait_for_choice() -> Wait {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     fn v(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| (*s).to_string()).collect()
@@ -251,59 +189,71 @@ mod tests {
 
     #[test]
     fn parses_cwd_and_command() {
-        let a = parse_args(&v(&["--cwd", "/p", "--", "cargo test"])).unwrap();
+        let a = ResumeWrapper::parse(&v(&["--cwd", "/p", "--", "cargo test"])).unwrap();
         assert_eq!(a.cwd, PathBuf::from("/p"));
         assert_eq!(a.command.as_deref(), Some("cargo test"));
     }
 
     #[test]
     fn command_may_look_like_a_flag() {
-        let a = parse_args(&v(&["--cwd", "/p", "--", "--help"])).unwrap();
+        let a = ResumeWrapper::parse(&v(&["--cwd", "/p", "--", "--help"])).unwrap();
         assert_eq!(a.command.as_deref(), Some("--help"));
     }
 
     #[test]
     fn no_command_forms() {
-        assert_eq!(parse_args(&v(&["--cwd", "/p"])).unwrap().command, None);
         assert_eq!(
-            parse_args(&v(&["--cwd", "/p", "--"])).unwrap().command,
+            ResumeWrapper::parse(&v(&["--cwd", "/p"])).unwrap().command,
             None
         );
         assert_eq!(
-            parse_args(&v(&["--cwd", "/p", "--", ""])).unwrap().command,
+            ResumeWrapper::parse(&v(&["--cwd", "/p", "--"]))
+                .unwrap()
+                .command,
+            None
+        );
+        assert_eq!(
+            ResumeWrapper::parse(&v(&["--cwd", "/p", "--", ""]))
+                .unwrap()
+                .command,
             None
         );
     }
 
     #[test]
     fn now_flag_parses_before_the_separator_only() {
-        let a = parse_args(&v(&["--now", "--cwd", "/p", "--", "htop"])).unwrap();
+        let a = ResumeWrapper::parse(&v(&["--now", "--cwd", "/p", "--", "htop"])).unwrap();
         assert!(a.now);
         assert_eq!(a.command.as_deref(), Some("htop"));
-        let a = parse_args(&v(&["--cwd", "/p", "--now"])).unwrap();
+        let a = ResumeWrapper::parse(&v(&["--cwd", "/p", "--now"])).unwrap();
         assert!(a.now && a.command.is_none());
-        let a = parse_args(&v(&["--cwd", "/p", "--", "--now"])).unwrap();
+        let a = ResumeWrapper::parse(&v(&["--cwd", "/p", "--", "--now"])).unwrap();
         assert!(!a.now);
         assert_eq!(a.command.as_deref(), Some("--now"));
-        assert!(!parse_args(&v(&["--cwd", "/p"])).unwrap().now);
+        assert!(!ResumeWrapper::parse(&v(&["--cwd", "/p"])).unwrap().now);
     }
 
     #[test]
     fn exit_flag_parses_like_now_and_needs_now() {
-        let a = parse_args(&v(&["--now", "--exit", "--cwd", "/p", "--", "htop"])).unwrap();
+        let a =
+            ResumeWrapper::parse(&v(&["--now", "--exit", "--cwd", "/p", "--", "htop"])).unwrap();
         assert!(a.now && a.exit);
-        let a = parse_args(&v(&["--exit", "--now", "--exit", "--cwd", "/p"])).unwrap();
+        let a = ResumeWrapper::parse(&v(&["--exit", "--now", "--exit", "--cwd", "/p"])).unwrap();
         assert!(a.exit && a.command.is_none());
-        let a = parse_args(&v(&["--now", "--cwd", "/p", "--", "--exit"])).unwrap();
+        let a = ResumeWrapper::parse(&v(&["--now", "--cwd", "/p", "--", "--exit"])).unwrap();
         assert!(!a.exit);
         assert_eq!(a.command.as_deref(), Some("--exit"));
-        assert!(!parse_args(&v(&["--now", "--cwd", "/p"])).unwrap().exit);
-        assert!(parse_args(&v(&["--exit", "--cwd", "/p", "--", "htop"])).is_err());
+        assert!(
+            !ResumeWrapper::parse(&v(&["--now", "--cwd", "/p"]))
+                .unwrap()
+                .exit
+        );
+        assert!(ResumeWrapper::parse(&v(&["--exit", "--cwd", "/p", "--", "htop"])).is_err());
     }
 
     #[test]
     fn now_banner_does_not_offer_enter() {
-        let a = ResumeArgs {
+        let a = ResumeWrapper {
             cwd: "/p".into(),
             command: Some("htop".into()),
             now: true,
@@ -314,17 +264,17 @@ mod tests {
 
     #[test]
     fn rejects_bad_usage() {
-        assert!(parse_args(&[]).is_err());
-        assert!(parse_args(&v(&["--cwd"])).is_err());
-        assert!(parse_args(&v(&["--cwd", "/a", "--cwd", "/b"])).is_err());
-        assert!(parse_args(&v(&["--cwd", "/a", "x"])).is_err());
-        assert!(parse_args(&v(&["--cwd", "/a", "--", "a", "b"])).is_err());
-        assert!(parse_args(&v(&["--", "x"])).is_err());
+        assert!(ResumeWrapper::parse(&[]).is_err());
+        assert!(ResumeWrapper::parse(&v(&["--cwd"])).is_err());
+        assert!(ResumeWrapper::parse(&v(&["--cwd", "/a", "--cwd", "/b"])).is_err());
+        assert!(ResumeWrapper::parse(&v(&["--cwd", "/a", "x"])).is_err());
+        assert!(ResumeWrapper::parse(&v(&["--cwd", "/a", "--", "a", "b"])).is_err());
+        assert!(ResumeWrapper::parse(&v(&["--", "x"])).is_err());
     }
 
     #[test]
     fn banner_text_is_exact() {
-        let with = ResumeArgs {
+        let with = ResumeWrapper {
             cwd: "/p".into(),
             command: Some("cargo test".into()),
             now: false,
@@ -334,7 +284,7 @@ mod tests {
             banner(&with),
             "CDE restored this terminal. Last command: cargo test. Press Enter to run it, or Ctrl+C for a shell."
         );
-        let without = ResumeArgs {
+        let without = ResumeWrapper {
             cwd: "/p".into(),
             command: None,
             now: false,

@@ -10,53 +10,13 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use crucible_compositor::ipc::{Request, Response};
+use crucible_persist::RelaunchWrapper;
 
 use crate::client::{Client, socket_from_env};
 use crate::tty::RawGuard;
 
 /// Usage text for `crucible relaunch --help`.
 pub const USAGE: &str = "usage: crucible relaunch [--app-id <id>] -- <cmdline>\n\nRestored-app placeholder used by CDE: shows which app was in this slot and waits. Enter asks the\ncompositor (over $CDE_SOCKET) to relaunch the app in the same pane slot and close this placeholder;\nCtrl+C, Ctrl+D or EOF dismisses it. The command is one argument (a shell string) and is never run\nby this process.\n";
-
-/// Parsed `relaunch` arguments.
-#[derive(Debug, PartialEq, Eq)]
-pub struct RelaunchArgs {
-    /// The saved app id, if any.
-    pub app_id: Option<String>,
-    /// The saved command line (one shell string).
-    pub cmdline: String,
-}
-
-/// Parses the arguments after `relaunch`.
-///
-/// # Errors
-/// A usage message for a repeated or valueless `--app-id`, unknown arguments, or anything but
-/// exactly one non-empty element after `--`.
-pub fn parse_args(args: &[String]) -> Result<RelaunchArgs, String> {
-    let mut app_id = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--app-id" => {
-                let v = args.get(i + 1).ok_or("--app-id needs a value")?;
-                if app_id.replace(v.clone()).is_some() {
-                    return Err("--app-id given twice".into());
-                }
-                i += 2;
-            }
-            "--" => {
-                return match &args[i + 1..] {
-                    [cmd] if !cmd.is_empty() => Ok(RelaunchArgs {
-                        app_id,
-                        cmdline: cmd.clone(),
-                    }),
-                    _ => Err("expected exactly one non-empty command line after `--`".into()),
-                };
-            }
-            other => return Err(format!("unexpected argument {other:?}")),
-        }
-    }
-    Err("`-- <cmdline>` is required".into())
-}
 
 /// The basename of the first shell word of `cmdline` (quotes stripped naively).
 fn program_of(cmdline: &str) -> String {
@@ -71,7 +31,7 @@ fn program_of(cmdline: &str) -> String {
 
 /// The banner shown while waiting.
 #[must_use]
-pub fn banner(args: &RelaunchArgs) -> String {
+pub fn banner(args: &RelaunchWrapper) -> String {
     let what = args
         .app_id
         .clone()
@@ -95,7 +55,7 @@ fn send_relaunch() -> Result<(), String> {
 
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    let parsed = match parse_args(args) {
+    let parsed = match RelaunchWrapper::parse(args) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("crucible relaunch: {e}\n\n{USAGE}");
@@ -141,15 +101,15 @@ mod tests {
     #[test]
     fn parse_accepts_with_and_without_app_id() {
         assert_eq!(
-            parse_args(&a(&["--app-id", "gimp", "--", "gimp a.png"])),
-            Ok(RelaunchArgs {
+            RelaunchWrapper::parse(&a(&["--app-id", "gimp", "--", "gimp a.png"])),
+            Ok(RelaunchWrapper {
                 app_id: Some("gimp".into()),
                 cmdline: "gimp a.png".into()
             })
         );
         assert_eq!(
-            parse_args(&a(&["--", "--help"])),
-            Ok(RelaunchArgs {
+            RelaunchWrapper::parse(&a(&["--", "--help"])),
+            Ok(RelaunchWrapper {
                 app_id: None,
                 cmdline: "--help".into()
             })
@@ -169,13 +129,13 @@ mod tests {
             &["c"],
             &["--app-id", "x"],
         ] {
-            assert!(parse_args(&a(bad)).is_err(), "{bad:?}");
+            assert!(RelaunchWrapper::parse(&a(bad)).is_err(), "{bad:?}");
         }
     }
 
     #[test]
     fn banner_names_app_id_or_program() {
-        let with = RelaunchArgs {
+        let with = RelaunchWrapper {
             app_id: Some("org.gimp.GIMP".into()),
             cmdline: "gimp".into(),
         };
@@ -183,7 +143,7 @@ mod tests {
             banner(&with),
             "CDE restored org.gimp.GIMP. Press Enter to relaunch it, or Ctrl+C to dismiss."
         );
-        let without = RelaunchArgs {
+        let without = RelaunchWrapper {
             app_id: None,
             cmdline: "/usr/lib/firefox-esr/firefox-esr --new-window".into(),
         };

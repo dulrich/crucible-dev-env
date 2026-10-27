@@ -9,6 +9,7 @@ use std::process::{Child, Command};
 use std::time::{Instant, SystemTime};
 
 use crucible_layout::WorkspaceId;
+use crucible_persist::{RelaunchWrapper, ResumeWrapper};
 use tracing::{error, info, warn};
 
 use crate::config::pick_terminal;
@@ -120,15 +121,20 @@ pub fn restore_args(
     let Some(command) = command else {
         return Vec::new();
     };
-    vec![
-        exec_flag.into(),
-        crucible.into(),
-        "resume".into(),
-        "--cwd".into(),
-        cwd.into(),
-        "--".into(),
-        command.into(),
-    ]
+    let wrapper = ResumeWrapper {
+        cwd: cwd.to_path_buf(),
+        command: Some(command.to_string()),
+        now: false,
+        exit: false,
+    };
+    wrapper_args(exec_flag, crucible, "resume", wrapper.to_args())
+}
+
+/// `<exec-flag> <crucible> <sub> <args…>`: a CDE wrapper run by the terminal.
+fn wrapper_args(exec_flag: &str, crucible: &Path, sub: &str, args: Vec<OsString>) -> Vec<OsString> {
+    let mut out: Vec<OsString> = vec![exec_flag.into(), crucible.into(), sub.into()];
+    out.extend(args);
+    out
 }
 
 /// The terminal arguments for `run-in-terminal` / `run-tui`: `<exec-flag> <crucible> resume --now
@@ -142,17 +148,13 @@ pub fn run_in_terminal_args(
     command: &str,
     exit: bool,
 ) -> Vec<OsString> {
-    let mut args: Vec<OsString> = vec![
-        exec_flag.into(),
-        crucible.into(),
-        "resume".into(),
-        "--now".into(),
-    ];
-    if exit {
-        args.push("--exit".into());
-    }
-    args.extend(["--cwd".into(), cwd.into(), "--".into(), command.into()]);
-    args
+    let wrapper = ResumeWrapper {
+        cwd: cwd.to_path_buf(),
+        command: Some(command.to_string()),
+        now: true,
+        exit,
+    };
+    wrapper_args(exec_flag, crucible, "resume", wrapper.to_args())
 }
 
 /// A spawned child's `PATH`: `exe_dir` prepended to the inherited `PATH`, unless it is already an
@@ -238,14 +240,11 @@ pub fn relaunch_args(
     app_id: Option<&str>,
     cmdline: &str,
 ) -> Vec<OsString> {
-    let mut args: Vec<OsString> = vec![exec_flag.into(), crucible.into(), "relaunch".into()];
-    if let Some(id) = app_id {
-        args.push("--app-id".into());
-        args.push(id.into());
-    }
-    args.push("--".into());
-    args.push(cmdline.into());
-    args
+    let wrapper = RelaunchWrapper {
+        app_id: app_id.map(str::to_string),
+        cmdline: cmdline.to_string(),
+    };
+    wrapper_args(exec_flag, crucible, "relaunch", wrapper.to_args())
 }
 
 /// The terminal arguments for the picker: `<exec-flag> <crucible> pick [--rename <encoded>]`.
@@ -550,7 +549,7 @@ mod tests {
         );
         // The placeholder argv (minus the exec flag) decodes back to the record.
         let argv = strs(relaunch_args("-e", c, Some("x"), "x --y"));
-        let cap = crucible_persist::parse_relaunch_banner(&argv[1..]).unwrap();
+        let cap = crucible_persist::RelaunchWrapper::from_argv(&argv[1..]).unwrap();
         assert_eq!(cap.app_id.as_deref(), Some("x"));
         assert_eq!(cap.cmdline, "x --y");
     }
