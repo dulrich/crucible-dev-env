@@ -423,11 +423,11 @@ pub fn match_pending(pid: u32, ancestors: &[u32], has: impl Fn(u32) -> bool) -> 
         .find(|p| has(*p))
 }
 
-/// Whether `pid` (or its nearest spawned ancestor) was spawned as a [`SpawnKind::Terminal`].
+/// Whether `pid` itself was spawned as a [`SpawnKind::Terminal`] (exact pid; ancestors never count, so an app launched from a terminal is not a terminal).
 #[must_use]
-pub fn is_terminal_spawn(pid: u32, ancestors: &[u32], spawned: &HashMap<u32, SpawnRecord>) -> bool {
-    match_pending(pid, ancestors, |k| spawned.contains_key(&k))
-        .and_then(|k| spawned.get(&k))
+pub fn is_terminal_spawn(pid: u32, spawned: &HashMap<u32, SpawnRecord>) -> bool {
+    spawned
+        .get(&pid)
         .is_some_and(|rec| rec.kind == SpawnKind::Terminal)
 }
 
@@ -1761,7 +1761,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         // The class must be known before the first placement (every mapping path applies the
         // layout), so the window's first rect already honours terminal vs app.
-        let terminal = pid.is_some_and(|p| is_terminal_spawn(p, &ancestors, &self.persist.spawned));
+        let terminal = pid.is_some_and(|p| is_terminal_spawn(p, &self.persist.spawned));
         let info = WindowInfo { pid, terminal };
         match pending.map(|p| p.target) {
             Some(Target::Overlay) => self.map_overlay(element),
@@ -2349,21 +2349,20 @@ mod tests {
     }
 
     #[test]
-    fn is_terminal_spawn_depends_on_the_matched_kind() {
+    fn is_terminal_spawn_is_the_exact_pid_kind_only() {
         let spawned: HashMap<u32, SpawnRecord> = [
             (10, SpawnRecord::now(SpawnKind::Terminal, "t")),
             (20, SpawnRecord::now(SpawnKind::App, "a")),
             (30, SpawnRecord::now(SpawnKind::Overlay, "o")),
         ]
         .into();
-        assert!(is_terminal_spawn(10, &[], &spawned));
-        assert!(is_terminal_spawn(5, &[7, 10], &spawned));
-        assert!(!is_terminal_spawn(20, &[], &spawned));
-        assert!(!is_terminal_spawn(5, &[20], &spawned));
-        assert!(!is_terminal_spawn(30, &[], &spawned));
-        assert!(!is_terminal_spawn(5, &[7, 8], &spawned));
-        // the nearest spawned ancestor decides, not any terminal further up
-        assert!(!is_terminal_spawn(5, &[20, 10], &spawned));
+        assert!(is_terminal_spawn(10, &spawned));
+        assert!(!is_terminal_spawn(20, &spawned));
+        assert!(!is_terminal_spawn(30, &spawned));
+        assert!(!is_terminal_spawn(99, &spawned));
+        // a child of a terminal spawn (firefox from ghostty) is not a terminal; the
+        // pid 5 child of App 20 is not one either — ancestors never decide the class
+        assert!(!is_terminal_spawn(5, &spawned));
     }
 
     #[test]
