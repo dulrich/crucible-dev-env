@@ -654,6 +654,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         };
         let rect = Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h);
         self.set_model_output_rect(model_id, rect);
+        self.lock_output_resized(output);
     }
 
     /// Writes `rect` onto model output `id`, reporting (and skipping) a stale binding.

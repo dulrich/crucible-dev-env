@@ -102,6 +102,9 @@ pub enum Action {
     ToggleHeader,
     /// Rename the active workspace (interactive prompt). `Super+Shift+R`. Implemented by WP-5.
     RenameWorkspace,
+    /// Spawn the configured `lock-command` (a screen locker, e.g. `swaylock`) detached. The lock
+    /// itself starts only when the locker makes its `ext-session-lock-v1` request. `Super+Escape`.
+    Lock,
 
     /// Switch to virtual terminal `n` (only meaningful on the udev/DRM backend).
     ///
@@ -144,6 +147,7 @@ impl std::fmt::Display for Action {
             Self::OpenSettings => f.write_str("open-settings"),
             Self::ToggleHeader => f.write_str("toggle-header"),
             Self::RenameWorkspace => f.write_str("rename-workspace"),
+            Self::Lock => f.write_str("lock"),
             Self::VtSwitch(n) => write!(f, "vt-switch {n}"),
         }
     }

@@ -102,6 +102,7 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+P` | Open the workspace picker (live, saved and folder workspaces) |
 | `Super+B` | Show/hide the workspace header strip (`header { mode "toggle" }`) |
 | `Super+Shift+R` | Rename the active workspace (picker in rename mode) |
+| `Super+Escape` | Lock the screen (spawns `lock-command`, default `swaylock`; see `docs/config.md`) |
 | `Super+Shift+]` / `Super+Shift+[` | Move the focused window to the next / previous workspace |
 | `Super+Shift+W` | Close the active workspace — saved first, its windows ended; refused on the last one |
 | `Super+1` ... `Super+0` | Switch to the workspace pinned to that slot; a closed or saved one reopens on the monitor it was last viewed on |

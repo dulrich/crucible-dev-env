@@ -98,6 +98,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
                         ctrl: modifiers.ctrl,
                     };
                     let action = crucible_keys::resolve(&state.bindings, mods, keysym);
+                    // While locked only VT switching runs; every other key goes to the locker.
+                    let action = action.filter(|a| {
+                        !state.is_session_locked()
+                            || matches!(a, crucible_keys::Action::VtSwitch(_))
+                    });
                     if action.is_some() {
                         state.suppressed_keys.consume_press(raw_keycode);
                     }
@@ -135,6 +140,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// [`KeyboardTarget`](smithay::input::keyboard::KeyboardTarget) impl drives the X11
     /// `set_input_focus`/take-focus that activates it.
     pub fn set_keyboard_focus(&mut self, target: Option<KeyboardFocusTarget>) {
+        // While the session is locked, focus never leaves the lock surface (`crate::lock`).
+        if self.is_session_locked() && !matches!(target, Some(KeyboardFocusTarget::LockSurface(_)))
+        {
+            return;
+        }
+        self.force_keyboard_focus(target);
+    }
+
+    /// Sets keyboard focus unconditionally (the lock glue's own path; see [`Self::set_keyboard_focus`]).
+    pub(crate) fn force_keyboard_focus(&mut self, target: Option<KeyboardFocusTarget>) {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };

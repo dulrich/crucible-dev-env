@@ -109,6 +109,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.open_settings();
                 return;
             }
+            Action::Lock => {
+                self.spawn_locker();
+                return;
+            }
             // Auto-names skip live AND saved names, so a fresh "2" never overwrites a saved "2".
             Action::NewWorkspace => {
                 let saved = crucible_persist::store::list_saved(&self.persist.store_dir)
@@ -215,6 +219,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
         | Action::MoveWorkspaceToOutput(_)
         | Action::Slot(_)
         | Action::PinSlot(_)
+        | Action::Lock
         | Action::NewWorkspace
         | Action::VtSwitch(_) => {
             unreachable!("compositor-level action; handle_key_action routes it before with_model")

@@ -221,6 +221,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub header: crate::header::HeaderState,
     /// Font + glyph cache for the header labels; disabled until the config selects a font.
     pub header_text: crate::text::TextRenderer,
+    /// Screen-lock state (`ext-session-lock-v1`); see [`crate::lock`].
+    pub session_lock: crate::lock::SessionLock,
 }
 
 /// What the pointer hovers, for focus-follows-mouse enter detection.
@@ -377,6 +379,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
+        let session_lock = crate::lock::SessionLock::new(
+            smithay::wayland::session_lock::SessionLockManagerState::new::<Self, _>(&dh, |_| true),
+        );
         let mut seat_state = SeatState::new();
 
         // Create the seat with keyboard + pointer capabilities. NB: this only *advertises* the
@@ -421,6 +426,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             persist: crate::persist::PersistState::new(crucible_persist::store::store_dir()),
             header: crate::header::HeaderState::default(),
             header_text: crate::text::TextRenderer::from_font(None),
+            session_lock,
         }
     }
 }

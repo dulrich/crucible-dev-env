@@ -211,7 +211,26 @@ pub fn run_winit() {
             let damage_tracker = &mut state.backend_data.damage_tracker;
             let age = backend.buffer_age().unwrap_or(0);
 
+            // While locked: only the lock surface over black (no space, chrome, header, cursor).
+            let locked = state.session_lock.is_locked();
+            let lock = &state.session_lock;
             let render_res = backend.bind().and_then(|(renderer, mut fb)| {
+                if locked {
+                    let elements =
+                        crate::lock::lock_render_elements(lock, &output, renderer, scale);
+                    return damage_tracker
+                        .render_output(
+                            renderer,
+                            &mut fb,
+                            age,
+                            &elements,
+                            crate::lock::LOCK_CLEAR_COLOR,
+                        )
+                        .map_err(|err| match err {
+                            OutputDamageTrackerError::Rendering(err) => err.into(),
+                            OutputDamageTrackerError::OutputNoMode(_) => unreachable!(),
+                        });
+                }
                 // Header strip (labels, highlight, background) in front of the chrome.
                 let mut header_elements = crate::header::build_header_elements(
                     &header_layouts,
@@ -251,12 +270,19 @@ pub fn run_winit() {
                 })
             });
 
+            // A locked frame counts as presented once submitted (or when nothing changed since the
+            // last one: the first locked frame always carries damage, its clear colour differs).
+            let mut presented_locked = false;
             match render_res {
                 Ok(render_output_result) => {
                     if let Some(damage) = render_output_result.damage {
                         if let Err(err) = backend.submit(Some(damage)) {
                             warn!("Failed to submit buffer: {}", err);
+                        } else {
+                            presented_locked = locked;
                         }
+                    } else {
+                        presented_locked = locked;
                     }
                 }
                 Err(smithay::backend::SwapBuffersError::ContextLost(err)) => {
@@ -267,10 +293,21 @@ pub fn run_winit() {
                 }
                 Err(err) => warn!("Rendering error: {}", err),
             }
+            if presented_locked {
+                state.lock_output_presented(&output);
+            }
         }
 
         // Send frame callbacks so clients render their next frame.
         let frame_time = start_time.elapsed();
+        if state.session_lock.is_locked() {
+            crate::lock::send_lock_frames(
+                &state.session_lock,
+                &output,
+                frame_time,
+                Some(Duration::ZERO),
+            );
+        }
         state.space.elements().for_each(|window| {
             window.send_frame(&output, frame_time, Some(Duration::ZERO), |_, _| {
                 Some(output.clone())

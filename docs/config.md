@@ -49,6 +49,18 @@ restore-session #false
 
 `#true` (default) or `#false`. When on, CDE records the open workspaces per output and the focused one in `$XDG_STATE_HOME/cde/session.kdl` (beside the `workspaces/` store) and reopens them at startup, with no seed workspace and no picker. Workspaces no longer saved on disk are skipped; workspaces of a disconnected output open on the first output. With nothing restorable, or when off, startup opens a seed workspace and the picker (when saved workspaces exist) as before.
 
+### `lock-command`
+
+```kdl
+lock-command "swaylock -f -c 000000"
+```
+
+The screen locker the `lock` action (default `Super+Escape`) spawns, detached (not into a pane). Default `"swaylock"`; must not be empty. The string is split on whitespace into the program and its arguments (no shell quoting). A failed spawn only logs a warning.
+
+#### Screen lock
+
+CDE implements `ext-session-lock-v1`, so any Wayland locker (swaylock, gtklock, waylock, …) works. While locked only the locker is shown (over black) and only it receives input; no CDE chord runs except VT switching (`Ctrl+Alt+F<n>`). If the locker dies the screen stays black and locked; running the locker again (from a VT, or over ssh with `WAYLAND_DISPLAY` set) takes over the lock, and unlocking it unlocks the session.
+
 ### `picker`
 
 ```kdl
@@ -144,6 +156,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `open-settings` | Open the settings overlay (`crucible keys`): the effective keybindings; Enter runs the selected binding |
 | `toggle-header` | Show/hide the workspace header strip (`header { mode "toggle" }` only; a no-op in `always` and `off`) |
 | `rename-workspace` | Rename the active workspace (the picker in rename mode) |
+| `lock` | Lock the screen: spawn `lock-command` (default chord `Super+Escape`) |
 | `none` | Unbind the chord |
 
 `<dir>` is `left`, `right`, `up` or `down`; `<n>` is a signed integer such as `1`, `+1` or `-1`.

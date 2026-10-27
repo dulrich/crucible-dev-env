@@ -63,6 +63,8 @@ pub enum KeyboardFocusTarget {
     LayerSurface(LayerSurface),
     /// An xdg or input-method popup.
     Popup(PopupKind),
+    /// An `ext-session-lock-v1` lock surface (the locker; see [`crate::lock`]).
+    LockSurface(WlSurface),
 }
 
 /// What the seat's pointer (and touch) is focused on.
@@ -85,6 +87,7 @@ impl IsAlive for KeyboardFocusTarget {
             KeyboardFocusTarget::Window(w) => w.alive(),
             KeyboardFocusTarget::LayerSurface(l) => l.alive(),
             KeyboardFocusTarget::Popup(p) => p.alive(),
+            KeyboardFocusTarget::LockSurface(s) => s.alive(),
         }
     }
 }
@@ -109,6 +112,7 @@ impl KeyboardFocusTarget {
             },
             Self::LayerSurface(l) => l.wl_surface(),
             Self::Popup(p) => p.wl_surface(),
+            Self::LockSurface(s) => s,
         }
     }
 }
@@ -138,6 +142,7 @@ impl WaylandFocus for KeyboardFocusTarget {
             KeyboardFocusTarget::Window(w) => w.wl_surface(),
             KeyboardFocusTarget::LayerSurface(l) => Some(Cow::Borrowed(l.wl_surface())),
             KeyboardFocusTarget::Popup(p) => Some(Cow::Borrowed(p.wl_surface())),
+            KeyboardFocusTarget::LockSurface(s) => Some(Cow::Borrowed(s)),
         }
     }
 }
@@ -583,6 +588,7 @@ impl From<KeyboardFocusTarget> for PointerFocusTarget {
             KeyboardFocusTarget::Popup(popup) => {
                 PointerFocusTarget::WlSurface(popup.wl_surface().clone())
             }
+            KeyboardFocusTarget::LockSurface(s) => PointerFocusTarget::WlSurface(s),
         }
     }
 }

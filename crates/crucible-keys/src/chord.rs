@@ -34,6 +34,7 @@
 //! | `Super+Shift+<0-9>`   | `PinSlot(n)`                   | pin the active workspace to slot n |
 //! | `Super+P`             | `OpenPicker`                   | fuzzy workspace picker (WP-5)     |
 //! | `Super+Shift+R`       | `RenameWorkspace`              | rename the active workspace (WP-5)|
+//! | `Super+Escape`        | `Lock`                         | spawn `lock-command` (screen lock) |
 //! | `Ctrl+Alt+F<n>`       | `VtSwitch(n)`                  | backend VT switch (hard-wired, independent of `Super`) |
 //!
 //! `Super+Shift+<0-9>` also binds the US shifted symbol (`exclam`, `at`, ...), which is what the
@@ -427,6 +428,7 @@ mod tests {
                                     | Action::RenameWorkspace
                                     | Action::OpenSettings
                                     | Action::ToggleHeader
+                                    | Action::Lock
                             )
                         );
                         if is_new_verb {

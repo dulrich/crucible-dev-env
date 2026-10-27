@@ -31,7 +31,7 @@ use smithay::{
 use tracing::{debug, error, warn};
 
 use crate::{
-    render::{CustomRenderElements, output_elements},
+    render::{CustomRenderElements, OutputRenderElements, output_elements},
     state::{CrucibleState, take_presentation_feedback, update_primary_scanout_output},
 };
 
@@ -115,6 +115,11 @@ impl CrucibleState<UdevData> {
                 }
             }
         };
+
+        // E2: the page-flip of a locked frame completed, so that output now shows it.
+        if self.session_lock.take_queued(&output) {
+            self.lock_output_presented(&output);
+        }
 
         if schedule_render {
             // Schedule the next repaint roughly one frame out.
@@ -218,21 +223,26 @@ impl CrucibleState<UdevData> {
             .map(CustomRenderElements::SolidColor)
             .collect();
 
+        // While locked: only the lock surface over black (no space, chrome, header, cursor).
+        let locked = self.session_lock.is_locked();
+
         // Header strip (labels, highlight, background) in front of the chrome. `header_text` is a
         // disjoint field from the `backend_data` the renderer borrows.
-        let mut header_elements = crate::header::build_header_elements(
-            &header_layouts,
-            header_output,
-            (output_geo.loc.x, output_geo.loc.y),
-            header_size,
-            &mut self.header_text,
-            &mut renderer,
-        );
-        header_elements.append(&mut chrome);
-        chrome = header_elements;
+        if !locked {
+            let mut header_elements = crate::header::build_header_elements(
+                &header_layouts,
+                header_output,
+                (output_geo.loc.x, output_geo.loc.y),
+                header_size,
+                &mut self.header_text,
+                &mut renderer,
+            );
+            header_elements.append(&mut chrome);
+            chrome = header_elements;
+        }
 
         // Cursor element, drawn only on the output the pointer is over (on top of chrome).
-        if output_geo.to_f64().contains(pointer_location) {
+        if !locked && output_geo.to_f64().contains(pointer_location) {
             let cursor_pos = pointer_location - output_geo.loc.to_f64();
             let cursor_elements: Vec<CustomRenderElements<UdevRenderer<'_>>> =
                 self.backend_data.pointer_element.render_elements(
@@ -247,7 +257,23 @@ impl CrucibleState<UdevData> {
             chrome = all;
         }
 
-        let (elements, clear_color) = output_elements(&output, &self.space, chrome, &mut renderer);
+        let (elements, clear_color) = if locked {
+            let lock_elements = crate::lock::lock_render_elements(
+                &self.session_lock,
+                &output,
+                &mut renderer,
+                scale,
+            );
+            (
+                lock_elements
+                    .into_iter()
+                    .map(OutputRenderElements::Custom)
+                    .collect(),
+                crate::lock::LOCK_CLEAR_COLOR.into(),
+            )
+        } else {
+            output_elements(&output, &self.space, chrome, &mut renderer)
+        };
 
         let surface = self
             .backend_data
@@ -282,10 +308,15 @@ impl CrucibleState<UdevData> {
                     .drm_output
                     .queue_frame(Some(feedback))
                     .map_err(Into::<SwapBuffersError>::into)?;
+                // E2: `frame_finish` counts this output as presented iff this frame was locked.
+                self.session_lock.note_queued(&output, locked);
             }
             // Send frame callbacks so clients draw their next frame.
             let now = self.clock.now();
             let throttle = Some(Duration::from_secs(1));
+            if locked {
+                crate::lock::send_lock_frames(&self.session_lock, &output, now, throttle);
+            }
             self.space.elements().for_each(|window| {
                 window.send_frame(&output, now, throttle, |_, _| Some(output.clone()));
             });

@@ -133,10 +133,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let state = wl_pointer::ButtonState::from(evt.state());
 
         if wl_pointer::ButtonState::Pressed == state {
-            if self.consume_header_press(button) {
-                return;
+            // While locked: no header clicks, no click-to-focus; the press goes to the lock surface.
+            if !self.is_session_locked() {
+                if self.consume_header_press(button) {
+                    return;
+                }
+                self.update_keyboard_focus_under_pointer(serial);
             }
-            self.update_keyboard_focus_under_pointer(serial);
         } else if self.header.consumed.consume_release(button) {
             // The paired release of a press the header strip consumed: never forward a release
             // whose press the client did not see (audit E8).
@@ -227,6 +230,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         &self,
         pos: Point<f64, Logical>,
     ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
+        if self.is_session_locked() {
+            return crate::lock::lock_surface_under(&self.session_lock, &self.space, pos);
+        }
         self.space
             .element_under(pos)
             .and_then(|(window, location)| {
@@ -334,7 +340,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// mapped the tracker still updates but hovering never moves focus off it. Does nothing when
     /// the option is off.
     fn focus_follows_pointer(&mut self) {
-        if !self.focus_follows_mouse {
+        if !self.focus_follows_mouse || self.is_session_locked() {
             return;
         }
         let location = self.pointer.current_location();

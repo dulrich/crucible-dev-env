@@ -224,6 +224,7 @@ impl Default for Bindings {
         bind(sup, &[Keysym::bracketleft], Action::CycleWorkspace(-1));
         bind(sup, &[Keysym::n, Keysym::N], Action::NewWorkspace);
         bind(sup, &[Keysym::p, Keysym::P], Action::OpenPicker);
+        bind(sup, &[Keysym::Escape], Action::Lock);
 
         // ---- Super+Shift ----
         bind(sup_shift, &[Keysym::Return], Action::RunTerminal);
@@ -559,6 +560,7 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
         "move-window-to-workspace" => unary(Action::MoveWindowToWorkspace(delta(words.get(1))?)),
         "close-workspace" => nullary(Action::CloseWorkspace),
         "close-all-workspaces" => nullary(Action::CloseAllWorkspaces),
+        "lock" => nullary(Action::Lock),
         "move-workspace-to-output" => unary(Action::MoveWorkspaceToOutput(delta(words.get(1))?)),
         "slot" => unary(Action::Slot(slot_index(words.get(1))?)),
         "pin-slot" => unary(Action::PinSlot(slot_index(words.get(1))?)),
@@ -705,6 +707,7 @@ mod tests {
             ("new-workspace", Action::NewWorkspace),
             ("close-workspace", Action::CloseWorkspace),
             ("close-all-workspaces", Action::CloseAllWorkspaces),
+            ("lock", Action::Lock),
             (
                 "move-workspace-to-output -2",
                 Action::MoveWorkspaceToOutput(-2),

@@ -378,6 +378,9 @@ pub struct Config {
     pub overlay: OverlayConfig,
     /// Workspace header strip mode, font and size.
     pub header: HeaderConfig,
+    /// The screen locker the `lock` action spawns (`lock-command`), split on whitespace into
+    /// program + arguments (no shell quoting). Default `"swaylock"`.
+    pub lock_command: String,
     /// Binding overrides as raw `(chord, action)` strings, in file order.
     pub binds: Vec<(String, String)>,
 }
@@ -393,6 +396,7 @@ impl Default for Config {
             overlay: OverlayConfig::default(),
             header: HeaderConfig::default(),
             binds: Vec::new(),
+            lock_command: "swaylock".to_string(),
         }
     }
 }
@@ -467,6 +471,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 | "overlay"
                 | "header"
                 | "binds"
+                | "lock-command"
         ) && seen.contains(&name)
         {
             return Err(ConfigError::Duplicate {
@@ -502,6 +507,12 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "overlay" => config.overlay = parse_overlay(text, node)?,
             "header" => config.header = parse_header(text, node)?,
             "binds" => config.binds = parse_binds(text, node)?,
+            "lock-command" => {
+                no_properties(text, node)?;
+                let cmd = string_args(text, node, &["a command string"])?[0];
+                nonempty(text, node, "command", cmd)?;
+                config.lock_command = cmd.to_string();
+            }
             other => {
                 return Err(ConfigError::UnknownNode {
                     at,
@@ -987,6 +998,17 @@ binds {
         assert!(c.focus_follows_mouse);
         assert!(c.picker_roots.is_empty());
         assert!(c.binds.is_empty());
+    }
+
+    #[test]
+    fn lock_command_defaults_to_swaylock_and_rejects_empty_or_duplicate() {
+        assert_eq!(Config::default().lock_command, "swaylock");
+        let c = parse("lock-command \"swaylock -f -c 000000\"\n").unwrap();
+        assert_eq!(c.lock_command, "swaylock -f -c 000000");
+        let (err, _) = err_at("lock-command \"  \"\n");
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
+        let (err, _) = err_at("lock-command \"a\"\nlock-command \"b\"\n");
+        assert!(matches!(err, ConfigError::Duplicate { .. }));
     }
 
     #[test]

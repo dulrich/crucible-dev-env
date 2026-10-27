@@ -56,3 +56,6 @@ pub mod header;
 
 /// Compositor-drawn text: font resolution, fontdue rasterization, memory render element.
 pub mod text;
+
+/// Screen lock (`ext-session-lock-v1`): the lock state machine and its Smithay glue.
+pub mod lock;
