@@ -18,6 +18,9 @@ pub struct WindowMeta {
     pub pid: Option<u32>,
     /// The placement class: a CDE-spawned terminal or an app.
     pub class: WindowClass,
+    /// The saved record the window's spawn stands for (a restored window or a relaunched app),
+    /// copied from the matched CDE spawn at map time; capture prefers it over `/proc` decoding.
+    pub origin: Option<crucible_persist::WindowRecord>,
 }
 
 /// One managed binding: the payload plus its metadata.
@@ -341,6 +344,7 @@ mod tests {
         WindowMeta {
             pid: None,
             class: WindowClass::App,
+            origin: None,
         }
     }
 
@@ -348,6 +352,7 @@ mod tests {
         WindowMeta {
             pid: Some(pid),
             class: WindowClass::Terminal,
+            origin: None,
         }
     }
 

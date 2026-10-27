@@ -9,7 +9,7 @@ use std::process::{Child, Command};
 use std::time::{Instant, SystemTime};
 
 use crucible_layout::WorkspaceId;
-use crucible_persist::{RelaunchWrapper, ResumeWrapper};
+use crucible_persist::{RelaunchWrapper, ResumeWrapper, WindowRecord};
 use tracing::{error, info, warn};
 
 use crate::config::pick_terminal;
@@ -19,14 +19,67 @@ use crate::ipc::{
 };
 use crate::state::{Backend, CrucibleState};
 
-/// Spawned-process registry and child handles (a field of [`super::PersistState`]).
-#[derive(Debug, Default)]
-pub(super) struct SpawnState {
-    pub(super) spawned: HashMap<u32, SpawnRecord>,
-    /// Handles of every CDE-spawned child, kept so exited ones are reaped (never reap-any).
-    pub(super) children: Vec<Child>,
+/// One CDE-spawned child: its handle and what it was spawned as.
+#[derive(Debug)]
+struct Spawned {
+    child: Child,
+    record: SpawnRecord,
 }
 
+/// The PID-provenance registry (a field of [`super::PersistState`]): every CDE-spawned child's
+/// handle together with its [`SpawnRecord`]. A child and its record live and die together —
+/// [`Self::reap`] drops both, so a recycled PID is never classified from a dead spawn.
+#[derive(Debug, Default)]
+pub(super) struct SpawnRegistry {
+    by_pid: HashMap<u32, Spawned>,
+}
+
+impl SpawnRegistry {
+    /// Registers a freshly spawned `child` with its `record`; returns its PID.
+    pub(super) fn insert(&mut self, child: Child, record: SpawnRecord) -> u32 {
+        let pid = child.id();
+        self.by_pid.insert(pid, Spawned { child, record });
+        pid
+    }
+
+    /// The record of the live (not yet reaped) CDE spawn `pid`.
+    #[must_use]
+    pub(super) fn get(&self, pid: u32) -> Option<&SpawnRecord> {
+        self.by_pid.get(&pid).map(|s| &s.record)
+    }
+
+    /// Kills the held child `pid` (SIGKILL via its own handle; the next [`Self::reap`] collects
+    /// it). Returns `false` when CDE holds no live handle for `pid`.
+    pub(super) fn kill(&mut self, pid: u32) -> bool {
+        self.by_pid
+            .get_mut(&pid)
+            .is_some_and(|s| s.child.kill().is_ok())
+    }
+
+    /// Reaps exited children through their own handles (`try_wait`), dropping each **with its
+    /// record** and returning their PIDs. Children still running are kept; a `try_wait` error
+    /// drops the child too. Never a reap-any call: XWayland's children are not ours.
+    pub(super) fn reap(&mut self) -> Vec<u32> {
+        let mut reaped = Vec::new();
+        self.by_pid.retain(|pid, s| match s.child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) | Err(_) => {
+                reaped.push(*pid);
+                false
+            }
+        });
+        reaped.sort_unstable();
+        reaped
+    }
+
+    /// Whether `pid` itself is a live [`SpawnKind::Terminal`] spawn (exact pid; ancestors never
+    /// count, so an app launched from a terminal is not a terminal).
+    #[must_use]
+    pub(super) fn is_terminal_spawn(&self, pid: u32) -> bool {
+        self.get(pid)
+            .is_some_and(|rec| rec.kind == SpawnKind::Terminal)
+    }
+}
 /// What a CDE-spawned process is, remembered per PID so a mapped window can be classified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnKind {
@@ -49,6 +102,9 @@ pub struct SpawnRecord {
     pub at: Instant,
     /// Wall-clock spawn time, ms since the UNIX epoch.
     pub epoch_ms: u128,
+    /// The saved record this spawn stands for (a restored window, or a relaunched app), carried
+    /// to map time so capture records it instead of reverse-engineering CDE's own wrappers.
+    pub origin: Option<WindowRecord>,
 }
 
 impl SpawnRecord {
@@ -60,6 +116,7 @@ impl SpawnRecord {
             program: program.to_owned(),
             at: Instant::now(),
             epoch_ms: epoch_ms_now(),
+            origin: None,
         }
     }
 
@@ -75,38 +132,6 @@ pub(super) fn epoch_ms_now() -> u128 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis())
-}
-
-/// Reaps exited children through their own handles (`try_wait`), dropping them from `children`
-/// and returning their PIDs. Children still running (or never reaped by anyone else) are kept; a
-/// `try_wait` error drops the child too. Never a reap-any call: XWayland's children are not ours.
-pub fn reap_exited(children: &mut Vec<Child>) -> Vec<u32> {
-    let mut reaped = Vec::new();
-    children.retain_mut(|child| match child.try_wait() {
-        Ok(None) => true,
-        Ok(Some(_)) | Err(_) => {
-            reaped.push(child.id());
-            false
-        }
-    });
-    reaped
-}
-
-/// Kills the held child `pid` (SIGKILL via its own handle; the next [`reap_exited`] collects it).
-/// Returns `false` when CDE holds no live handle for `pid`.
-pub fn kill_child(children: &mut [Child], pid: u32) -> bool {
-    children
-        .iter_mut()
-        .find(|c| c.id() == pid)
-        .is_some_and(|c| c.kill().is_ok())
-}
-
-/// Whether `pid` itself was spawned as a [`SpawnKind::Terminal`] (exact pid; ancestors never count, so an app launched from a terminal is not a terminal).
-#[must_use]
-pub fn is_terminal_spawn(pid: u32, spawned: &HashMap<u32, SpawnRecord>) -> bool {
-    spawned
-        .get(&pid)
-        .is_some_and(|rec| rec.kind == SpawnKind::Terminal)
 }
 
 /// The terminal arguments restoring a terminal: `<exec-flag> <crucible> resume --cwd <dir> --
@@ -294,13 +319,26 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     /// Spawns `program args…` connected to this compositor (`WAYLAND_DISPLAY`, `CDE_SOCKET`),
-    /// optionally in `cwd`. The PID is remembered as a CDE-spawn of `kind`. Returns the PID.
+    /// optionally in `cwd`. The PID is remembered as a CDE-spawn of `kind` with no origin. Returns
+    /// the PID.
     pub fn spawn_process(
         &mut self,
         program: &str,
         args: &[OsString],
         cwd: Option<&Path>,
         kind: SpawnKind,
+    ) -> Option<u32> {
+        self.spawn_process_with(program, args, cwd, kind, None)
+    }
+
+    /// As [`Self::spawn_process`], remembering `origin` (the saved record the spawn stands for).
+    pub(super) fn spawn_process_with(
+        &mut self,
+        program: &str,
+        args: &[OsString],
+        cwd: Option<&Path>,
+        kind: SpawnKind,
+        origin: Option<WindowRecord>,
     ) -> Option<u32> {
         let Some(socket) = self.socket_name.clone() else {
             warn!(program, "no wayland socket; cannot spawn");
@@ -317,7 +355,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             cmd.env(OVERLAY_STYLE_ENV, self.config.overlay.style.as_str());
             cmd.env(LAUNCHER_TUI_ENV, self.config.launcher_tui.join(":"));
         }
-        let record = SpawnRecord::now(kind, program);
+        let record = SpawnRecord {
+            origin,
+            ..SpawnRecord::now(kind, program)
+        };
         if kind == SpawnKind::Overlay {
             cmd.env(SPAWN_EPOCH_ENV, record.epoch_ms.to_string());
         }
@@ -331,8 +372,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(child) => {
                 let pid = child.id();
                 info!(program, ?args, ?cwd, pid, "spawned");
-                self.persist.spawn.spawned.insert(pid, record);
-                self.persist.spawn.children.push(child);
+                self.persist.spawn.insert(child, record);
                 Some(pid)
             }
             Err(err) => {
@@ -448,9 +488,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Runs `cmd` via `/bin/sh -c 'exec <cmd>'` (kind `App`) in workspace `ws`'s root, if any.
     pub(super) fn spawn_command_in(&mut self, cmd: &str, ws: WorkspaceId) -> Option<u32> {
+        self.spawn_command_with(cmd, ws, None)
+    }
+
+    /// As [`Self::spawn_command_in`], remembering `origin` on the spawn (a relaunched app).
+    pub(super) fn spawn_command_with(
+        &mut self,
+        cmd: &str,
+        ws: WorkspaceId,
+        origin: Option<WindowRecord>,
+    ) -> Option<u32> {
         let root = self.persist.workspace.roots.get(&ws).cloned();
         let args = [OsString::from("-c"), OsString::from(format!("exec {cmd}"))];
-        self.spawn_process("/bin/sh", &args, root.as_deref(), SpawnKind::App)
+        self.spawn_process_with("/bin/sh", &args, root.as_deref(), SpawnKind::App, origin)
     }
 }
 
@@ -459,45 +509,77 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    #[test]
-    fn kill_child_ends_only_a_held_child() {
-        let child = std::process::Command::new("/bin/sleep")
-            .arg("30")
+    fn spawn(program: &str, args: &[&str]) -> Child {
+        std::process::Command::new(program)
+            .args(args)
             .spawn()
-            .unwrap();
-        let pid = child.id();
-        let mut children = vec![child];
-        assert!(!kill_child(&mut children, pid.wrapping_add(1_000_000)));
-        assert!(kill_child(&mut children, pid));
-        let status = children[0].wait().unwrap();
-        assert!(!status.success(), "killed, not exited cleanly");
+            .unwrap()
+    }
+
+    fn end_all(reg: &mut SpawnRegistry) {
+        for s in reg.by_pid.values_mut() {
+            let _ = s.child.kill();
+            let _ = s.child.wait();
+        }
     }
 
     #[test]
-    fn reap_exited_drops_only_exited_children() {
-        let quick = std::process::Command::new("/bin/true").spawn().unwrap();
-        let quick_pid = quick.id();
-        let slow = std::process::Command::new("/bin/sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        let slow_pid = slow.id();
-        let mut children = vec![quick, slow];
-        let mut reaped = Vec::new();
+    fn registry_kill_ends_only_a_held_child() {
+        let mut reg = SpawnRegistry::default();
+        let pid = reg.insert(
+            spawn("/bin/sleep", &["30"]),
+            SpawnRecord::now(SpawnKind::App, "sleep"),
+        );
+        assert!(!reg.kill(pid.wrapping_add(1_000_000)));
+        assert!(reg.kill(pid));
+        let status = reg.by_pid.get_mut(&pid).unwrap().child.wait().unwrap();
+        assert!(!status.success(), "killed, not exited cleanly");
+    }
+
+    /// Reaps `reg` until something exits (or ~2 s pass).
+    fn reap_some(reg: &mut SpawnRegistry) -> Vec<u32> {
         for _ in 0..40 {
-            reaped = reap_exited(&mut children);
+            let reaped = reg.reap();
             if !reaped.is_empty() {
-                break;
+                return reaped;
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(50));
         }
-        assert_eq!(reaped, vec![quick_pid]);
-        assert_eq!(children.len(), 1);
-        assert_eq!(children[0].id(), slow_pid);
-        for c in &mut children {
-            c.kill().unwrap();
-            c.wait().unwrap();
-        }
+        Vec::new()
+    }
+
+    #[test]
+    fn registry_reap_drops_only_exited_children_with_their_records() {
+        let mut reg = SpawnRegistry::default();
+        let quick = reg.insert(
+            spawn("/bin/true", &[]),
+            SpawnRecord::now(SpawnKind::App, "true"),
+        );
+        let slow = reg.insert(
+            spawn("/bin/sleep", &["30"]),
+            SpawnRecord::now(SpawnKind::App, "sleep"),
+        );
+        assert_eq!(reap_some(&mut reg), vec![quick]);
+        assert_eq!(reg.by_pid.len(), 1);
+        assert!(reg.get(quick).is_none());
+        assert!(reg.get(slow).is_some());
+        end_all(&mut reg);
+    }
+
+    /// B2: a reaped terminal's record goes with its handle, so the recycled PID of an unrelated
+    /// client is not classified from the dead spawn.
+    #[test]
+    fn reaped_terminal_pid_is_no_longer_a_terminal_spawn() {
+        let mut reg = SpawnRegistry::default();
+        let pid = reg.insert(
+            spawn("/bin/true", &[]),
+            SpawnRecord::now(SpawnKind::Terminal, "term"),
+        );
+        assert!(reg.is_terminal_spawn(pid));
+        assert_eq!(reap_some(&mut reg), vec![pid]);
+        assert!(!reg.is_terminal_spawn(pid));
+        assert!(reg.get(pid).is_none());
+        assert!(!reg.kill(pid));
     }
 
     #[test]
@@ -510,19 +592,26 @@ mod tests {
 
     #[test]
     fn is_terminal_spawn_is_the_exact_pid_kind_only() {
-        let spawned: HashMap<u32, SpawnRecord> = [
-            (10, SpawnRecord::now(SpawnKind::Terminal, "t")),
-            (20, SpawnRecord::now(SpawnKind::App, "a")),
-            (30, SpawnRecord::now(SpawnKind::Overlay, "o")),
-        ]
-        .into();
-        assert!(is_terminal_spawn(10, &spawned));
-        assert!(!is_terminal_spawn(20, &spawned));
-        assert!(!is_terminal_spawn(30, &spawned));
-        assert!(!is_terminal_spawn(99, &spawned));
-        // a child of a terminal spawn (firefox from ghostty) is not a terminal; the
-        // pid 5 child of App 20 is not one either — ancestors never decide the class
-        assert!(!is_terminal_spawn(5, &spawned));
+        let mut reg = SpawnRegistry::default();
+        let t = reg.insert(
+            spawn("/bin/sleep", &["30"]),
+            SpawnRecord::now(SpawnKind::Terminal, "t"),
+        );
+        let a = reg.insert(
+            spawn("/bin/sleep", &["30"]),
+            SpawnRecord::now(SpawnKind::App, "a"),
+        );
+        let o = reg.insert(
+            spawn("/bin/sleep", &["30"]),
+            SpawnRecord::now(SpawnKind::Overlay, "o"),
+        );
+        assert!(reg.is_terminal_spawn(t));
+        assert!(!reg.is_terminal_spawn(a));
+        assert!(!reg.is_terminal_spawn(o));
+        // a pid CDE never spawned (e.g. firefox launched from the terminal) is not a terminal;
+        // ancestors never decide the class
+        assert!(!reg.is_terminal_spawn(t.wrapping_add(1_000_000)));
+        end_all(&mut reg);
     }
 
     #[test]

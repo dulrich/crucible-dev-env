@@ -128,8 +128,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .get(&pane)
             .and_then(|v| v.iter().find(|(w, _)| *w == id).map(|(_, i)| *i));
         let element = self.layout.element(id).cloned();
+        // The app stands for the placeholder's saved record: carried as the spawn's origin.
+        let origin = crucible_persist::WindowRecord::App {
+            app_id: capture.app_id.clone(),
+            cmdline: Some(capture.cmdline.clone()),
+        };
         let pid = self
-            .spawn_command_in(&capture.cmdline, ws)
+            .spawn_command_with(&capture.cmdline, ws, Some(origin))
             .ok_or_else(|| "spawn failed".to_string())?;
         self.persist.placement.pending.insert(
             pid,

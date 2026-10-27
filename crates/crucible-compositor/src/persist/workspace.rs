@@ -10,7 +10,6 @@ use crucible_persist::slots::slots_path;
 use tracing::{debug, info, warn};
 
 use super::placement::Target;
-use super::spawn::kill_child;
 use super::{close_element, skip_record};
 use crate::state::{Backend, CrucibleState};
 
@@ -255,10 +254,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         };
         // (f) Policy: end each window — kill a CDE-spawned child, else ask the client to close.
         for (element, meta) in ended {
-            if !meta
-                .pid
-                .is_some_and(|p| kill_child(&mut self.persist.spawn.children, p))
-            {
+            if !meta.pid.is_some_and(|p| self.persist.spawn.kill(p)) {
                 close_element(&element);
             }
         }

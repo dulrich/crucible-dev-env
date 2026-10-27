@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 use super::close_element;
 use super::placement::{Pending, Target};
 use super::spawn::{
-    SpawnKind, epoch_ms_now, keys_args, kill_child, launcher_args, picker_args, with_terminal_args,
+    SpawnKind, epoch_ms_now, keys_args, launcher_args, picker_args, with_terminal_args,
 };
 use crate::element::WindowElement;
 use crate::focus::KeyboardFocusTarget;
@@ -387,7 +387,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Ends an overlay by killing its terminal process, so the terminal never asks to confirm
     /// closing a window with a running TUI. Falls back to a polite close when CDE holds no handle.
     pub(super) fn end_overlay(&mut self, element: &WindowElement, pid: Option<u32>) {
-        if !pid.is_some_and(|p| kill_child(&mut self.persist.spawn.children, p)) {
+        if !pid.is_some_and(|p| self.persist.spawn.kill(p)) {
             close_element(element);
         }
     }
@@ -464,7 +464,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(super) fn discard_warm(&mut self) {
         if let Some(warm) = self.persist.overlay.warm.take() {
             self.persist.placement.pending.remove(&warm.pid);
-            if !kill_child(&mut self.persist.spawn.children, warm.pid) {
+            if !self.persist.spawn.kill(warm.pid) {
                 if let Some(element) = &warm.element {
                     close_element(element);
                 }
@@ -536,7 +536,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(super) fn store_warm(&mut self, element: WindowElement, pid: Option<u32>) {
         let Some(warm_pid) = self.persist.overlay.warm.as_ref().map(|w| w.pid) else {
             // The slot was discarded meanwhile: end the stray host without showing it.
-            if !pid.is_some_and(|p| kill_child(&mut self.persist.spawn.children, p)) {
+            if !pid.is_some_and(|p| self.persist.spawn.kill(p)) {
                 close_element(&element);
             }
             return;
@@ -547,7 +547,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 "warm overlay host arrived as an X11 window; overlay pre-warming disabled for this session"
             );
             self.persist.overlay.warm_disabled = true;
-            if !kill_child(&mut self.persist.spawn.children, warm_pid) {
+            if !self.persist.spawn.kill(warm_pid) {
                 close_element(&element);
             }
             if let Some(w) = self.persist.overlay.warm.take() {

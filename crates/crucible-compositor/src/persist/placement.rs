@@ -8,7 +8,6 @@ use crucible_layout::{PaneId, WindowId, WorkspaceId};
 use tracing::{info, warn};
 
 use super::proc_root;
-use super::spawn::is_terminal_spawn;
 use crate::element::WindowElement;
 use crate::layout::{WindowClass, WindowMeta};
 use crate::state::{Backend, CrucibleState};
@@ -138,31 +137,30 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 })
             })
             .and_then(|k| self.persist.placement.pending.remove(&k));
-        if let Some(rec) = pid
-            .and_then(|p| {
-                match_pending(p, &ancestors, |k| {
-                    self.persist.spawn.spawned.contains_key(&k)
-                })
-            })
-            .and_then(|k| self.persist.spawn.spawned.get(&k).map(|rec| (k, rec)))
-            .map(|(k, rec)| (k, rec.clone()))
+        // The matched spawn (pid or an ancestor) feeds the latency line and carries the origin
+        // record (what a restored window / relaunched app stands for) to capture time.
+        let mut origin = None;
+        if let Some((k, rec)) = pid
+            .and_then(|p| match_pending(p, &ancestors, |k| self.persist.spawn.get(k).is_some()))
+            .and_then(|k| self.persist.spawn.get(k).map(|rec| (k, rec)))
         {
             info!(
-                kind = ?rec.1.kind,
-                program = %rec.1.program,
-                pid = rec.0,
-                spawn_to_map_ms = u64::try_from(rec.1.ms_until(Instant::now())).unwrap_or(u64::MAX),
+                kind = ?rec.kind,
+                program = %rec.program,
+                pid = k,
+                spawn_to_map_ms = u64::try_from(rec.ms_until(Instant::now())).unwrap_or(u64::MAX),
                 "latency: spawn→map"
             );
+            origin.clone_from(&rec.origin);
         }
         // The class must be known before the first placement (every mapping path applies the
         // layout), so the window's first rect already honours terminal vs app.
-        let class = if pid.is_some_and(|p| is_terminal_spawn(p, &self.persist.spawn.spawned)) {
+        let class = if pid.is_some_and(|p| self.persist.spawn.is_terminal_spawn(p)) {
             WindowClass::Terminal
         } else {
             WindowClass::App
         };
-        let meta = WindowMeta { pid, class };
+        let meta = WindowMeta { pid, class, origin };
         match pending.map(|p| p.target) {
             Some(Target::Overlay) => self.map_overlay(element),
             Some(Target::WarmOverlay) => self.store_warm(element, pid),

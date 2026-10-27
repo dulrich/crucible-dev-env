@@ -30,7 +30,7 @@ pub mod slots;
 pub mod store;
 pub mod wrapper;
 
-pub use capture::{TerminalCapture, ancestors, capture_relaunch, capture_terminal, children_of};
+pub use capture::{TerminalCapture, ancestors, capture_terminal, children_of, window_record};
 pub use error::PersistError;
 pub use format::FORMAT_VERSION;
 pub use policy::should_save;

@@ -1,7 +1,7 @@
 //! Workspace persistence wired into the compositor: the 1 s tick (auto-save + config reload),
 //! per-window capture by client PID, session record and restore. This module root keeps the
 //! tick/save/capture/restore/session code plus the pure helpers those use (`skip_record`,
-//! `resolve_cwd`, the picker candidate builders, the capture fallbacks); the rest lives in siblings,
+//! `resolve_cwd`, the picker candidate builders); the rest lives in siblings,
 //! each with its own `impl CrucibleState` block and its own slice of [`PersistState`]:
 //!
 //! - [`spawn`]: spawn registry ([`SpawnKind`]), env/`PATH`, command preflight, the terminal/overlay
@@ -15,16 +15,18 @@
 //! module's `tests`); the `impl CrucibleState` blocks gather inputs from the model, `/proc` and the
 //! store and apply the results.
 //!
-//! ## Which windows are terminals
+//! ## How windows are classified (origin first)
 //! By **PID provenance**, not app-id matching: every process CDE spawns through
-//! [`CrucibleState::spawn_process`] is remembered with its [`spawn::SpawnKind`], and a toplevel whose client PID
-//! is one of them (exact pid, no ancestor walk) of kind [`spawn::SpawnKind::Terminal`] is a terminal,
-//! captured with [`crucible_persist::capture_terminal`]. Everything else (apps from `run`, the
-//! picker overlay, unknown clients) is recorded as an `app` — with one exception: a non-terminal
-//! window whose own argv is a CDE restore wrapper (`crucible relaunch|resume …`, bare or run by
-//! the terminal after its exec flag) is recorded as the record the wrapper stands for (see
-//! [`crucible_persist::CdeWrapper::decode`]), which may be a `terminal`, so restores
-//! never nest wrappers.
+//! [`CrucibleState::spawn_process`] is held in the [`spawn::SpawnRegistry`] with its
+//! [`spawn::SpawnKind`] and, for a restored window or a relaunched app, its **origin** — the saved
+//! record it stands for. A reaped child leaves the registry with its record. At map time a
+//! toplevel whose client PID is itself (exact pid) a live [`spawn::SpawnKind::Terminal`] spawn is
+//! a terminal; the spawn matched by pid or ancestor hands its origin to the window's meta. Capture
+//! is one pure classifier, [`crucible_persist::window_record`]: the origin wins whenever the
+//! foreground is CDE's own wrapper or `/proc` finds nothing, a live shell/foreground capture wins
+//! otherwise, and a wrapper with no origin (one that outlived a compositor restart) is decoded —
+//! so saved records never nest `crucible resume|relaunch`, and an uncaptured terminal is never an
+//! app.
 
 mod ipc;
 mod overlay;
@@ -53,7 +55,7 @@ use crate::ipc::{Candidate, CandidateKind};
 use crate::state::{Backend, CrucibleState};
 use overlay::{Overlay, OverlayState};
 use placement::{PENDING_TTL, Pending, Target};
-use spawn::{reap_exited, relaunch_args, restore_args};
+use spawn::{relaunch_args, restore_args};
 use workspace::restore_target;
 
 /// Auto-save / config-poll cadence.
@@ -81,7 +83,7 @@ pub struct PersistState {
     /// The bound IPC socket path, exported to children as `CDE_SOCKET`.
     pub ipc_path: Option<PathBuf>,
     /// Spawned-process registry and child handles (see [`spawn`]).
-    spawn: spawn::SpawnState,
+    spawn: spawn::SpawnRegistry,
     /// The overlay slot and the pre-warmed host (see [`overlay`]).
     overlay: overlay::OverlayRuntime,
     /// Window kinds, pending placements and restore order (see [`placement`]).
@@ -105,7 +107,7 @@ impl PersistState {
             store_dir,
             slots: Slots::new(),
             ipc_path: None,
-            spawn: spawn::SpawnState::default(),
+            spawn: spawn::SpawnRegistry::default(),
             overlay: overlay::OverlayRuntime::default(),
             placement: placement::PlacementState::default(),
             workspace: workspace::WorkspaceState::default(),
@@ -225,63 +227,6 @@ pub fn apply_slots(candidates: &mut [Candidate], slot_of: impl Fn(&str) -> Optio
 
 fn proc_root() -> &'static Path {
     Path::new("/proc")
-}
-
-/// The record for a non-terminal window: a CDE restore wrapper in its raw argv is decoded into the
-/// record it stands for (decode before joining); otherwise the plain `app` with the joined argv.
-fn app_fallback_record(
-    element_app_id: Option<String>,
-    argv: Option<&[String]>,
-    exec_flag: &str,
-) -> WindowRecord {
-    use crucible_persist::{CdeWrapper, capture::join_command};
-    let argv = argv.filter(|a| !a.is_empty());
-    match argv.and_then(|a| CdeWrapper::decode(a, exec_flag)) {
-        Some(CdeWrapper::App(cap)) => WindowRecord::App {
-            app_id: cap.app_id.or(element_app_id),
-            cmdline: Some(cap.cmdline),
-        },
-        Some(CdeWrapper::Terminal(cap)) => WindowRecord::Terminal {
-            cwd: cap.cwd,
-            command: cap.command,
-        },
-        None => WindowRecord::App {
-            app_id: element_app_id,
-            cmdline: argv.map(join_command),
-        },
-    }
-}
-
-/// The record for a CDE-spawned **terminal** whose `/proc` capture found nothing (e.g. saved in
-/// the moment between the window mapping and the terminal starting its shell). It never becomes
-/// a plain `app` — that record would relaunch the terminal as an app forever. A CDE restore
-/// wrapper in its argv decodes as for apps; otherwise it is an idle terminal in the terminal
-/// process's own cwd (empty when unreadable, which restore resolves to the root or `$HOME`).
-fn terminal_fallback_record(
-    argv: Option<&[String]>,
-    exec_flag: &str,
-    terminal_cwd: Option<PathBuf>,
-) -> WindowRecord {
-    use crucible_persist::CdeWrapper;
-    match argv.and_then(|a| CdeWrapper::decode(a, exec_flag)) {
-        Some(CdeWrapper::App(cap)) => WindowRecord::App {
-            app_id: cap.app_id,
-            cmdline: Some(cap.cmdline),
-        },
-        Some(CdeWrapper::Terminal(cap)) => WindowRecord::Terminal {
-            cwd: cap.cwd,
-            command: cap.command,
-        },
-        None => WindowRecord::Terminal {
-            cwd: terminal_cwd.unwrap_or_default(),
-            command: None,
-        },
-    }
-}
-
-fn read_argv(pid: u32) -> Option<Vec<String>> {
-    let bytes = std::fs::read(proc_root().join(pid.to_string()).join("cmdline")).ok()?;
-    Some(crucible_persist::capture::parse_cmdline(&bytes))
 }
 
 fn element_app_id(element: &WindowElement) -> Option<String> {
@@ -501,7 +446,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.persist.workspace.pending_pin = None;
             }
         }
-        let reaped = reap_exited(&mut self.persist.spawn.children);
+        let reaped = self.persist.spawn.reap();
         if !reaped.is_empty() {
             debug!(?reaped, "reaped exited children");
         }
@@ -601,58 +546,26 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     fn capture_record(&self, ws: WorkspaceId) -> Option<WorkspaceRecord> {
-        let world = &self.layout.world;
-        let mut records = HashMap::new();
-        for pane in world.workspace(ws)?.panes() {
-            for win in world.pane(pane)?.windows() {
-                records.insert(*win, self.window_record(*win));
-            }
-        }
         let mut record = WorkspaceRecord::from_world(
-            world,
+            &self.layout.world,
             ws,
             self.persist.workspace.roots.get(&ws).cloned(),
-            |id| {
-                records.get(&id).cloned().unwrap_or(WindowRecord::App {
-                    app_id: None,
-                    cmdline: None,
-                })
-            },
+            |id| self.window_record(id),
         )?;
         record.output = self.persist.workspace.last_output.get(&ws).cloned();
         Some(record)
     }
 
+    /// The saved record for window `id`: its meta (pid, class, spawn origin), element app id and
+    /// the exec flag, classified by [`crucible_persist::window_record`].
     fn window_record(&self, id: WindowId) -> WindowRecord {
         let meta = self.layout.meta(id);
-        let pid = meta.and_then(|m| m.pid);
-        if let (Some(pid), true) = (
-            pid,
+        crucible_persist::window_record(
+            proc_root(),
+            meta.and_then(|m| m.pid),
             meta.is_some_and(|m| m.class == crate::layout::WindowClass::Terminal),
-        ) {
-            // A relaunch placeholder still waiting for Enter keeps its original app record.
-            if let Some(cap) = crucible_persist::capture_relaunch(proc_root(), pid) {
-                return WindowRecord::App {
-                    app_id: cap.app_id,
-                    cmdline: Some(cap.cmdline),
-                };
-            }
-            if let Some(cap) = crucible_persist::capture_terminal(proc_root(), pid) {
-                return WindowRecord::Terminal {
-                    cwd: cap.cwd,
-                    command: cap.command,
-                };
-            }
-            return terminal_fallback_record(
-                read_argv(pid).as_deref(),
-                &self.config.terminal.exec_flag,
-                std::fs::read_link(proc_root().join(pid.to_string()).join("cwd")).ok(),
-            );
-        }
-        let argv = pid.and_then(read_argv);
-        app_fallback_record(
+            meta.and_then(|m| m.origin.as_ref()),
             self.layout.element(id).and_then(element_app_id),
-            argv.as_deref(),
             &self.config.terminal.exec_flag,
         )
     }
@@ -726,7 +639,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                         let dir =
                             resolve_cwd(cwd, record.root.as_deref(), home.as_deref(), Path::is_dir);
                         let args = restore_args(&exec_flag, &crucible, &dir, command.as_deref());
-                        jobs.push((dir, args, target));
+                        jobs.push((dir, args, target, window.clone()));
                     }
                     WindowRecord::App {
                         app_id,
@@ -740,17 +653,22 @@ impl<B: Backend + 'static> CrucibleState<B> {
                             Path::is_dir,
                         );
                         let args = relaunch_args(&exec_flag, &crucible, app_id.as_deref(), cmdline);
-                        jobs.push((dir, args, target));
+                        jobs.push((dir, args, target, window.clone()));
                     }
                     WindowRecord::App { cmdline: None, .. } => {}
                 }
             }
         }
         let now = Instant::now();
-        for (dir, args, target) in jobs {
+        for (dir, args, target, origin) in jobs {
             let args = self.with_tiling_args(args);
-            if let Some(pid) = self.spawn_process(&program, &args, Some(&dir), SpawnKind::Terminal)
-            {
+            if let Some(pid) = self.spawn_process_with(
+                &program,
+                &args,
+                Some(&dir),
+                SpawnKind::Terminal,
+                Some(origin),
+            ) {
                 self.persist
                     .placement
                     .pending
@@ -898,108 +816,5 @@ mod tests {
         assert_eq!(names, ["a", "b"]);
         assert_eq!(got[0].1, root.join("a"));
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn app_fallback_decodes_wrappers_before_joining() {
-        let v = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
-        let id = || Some("elem".to_string());
-        let wrapped = v(&[
-            "ghostty",
-            "-e",
-            "/x/crucible",
-            "relaunch",
-            "--",
-            "firefox -p",
-        ]);
-        assert_eq!(
-            app_fallback_record(id(), Some(&wrapped), "-e"),
-            WindowRecord::App {
-                app_id: id(),
-                cmdline: Some("firefox -p".into())
-            }
-        );
-        let tui = v(&[
-            "g",
-            "-e",
-            "/x/crucible",
-            "resume",
-            "--now",
-            "--exit",
-            "--cwd",
-            "/p",
-            "--",
-            "vim",
-        ]);
-        assert_eq!(
-            app_fallback_record(id(), Some(&tui), "-e"),
-            WindowRecord::Terminal {
-                cwd: "/p".into(),
-                command: Some("vim".into())
-            }
-        );
-        let plain = v(&["firefox", "--new"]);
-        assert_eq!(
-            app_fallback_record(id(), Some(&plain), "-e"),
-            WindowRecord::App {
-                app_id: id(),
-                cmdline: Some("firefox --new".into())
-            }
-        );
-        assert_eq!(
-            app_fallback_record(None, None, "-e"),
-            WindowRecord::App {
-                app_id: None,
-                cmdline: None
-            }
-        );
-    }
-
-    #[test]
-    fn uncaptured_terminal_never_becomes_an_app() {
-        let v = |a: &[&str]| a.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
-        // A bare terminal saved before its shell started (the host-b 2026-10-27 regression).
-        let bare = v(&["ghostty", "--gtk-single-instance=false"]);
-        assert_eq!(
-            terminal_fallback_record(Some(&bare), "-e", Some("/w".into())),
-            WindowRecord::Terminal {
-                cwd: "/w".into(),
-                command: None
-            }
-        );
-        assert_eq!(
-            terminal_fallback_record(None, "-e", None),
-            WindowRecord::Terminal {
-                cwd: PathBuf::new(),
-                command: None
-            }
-        );
-        // A pending restore banner still decodes to its command.
-        let resume = v(&[
-            "g",
-            "-e",
-            "/x/crucible",
-            "resume",
-            "--cwd",
-            "/p",
-            "--",
-            "htop",
-        ]);
-        assert_eq!(
-            terminal_fallback_record(Some(&resume), "-e", Some("/w".into())),
-            WindowRecord::Terminal {
-                cwd: "/p".into(),
-                command: Some("htop".into())
-            }
-        );
-        // A relaunch placeholder whose child already exited keeps its app record.
-        let relaunch = v(&["g", "-e", "/x/crucible", "relaunch", "--", "firefox"]);
-        assert_eq!(
-            terminal_fallback_record(Some(&relaunch), "-e", Some("/w".into())),
-            WindowRecord::App {
-                app_id: None,
-                cmdline: Some("firefox".into())
-            }
-        );
     }
 }

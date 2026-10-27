@@ -1,4 +1,5 @@
-//! `/proc` capture of a terminal window's working directory and foreground command.
+//! `/proc` capture of a terminal window's working directory and foreground command, and the one
+//! window classifier ([`window_record`]) that turns a managed window into its saved record.
 //!
 //! Pure parsers over `/proc` text plus a thin filesystem edge that takes a `proc_root` (normally
 //! `/proc`; tests point it at a fixture tree).
@@ -8,7 +9,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::wrapper::{RelaunchWrapper, ResumeWrapper};
+use crate::record::WindowRecord;
+use crate::wrapper::{CdeWrapper, RelaunchWrapper, ResumeWrapper};
 
 /// What a terminal window was doing when captured.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,14 +112,6 @@ pub fn is_shell_program(argv0: &str) -> bool {
     )
 }
 
-/// Scans the direct children of `terminal_pid` for an app relaunch placeholder banner.
-#[must_use]
-pub fn capture_relaunch(proc_root: &Path, terminal_pid: u32) -> Option<RelaunchWrapper> {
-    children_of(proc_root, terminal_pid)
-        .into_iter()
-        .find_map(|c| RelaunchWrapper::from_argv(&read_cmdline(proc_root, c)))
-}
-
 fn pid_dir(proc_root: &Path, pid: u32) -> PathBuf {
     proc_root.join(pid.to_string())
 }
@@ -181,25 +175,16 @@ pub fn ancestors(proc_root: &Path, pid: u32, max_depth: usize) -> Vec<u32> {
 /// Captures the terminal client `terminal_pid`: the working directory and foreground command of
 /// whatever runs in it. `None` when the pid has no readable children/cwd.
 ///
-/// 1. A child that is CDE's pending restore banner decodes straight back to its `--cwd` and
-///    command (so a record survives a second restart before Enter and never nests `resume`).
-/// 2. Otherwise the shell is the first child (with several, the first with a set `tpgid`); its
-///    `tpgid` is the foreground group leader. If that is the shell itself (or unset) the command
-///    is `None` and the cwd is the shell's; otherwise cwd and command come from the foreground
-///    process, falling back to the shell if it vanished meanwhile. A foreground process that is itself a
-///    shell and a direct child of the session leader (ghostty's `sh -c "bash --posix"` integration
-///    wrapper) is the real interactive shell: the terminal is idle, with that shell's cwd.
+/// The shell is the first child (with several, the first with a set `tpgid`); its `tpgid` is the
+/// foreground group leader. If that is the shell itself (or unset) the command is `None` and the
+/// cwd is the shell's; otherwise cwd and command come from the foreground process, falling back
+/// to the shell if it vanished meanwhile. A foreground process that is itself a shell and a
+/// direct child of the session leader (ghostty's `sh -c "bash --posix"` integration wrapper) is
+/// the real interactive shell: the terminal is idle, with that shell's cwd. CDE's own wrappers
+/// are not special here; [`window_record`] handles them first.
 #[must_use]
 pub fn capture_terminal(proc_root: &Path, terminal_pid: u32) -> Option<TerminalCapture> {
     let children = children_of(proc_root, terminal_pid);
-    for child in &children {
-        if let Some(banner) = ResumeWrapper::from_argv(&read_cmdline(proc_root, *child)) {
-            return Some(TerminalCapture {
-                cwd: banner.cwd,
-                command: banner.command,
-            });
-        }
-    }
     let shell = if children.len() == 1 {
         children[0]
     } else {
@@ -230,6 +215,112 @@ pub fn capture_terminal(proc_root: &Path, terminal_pid: u32) -> Option<TerminalC
             command: Some(join_command(&args)),
         }),
         _ => Some(idle),
+    }
+}
+
+/// The record a CDE wrapper stands for: `resume` → a terminal, `relaunch` → an app.
+fn wrapper_record(wrapper: CdeWrapper) -> WindowRecord {
+    match wrapper {
+        CdeWrapper::App(cap) => WindowRecord::App {
+            app_id: cap.app_id,
+            cmdline: Some(cap.cmdline),
+        },
+        CdeWrapper::Terminal(cap) => WindowRecord::Terminal {
+            cwd: cap.cwd,
+            command: cap.command,
+        },
+    }
+}
+
+/// A process whose own argv is a bare CDE wrapper (`crucible resume|relaunch …`).
+fn wrapper_process(proc_root: &Path, pid: u32) -> Option<CdeWrapper> {
+    let argv = read_cmdline(proc_root, pid);
+    RelaunchWrapper::from_argv(&argv)
+        .map(CdeWrapper::App)
+        .or_else(|| ResumeWrapper::from_argv(&argv).map(CdeWrapper::Terminal))
+}
+
+/// Classifies one managed window into the record to save. Pure over `proc_root` (normally
+/// `/proc`). `pid` is the client PID, `terminal` whether it is a CDE-spawned terminal (exact
+/// pid), `origin` the saved record its spawn stands for (a restored window or a relaunched app),
+/// `app_id` the element's app id and `exec_flag` the terminal's exec flag. Origin first:
+///
+/// - **Terminal:** (1) a child of the terminal that is a CDE wrapper (a pending restore banner or
+///   relaunch placeholder — the foreground is CDE itself) yields the origin, else the decoded
+///   wrapper; (2) otherwise the live [`capture_terminal`] result (the user may have `cd`'d or run
+///   something since the restore); (3) if that finds nothing, the origin; else the terminal's own
+///   argv decoded as a wrapper ([`CdeWrapper::decode`]); else an idle terminal in the terminal
+///   process's cwd (empty when unreadable). Never an app unless an origin or a relaunch wrapper
+///   says so.
+/// - **App:** the client's argv — a CDE wrapper in it is decoded before joining; otherwise the
+///   app id and the joined argv. An app whose argv yields no cmdline but whose origin is an app
+///   (a relaunched app) records the origin's cmdline.
+#[must_use]
+pub fn window_record(
+    proc_root: &Path,
+    pid: Option<u32>,
+    terminal: bool,
+    origin: Option<&WindowRecord>,
+    app_id: Option<String>,
+    exec_flag: &str,
+) -> WindowRecord {
+    if terminal {
+        let Some(pid) = pid else {
+            return origin.cloned().unwrap_or(WindowRecord::Terminal {
+                cwd: PathBuf::new(),
+                command: None,
+            });
+        };
+        if let Some(wrapper) = children_of(proc_root, pid)
+            .into_iter()
+            .find_map(|c| wrapper_process(proc_root, c))
+        {
+            return origin.cloned().unwrap_or_else(|| wrapper_record(wrapper));
+        }
+        if let Some(cap) = capture_terminal(proc_root, pid) {
+            return WindowRecord::Terminal {
+                cwd: cap.cwd,
+                command: cap.command,
+            };
+        }
+        if let Some(origin) = origin {
+            return origin.clone();
+        }
+        return match CdeWrapper::decode(&read_cmdline(proc_root, pid), exec_flag) {
+            Some(wrapper) => wrapper_record(wrapper),
+            None => WindowRecord::Terminal {
+                cwd: read_cwd(proc_root, pid).unwrap_or_default(),
+                command: None,
+            },
+        };
+    }
+    let argv = pid.map(|p| read_cmdline(proc_root, p)).unwrap_or_default();
+    if argv.is_empty() {
+        if let Some(WindowRecord::App {
+            app_id: origin_id,
+            cmdline: Some(cmdline),
+        }) = origin
+        {
+            return WindowRecord::App {
+                app_id: origin_id.clone().or(app_id),
+                cmdline: Some(cmdline.clone()),
+            };
+        }
+        return WindowRecord::App {
+            app_id,
+            cmdline: None,
+        };
+    }
+    match CdeWrapper::decode(&argv, exec_flag) {
+        Some(CdeWrapper::App(cap)) => WindowRecord::App {
+            app_id: cap.app_id.or(app_id),
+            cmdline: Some(cap.cmdline),
+        },
+        Some(wrapper) => wrapper_record(wrapper),
+        None => WindowRecord::App {
+            app_id,
+            cmdline: Some(join_command(&argv)),
+        },
     }
 }
 
@@ -452,40 +543,6 @@ mod tests {
     }
 
     #[test]
-    fn resume_banner_is_decoded_not_nested() {
-        let p = Proc::new("banner");
-        p.add((100, "term", 1), 0, "/", &["term"], &[200]);
-        p.add(
-            (200, "crucible", 100),
-            200,
-            "/elsewhere",
-            &[
-                "/usr/bin/crucible",
-                "resume",
-                "--cwd",
-                "/proj",
-                "--",
-                "cargo test -- --nocapture",
-            ],
-            &[],
-        );
-        let c = capture_terminal(&p.0, 100).unwrap();
-        assert_eq!(c.cwd, PathBuf::from("/proj"));
-        assert_eq!(c.command.as_deref(), Some("cargo test -- --nocapture"));
-
-        let p = Proc::new("banner2");
-        p.add((100, "term", 1), 0, "/", &["term"], &[200]);
-        p.add(
-            (200, "crucible", 100),
-            200,
-            "/e",
-            &["crucible", "resume", "--cwd", "/proj"],
-            &[],
-        );
-        let c = capture_terminal(&p.0, 100).unwrap();
-        assert_eq!((c.cwd, c.command), (PathBuf::from("/proj"), None));
-    }
-    #[test]
     fn missing_pid_and_childless_terminal_are_none() {
         let p = Proc::new("none");
         assert_eq!(capture_terminal(&p.0, 4242), None);
@@ -506,8 +563,176 @@ mod tests {
         assert!(ancestors(&p.0, 999, 5).is_empty());
     }
 
+    fn term(cwd: &str, command: Option<&str>) -> WindowRecord {
+        WindowRecord::Terminal {
+            cwd: cwd.into(),
+            command: command.map(str::to_string),
+        }
+    }
+
+    fn app(app_id: Option<&str>, cmdline: Option<&str>) -> WindowRecord {
+        WindowRecord::App {
+            app_id: app_id.map(str::to_string),
+            cmdline: cmdline.map(str::to_string),
+        }
+    }
+
+    /// Classifies terminal `pid` (exec flag `-e`, no element app id).
+    fn terminal_record(p: &Proc, pid: u32, origin: Option<&WindowRecord>) -> WindowRecord {
+        window_record(&p.0, Some(pid), true, origin, None, "-e")
+    }
+
+    /// A terminal process with no readable argv or cwd and no children.
+    fn add_bare(p: &Proc, pid: u32) {
+        let task = p.0.join(pid.to_string()).join("task").join(pid.to_string());
+        fs::create_dir_all(&task).unwrap();
+        fs::write(task.join("children"), "").unwrap();
+    }
+
+    /// Moved from the compositor's `uncaptured_terminal_never_becomes_an_app` (the `bc86b6c`
+    /// guarantee): a CDE-spawned terminal with no origin whose capture finds nothing is a terminal.
     #[test]
-    fn capture_relaunch_reads_direct_children() {
+    fn uncaptured_terminal_never_becomes_an_app() {
+        let p = Proc::new("uncaptured");
+        // A bare terminal saved before its shell started (the host-b 2026-10-27 regression).
+        p.add(
+            (100, "ghostty", 1),
+            0,
+            "/w",
+            &["ghostty", "--gtk-single-instance=false"],
+            &[],
+        );
+        assert_eq!(terminal_record(&p, 100, None), term("/w", None));
+        // Unreadable argv and cwd.
+        add_bare(&p, 101);
+        assert_eq!(
+            terminal_record(&p, 101, None),
+            WindowRecord::Terminal {
+                cwd: PathBuf::new(),
+                command: None
+            }
+        );
+        // A pending restore banner in its own argv still decodes to its command.
+        p.add(
+            (102, "g", 1),
+            0,
+            "/w",
+            &[
+                "g",
+                "-e",
+                "/x/crucible",
+                "resume",
+                "--cwd",
+                "/p",
+                "--",
+                "htop",
+            ],
+            &[],
+        );
+        assert_eq!(terminal_record(&p, 102, None), term("/p", Some("htop")));
+        // A relaunch placeholder whose child already exited keeps its app record.
+        p.add(
+            (103, "g", 1),
+            0,
+            "/w",
+            &["g", "-e", "/x/crucible", "relaunch", "--", "firefox"],
+            &[],
+        );
+        assert_eq!(terminal_record(&p, 103, None), app(None, Some("firefox")));
+        // A terminal class with no pid at all is an empty idle terminal.
+        assert_eq!(
+            window_record(&p.0, None, true, None, None, "-e"),
+            WindowRecord::Terminal {
+                cwd: PathBuf::new(),
+                command: None
+            }
+        );
+    }
+
+    /// Moved from the compositor's `app_fallback_decodes_wrappers_before_joining`.
+    #[test]
+    fn app_decodes_wrappers_before_joining() {
+        let p = Proc::new("app");
+        let id = || Some("elem".to_string());
+        let rec = |pid: u32| window_record(&p.0, Some(pid), false, None, id(), "-e");
+        p.add(
+            (100, "ghostty", 1),
+            0,
+            "/",
+            &[
+                "ghostty",
+                "-e",
+                "/x/crucible",
+                "relaunch",
+                "--",
+                "firefox -p",
+            ],
+            &[],
+        );
+        assert_eq!(rec(100), app(Some("elem"), Some("firefox -p")));
+        p.add(
+            (101, "g", 1),
+            0,
+            "/",
+            &[
+                "g",
+                "-e",
+                "/x/crucible",
+                "resume",
+                "--now",
+                "--exit",
+                "--cwd",
+                "/p",
+                "--",
+                "vim",
+            ],
+            &[],
+        );
+        assert_eq!(rec(101), term("/p", Some("vim")));
+        p.add((102, "firefox", 1), 0, "/", &["firefox", "--new"], &[]);
+        assert_eq!(rec(102), app(Some("elem"), Some("firefox --new")));
+        assert_eq!(
+            window_record(&p.0, None, false, None, None, "-e"),
+            app(None, None)
+        );
+    }
+
+    /// Moved from `resume_banner_is_decoded_not_nested` and `capture_relaunch_reads_direct_children`:
+    /// a CDE wrapper child with no origin (one that outlived a compositor restart) is decoded.
+    #[test]
+    fn wrapper_child_without_origin_is_decoded_not_nested() {
+        let p = Proc::new("banner");
+        p.add((100, "term", 1), 0, "/", &["term"], &[200]);
+        p.add(
+            (200, "crucible", 100),
+            200,
+            "/elsewhere",
+            &[
+                "/usr/bin/crucible",
+                "resume",
+                "--cwd",
+                "/proj",
+                "--",
+                "cargo test -- --nocapture",
+            ],
+            &[],
+        );
+        assert_eq!(
+            terminal_record(&p, 100, None),
+            term("/proj", Some("cargo test -- --nocapture"))
+        );
+
+        let p = Proc::new("banner2");
+        p.add((100, "term", 1), 0, "/", &["term"], &[200]);
+        p.add(
+            (200, "crucible", 100),
+            200,
+            "/e",
+            &["crucible", "resume", "--cwd", "/proj"],
+            &[],
+        );
+        assert_eq!(terminal_record(&p, 100, None), term("/proj", None));
+
         let p = Proc::new("relaunch");
         p.add((100, "term", 1), 0, "/", &["term"], &[200]);
         p.add(
@@ -524,14 +749,104 @@ mod tests {
             ],
             &[],
         );
-        let c = capture_relaunch(&p.0, 100).unwrap();
-        assert_eq!(c.app_id.as_deref(), Some("gimp"));
-        assert_eq!(c.cmdline, "gimp a.png");
-        assert_eq!(capture_relaunch(&p.0, 200), None);
+        assert_eq!(
+            terminal_record(&p, 100, None),
+            app(Some("gimp"), Some("gimp a.png"))
+        );
 
+        // An ordinary shell child is not a wrapper: the live capture.
         let p = Proc::new("relaunch2");
         p.add((100, "term", 1), 0, "/", &["term"], &[200]);
         p.add((200, "bash", 100), 200, "/", &["bash"], &[]);
-        assert_eq!(capture_relaunch(&p.0, 100), None);
+        assert_eq!(terminal_record(&p, 100, None), term("/", None));
+    }
+
+    #[test]
+    fn origin_wins_over_a_cde_wrapper_foreground() {
+        let p = Proc::new("origin-wrapper");
+        p.add((100, "term", 1), 0, "/", &["term"], &[200]);
+        p.add(
+            (200, "crucible", 100),
+            200,
+            "/",
+            &["crucible", "resume", "--cwd", "/decoded", "--", "x"],
+            &[],
+        );
+        let origin = term("/saved", Some("cargo run"));
+        assert_eq!(terminal_record(&p, 100, Some(&origin)), origin);
+        let origin = app(Some("gimp"), Some("gimp a.png"));
+        assert_eq!(terminal_record(&p, 100, Some(&origin)), origin);
+    }
+
+    #[test]
+    fn live_capture_wins_over_the_origin() {
+        let p = Proc::new("origin-live");
+        p.add((100, "term", 1), 0, "/", &["term"], &[200]);
+        p.add((200, "bash", 100), 300, "/home/u", &["bash"], &[300]);
+        p.add((300, "htop", 200), 300, "/var/log", &["htop"], &[]);
+        let origin = term("/saved", Some("cargo run"));
+        assert_eq!(
+            terminal_record(&p, 100, Some(&origin)),
+            term("/var/log", Some("htop"))
+        );
+        // The user has since quit the restored command: an idle shell wins too.
+        let p = Proc::new("origin-idle");
+        p.add((100, "term", 1), 0, "/", &["term"], &[200]);
+        p.add((200, "bash", 100), 200, "/cd-ed", &["bash"], &[]);
+        assert_eq!(
+            terminal_record(&p, 100, Some(&origin)),
+            term("/cd-ed", None)
+        );
+    }
+
+    #[test]
+    fn uncaptured_terminal_with_an_origin_returns_the_origin() {
+        let p = Proc::new("origin-none");
+        p.add(
+            (100, "g", 1),
+            0,
+            "/w",
+            &[
+                "g",
+                "-e",
+                "/x/crucible",
+                "resume",
+                "--cwd",
+                "/argv",
+                "--",
+                "y",
+            ],
+            &[],
+        );
+        let origin = term("/saved", Some("cargo run"));
+        assert_eq!(terminal_record(&p, 100, Some(&origin)), origin);
+        add_bare(&p, 101);
+        assert_eq!(terminal_record(&p, 101, Some(&origin)), origin);
+    }
+
+    /// Licensed change 2: a relaunched app whose argv is unreadable keeps its origin's cmdline;
+    /// any readable argv still wins, and a non-app origin never makes an app cmdline.
+    #[test]
+    fn app_with_unreadable_argv_records_its_app_origin() {
+        let p = Proc::new("app-origin");
+        add_bare(&p, 100);
+        let origin = app(Some("gimp"), Some("gimp a.png"));
+        let rec = |pid, origin: Option<&WindowRecord>, id: Option<&str>| {
+            window_record(&p.0, Some(pid), false, origin, id.map(str::to_string), "-e")
+        };
+        assert_eq!(rec(100, Some(&origin), Some("elem")), origin);
+        let unnamed = app(None, Some("gimp a.png"));
+        assert_eq!(
+            rec(100, Some(&unnamed), Some("elem")),
+            app(Some("elem"), Some("gimp a.png"))
+        );
+        assert_eq!(rec(100, None, Some("elem")), app(Some("elem"), None));
+        let t = term("/saved", None);
+        assert_eq!(rec(100, Some(&t), Some("elem")), app(Some("elem"), None));
+        p.add((101, "gimp", 1), 0, "/", &["gimp", "b.png"], &[]);
+        assert_eq!(
+            rec(101, Some(&origin), Some("elem")),
+            app(Some("elem"), Some("gimp b.png"))
+        );
     }
 }
