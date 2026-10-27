@@ -117,7 +117,7 @@ Every workspace is saved automatically (about once a second, when its layout or 
 
 `Super+P` opens the **picker**: a centred terminal overlay running `crucible pick`, listing live workspaces, then saved ones, then folders under the configured `picker` roots (see `docs/config.md`). Picking a saved workspace restores it: its panes come back and each terminal reopens in its old directory, with its old command waiting behind a "press Enter to run" banner (`crucible resume`). App windows come back as a placeholder (`crucible relaunch`); Enter relaunches the app in the same slot, Ctrl+C dismisses it. Picking a folder creates a workspace named after it, rooted there: new terminals in it start in that folder. `Super+Shift+R` opens the picker in rename mode for the active workspace (its saved file is renamed too). When saved workspaces exist, the picker opens automatically at startup. Delete a workspace by deleting its file.
 
-Overlays (the picker, the launcher and the settings view) are modal: hovering never moves focus off an open overlay, and clicking outside it closes it.
+Overlays (the picker, the launcher and the settings view) are modal: hovering never moves focus off an open overlay, and clicking outside it or pressing any other `Super` chord (a slot, a workspace or pane verb) closes it before the click or chord takes effect. Opening another overlay replaces it.
 
 The picker talks to the compositor over a Unix socket at `$XDG_RUNTIME_DIR/cde/<wayland-socket>.sock`, exported to every child as `CDE_SOCKET`. The config file (`~/.config/cde/config.kdl`) is re-read when it changes.
 

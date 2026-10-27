@@ -30,7 +30,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// other verb is a model mutation applied through [`Self::with_model`], the single entry point
     /// (`SameWorkspace` is logged at debug level as an expected no-op; anything else surfaces as a
     /// warning without panicking).
+    ///
+    /// Overlays are modal for chords as for clicks: a chord pressed while an overlay is mapped closes
+    /// it first, then runs (see [`chord_closes_overlay`]).
     pub(super) fn handle_key_action(&mut self, action: Action) {
+        if chord_closes_overlay(self.mapped_overlay().is_some(), &action) {
+            self.close_mapped_overlay();
+        }
         let model_action = match action {
             Action::Quit => {
                 info!("Super+Shift+Q: flushing workspaces and quitting");
@@ -232,10 +238,51 @@ fn move_window_to_adjacent_workspace(world: &mut World, delta: i64) -> Result<()
     world.move_window_to_workspace(window_id, target_ws)
 }
 
+/// Whether a chord closes the mapped overlay before it runs: the keyboard twin of the click rule
+/// (`click_closes_overlay`), so a workspace verb never leaves an overlay stranded over another
+/// workspace. Overlay-opening chords are exempt (they replace or toggle the overlay themselves),
+/// as are VT switches (the overlay is still there on return).
+#[must_use]
+fn chord_closes_overlay(overlay_mapped: bool, action: &Action) -> bool {
+    overlay_mapped
+        && !matches!(
+            action,
+            Action::OpenPicker
+                | Action::RenameWorkspace
+                | Action::OpenLauncher
+                | Action::OpenSettings
+                | Action::VtSwitch(_)
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crucible_layout::Direction;
+
+    #[test]
+    fn chord_closes_a_mapped_overlay_except_overlay_openers_and_vt_switch() {
+        for action in [
+            Action::Slot(7),
+            Action::CycleWorkspace(1),
+            Action::NewWorkspace,
+            Action::CloseWorkspace,
+            Action::Focus(Direction::Left),
+            Action::RunTerminal,
+        ] {
+            assert!(chord_closes_overlay(true, &action), "{action}");
+            assert!(!chord_closes_overlay(false, &action), "{action}");
+        }
+        for action in [
+            Action::OpenPicker,
+            Action::RenameWorkspace,
+            Action::OpenLauncher,
+            Action::OpenSettings,
+            Action::VtSwitch(2),
+        ] {
+            assert!(!chord_closes_overlay(true, &action), "{action}");
+        }
+    }
 
     // ---- model action execution: each verb dispatches the right `World` call ----------------
     //
