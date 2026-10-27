@@ -48,6 +48,22 @@ pub fn plan_bindings(current: &Bindings, config: &Config) -> (Bindings, Option<B
     }
 }
 
+/// What a pre-warmed overlay host bakes in at spawn time: resolved terminal program, exec flag,
+/// overlay terminal args, and the launcher's TUI entries. A change in any of them invalidates
+/// the warm host.
+pub type WarmKey = (String, String, Vec<String>, Vec<String>);
+
+/// The [`WarmKey`] of `config` given the resolved `terminal` program.
+#[must_use]
+pub fn warm_key(config: &Config, terminal: String) -> WarmKey {
+    (
+        terminal,
+        config.terminal.exec_flag.clone(),
+        config.overlay.terminal_args.clone(),
+        config.launcher_tui.clone(),
+    )
+}
+
 /// The terminal command to spawn: the configured one when set, else the keys crate's resolution.
 #[must_use]
 pub fn pick_terminal(configured: Option<&str>, fallback: String) -> String {
@@ -61,11 +77,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ///
     /// Public so WP-5's reload timer can call it; safe to call before any output exists.
     pub fn apply_config(&mut self, config: Config) {
-        let old_overlay_terminal = (
-            self.terminal_program(),
-            self.config.terminal.exec_flag.clone(),
-            self.config.overlay.terminal_args.clone(),
-        );
+        let old_overlay_terminal = warm_key(&self.config, self.terminal_program());
         let (bindings, bind_error) = plan_bindings(&self.bindings, &config);
         if let Some(err) = bind_error {
             error!(%err, "invalid binds in config; keeping the previous bindings");
@@ -93,13 +105,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         self.focus_follows_mouse = config.focus_follows_mouse;
         self.config = config;
-        if old_overlay_terminal
-            != (
-                self.terminal_program(),
-                self.config.terminal.exec_flag.clone(),
-                self.config.overlay.terminal_args.clone(),
-            )
-        {
+        if old_overlay_terminal != warm_key(&self.config, self.terminal_program()) {
             self.warm_config_changed();
         }
         if hide_header {
@@ -120,6 +126,17 @@ mod tests {
             logo: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn warm_key_tracks_launcher_entries() {
+        let a = Config::default();
+        let b = Config {
+            launcher_tui: vec!["k9s".into()],
+            ..Config::default()
+        };
+        assert_eq!(warm_key(&a, "t".into()), warm_key(&a.clone(), "t".into()));
+        assert_ne!(warm_key(&a, "t".into()), warm_key(&b, "t".into()));
     }
 
     #[test]

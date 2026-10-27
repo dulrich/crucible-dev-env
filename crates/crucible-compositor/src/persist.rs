@@ -33,8 +33,8 @@ use crate::config::pick_terminal;
 use crate::element::WindowElement;
 use crate::focus::KeyboardFocusTarget;
 use crate::ipc::{
-    Candidate, CandidateKind, OVERLAY_STYLE_ENV, Request, Response, SOCKET_ENV, SPAWN_EPOCH_ENV,
-    TERMINAL_ENV, TERMINAL_EXEC_FLAG_ENV, encode_field,
+    Candidate, CandidateKind, LAUNCHER_TUI_ENV, OVERLAY_STYLE_ENV, Request, Response, SOCKET_ENV,
+    SPAWN_EPOCH_ENV, TERMINAL_ENV, TERMINAL_EXEC_FLAG_ENV, encode_field,
 };
 use crate::layout::model_output_id;
 use crate::state::{Backend, CrucibleState};
@@ -1406,6 +1406,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .env(TERMINAL_EXEC_FLAG_ENV, &self.config.terminal.exec_flag);
         if kind == SpawnKind::Overlay {
             cmd.env(OVERLAY_STYLE_ENV, self.config.overlay.style.as_str());
+            cmd.env(LAUNCHER_TUI_ENV, self.config.launcher_tui.join(":"));
         }
         let record = SpawnRecord::now(kind, program);
         if kind == SpawnKind::Overlay {

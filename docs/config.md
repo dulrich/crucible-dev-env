@@ -75,6 +75,25 @@ Directories whose immediate subdirectories become workspace-picker candidates. Z
 
 `slots` takes one boolean (`#true` or `#false`, at most once; default `#false`). When `#true`, picker rows for workspaces pinned to a slot (via `Super+Shift+<n>` or the `pin-slot` action) show a `⌘<n>` badge before the name, e.g. `live   ⌘3 work`; folder rows never carry one, and the badge is not part of the fuzzy-filtered text.
 
+### `launcher`
+
+```kdl
+launcher {
+    tui "codex-*"
+    tui "lazydocker" "k9s"
+}
+```
+
+Adds TUI programs to the program launcher (`Super+Return`), beside its built-in list: htop, btop, nvtop, top, nano, vim, nvim, mc, ranger, yazi, lazygit, tig, ncdu, claude, codex, glances, bottom, lazydocker, k9s, ncmpcpp, weechat, irssi, cmus and newsboat.
+
+Each `tui` node takes one or more string arguments (no properties); each is a bare program name or a glob, non-empty, containing no `/` and no `:`. In a glob, `*` matches any run of characters (possibly empty) and is the only wildcard. Duplicate entries are collapsed; a duplicate `launcher` block or any other child is an error.
+
+A program is listed only when it is found as an executable file on `PATH`; one that is not installed produces no row and no error. `PATH` is the one CDE spawns the launcher with (CDE's own plus the `crucible` executable's directory); there is no `PATH` setting. A glob lists every matching executable, the earlier `PATH` directory winning a duplicate name. Rows run the resolved absolute path in the configured terminal, and are omitted when the terminal is unknown.
+
+A program is not listed twice: if a desktop entry's `Exec` starts with the same program name (compared by basename, e.g. `Exec=htop`), only the desktop entry is shown. Wrapper commands such as `Exec=env FOO=1 vim` are not recognised, so such a program can appear twice.
+
+A config save takes effect on the next launcher open (the pre-warmed launcher is restarted when these entries change).
+
 ### `overlay`
 
 ```kdl

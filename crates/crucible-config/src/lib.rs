@@ -383,6 +383,9 @@ pub struct Config {
     /// The screen locker the `lock` action spawns (`lock-command`), split on whitespace into
     /// program + arguments (no shell quoting). Default `"swaylock"`.
     pub lock_command: String,
+    /// Extra TUI program names / `*` globs from `launcher { tui … }`, in file order, first
+    /// occurrence kept on duplicates. Each entry is non-empty with no `/` and no `:`.
+    pub launcher_tui: Vec<String>,
     /// Binding overrides as raw `(chord, action)` strings, in file order.
     pub binds: Vec<(String, String)>,
 }
@@ -398,6 +401,7 @@ impl Default for Config {
             picker_slots: false,
             overlay: OverlayConfig::default(),
             header: HeaderConfig::default(),
+            launcher_tui: Vec::new(),
             binds: Vec::new(),
             lock_command: "swaylock".to_string(),
         }
@@ -475,6 +479,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 | "header"
                 | "binds"
                 | "lock-command"
+                | "launcher"
         ) && seen.contains(&name)
         {
             return Err(ConfigError::Duplicate {
@@ -508,6 +513,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             }
             "picker" => (config.picker_roots, config.picker_slots) = parse_picker(text, node)?,
             "overlay" => config.overlay = parse_overlay(text, node)?,
+            "launcher" => config.launcher_tui = parse_launcher(text, node)?,
             "header" => config.header = parse_header(text, node)?,
             "binds" => config.binds = parse_binds(text, node)?,
             "lock-command" => {
@@ -860,6 +866,45 @@ fn parse_picker(text: &str, node: &KdlNode) -> Result<(Vec<PathBuf>, bool), Conf
     Ok((roots, slots.unwrap_or(false)))
 }
 
+/// Parses `launcher { tui "name" "glob-*" … }` into the deduped entry list.
+fn parse_launcher(text: &str, node: &KdlNode) -> Result<Vec<String>, ConfigError> {
+    let mut out: Vec<String> = Vec::new();
+    for child in block_children(text, node)? {
+        let at = locate(text, child.span().offset());
+        if child.name().value() != "tui" {
+            return Err(ConfigError::UnknownNode {
+                at,
+                name: node_name(child),
+                context: "launcher",
+            });
+        }
+        no_properties(text, child)?;
+        let entries = string_list(text, child)?;
+        if entries.is_empty() {
+            return Err(ConfigError::MissingArgument {
+                at,
+                node: node_name(child),
+                expected: "a program name",
+            });
+        }
+        for entry in entries {
+            nonempty(text, child, "program name", &entry)?;
+            if entry.contains('/') || entry.contains(':') {
+                return Err(ConfigError::InvalidValue {
+                    at,
+                    node: node_name(child),
+                    what: format!("argument `{entry}`"),
+                    message: "must be a bare program name or glob, without `/` or `:`".to_string(),
+                });
+            }
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn parse_overlay(text: &str, node: &KdlNode) -> Result<OverlayConfig, ConfigError> {
     let mut out = OverlayConfig::default();
     let mut seen: Vec<&str> = Vec::new();
@@ -1124,6 +1169,34 @@ binds {
             "{err}"
         );
         assert_eq!(at, Location { line: 4, column: 1 });
+    }
+
+    #[test]
+    fn launcher_block_parses_and_validates() {
+        let c =
+            parse("launcher {\n    tui \"codex-*\"\n    tui \"lazydocker\" \"k9s\" \"k9s\"\n}\n")
+                .unwrap();
+        assert_eq!(c.launcher_tui, vec!["codex-*", "lazydocker", "k9s"]);
+        assert!(parse("").unwrap().launcher_tui.is_empty());
+        for bad in [
+            "launcher {\n    tui \"\"\n}\n",
+            "launcher {\n    tui \"a/b\"\n}\n",
+            "launcher {\n    tui \"a:b\"\n}\n",
+            "launcher {\n    tui\n}\n",
+        ] {
+            let (err, _) = err_at(bad);
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::InvalidValue { .. } | ConfigError::MissingArgument { .. }
+                ),
+                "{bad}: {err:?}"
+            );
+        }
+        let (err, _) = err_at("launcher {\n    tui \"a\"\n}\nlauncher {\n}\n");
+        assert!(matches!(err, ConfigError::Duplicate { .. }));
+        let (err, _) = err_at("launcher {\n    app \"a\"\n}\n");
+        assert!(matches!(&err, ConfigError::UnknownNode { context, .. } if *context == "launcher"));
     }
 
     #[test]

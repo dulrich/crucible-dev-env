@@ -55,6 +55,11 @@ pub const TERMINAL_EXEC_FLAG_ENV: &str = "CDE_TERMINAL_EXEC_FLAG";
 /// Environment variable carrying the configured overlay style, set on overlay spawns only.
 pub const OVERLAY_STYLE_ENV: &str = "CDE_OVERLAY_STYLE";
 
+/// Environment variable carrying the `launcher { tui … }` entries (program names / `*` globs)
+/// joined by `:`, set on overlay spawns only. Unset or empty means no configured entries (the
+/// launcher's built-in list still applies). Entries never contain `/` or `:`.
+pub const LAUNCHER_TUI_ENV: &str = "CDE_LAUNCHER_TUI";
+
 /// Environment variable carrying the wall-clock spawn time (ms since the UNIX epoch), set on
 /// overlay spawns only, so the overlay can log its spawn-to-first-usable-frame latency.
 pub const SPAWN_EPOCH_ENV: &str = "CDE_SPAWN_EPOCH_MS";
