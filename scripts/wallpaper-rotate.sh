@@ -5,7 +5,7 @@ set -uo pipefail
 
 usage() {
 	cat <<'USAGE'
-Usage: wallpaper-rotate.sh [--help|-h] [--dry-run] [--dir DIR] [--mode MODE]
+Usage: wallpaper-rotate.sh [--help|-h] [--dry-run] [--wait SECONDS] [--dir DIR] [--mode MODE]
 
 Pick a random image from DIR and show it on every output with swaybg. The new
 swaybg starts first and the previous one is stopped only once the new one is
@@ -17,6 +17,9 @@ Options:
                <photos-root>/bgs_4k/bgset); jpg/jpeg/png, not recursive
   --mode MODE  swaybg scaling mode: stretch|fit|fill|center|tile (default: fill)
   --dry-run    print the socket and image that would be used, change nothing
+  --wait SECONDS
+               poll up to SECONDS for a live Wayland socket before giving up
+               (for compositor startup; default 0 = check once)
 
 Environment:
   WAYLAND_DISPLAY   socket to use; when unset, the first live wayland-* socket
@@ -35,10 +38,15 @@ USAGE
 dir="${WALLPAPER_DIR:-<photos-root>/bgs_4k/bgset}"
 mode=fill
 dry_run=0
+wait_s=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--help | -h) usage; exit 0 ;;
 	--dry-run) dry_run=1 ;;
+	--wait)
+		[ $# -ge 2 ] || { usage >&2; exit 2; }
+		case "$2" in '' | *[!0-9]*) echo "wallpaper-rotate: bad --wait '$2'" >&2; exit 2 ;; esac
+		wait_s=$2; shift ;;
 	--dir) [ $# -ge 2 ] || { usage >&2; exit 2; }; dir=$2; shift ;;
 	--mode)
 		[ $# -ge 2 ] || { usage >&2; exit 2; }
@@ -60,16 +68,26 @@ socket_live() {
 	ss -xlH 2>/dev/null | grep -qF -- " $1 "
 }
 
-if [ -n "${WAYLAND_DISPLAY:-}" ]; then
-	case "$WAYLAND_DISPLAY" in /*) sock=$WAYLAND_DISPLAY ;; *) sock="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ;; esac
-	socket_live "$sock" || sock=
-else
+find_socket() {
 	sock=
-	for s in "$XDG_RUNTIME_DIR"/wayland-*; do
-		case "$s" in *.lock) continue ;; esac
-		if socket_live "$s"; then sock=$s; break; fi
-	done
-fi
+	if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+		local s
+		case "$WAYLAND_DISPLAY" in /*) s=$WAYLAND_DISPLAY ;; *) s="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY" ;; esac
+		if socket_live "$s"; then sock=$s; fi
+	else
+		for s in "$XDG_RUNTIME_DIR"/wayland-*; do
+			case "$s" in *.lock) continue ;; esac
+			if socket_live "$s"; then sock=$s; break; fi
+		done
+	fi
+}
+
+find_socket
+deadline=$((SECONDS + wait_s))
+while [ -z "$sock" ] && [ "$SECONDS" -lt "$deadline" ]; do
+	sleep 1
+	find_socket
+done
 if [ -z "$sock" ]; then
 	[ "$dry_run" = 1 ] && echo "no live Wayland session in $XDG_RUNTIME_DIR"
 	exit 0

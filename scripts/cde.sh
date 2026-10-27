@@ -20,6 +20,9 @@ Environment overrides:
              runs ghostty with --gtk-single-instance=false)
   RUST_LOG   log filter (default: info)
   CDE_MODE   crucible mode flag (default: --tty-udev)
+  CDE_WALLPAPER  set to 0 to skip the startup wallpaper (default: in --tty-udev
+             mode, scripts/wallpaper-rotate.sh runs once the compositor
+             is listening; cron keeps rotating it)
 
 Logs: /tmp/cde/cde-<timestamp>.log, newest symlinked as /tmp/cde/latest.log
 USAGE
@@ -60,6 +63,12 @@ cd "$repo" || { echo "cde.sh: repo not found: $repo" >&2; exit 1; }
 if ! cargo build 2>&1 | tee -a "$log"; then
 	echo "cde.sh: build failed, see $log" >&2
 	exit 1
+fi
+
+# Startup wallpaper: only on a bare TTY (nested modes would hit the parent session's
+# WAYLAND_DISPLAY). Backgrounded; waits up to 30 s for crucible's socket, then exits.
+if [ "$mode" = --tty-udev ] && [ "${CDE_WALLPAPER:-1}" != 0 ]; then
+	env -u WAYLAND_DISPLAY "$repo/scripts/wallpaper-rotate.sh" --wait 30 >>"$log" 2>&1 </dev/null &
 fi
 
 ./target/debug/crucible "$mode" "$@" 2>&1 | tee -a "$log"
