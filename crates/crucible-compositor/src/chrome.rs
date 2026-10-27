@@ -34,13 +34,11 @@ use smithay::{
     utils::{Physical, Rectangle},
 };
 
-use std::collections::HashSet;
-
 use crucible_config::{OverlayStyle, Rgb, TilingConfig};
-use crucible_layout::{Projection, Rect, WindowId};
+use crucible_layout::{Projection, Rect};
 
 use crate::{
-    layout::{WindowClass, window_rect},
+    layout::{LayoutState, WindowClass, window_rect},
     render::CustomRenderElements,
     state::{Backend, CrucibleState},
 };
@@ -359,28 +357,6 @@ pub fn fill_color(fill: Rgb) -> [f32; 4] {
     ]
 }
 
-/// The window-class data the chrome needs, owned so a backend can build it before borrowing its
-/// renderer: the terminal windows and the tiling settings.
-#[derive(Debug, Clone, Default)]
-pub struct ChromeClasses {
-    /// Windows classified as CDE-spawned terminals; every other visible window is an app.
-    pub terminals: HashSet<WindowId>,
-    /// The active tiling settings.
-    pub tiling: TilingConfig,
-}
-
-impl ChromeClasses {
-    /// The class of `id`.
-    #[must_use]
-    pub fn class_of(&self, id: WindowId) -> WindowClass {
-        if self.terminals.contains(&id) {
-            WindowClass::Terminal
-        } else {
-            WindowClass::App
-        }
-    }
-}
-
 /// Pure chrome plan: the coloured rects (output-local) for the app fills, the focus ring, the pips
 /// and, while an overlay is mapped, the overlay ring. Earlier entries are drawn in front.
 ///
@@ -447,37 +423,33 @@ pub fn plan_chrome(
 /// overlay ring) for the current frame.
 ///
 /// Reads the focused identity and every visible tile from the applied [`Projection`] (tile rects)
-/// and plans each tile with [`plan_tile`] by its class in `classes`. Then iterates every output's
-/// active workspace's panes; for panes with `> 1` window, builds pip indicators via
-/// [`stack_pips_with_margin`].
+/// and plans each tile with [`plan_tile`] by its class ([`LayoutState::window_class`]). Then
+/// iterates every output's active workspace's panes; for panes with `> 1` window, builds pip
+/// indicators via [`stack_pips_with_margin`].
 ///
 /// Returns an empty vec when [`ENABLE_CHROME`] is `false`.
 ///
 /// Caller note: the returned elements should be prepended to (or chained before) the cursor
 /// elements so the stacking order from front to back is: cursor → chrome → windows.
 pub fn build_chrome_elements(
-    world: &crucible_layout::World,
+    layout: &LayoutState,
     projection: &Projection,
     empty_focus_rect: Option<Rect>,
     overlay: Option<OverlayChrome>,
     output_origin: (i32, i32),
-    classes: &ChromeClasses,
+    tiling: &TilingConfig,
 ) -> Vec<SolidColorRenderElement> {
     if !ENABLE_CHROME {
         return Vec::new();
     }
+    let world = &layout.world;
 
     // ---- 1. Per visible tile: focus ring (focused window) and app-inset fill (every app) ----
     let focus = projection.focus();
     let mut ring: Vec<Rect> = Vec::new();
     let mut fills: Vec<Rect> = Vec::new();
     for &(id, tile) in projection.windows() {
-        let plan = plan_tile(
-            tile,
-            classes.class_of(id),
-            &classes.tiling,
-            focus == Some(id),
-        );
+        let plan = plan_tile(tile, layout.window_class(id), tiling, focus == Some(id));
         ring.extend(plan.ring);
         fills.extend(plan.fill);
     }
@@ -485,7 +457,7 @@ pub fn build_chrome_elements(
     if focus.is_none()
         && let Some(tile) = empty_focus_rect
     {
-        ring.extend(plan_tile(tile, WindowClass::Terminal, &classes.tiling, true).ring);
+        ring.extend(plan_tile(tile, WindowClass::Terminal, tiling, true).ring);
     }
 
     // ---- 2. Per-pane stack-position indicators (global rects) ----
@@ -512,9 +484,9 @@ pub fn build_chrome_elements(
             let Some(pane_rect) = projection.rect_of(focused_win) else {
                 continue;
             };
-            let strip = match classes.class_of(focused_win) {
-                WindowClass::Terminal => classes.tiling.terminal.gap,
-                WindowClass::App => classes.tiling.app.gap,
+            let strip = match layout.window_class(focused_win) {
+                WindowClass::Terminal => tiling.terminal.gap,
+                WindowClass::App => tiling.app.gap,
             };
             let margin = pip_margin(i32::try_from(strip).unwrap_or(i32::MAX));
             for (rect, is_focused) in
@@ -534,7 +506,7 @@ pub fn build_chrome_elements(
     plan_chrome(
         &ring,
         &fills,
-        fill_color(classes.tiling.app.fill),
+        fill_color(tiling.app.fill),
         &pips,
         overlay,
         output_origin,
@@ -566,15 +538,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
         })
     }
 
-    /// The per-window class data and tiling settings the chrome is built from; shared by the
-    /// winit ([`Self::chrome_elements`]) and udev (direct [`build_chrome_elements`]) paths.
-    pub(crate) fn chrome_classes(&self) -> ChromeClasses {
-        ChromeClasses {
-            terminals: self.terminal_window_ids(),
-            tiling: self.config.tiling.clone(),
-        }
-    }
-
     /// Returns the chrome render elements for the current frame.
     ///
     /// Reads live model state (`self.layout.world`) and `self.projection` (the projection last
@@ -597,13 +560,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
             + smithay::backend::renderer::ImportMem,
     {
         build_chrome_elements(
-            &self.layout.world,
+            &self.layout,
             &self.projection,
             self.focused_empty_pane_rect(),
             self.overlay_chrome(),
             // The winit backend renders its single output at the Space origin.
             (0, 0),
-            &self.chrome_classes(),
+            &self.config.tiling,
         )
         .into_iter()
         .map(CustomRenderElements::SolidColor)

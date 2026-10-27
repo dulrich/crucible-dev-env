@@ -7,9 +7,12 @@
 //!   [`WindowId`] ↔ element map for **managed** windows and the flat set of **unmanaged** elements
 //!   (X11 override-redirect surfaces, which deliberately live outside the `World`);
 //! - the **lifecycle controller**: [`CrucibleState::map_managed_window`],
-//!   [`CrucibleState::unmap_matching`], [`CrucibleState::map_unmanaged_element`] and the output
-//!   registration methods. Both shell backends (xdg-shell and XWayland) go through these; no backend
-//!   sequences model/map/`Space` transitions by hand;
+//!   [`CrucibleState::unmap_matching`], [`CrucibleState::end_workspace`],
+//!   [`CrucibleState::map_unmanaged_element`] and the output registration methods. Per-window
+//!   metadata ([`WindowMeta`]: pid and class) is bound with the element at open and released with
+//!   it, so it is known before the first placement and never outlives the window. Both shell
+//!   backends (xdg-shell and XWayland) go through these; no backend sequences model/map/`Space`
+//!   transitions by hand;
 //! - [`CrucibleState::apply_layout`], which derives the [`Projection`] from the model, diffs it
 //!   against the last applied one, and applies exactly that difference to the `Space`.
 //!
@@ -51,13 +54,13 @@ mod bindings;
 mod outputs;
 mod placement;
 
-pub use bindings::{Binding, LayoutState, Payload, Teardown};
+pub use bindings::{Binding, LayoutState, Payload, Teardown, WindowMeta};
 pub use outputs::{model_output_id, set_model_output_id};
 use placement::configure_placement;
 pub use placement::{NO_GAPS, WindowClass, clamped_gap, window_rect};
 
 use crucible_layout::{
-    FocusChange, LayoutChange, LayoutError, PaneId, Projection, Rect, WindowId, World,
+    FocusChange, LayoutChange, LayoutError, PaneId, Projection, Rect, WindowId, WorkspaceId, World,
 };
 use smithay::utils::{Logical, Point};
 use tracing::{debug, warn};
@@ -236,37 +239,53 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     // ---- window lifecycle controller ---------------------------------------------------------
 
-    /// Maps a **managed** window: model open, bind the element, apply the projection.
+    /// Maps a **managed** window: model open, bind the element with its `meta`, apply the
+    /// projection.
     ///
     /// The projection — not the caller — decides where and at what size the window lands, and
-    /// whether it takes focus. `on_open` runs with the new id **before** the first
-    /// [`Self::apply_layout`], so per-window state the placement reads (its class) is registered
-    /// in time. Returns the model [`WindowId`] now bound to `element`.
-    pub fn map_managed_window(
-        &mut self,
-        element: WindowElement,
-        on_open: impl FnOnce(&mut Self, WindowId),
-    ) -> WindowId {
-        let id = self.layout.open_managed(element);
-        on_open(self, id);
+    /// whether it takes focus. `meta` is bound **before** the first [`Self::apply_layout`], so the
+    /// class the placement reads is known in time. Returns the model [`WindowId`] now bound to
+    /// `element`.
+    pub fn map_managed_window(&mut self, element: WindowElement, meta: WindowMeta) -> WindowId {
+        let id = self.layout.open_managed(element, meta);
         self.apply_layout();
         id
     }
 
     /// Maps a **managed** window into `pane` at stack `index` (a restored window matched to its
     /// pending placement). Same commit order as [`Self::map_managed_window`]; on a model error
-    /// nothing is bound or mapped and `on_open` is not called.
+    /// nothing is bound or mapped.
     pub fn map_managed_window_at(
         &mut self,
         element: WindowElement,
+        meta: WindowMeta,
         pane: PaneId,
         index: usize,
-        on_open: impl FnOnce(&mut Self, WindowId),
     ) -> Result<WindowId, LayoutError> {
-        let id = self.layout.open_managed_at(element, pane, index)?;
-        on_open(self, id);
+        let id = self.layout.open_managed_at(element, meta, pane, index)?;
         self.apply_layout();
         Ok(id)
+    }
+
+    /// Removes workspace `ws` and tears down every window it held, in the commit order: the model
+    /// drops the workspace and its bindings ([`LayoutState::release_workspace`]), each element is
+    /// unmapped from the `Space`, then the projection is applied. Returns the ended elements with
+    /// their metadata so the caller can decide how to end each client. On a model error nothing
+    /// changes and the error is returned.
+    pub fn end_workspace(
+        &mut self,
+        ws: WorkspaceId,
+    ) -> Result<Vec<(WindowElement, WindowMeta)>, LayoutError> {
+        let released = self.layout.release_workspace(ws)?;
+        let ended = released
+            .into_iter()
+            .map(|(_, element, meta)| {
+                self.space.unmap_elem(&element);
+                (element, meta)
+            })
+            .collect();
+        self.apply_layout();
+        Ok(ended)
     }
 
     /// Maps an **unmanaged** element (X11 override-redirect) at `location`.
@@ -288,11 +307,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub fn unmap_matching(&mut self, pred: impl Fn(&WindowElement) -> bool) -> Teardown {
         match self.layout.resolve(&pred) {
             Binding::Managed(id) => match self.layout.close_managed(id) {
-                Ok(element) => {
-                    if let Some(element) = element {
+                Ok(released) => {
+                    if let Some((element, _)) = released {
                         self.space.unmap_elem(&element);
                     }
-                    self.persist.forget_window(id);
                     self.apply_layout();
                     Teardown::Managed(id)
                 }

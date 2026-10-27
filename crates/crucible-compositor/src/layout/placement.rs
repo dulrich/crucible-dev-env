@@ -56,7 +56,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(crate) fn placed_rect(&self, id: WindowId, tile: Rect) -> Rectangle<i32, Logical> {
         to_logical(window_rect(
             tile,
-            self.window_class(id),
+            self.layout.window_class(id),
             &self.config.tiling,
         ))
     }

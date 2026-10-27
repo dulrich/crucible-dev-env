@@ -5,14 +5,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crucible_layout::{OutputId, WindowId, WorkspaceId, World};
+use crucible_layout::{OutputId, WorkspaceId, World};
 use crucible_persist::slots::slots_path;
 use tracing::{debug, info, warn};
 
 use super::placement::Target;
 use super::spawn::kill_child;
 use super::{close_element, skip_record};
-use crate::element::WindowElement;
 use crate::state::{Backend, CrucibleState};
 
 /// Workspace roots, last-viewed outputs and the pending slot pin (a field of
@@ -239,33 +238,27 @@ impl<B: Backend + 'static> CrucibleState<B> {
             warn!(?ws, "close-workspace: save failed; refusing to close");
             return;
         }
-        // (d) Snapshot what to end, and the panes, before the model forgets them.
-        let world = &self.layout.world;
-        let panes = world.workspace(ws).map(|w| w.panes()).unwrap_or_default();
-        let ends: Vec<(WindowId, Option<WindowElement>, Option<u32>)> = panes
-            .iter()
-            .filter_map(|p| world.pane(*p))
-            .flat_map(|p| p.windows().iter().copied())
-            .map(|id| {
-                let element = self.layout.element(id).cloned();
-                let pid = self.persist.placement.windows.get(&id).and_then(|i| i.pid);
-                (id, element, pid)
-            })
-            .collect();
-        // (e) The model drops the workspace; apply_layout hides its elements.
-        if let Err(err) = self.with_model(|w| w.remove_workspace(ws).map(|_| ())) {
-            info!(%err, ?ws, "close-workspace refused by the model");
-            return;
-        }
-        // (f) Release each binding first, then end the window.
-        for (id, element, pid) in ends {
-            let bound = self.layout.release_binding(id);
-            self.persist.forget_window(id);
-            let Some(element) = bound.or(element) else {
-                continue;
-            };
-            self.space.unmap_elem(&element);
-            if !pid.is_some_and(|p| kill_child(&mut self.persist.spawn.children, p)) {
+        // (d) Snapshot the panes before the model forgets them (for step (g)).
+        let panes = self
+            .layout
+            .world
+            .workspace(ws)
+            .map(|w| w.panes())
+            .unwrap_or_default();
+        // (e) The lifecycle controller drops the workspace, its bindings and its `Space` mappings.
+        let ended = match self.end_workspace(ws) {
+            Ok(ended) => ended,
+            Err(err) => {
+                info!(%err, ?ws, "close-workspace refused by the model");
+                return;
+            }
+        };
+        // (f) Policy: end each window — kill a CDE-spawned child, else ask the client to close.
+        for (element, meta) in ended {
+            if !meta
+                .pid
+                .is_some_and(|p| kill_child(&mut self.persist.spawn.children, p))
+            {
                 close_element(&element);
             }
         }

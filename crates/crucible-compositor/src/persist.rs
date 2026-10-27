@@ -128,11 +128,6 @@ impl PersistState {
             .map(|f| self.store_dir.join(f))
             .map_err(|e| e.to_string())
     }
-
-    /// Forgets a closed managed window's kind.
-    pub fn forget_window(&mut self, id: WindowId) {
-        self.placement.windows.remove(&id);
-    }
 }
 
 /// Whether a record is not worth writing: one pane, no windows, no folder root.
@@ -629,9 +624,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     fn window_record(&self, id: WindowId) -> WindowRecord {
-        let info = self.persist.placement.windows.get(&id).copied();
-        let pid = info.and_then(|i| i.pid);
-        if let (Some(pid), true) = (pid, info.is_some_and(|i| i.terminal)) {
+        let meta = self.layout.meta(id);
+        let pid = meta.and_then(|m| m.pid);
+        if let (Some(pid), true) = (
+            pid,
+            meta.is_some_and(|m| m.class == crate::layout::WindowClass::Terminal),
+        ) {
             // A relaunch placeholder still waiting for Enter keeps its original app record.
             if let Some(cap) = crucible_persist::capture_relaunch(proc_root(), pid) {
                 return WindowRecord::App {

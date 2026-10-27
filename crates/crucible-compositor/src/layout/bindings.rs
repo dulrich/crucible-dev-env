@@ -1,10 +1,31 @@
-//! The model plus compositor payload bindings: [`LayoutState`], [`Payload`], [`Binding`], [`Teardown`].
+//! The model plus compositor payload bindings: [`LayoutState`], [`WindowMeta`], [`Payload`],
+//! [`Binding`], [`Teardown`].
 
 use std::collections::{HashMap, HashSet};
 
-use crucible_layout::{LayoutError, OutputId, PaneId, Rect, WindowId, World};
+use crucible_layout::{LayoutError, OutputId, PaneId, Rect, WindowId, WorkspaceId, World};
 
+use super::WindowClass;
 use crate::element::WindowElement;
+
+/// Per-window compositor metadata, bound to a managed window for exactly as long as its payload.
+///
+/// Supplied when the window is opened, so it is known before the first placement (the class
+/// decides the window's first rect), and returned when the binding is released.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowMeta {
+    /// The client PID, when known.
+    pub pid: Option<u32>,
+    /// The placement class: a CDE-spawned terminal or an app.
+    pub class: WindowClass,
+}
+
+/// One managed binding: the payload plus its metadata.
+#[derive(Debug)]
+struct Bound<E> {
+    element: E,
+    meta: WindowMeta,
+}
 
 /// The compositor-side payload a model window is bound to.
 ///
@@ -64,8 +85,8 @@ pub enum Teardown {
 pub struct LayoutState<E = WindowElement> {
     /// The pure layout model — single source of truth for geometry/focus/stacking/membership.
     pub world: World,
-    /// Managed windows: model id → payload (visible or hidden).
-    by_id: HashMap<WindowId, E>,
+    /// Managed windows: model id → payload and metadata (visible or hidden).
+    by_id: HashMap<WindowId, Bound<E>>,
     /// Unmanaged (override-redirect) payloads, outside the model.
     unmanaged: Vec<E>,
 }
@@ -90,7 +111,24 @@ impl<E: Payload> LayoutState<E> {
     /// Resolves a model `id` to its payload.
     #[must_use]
     pub fn element(&self, id: WindowId) -> Option<&E> {
-        self.by_id.get(&id)
+        self.by_id.get(&id).map(|b| &b.element)
+    }
+
+    /// The metadata bound to model window `id`.
+    #[must_use]
+    pub fn meta(&self, id: WindowId) -> Option<&WindowMeta> {
+        self.by_id.get(&id).map(|b| &b.meta)
+    }
+
+    /// Every bound managed window's metadata, in no particular order.
+    pub fn metas(&self) -> impl Iterator<Item = (WindowId, &WindowMeta)> {
+        self.by_id.iter().map(|(id, b)| (*id, &b.meta))
+    }
+
+    /// The placement class of window `id` — the single class lookup. An unbound id is an app.
+    #[must_use]
+    pub fn window_class(&self, id: WindowId) -> WindowClass {
+        self.meta(id).map_or(WindowClass::App, |m| m.class)
     }
 
     /// Number of managed windows currently bound (visible *and* hidden).
@@ -109,7 +147,7 @@ impl<E: Payload> LayoutState<E> {
     ///
     /// Managed bindings are checked first: a payload can only ever be in one of the two sets.
     pub fn resolve(&self, pred: impl Fn(&E) -> bool) -> Binding {
-        if let Some((id, _)) = self.by_id.iter().find(|(_, e)| pred(e)) {
+        if let Some((id, _)) = self.by_id.iter().find(|(_, b)| pred(&b.element)) {
             return Binding::Managed(*id);
         }
         if self.unmanaged.iter().any(&pred) {
@@ -118,15 +156,20 @@ impl<E: Payload> LayoutState<E> {
         Binding::None
     }
 
-    /// Step 1+2 of the commit order for a **map**: open a window in the model, then bind `element`.
+    /// Step 1+2 of the commit order for a **map**: open a window in the model, then bind `element`
+    /// with its `meta`.
     ///
     /// `World::open_window` is infallible, so this cannot leave the pair inconsistent. Returns the
     /// new [`WindowId`]; the caller applies the projection.
-    pub fn open_managed(&mut self, element: E) -> WindowId {
+    pub fn open_managed(&mut self, element: E, meta: WindowMeta) -> WindowId {
         let id = self.world.open_window();
-        element.set_window_id(id);
-        self.by_id.insert(id, element);
+        self.bind(id, element, meta);
         id
+    }
+
+    fn bind(&mut self, id: WindowId, element: E, meta: WindowMeta) {
+        element.set_window_id(id);
+        self.by_id.insert(id, Bound { element, meta });
     }
 
     /// Like [`Self::open_managed`] but opens the window at stack `index` of `pane` (restore
@@ -134,12 +177,12 @@ impl<E: Payload> LayoutState<E> {
     pub fn open_managed_at(
         &mut self,
         element: E,
+        meta: WindowMeta,
         pane: PaneId,
         index: usize,
     ) -> Result<WindowId, LayoutError> {
         let id = self.world.open_window_at(pane, index)?;
-        element.set_window_id(id);
-        self.by_id.insert(id, element);
+        self.bind(id, element, meta);
         Ok(id)
     }
 
@@ -148,19 +191,34 @@ impl<E: Payload> LayoutState<E> {
     ///
     /// The model mutation happens **first and alone**: if it fails, `Err` is returned and neither
     /// the binding map nor (by extension) the `Space` has been touched. On success the released
-    /// payload is returned so the caller can unmap it from the `Space`; `Ok(None)` means the model
-    /// knew the window but nothing was ever bound to it.
-    pub fn close_managed(&mut self, id: WindowId) -> Result<Option<E>, LayoutError> {
+    /// payload and its metadata are returned so the caller can unmap it from the `Space`;
+    /// `Ok(None)` means the model knew the window but nothing was ever bound to it.
+    pub fn close_managed(&mut self, id: WindowId) -> Result<Option<(E, WindowMeta)>, LayoutError> {
         self.world.close_window(id)?;
-        Ok(self.by_id.remove(&id))
+        Ok(self.release_binding(id))
     }
 
     /// Drops the binding of a window the model has **already** forgotten (e.g. after
-    /// `World::remove_workspace`), returning its payload so the caller can unmap and end it.
-    /// `None` when nothing was bound. After this, a later unmap/destroy of the payload resolves to
-    /// [`Binding::None`] and is ignored.
-    pub fn release_binding(&mut self, id: WindowId) -> Option<E> {
-        self.by_id.remove(&id)
+    /// `World::remove_workspace`), returning its payload and metadata so the caller can unmap and
+    /// end it. `None` when nothing was bound. After this, a later unmap/destroy of the payload
+    /// resolves to [`Binding::None`] and is ignored.
+    pub fn release_binding(&mut self, id: WindowId) -> Option<(E, WindowMeta)> {
+        self.by_id.remove(&id).map(|b| (b.element, b.meta))
+    }
+
+    /// The model half of closing a workspace: removes `ws` from the model, then releases the
+    /// binding of every window it held, returning each `(id, payload, meta)` in pane/stack order so
+    /// the caller can unmap and end them. On a model error nothing changes and the error is
+    /// returned.
+    pub fn release_workspace(
+        &mut self,
+        ws: WorkspaceId,
+    ) -> Result<Vec<(WindowId, E, WindowMeta)>, LayoutError> {
+        let ids = self.world.remove_workspace(ws)?;
+        Ok(ids
+            .into_iter()
+            .filter_map(|id| self.release_binding(id).map(|(e, m)| (id, e, m)))
+            .collect())
     }
 
     /// Tracks an unmanaged payload. Returns `false` if it was already tracked (idempotent).
@@ -257,31 +315,104 @@ mod tests {
         let mut layout = state();
         let pane = layout.world.focused_pane_id();
         let b = layout
-            .open_managed_at(TestElement::new(2), pane, 0)
+            .open_managed_at(TestElement::new(2), app(), pane, 0)
             .unwrap();
         let a = layout
-            .open_managed_at(TestElement::new(1), pane, 0)
+            .open_managed_at(TestElement::new(1), app(), pane, 0)
             .unwrap();
         assert_eq!(layout.world.pane(pane).unwrap().windows(), vec![a, b]);
         assert_eq!(layout.element(a).unwrap().window_id(), Some(a));
         let bogus = PaneId::from_raw(999);
         assert!(
             layout
-                .open_managed_at(TestElement::new(3), bogus, 0)
+                .open_managed_at(TestElement::new(3), terminal(3), bogus, 0)
                 .is_err()
         );
         assert_eq!(layout.managed_count(), 2);
+        assert_eq!(layout.resolve(tagged(3)), Binding::None);
+        assert!(layout.metas().all(|(_, m)| m.pid != Some(3)));
     }
 
     fn state() -> LayoutState<TestElement> {
         LayoutState::new()
     }
 
+    fn app() -> WindowMeta {
+        WindowMeta {
+            pid: None,
+            class: WindowClass::App,
+        }
+    }
+
+    fn terminal(pid: u32) -> WindowMeta {
+        WindowMeta {
+            pid: Some(pid),
+            class: WindowClass::Terminal,
+        }
+    }
+
+    /// The class is bound at open, so the first placement (applied right after) already reads it;
+    /// releasing the binding returns the meta and the class falls back to `App`.
+    #[test]
+    fn meta_is_bound_at_open_and_returned_at_release() {
+        let mut layout = state();
+        let pane = layout.world.focused_pane_id();
+        let a = layout.open_managed(TestElement::new(1), terminal(10));
+        let b = layout
+            .open_managed_at(TestElement::new(2), terminal(20), pane, 0)
+            .unwrap();
+        assert_eq!(layout.window_class(a), WindowClass::Terminal);
+        assert_eq!(layout.window_class(b), WindowClass::Terminal);
+        assert_eq!(layout.meta(b), Some(&terminal(20)));
+
+        let (_, meta) = layout.close_managed(a).unwrap().unwrap();
+        assert_eq!(meta, terminal(10));
+        assert_eq!(layout.window_class(a), WindowClass::App);
+        assert!(layout.meta(a).is_none());
+
+        layout.world.close_window(b).unwrap();
+        let (_, meta) = layout.release_binding(b).unwrap();
+        assert_eq!(meta, terminal(20));
+        assert_eq!(layout.window_class(b), WindowClass::App);
+    }
+
+    #[test]
+    fn release_workspace_drops_the_model_and_bindings_or_nothing() {
+        let mut layout = state();
+        let first = layout.world.active_workspace_id();
+        let kept = layout.open_managed(TestElement::new(1), app());
+        let ws = layout.world.new_workspace("two");
+        let pane = layout.world.workspace(ws).unwrap().panes()[0];
+        let a = layout
+            .open_managed_at(TestElement::new(2), terminal(7), pane, 0)
+            .unwrap();
+        let b = layout
+            .open_managed_at(TestElement::new(3), app(), pane, 1)
+            .unwrap();
+        let released = layout.release_workspace(ws).unwrap();
+        let tags: Vec<(WindowId, u32, WindowMeta)> = released
+            .into_iter()
+            .map(|(id, e, m)| (id, e.tag, m))
+            .collect();
+        assert_eq!(tags.len(), 2);
+        assert!(tags.contains(&(a, 2, terminal(7))));
+        assert!(tags.contains(&(b, 3, app())));
+        assert_eq!(layout.managed_count(), 1);
+        assert!(layout.element(kept).is_some());
+        assert_eq!(layout.resolve(tagged(2)), Binding::None);
+
+        // The last workspace is refused by the model: nothing changes.
+        let before = layout.world.clone();
+        assert!(layout.release_workspace(first).is_err());
+        assert_eq!(layout.world, before);
+        assert_eq!(layout.managed_count(), 1);
+    }
+
     #[test]
     fn opening_a_managed_window_binds_the_payload_both_ways() {
         let mut layout = state();
         let element = TestElement::new(1);
-        let id = layout.open_managed(element.clone());
+        let id = layout.open_managed(element.clone(), app());
 
         assert_eq!(element.window_id(), Some(id));
         assert_eq!(layout.element(id), Some(&element));
@@ -293,10 +424,10 @@ mod tests {
     #[test]
     fn closing_a_managed_window_releases_model_and_binding_together() {
         let mut layout = state();
-        let id = layout.open_managed(TestElement::new(1));
+        let id = layout.open_managed(TestElement::new(1), app());
 
         let released = layout.close_managed(id).expect("close succeeds");
-        assert_eq!(released.map(|e| e.tag), Some(1));
+        assert_eq!(released.map(|(e, _)| e.tag), Some(1));
         assert_eq!(layout.managed_count(), 0);
         assert_eq!(layout.world.window_count(), 0);
         // The window is gone from both halves, so a repeat resolves to nothing at all.
@@ -306,11 +437,11 @@ mod tests {
     #[test]
     fn release_binding_drops_only_the_binding_of_a_forgotten_window() {
         let mut layout = state();
-        let id = layout.open_managed(TestElement::new(1));
-        let keep = layout.open_managed(TestElement::new(2));
+        let id = layout.open_managed(TestElement::new(1), app());
+        let keep = layout.open_managed(TestElement::new(2), app());
         layout.world.close_window(id).unwrap();
 
-        assert_eq!(layout.release_binding(id).map(|e| e.tag), Some(1));
+        assert_eq!(layout.release_binding(id).map(|(e, _)| e.tag), Some(1));
         assert_eq!(layout.managed_count(), 1);
         assert_eq!(layout.resolve(tagged(1)), Binding::None);
         assert_eq!(layout.resolve(tagged(2)), Binding::Managed(keep));
@@ -321,7 +452,7 @@ mod tests {
     #[test]
     fn repeated_close_is_an_error_the_resolver_never_reaches() {
         let mut layout = state();
-        let id = layout.open_managed(TestElement::new(1));
+        let id = layout.open_managed(TestElement::new(1), app());
         layout.close_managed(id).expect("first close succeeds");
 
         // Directly re-closing reports the model's rejection...
@@ -336,8 +467,8 @@ mod tests {
     #[test]
     fn a_failed_model_close_leaves_every_binding_untouched() {
         let mut layout = state();
-        let kept = layout.open_managed(TestElement::new(1));
-        let other = layout.open_managed(TestElement::new(2));
+        let kept = layout.open_managed(TestElement::new(1), app());
+        let other = layout.open_managed(TestElement::new(2), app());
         let unknown = WindowId::from_raw(9_999);
 
         let before_world = layout.world.clone();
@@ -387,7 +518,7 @@ mod tests {
     #[test]
     fn managed_and_unmanaged_sets_stay_distinct() {
         let mut layout = state();
-        let managed = layout.open_managed(TestElement::new(1));
+        let managed = layout.open_managed(TestElement::new(1), app());
         layout.track_unmanaged(TestElement::new(2));
 
         assert_eq!(layout.resolve(tagged(1)), Binding::Managed(managed));
@@ -408,7 +539,7 @@ mod tests {
             .set_output_rect(output, Rect::new(0, 0, 800, 600))
             .expect("output exists");
 
-        let managed = layout.open_managed(TestElement::new(1));
+        let managed = layout.open_managed(TestElement::new(1), app());
         layout.track_unmanaged(TestElement::new(2));
 
         let projection = layout
@@ -490,7 +621,7 @@ mod tests {
     fn releasing_the_last_output_is_refused_and_changes_nothing() {
         let mut layout = state();
         let only = layout.bind_output(&HashSet::new(), R1);
-        layout.open_managed(TestElement::new(1));
+        layout.open_managed(TestElement::new(1), app());
         let before = layout.world.clone();
 
         assert_eq!(layout.release_output(only), Err(LayoutError::LastOutput));
@@ -504,7 +635,7 @@ mod tests {
         let first = layout.bind_output(&HashSet::new(), R1);
         let second = layout.bind_output(&HashSet::from([first]), R2);
         layout.world.set_focused_output(second).unwrap();
-        let id = layout.open_managed(TestElement::new(7));
+        let id = layout.open_managed(TestElement::new(7), app());
 
         layout.release_output(second).unwrap();
 

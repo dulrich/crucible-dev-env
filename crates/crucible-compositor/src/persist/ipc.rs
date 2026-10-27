@@ -90,15 +90,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let capture = crucible_persist::RelaunchWrapper::from_argv(&args)
             .ok_or_else(|| "not a relaunch placeholder".to_string())?;
         let ancestors = crucible_persist::ancestors(proc_root(), peer, ANCESTOR_DEPTH);
-        let windows = &self.persist.placement.windows;
+        let layout = &self.layout;
         let pid = match_pending(peer, &ancestors, |p| {
-            windows.values().any(|i| i.pid == Some(p))
+            layout.metas().any(|(_, m)| m.pid == Some(p))
         })
         .ok_or_else(|| "no placeholder window".to_string())?;
-        let mut ids: Vec<WindowId> = windows
-            .iter()
-            .filter(|(_, i)| i.pid == Some(pid))
-            .map(|(id, _)| *id)
+        let mut ids: Vec<WindowId> = layout
+            .metas()
+            .filter(|(_, m)| m.pid == Some(pid))
+            .map(|(id, _)| id)
             .collect();
         ids.sort();
         let world = &self.layout.world;

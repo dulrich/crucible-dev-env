@@ -189,7 +189,6 @@ impl CrucibleState<UdevData> {
         let pointer_location = self.pointer.current_location();
         let empty_focus_rect = self.focused_empty_pane_rect();
         let overlay_chrome = self.overlay_chrome();
-        let chrome_classes = self.chrome_classes();
         let header_layouts = self.header_layouts();
         let header_size = self.config.header.size;
         let header_output = crate::layout::model_output_id(&output);
@@ -212,12 +211,12 @@ impl CrucibleState<UdevData> {
         // SolidColorRenderElement is renderer-agnostic; no renderer reference is needed.
         let mut chrome: Vec<CustomRenderElements<UdevRenderer<'_>>> =
             crate::chrome::build_chrome_elements(
-                &self.layout.world,
+                &self.layout,
                 &self.projection,
                 empty_focus_rect,
                 overlay_chrome,
                 (output_geo.loc.x, output_geo.loc.y),
-                &chrome_classes,
+                &self.config.tiling,
             )
             .into_iter()
             .map(CustomRenderElements::SolidColor)

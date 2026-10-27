@@ -10,12 +10,12 @@ use tracing::{info, warn};
 use super::proc_root;
 use super::spawn::is_terminal_spawn;
 use crate::element::WindowElement;
+use crate::layout::{WindowClass, WindowMeta};
 use crate::state::{Backend, CrucibleState};
 
-/// Window kinds, pending placements and restore order (a field of [`super::PersistState`]).
+/// Pending placements and restore order (a field of [`super::PersistState`]).
 #[derive(Debug, Default)]
 pub(super) struct PlacementState {
-    pub(super) windows: HashMap<WindowId, WindowInfo>,
     pub(super) pending: HashMap<u32, Pending>,
     pub(super) placed: HashMap<PaneId, Vec<(WindowId, usize)>>,
 }
@@ -60,12 +60,6 @@ pub enum Target {
 pub(super) struct Pending {
     pub(super) target: Target,
     pub(super) since: Instant,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(super) struct WindowInfo {
-    pub(super) pid: Option<u32>,
-    pub(super) terminal: bool,
 }
 
 /// The key `has` accepts among `pid` itself and then its `ancestors` (parent first).
@@ -163,8 +157,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         // The class must be known before the first placement (every mapping path applies the
         // layout), so the window's first rect already honours terminal vs app.
-        let terminal = pid.is_some_and(|p| is_terminal_spawn(p, &self.persist.spawn.spawned));
-        let info = WindowInfo { pid, terminal };
+        let class = if pid.is_some_and(|p| is_terminal_spawn(p, &self.persist.spawn.spawned)) {
+            WindowClass::Terminal
+        } else {
+            WindowClass::App
+        };
+        let meta = WindowMeta { pid, class };
         match pending.map(|p| p.target) {
             Some(Target::Overlay) => self.map_overlay(element),
             Some(Target::WarmOverlay) => self.store_warm(element, pid),
@@ -173,7 +171,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 saved_index,
                 focused,
             }) => {
-                self.map_placed(element, pane, saved_index, focused, info);
+                self.map_placed(element, pane, saved_index, focused, meta);
             }
             Some(Target::Slot {
                 pane,
@@ -181,44 +179,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 focused,
                 saved_index,
             }) => {
-                self.map_slot(element, pane, index, focused, saved_index, info);
+                self.map_slot(element, pane, index, focused, saved_index, meta);
             }
             None => {
-                self.map_managed_window(element, Self::register_info(info));
+                self.map_managed_window(element, meta);
             }
-        }
-    }
-
-    /// An `on_open` hook recording `info` for the new window id before its first placement.
-    pub(super) fn register_info(info: WindowInfo) -> impl FnOnce(&mut Self, WindowId) {
-        move |this, id| {
-            this.persist.placement.windows.insert(id, info);
-        }
-    }
-
-    /// Every managed window classified as a CDE-spawned terminal.
-    pub(crate) fn terminal_window_ids(&self) -> std::collections::HashSet<WindowId> {
-        self.persist
-            .placement
-            .windows
-            .iter()
-            .filter(|(_, i)| i.terminal)
-            .map(|(id, _)| *id)
-            .collect()
-    }
-
-    /// The placement class of window `id`: a CDE-spawned terminal, else an app.
-    pub(crate) fn window_class(&self, id: WindowId) -> crate::layout::WindowClass {
-        if self
-            .persist
-            .placement
-            .windows
-            .get(&id)
-            .is_some_and(|i| i.terminal)
-        {
-            crate::layout::WindowClass::Terminal
-        } else {
-            crate::layout::WindowClass::App
         }
     }
 
@@ -228,7 +193,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         pane: PaneId,
         saved_index: usize,
         focused: bool,
-        info: WindowInfo,
+        meta: WindowMeta,
     ) -> WindowId {
         let live: Vec<WindowId> = self
             .layout
@@ -239,14 +204,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let placed = self.persist.placement.placed.entry(pane).or_default();
         placed.retain(|(w, _)| live.contains(w));
         let index = insert_index(placed.iter().map(|(_, i)| *i), saved_index);
-        match self.map_managed_window_at(element.clone(), pane, index, Self::register_info(info)) {
+        match self.map_managed_window_at(element.clone(), meta.clone(), pane, index) {
             Ok(id) => {
                 self.finish_placement(pane, id, Some(saved_index), focused);
                 id
             }
             Err(err) => {
                 warn!(%err, "restore placement failed; using the focused pane");
-                self.map_managed_window(element, Self::register_info(info))
+                self.map_managed_window(element, meta)
             }
         }
     }
@@ -287,17 +252,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
         index: usize,
         focused: bool,
         saved_index: Option<usize>,
-        info: WindowInfo,
+        meta: WindowMeta,
     ) -> WindowId {
         let Some(live_len) = self.layout.world.pane(pane).map(|p| p.windows().len()) else {
             warn!(?pane, "relaunch pane is gone; using the focused pane");
-            return self.map_managed_window(element, Self::register_info(info));
+            return self.map_managed_window(element, meta);
         };
         match self.map_managed_window_at(
             element.clone(),
+            meta.clone(),
             pane,
             slot_index(index, live_len),
-            Self::register_info(info),
         ) {
             Ok(id) => {
                 self.finish_placement(pane, id, saved_index, focused);
@@ -305,7 +270,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
             Err(err) => {
                 warn!(%err, "relaunch placement failed; using the focused pane");
-                self.map_managed_window(element, Self::register_info(info))
+                self.map_managed_window(element, meta)
             }
         }
     }
