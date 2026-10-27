@@ -133,7 +133,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let state = wl_pointer::ButtonState::from(evt.state());
 
         if wl_pointer::ButtonState::Pressed == state {
-            self.header.alt.button_press();
             if self.consume_header_press(button) {
                 return;
             }

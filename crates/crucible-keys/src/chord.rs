@@ -11,6 +11,7 @@
 //! |-----------------------|--------------------------------|-----------------------------------|
 //! | `Super+Return`        | `OpenLauncher`                 | program launcher (overlay)        |
 //! | `Super+comma`         | `OpenSettings`                 | settings overlay (`crucible keys`)|
+//! | `Super+B`             | `ToggleHeader`                 | show/hide the workspace header    |
 //! | `Super+Shift+Q`       | `Quit`                         | stop compositor                   |
 //! | `Super+W`             | `ClosePane`                    | `World::close_pane()`             |
 //! | `Super+H/J/K/L`       | `Focus(Left/Down/Up/Right)`    | `World::focus(dir)`               |
@@ -422,7 +423,10 @@ mod tests {
                         let is_new_verb = matches!(
                             new,
                             Some(
-                                Action::OpenPicker | Action::RenameWorkspace | Action::OpenSettings
+                                Action::OpenPicker
+                                    | Action::RenameWorkspace
+                                    | Action::OpenSettings
+                                    | Action::ToggleHeader
                             )
                         );
                         if is_new_verb {

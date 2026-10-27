@@ -294,8 +294,9 @@ pub enum HeaderMode {
     Off,
     /// Always shown; its height is reserved at the top of each output.
     Always,
-    /// Hidden until a bare Alt tap toggles it; drawn over the tiles without reflow (the default).
-    Alt,
+    /// Hidden until `toggle-header` (Super+B) shows it; while shown its height is reserved at the top
+    /// of each output (the default).
+    Toggle,
 }
 
 impl HeaderMode {
@@ -305,7 +306,7 @@ impl HeaderMode {
         match self {
             Self::Off => "off",
             Self::Always => "always",
-            Self::Alt => "alt",
+            Self::Toggle => "toggle",
         }
     }
 
@@ -315,7 +316,7 @@ impl HeaderMode {
         match name {
             "off" => Some(Self::Off),
             "always" => Some(Self::Always),
-            "alt" => Some(Self::Alt),
+            "toggle" => Some(Self::Toggle),
             _ => None,
         }
     }
@@ -342,7 +343,7 @@ pub struct HeaderConfig {
 impl Default for HeaderConfig {
     fn default() -> Self {
         Self {
-            mode: HeaderMode::Alt,
+            mode: HeaderMode::Toggle,
             font: DEFAULT_HEADER_FONT.to_string(),
             size: 14,
         }
@@ -874,7 +875,7 @@ fn parse_header(text: &str, node: &KdlNode) -> Result<HeaderConfig, ConfigError>
                     at,
                     node: node_name(child),
                     what: "argument".to_string(),
-                    message: format!("`{s}` is not one of off, always, alt"),
+                    message: format!("`{s}` is not one of off, always, toggle"),
                 })?;
             }
             "font" => {
@@ -1265,18 +1266,21 @@ binds {
         let d = Config::default().header;
         assert_eq!(
             (d.mode, d.size, d.font.as_str()),
-            (HeaderMode::Alt, 14, "DejaVu Sans")
+            (HeaderMode::Toggle, 14, "DejaVu Sans")
         );
         for (name, mode) in [
             ("off", HeaderMode::Off),
             ("always", HeaderMode::Always),
-            ("alt", HeaderMode::Alt),
+            ("toggle", HeaderMode::Toggle),
         ] {
             let c = parse(&format!("header {{\n mode \"{name}\"\n}}\n")).unwrap();
             assert_eq!(c.header.mode, mode);
         }
-        let err = parse("header {\n mode \"sometimes\"\n}\n").unwrap_err();
-        assert!(err.to_string().contains("off, always, alt"), "{err}");
+        // The old `alt` spelling is not an alias.
+        for bad in ["sometimes", "alt"] {
+            let err = parse(&format!("header {{\n mode \"{bad}\"\n}}\n")).unwrap_err();
+            assert!(err.to_string().contains("off, always, toggle"), "{err}");
+        }
     }
 
     #[test]

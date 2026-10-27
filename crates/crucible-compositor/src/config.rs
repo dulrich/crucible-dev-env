@@ -71,12 +71,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             // re-configured) with the new geometry instead of diffing to nothing.
             self.projection = crucible_layout::Projection::default();
         }
+        let mut hide_header = false;
         if config.header != self.config.header {
-            // The `always` reservation may have changed height: re-place every window.
+            // The reservation may have changed height: re-place every window.
             self.projection = crucible_layout::Projection::default();
-            if config.header.mode != crucible_config::HeaderMode::Alt {
-                self.header.visible = false;
-            }
+            hide_header = config.header.mode != crucible_config::HeaderMode::Toggle;
         }
         // Load lazily (also on the first apply, when the header equals the default): only when
         // the strip can ever show and the font spec differs from what is loaded.
@@ -89,6 +88,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         self.focus_follows_mouse = config.focus_follows_mouse;
         self.config = config;
+        if hide_header {
+            // Same path as `toggle-header` (resets the projection, re-applies the layout).
+            self.set_header_visible(false);
+        }
         self.apply_layout();
     }
 }

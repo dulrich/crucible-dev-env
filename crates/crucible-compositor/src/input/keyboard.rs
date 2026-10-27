@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use smithay::backend::input::{Event, InputBackend, KeyState, KeyboardKeyEvent};
-use smithay::input::keyboard::{FilterResult, Keysym};
+use smithay::input::keyboard::FilterResult;
 use smithay::utils::SERIAL_COUNTER;
 use tracing::debug;
 
@@ -87,14 +87,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 let keysym = handle.modified_sym();
                 let raw_keycode = keycode.raw();
                 debug!(?key_state, mods = ?modifiers, keysym = keysym.raw(), "key");
-
-                // Header bare-Alt tap detector: observes only (the event is still forwarded or
-                // resolved below exactly as before — Alt is never intercepted).
-                state.header_observe_key(
-                    matches!(keysym, Keysym::Alt_L | Keysym::Alt_R),
-                    matches!(key_state, KeyState::Pressed),
-                    modifiers.logo || modifiers.shift || modifiers.ctrl,
-                );
 
                 if let KeyState::Pressed = key_state {
                     // A press that matches a Super-chord is intercepted; record it (by physical

@@ -211,6 +211,7 @@ impl Default for Bindings {
         // ---- plain Super (note: focus h/j/k/l are lowercase-only, as before) ----
         bind(sup, &[Keysym::Return], Action::OpenLauncher);
         bind(sup, &[Keysym::comma], Action::OpenSettings);
+        bind(sup, &[Keysym::b, Keysym::B], Action::ToggleHeader);
         bind(sup, &[Keysym::w, Keysym::W], Action::ClosePane);
         bind(sup, &[Keysym::h], Action::Focus(Direction::Left));
         bind(sup, &[Keysym::j], Action::Focus(Direction::Down));
@@ -538,6 +539,7 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
         "open-picker" => nullary(Action::OpenPicker),
         "open-launcher" => nullary(Action::OpenLauncher),
         "open-settings" => nullary(Action::OpenSettings),
+        "toggle-header" => nullary(Action::ToggleHeader),
         "rename-workspace" => nullary(Action::RenameWorkspace),
         "focus" => unary(Action::Focus(direction(words.get(1))?)),
         "move" => unary(Action::Move(direction(words.get(1))?)),
@@ -692,6 +694,7 @@ mod tests {
             ("open-picker", Action::OpenPicker),
             ("open-launcher", Action::OpenLauncher),
             ("open-settings", Action::OpenSettings),
+            ("toggle-header", Action::ToggleHeader),
             ("rename-workspace", Action::RenameWorkspace),
             ("focus left", Action::Focus(Direction::Left)),
             ("move right", Action::Move(Direction::Right)),
@@ -804,6 +807,15 @@ mod tests {
     }
 
     #[test]
+    fn default_super_b_toggles_the_header() {
+        let b = Bindings::default();
+        for k in [Keysym::b, Keysym::B] {
+            assert_eq!(b.get(sup(), k), Some(&Action::ToggleHeader));
+        }
+        assert_eq!(Action::ToggleHeader.to_string(), "toggle-header");
+    }
+
+    #[test]
     fn default_return_chord_opens_the_launcher() {
         let b = Bindings::default();
         assert_eq!(b.get(sup(), Keysym::Return), Some(&Action::OpenLauncher));
@@ -855,6 +867,7 @@ mod tests {
             Action::CycleStack(-1),
             Action::MoveWindowToWorkspace(1),
             Action::OpenSettings,
+            Action::ToggleHeader,
             Action::Resize(Direction::Up),
         ] {
             let b = Bindings::with_overrides(&[pair("Super+F1", &action.to_string())]).unwrap();

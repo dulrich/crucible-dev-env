@@ -72,7 +72,7 @@ Presentation of the picker, launcher and settings overlays. Every child is optio
 
 ```kdl
 header {
-    mode "alt"
+    mode "toggle"
     font "DejaVu Sans"
     size 14
 }
@@ -80,11 +80,11 @@ header {
 
 A clickable workspace strip at the top of every output, listing that output's workspaces in stack order with the active one highlighted in the focus-ring accent. Every child is optional and may appear once.
 
-- `mode` — `"off"`, `"always"` or `"alt"` (default); any other value is a config error. `off`: no strip and no input effect. `always`: the strip is always shown and its height is reserved at the top of each output (tiles, rings and X11 placement all shrink by exactly that height). `alt`: the strip is hidden until you tap **Alt** on its own (press and release with no other key or mouse button in between), which toggles it; it is drawn over the tiles and never reflows them. Alt key events are still delivered to the focused app unchanged, so Alt chords in apps keep working; Alt held with another modifier (or any other key) is not a tap.
+- `mode` — `"off"`, `"always"` or `"toggle"` (default); any other value (including the old `"alt"`) is a config error. `off`: no strip and no input effect; `toggle-header` does nothing. `always`: the strip is always shown and its height is reserved at the top of each output (tiles, rings and X11 placement all shrink by exactly that height). `toggle`: the strip is hidden until the `toggle-header` action (default `Super+B`) shows it; while shown it reserves its height exactly like `always` (every window is re-configured to the reflowed rects), and `Super+B` again hides it and gives the space back.
 - `font` — a font file path (a value containing `/`) or a fontconfig family name resolved with `fc-match`. Default `"DejaVu Sans"`. If no font can be loaded the strip still draws its background and highlight, without labels (one warning is logged).
 - `size` — label size in pixels, an integer from 6 to 96; default 14. The strip height is the size plus padding.
 
-Clicking a workspace name focuses that output and switches it to that workspace (the press and its release are consumed by the strip, never sent to the window beneath). In `alt` mode any click on the strip hides it again. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
+Clicking a workspace name focuses that output and switches it to that workspace (the press and its release are consumed by the strip, never sent to the window beneath). A click never hides the strip; in `toggle` mode only `toggle-header` does. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
 
 ### `binds`
 
@@ -129,6 +129,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `open-picker` | Open the workspace picker (`crucible pick`) |
 | `open-launcher` | Open the program launcher (`crucible launch`) |
 | `open-settings` | Open the read-only settings overlay (`crucible keys`): the effective keybindings |
+| `toggle-header` | Show/hide the workspace header strip (`header { mode "toggle" }` only; a no-op in `always` and `off`) |
 | `rename-workspace` | Rename the active workspace (the picker in rename mode) |
 | `none` | Unbind the chord |
 
@@ -156,7 +157,7 @@ overlay {
     terminal-args "--window-padding-color=extend-always" "--window-padding-balance=true"
 }
 header {
-    mode "alt"
+    mode "toggle"
     font "DejaVu Sans"
     size 14
 }

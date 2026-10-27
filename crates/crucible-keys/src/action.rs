@@ -20,7 +20,7 @@ pub const DEFAULT_TERMINALS: &[&str] = &["foot", "alacritty", "kitty", "weston-t
 /// libinput `Ctrl+Alt+F<n>` chord independent of the leader).
 ///
 /// Produced by [`crate::chord::resolve`]. `Quit`, `RunTerminal`, `Run`, `OpenPicker`, `OpenLauncher`,
-/// `OpenSettings`, `RenameWorkspace` and `VtSwitch` are
+/// `OpenSettings`, `ToggleHeader`, `RenameWorkspace` and `VtSwitch` are
 /// compositor-level (spawn a process, stop the loop, open UI, or ask the backend to switch VTs); every
 /// other variant names a `crucible_layout::World` operation the compositor applies through its
 /// single mutation entry point.
@@ -94,6 +94,9 @@ pub enum Action {
     OpenLauncher,
     /// Open the read-only settings overlay (`crucible keys`). `Super+comma`.
     OpenSettings,
+    /// Show/hide the workspace header strip (`header { mode "toggle" }` only; a no-op otherwise).
+    /// `Super+B`.
+    ToggleHeader,
     /// Rename the active workspace (interactive prompt). `Super+Shift+R`. Implemented by WP-5.
     RenameWorkspace,
 
@@ -135,6 +138,7 @@ impl std::fmt::Display for Action {
             Self::OpenPicker => f.write_str("open-picker"),
             Self::OpenLauncher => f.write_str("open-launcher"),
             Self::OpenSettings => f.write_str("open-settings"),
+            Self::ToggleHeader => f.write_str("toggle-header"),
             Self::RenameWorkspace => f.write_str("rename-workspace"),
             Self::VtSwitch(n) => write!(f, "vt-switch {n}"),
         }

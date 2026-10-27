@@ -411,10 +411,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Outputs not yet bound to a model id, or with no geometry in the `Space`, are skipped — they
     /// contribute nothing to the projection.
     ///
-    /// In header `always` mode each rect has the strip's height removed from its top, so the
+    /// While the header strip is shown (`always`, or `toggle` while visible) each rect has its height removed from its top, so the
     /// projection, `pane_rect`, the empty-pane ring and X11 placement all agree.
     pub(crate) fn output_bindings(&self) -> Vec<(OutputId, Rect)> {
-        let reserved = crate::header::reserved_height(&self.config.header);
+        let reserved = crate::header::reserved_height(&self.config.header, self.header.visible);
         self.raw_output_rects()
             .into_iter()
             .map(|(id, rect)| (id, crate::header::shrink_top(rect, reserved)))

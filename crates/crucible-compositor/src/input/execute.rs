@@ -97,6 +97,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.open_launcher();
                 return;
             }
+            Action::ToggleHeader => {
+                self.toggle_header();
+                return;
+            }
             Action::OpenSettings => {
                 self.open_settings();
                 return;
@@ -200,6 +204,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutEr
         | Action::OpenPicker
         | Action::OpenLauncher
         | Action::OpenSettings
+        | Action::ToggleHeader
         | Action::RenameWorkspace
         | Action::CloseWorkspace
         | Action::MoveWorkspaceToOutput(_)
@@ -251,6 +256,7 @@ fn chord_closes_overlay(overlay_mapped: bool, action: &Action) -> bool {
                 | Action::RenameWorkspace
                 | Action::OpenLauncher
                 | Action::OpenSettings
+                | Action::ToggleHeader
                 | Action::VtSwitch(_)
         )
 }
@@ -278,6 +284,7 @@ mod tests {
             Action::RenameWorkspace,
             Action::OpenLauncher,
             Action::OpenSettings,
+            Action::ToggleHeader,
             Action::VtSwitch(2),
         ] {
             assert!(!chord_closes_overlay(true, &action), "{action}");

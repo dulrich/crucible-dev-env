@@ -1,18 +1,18 @@
 //! The workspace header strip (plan 06 WP-6): one strip per output listing that output's workspace
-//! stack, the active one highlighted; clickable, shown always / on a bare-Alt tap / never.
+//! stack, the active one highlighted; clickable, shown always / on a `toggle-header` / never.
 //!
 //! ## Layout
 //! The decision logic is **pure** and Smithay-free (top of this module): [`segment_rects`] maps
-//! name widths to segment rects, [`hit_test`] maps a point to a segment, [`AltTap`] detects a bare
-//! Alt tap, [`ConsumedButtons`] pairs a consumed press with its release, and [`reserved_height`] /
-//! [`shrink_top`] give the `always` mode's reflow. The compositor glue (segments from the live
+//! name widths to segment rects, [`hit_test`] maps a point to a segment, [`ConsumedButtons`] pairs a consumed press with its release, and [`reserved_height`] /
+//! [`shrink_top`] give the reflow while the strip is shown. The compositor glue (segments from the live
 //! model, render elements) is below.
 //!
 //! ## Modes
 //! - `always`: the strip's height is subtracted from the output rect handed to the projection
 //!   ([`CrucibleState::output_bindings`]), so tiles, rings and X11 placement all agree.
-//! - `alt`: hidden until a bare Alt tap toggles it; drawn over the tiles, never reflowing. The Alt
-//!   key events are **forwarded to clients unchanged** — the detector only observes.
+//! - `toggle`: hidden until the `toggle-header` action (`Super+B`) shows it; while shown it reflows
+//!   the tiles exactly like `always`. Every visibility change re-configures all windows
+//!   ([`CrucibleState::set_header_visible`]). Clicking a label never hides it.
 //! - `off`: no strip, no input effect.
 //!
 //! Strip geometry is in logical pixels and, like the rest of the chrome, drawn at scale 1.
@@ -59,10 +59,11 @@ pub fn strip_height(size: u32) -> i32 {
     i32::try_from(size).unwrap_or(i32::MAX / 4) + 2 * PAD_Y
 }
 
-/// The height `always` mode reserves at the top of each output; `0` for `off` and `alt`.
+/// The height reserved at the top of each output: the strip height while the strip is shown
+/// (`always`, or `toggle` while `visible`), else `0`.
 #[must_use]
-pub fn reserved_height(config: &HeaderConfig) -> i32 {
-    if config.mode == HeaderMode::Always {
+pub fn reserved_height(config: &HeaderConfig, visible: bool) -> i32 {
+    if is_shown(config.mode, visible) {
         strip_height(config.size)
     } else {
         0
@@ -76,13 +77,13 @@ pub fn shrink_top(rect: Rect, height: i32) -> Rect {
     Rect::new(rect.x, rect.y + h, rect.width, rect.height - h)
 }
 
-/// Whether the strip is drawn (and clickable) given the mode and the `alt` toggle.
+/// Whether the strip is drawn (and clickable) given the mode and the `toggle` state.
 #[must_use]
-pub fn is_shown(mode: HeaderMode, alt_visible: bool) -> bool {
+pub fn is_shown(mode: HeaderMode, toggle_visible: bool) -> bool {
     match mode {
         HeaderMode::Off => false,
         HeaderMode::Always => true,
-        HeaderMode::Alt => alt_visible,
+        HeaderMode::Toggle => toggle_visible,
     }
 }
 
@@ -138,35 +139,13 @@ pub fn hit_test(segments: &[Segment], x: i32, y: i32) -> Option<usize> {
         .map(|s| s.index)
 }
 
-/// Detects a bare Alt tap: Alt pressed then released with no other key press and no button press in
-/// between. Pure state machine; it only observes, so Alt is always forwarded to clients.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct AltTap {
-    armed: bool,
-}
-
-impl AltTap {
-    /// Observes one key event; returns `true` when it completes a bare Alt tap.
-    /// `other_mods_held` is whether Super/Shift/Ctrl was already down when Alt was pressed (such a
-    /// press is a chord, not a bare Alt).
-    pub fn key(&mut self, is_alt: bool, pressed: bool, other_mods_held: bool) -> bool {
-        match (is_alt, pressed) {
-            (true, true) => {
-                self.armed = !other_mods_held;
-                false
-            }
-            (true, false) => std::mem::take(&mut self.armed),
-            (false, true) => {
-                self.armed = false;
-                false
-            }
-            (false, false) => false,
-        }
-    }
-
-    /// A pointer button press voids a pending tap.
-    pub fn button_press(&mut self) {
-        self.armed = false;
+/// The visibility after a `toggle-header`: flips in `toggle` mode, unchanged otherwise.
+#[must_use]
+pub fn toggled_visible(mode: HeaderMode, visible: bool) -> bool {
+    if mode == HeaderMode::Toggle {
+        !visible
+    } else {
+        visible
     }
 }
 
@@ -192,10 +171,8 @@ impl ConsumedButtons {
 /// Per-session header state, held on [`CrucibleState`].
 #[derive(Debug, Default)]
 pub struct HeaderState {
-    /// The `alt`-mode toggle: whether the strip is currently shown.
+    /// The `toggle`-mode state: whether the strip is currently shown.
     pub visible: bool,
-    /// Bare-Alt detector.
-    pub alt: AltTap,
     /// Buttons whose press the strip consumed.
     pub consumed: ConsumedButtons,
     /// The font spec the text renderer was last loaded for.
@@ -295,18 +272,25 @@ impl<B: Backend + 'static> CrucibleState<B> {
             })
     }
 
-    /// Feeds one key event to the bare-Alt detector (`alt` mode only); toggles the strip on a tap.
-    pub(crate) fn header_observe_key(&mut self, is_alt: bool, pressed: bool, others: bool) {
-        if self.config.header.mode != HeaderMode::Alt {
+    /// Sets the `toggle`-mode visibility. On a change the applied projection is forgotten and the
+    /// layout re-applied so every window is re-configured to the reflowed rects.
+    pub(crate) fn set_header_visible(&mut self, visible: bool) {
+        if self.header.visible == visible {
             return;
         }
-        if self.header.alt.key(is_alt, pressed, others) {
-            self.header.visible = !self.header.visible;
-        }
+        self.header.visible = visible;
+        self.projection = crucible_layout::Projection::default();
+        self.apply_layout();
+    }
+
+    /// `toggle-header`: flips the strip in `toggle` mode; a no-op in `always` and `off`.
+    pub(crate) fn toggle_header(&mut self) {
+        let next = toggled_visible(self.config.header.mode, self.header.visible);
+        self.set_header_visible(next);
     }
 
     /// Handles a consumed press on the strip: focus the output and switch to the clicked
-    /// workspace; in `alt` mode the strip hides again.
+    /// workspace. The strip stays open.
     pub(crate) fn header_click(&mut self, output: OutputId, workspace: Option<WorkspaceId>) {
         if let Some(ws) = workspace {
             let target = self
@@ -320,9 +304,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
             if let Err(err) = self.with_model(|world| world.switch_workspace(ws)) {
                 tracing::warn!(%err, "header click: workspace switch failed");
             }
-        }
-        if self.config.header.mode == HeaderMode::Alt {
-            self.header.visible = false;
         }
     }
 }
@@ -410,29 +391,6 @@ mod tests {
     }
 
     #[test]
-    fn bare_alt_tap_toggles_and_other_input_voids_it() {
-        let mut t = AltTap::default();
-        assert!(!t.key(true, true, false));
-        assert!(t.key(true, false, false)); // tap
-        assert!(!t.key(true, false, false)); // no stray second toggle
-
-        // Another key between voids it (Alt+Tab).
-        t.key(true, true, false);
-        t.key(false, true, false);
-        t.key(false, false, false);
-        assert!(!t.key(true, false, false));
-
-        // A button press between voids it.
-        t.key(true, true, false);
-        t.button_press();
-        assert!(!t.key(true, false, false));
-
-        // Alt pressed while another modifier is held is a chord, not a bare Alt.
-        t.key(true, true, true);
-        assert!(!t.key(true, false, false));
-    }
-
-    #[test]
     fn consumed_press_swallows_exactly_its_release() {
         const LEFT: u32 = 0x110;
         const RIGHT: u32 = 0x111;
@@ -447,20 +405,21 @@ mod tests {
     }
 
     #[test]
-    fn always_reserves_exactly_the_strip_height() {
+    fn reservation_by_mode_and_visibility() {
         let mut cfg = HeaderConfig::default();
         let out = Rect::new(0, 0, 1920, 1080);
-        for mode in [HeaderMode::Off, HeaderMode::Alt] {
-            cfg.mode = mode;
-            assert_eq!(shrink_top(out, reserved_height(&cfg)), out);
-        }
-        cfg.mode = HeaderMode::Always;
         let h = strip_height(cfg.size);
         assert_eq!(h, 14 + 2 * PAD_Y);
-        assert_eq!(
-            shrink_top(out, reserved_height(&cfg)),
-            Rect::new(0, h, 1920, 1080 - h)
-        );
+        let shrunk = Rect::new(0, h, 1920, 1080 - h);
+        for visible in [false, true] {
+            cfg.mode = HeaderMode::Off;
+            assert_eq!(shrink_top(out, reserved_height(&cfg, visible)), out);
+            cfg.mode = HeaderMode::Always;
+            assert_eq!(shrink_top(out, reserved_height(&cfg, visible)), shrunk);
+        }
+        cfg.mode = HeaderMode::Toggle;
+        assert_eq!(shrink_top(out, reserved_height(&cfg, false)), out);
+        assert_eq!(shrink_top(out, reserved_height(&cfg, true)), shrunk);
         // Never swallows more than half the output.
         assert_eq!(shrink_top(Rect::new(0, 0, 10, 20), 500).height, 10);
     }
@@ -469,7 +428,17 @@ mod tests {
     fn shown_by_mode() {
         assert!(!is_shown(HeaderMode::Off, true));
         assert!(is_shown(HeaderMode::Always, false));
-        assert!(is_shown(HeaderMode::Alt, true));
-        assert!(!is_shown(HeaderMode::Alt, false));
+        assert!(is_shown(HeaderMode::Toggle, true));
+        assert!(!is_shown(HeaderMode::Toggle, false));
+    }
+
+    #[test]
+    fn toggle_header_flips_only_in_toggle_mode() {
+        assert!(toggled_visible(HeaderMode::Toggle, false));
+        assert!(!toggled_visible(HeaderMode::Toggle, true));
+        for mode in [HeaderMode::Off, HeaderMode::Always] {
+            assert!(!toggled_visible(mode, false));
+            assert!(toggled_visible(mode, true));
+        }
     }
 }
