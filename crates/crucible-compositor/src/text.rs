@@ -207,6 +207,13 @@ impl TextRenderer {
         self.font.is_some()
     }
 
+    /// Whether the loaded font carries a glyph for `c` (`false` when text is disabled).
+    pub fn has_glyph(&self, c: char) -> bool {
+        self.font
+            .as_ref()
+            .is_some_and(|f| f.lookup_glyph_index(c) != 0)
+    }
+
     /// Width in pixels `text` lays out to at `px` (no rasterization); `None` when text is
     /// disabled. Used by the WP-6 header to size segments and hit-test clicks.
     pub fn measure(&self, text: &str, px: u32) -> Option<i32> {

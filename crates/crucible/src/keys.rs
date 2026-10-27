@@ -1,10 +1,10 @@
-//! `crucible keys` — the read-only settings overlay: lists the compositor's effective keybindings
-//! (fetched over the `bindings` IPC request). The state machine and rendering are pure; only
+//! `crucible keys` — the settings overlay: lists the compositor's effective keybindings
+//! (fetched over the `bindings` IPC request); Enter runs the selected one (`exec`). The state machine and rendering are pure; only
 //! [`run`] touches the terminal, the environment and the socket.
 
 use std::io::{Read, Write};
 
-use crucible_compositor::ipc::{Response, SOCKET_ENV, parse_bindings};
+use crucible_compositor::ipc::{Request, Response, SOCKET_ENV, parse_bindings};
 
 use crate::client::{Client, socket_from_env};
 use crate::fuzzy;
@@ -13,10 +13,10 @@ use crate::style::Style;
 use crate::tty::{RawGuard, window_size};
 
 /// Usage text for `crucible keys --help`.
-pub const USAGE: &str = "usage: crucible keys\n\nThe CDE settings overlay (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Comma).\nLists the effective keybindings, read-only. Type to filter; Up/Down or Ctrl+P/Ctrl+N move;\nEsc or Ctrl+C closes. Edit binds in config.kdl (docs/config.md).\n";
+pub const USAGE: &str = "usage: crucible keys\n\nThe CDE settings overlay (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Comma).\nLists the effective keybindings. Type to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter runs the\nselected binding; Esc or Ctrl+C closes. Edit binds in config.kdl (docs/config.md).\n";
 
 /// Status line shown under the rows.
-const STATUS: &str = "read-only — edit binds in config.kdl (docs/config.md)";
+const STATUS: &str = "Enter runs the selected binding — edit binds in config.kdl (docs/config.md)";
 
 /// Parses the reply to `bindings` into `(chord, action)` rows.
 ///
@@ -38,6 +38,7 @@ pub struct Keys {
     rows: Vec<(String, String)>,
     query: String,
     selected: usize,
+    status: Option<String>,
 }
 
 impl Keys {
@@ -48,6 +49,7 @@ impl Keys {
             rows,
             query: String::new(),
             selected: 0,
+            status: None,
         }
     }
 
@@ -59,12 +61,18 @@ impl Keys {
         fuzzy::filter(&self.query, &refs)
     }
 
-    /// Applies one key. Enter does nothing: the overlay is read-only.
+    /// Applies one key. Enter sends the selected row's action for execution.
     pub fn step(&mut self, key: Key) -> Outcome {
         match key {
+            Key::Enter | Key::AltEnter => {
+                if let Some(&idx) = self.matches().get(self.selected) {
+                    self.status = None;
+                    return Outcome::Send(Request::Exec(self.rows[idx].1.clone()));
+                }
+            }
             Key::Esc | Key::CtrlC => return Outcome::Exit,
             Key::CtrlD if self.query.is_empty() => return Outcome::Exit,
-            Key::CtrlD | Key::Enter | Key::AltEnter => {}
+            Key::CtrlD => {}
             Key::Up | Key::CtrlP => self.selected = self.selected.saturating_sub(1),
             Key::Down | Key::CtrlN => {
                 let last = self.matches().len().saturating_sub(1);
@@ -80,6 +88,17 @@ impl Keys {
             }
         }
         Outcome::Continue
+    }
+
+    /// Applies the compositor's answer to the last [`Outcome::Send`].
+    pub fn on_response(&mut self, resp: &Response) -> Outcome {
+        match resp {
+            Response::Ok(_) => Outcome::Exit,
+            Response::Err(reason) => {
+                self.status = Some(reason.clone());
+                Outcome::Continue
+            }
+        }
     }
 
     /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings).
@@ -118,7 +137,7 @@ impl Keys {
         while lines.len() < height - 1 {
             lines.push(String::new());
         }
-        lines.push(fit(STATUS, width));
+        lines.push(fit(self.status.as_deref().unwrap_or(STATUS), width));
         let mut out = style.frame_start();
         out.push_str(&lines.join("\r\n"));
         out
@@ -161,12 +180,12 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("crucible keys: stdin is not a terminal");
         return 1;
     };
-    let code = event_loop(&mut keys);
+    let code = event_loop(&mut keys, &mut client);
     drop(guard);
     code
 }
 
-fn event_loop(keys: &mut Keys) -> i32 {
+fn event_loop(keys: &mut Keys, client: &mut Client) -> i32 {
     let style = Style::from_env();
     let mut pending: Vec<u8> = Vec::new();
     let mut chunk = [0u8; 256];
@@ -185,7 +204,17 @@ fn event_loop(keys: &mut Keys) -> i32 {
         };
         pending.extend_from_slice(&chunk[..n]);
         for key in decode_keys(&mut pending) {
-            if keys.step(key) == Outcome::Exit {
+            let mut outcome = keys.step(key);
+            if let Outcome::Send(req) = &outcome {
+                outcome = match client.request(&req.to_line()) {
+                    Ok(line) => match Response::parse(&line) {
+                        Some(resp) => keys.on_response(&resp),
+                        None => keys.on_response(&Response::Err(format!("bad response {line:?}"))),
+                    },
+                    Err(e) => keys.on_response(&Response::Err(format!("compositor error: {e}"))),
+                };
+            }
+            if outcome == Outcome::Exit {
                 return 0;
             }
         }
@@ -235,15 +264,43 @@ mod tests {
     }
 
     #[test]
-    fn enter_is_a_no_op_and_esc_exits() {
+    fn enter_sends_exec_for_the_selected_row_and_esc_exits() {
         let mut k = Keys::new(rows());
-        assert_eq!(k.step(Key::Enter), Outcome::Continue);
-        assert_eq!(k.selected, 0);
+        assert_eq!(
+            k.step(Key::Enter),
+            Outcome::Send(Request::Exec("open-launcher".into()))
+        );
+        k.step(Key::Down);
+        assert_eq!(
+            k.step(Key::AltEnter),
+            Outcome::Send(Request::Exec("quit".into()))
+        );
+        assert_eq!(k.selected, 1);
         assert_eq!(k.step(Key::Esc), Outcome::Exit);
         assert_eq!(k.step(Key::CtrlC), Outcome::Exit);
         assert_eq!(k.step(Key::CtrlD), Outcome::Exit);
         k.step(Key::Char('x'));
         assert_eq!(k.step(Key::CtrlD), Outcome::Continue);
+    }
+
+    #[test]
+    fn enter_with_no_match_does_nothing() {
+        let mut k = Keys::new(rows());
+        for c in "zzzz".chars() {
+            k.step(Key::Char(c));
+        }
+        assert_eq!(k.step(Key::Enter), Outcome::Continue);
+    }
+
+    #[test]
+    fn responses_exit_on_ok_and_stay_open_with_status_on_err() {
+        let mut k = Keys::new(rows());
+        assert_eq!(
+            k.on_response(&Response::Err("boom".into())),
+            Outcome::Continue
+        );
+        assert!(k.render(80, 10).contains("boom"));
+        assert_eq!(k.on_response(&Response::Ok(String::new())), Outcome::Exit);
     }
 
     #[test]
@@ -265,7 +322,7 @@ mod tests {
         let out = k.render(80, 10);
         assert!(out.contains("keys> _"));
         assert!(out.contains("Super+W        close-pane"), "{out:?}");
-        assert!(out.contains("read-only"));
+        assert!(out.contains("Enter runs the selected binding"));
     }
 
     #[test]

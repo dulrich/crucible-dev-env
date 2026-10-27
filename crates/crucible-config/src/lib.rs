@@ -338,6 +338,8 @@ pub struct HeaderConfig {
     pub font: String,
     /// Font size in logical pixels, within [`HEADER_SIZE_MIN`]..=[`HEADER_SIZE_MAX`].
     pub size: u32,
+    /// Whether labels of slot-pinned workspaces carry a slot badge (`slots`).
+    pub slots: bool,
 }
 
 impl Default for HeaderConfig {
@@ -346,6 +348,7 @@ impl Default for HeaderConfig {
             mode: HeaderMode::Toggle,
             font: DEFAULT_HEADER_FONT.to_string(),
             size: 14,
+            slots: false,
         }
     }
 }
@@ -908,6 +911,11 @@ fn parse_header(text: &str, node: &KdlNode) -> Result<HeaderConfig, ConfigError>
                         message: format!("{n} is outside {HEADER_SIZE_MIN}..={HEADER_SIZE_MAX}"),
                     })?;
             }
+            "slots" => {
+                out.slots = single_arg(text, child, "a #true or #false")?
+                    .as_bool()
+                    .ok_or_else(|| wrong_type(text, child, "argument".into(), "#true or #false"))?;
+            }
             other => {
                 return Err(ConfigError::UnknownNode {
                     at,
@@ -1304,6 +1312,15 @@ binds {
             let err = parse(&format!("header {{\n mode \"{bad}\"\n}}\n")).unwrap_err();
             assert!(err.to_string().contains("off, always, toggle"), "{err}");
         }
+    }
+
+    #[test]
+    fn header_slots_setting() {
+        assert!(!Config::default().header.slots);
+        assert!(parse("header {\n slots #true\n}\n").unwrap().header.slots);
+        assert!(!parse("header {\n slots #false\n}\n").unwrap().header.slots);
+        let err = parse("header {\n slots \"yes\"\n}\n").unwrap_err();
+        assert!(matches!(err, ConfigError::WrongType { .. }), "{err:?}");
     }
 
     #[test]

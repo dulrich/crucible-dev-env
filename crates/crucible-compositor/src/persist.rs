@@ -2152,6 +2152,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     Err(reason) => Response::Err(reason),
                 };
             }
+            Request::Exec(text) => {
+                return match crucible_keys::bindings::parse_action_text(&text) {
+                    Err(e) => Response::Err(e.to_string()),
+                    Ok(None) => Response::Err("`none` is not a runnable action".to_string()),
+                    Ok(Some(action)) => {
+                        self.close_mapped_overlay();
+                        self.handle_key_action(action);
+                        Response::Ok(String::new())
+                    }
+                };
+            }
             Request::RunInTerminal(cmd) => {
                 return match self.run_in_terminal_checked(&cmd) {
                     Ok(_) => Response::Ok(String::new()),

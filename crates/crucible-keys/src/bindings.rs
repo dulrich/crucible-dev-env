@@ -461,6 +461,15 @@ fn parse_chord(text: &str) -> Result<Chord, BindError> {
     Ok(Chord { modifiers, keysym })
 }
 
+/// Parses a bare action string (the `binds` action grammar); `Ok(None)` is `none`. Errors carry
+/// an empty chord.
+///
+/// # Errors
+/// [`BindError::BadAction`] for an unknown or malformed action.
+pub fn parse_action_text(text: &str) -> Result<Option<Action>, BindError> {
+    parse_action("", text)
+}
+
 /// Parses an action string; `Ok(None)` is `none` (unbind).
 fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
     let bad = |reason: String| BindError::BadAction {
@@ -560,6 +569,15 @@ fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_text_round_trips_through_display() {
+        let a = parse_action_text("focus left").unwrap().unwrap();
+        assert_eq!(a.to_string(), "focus left");
+        assert_eq!(parse_action_text(&a.to_string()).unwrap(), Some(a));
+        assert_eq!(parse_action_text("none").unwrap(), None);
+        assert!(parse_action_text("bogus").is_err());
+    }
 
     fn pair(c: &str, a: &str) -> (String, String) {
         (c.to_string(), a.to_string())

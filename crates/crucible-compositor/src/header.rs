@@ -198,6 +198,20 @@ pub struct HeaderLayout {
     pub segments: Vec<Segment>,
 }
 
+/// Super-key glyph (place of interest sign) used in slot badges.
+const SUPER_GLYPH: char = '\u{2318}';
+
+/// The label for a workspace: `name`, prefixed with its slot badge when pinned to `slot`.
+/// The badge is the Super glyph plus the digit (`⌘3 name`), or `S-3 name` when the header font
+/// has no such glyph. `None` slot leaves the name unchanged.
+fn badge_label(name: &str, slot: Option<u8>, glyph: bool) -> String {
+    match slot {
+        None => name.to_string(),
+        Some(n) if glyph => format!("{SUPER_GLYPH}{n} {name}"),
+        Some(n) => format!("S-{n} {name}"),
+    }
+}
+
 fn phys(r: Rect, origin: (i32, i32)) -> Rectangle<i32, Physical> {
     Rectangle::new(
         (r.x - origin.0, r.y - origin.1).into(),
@@ -228,6 +242,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         let size = self.config.header.size;
         let height = strip_height(size);
+        let badges = self.config.header.slots;
+        let glyph = badges && self.header_text.has_glyph(SUPER_GLYPH);
         self.raw_output_rects()
             .into_iter()
             .filter_map(|(id, rect)| {
@@ -235,7 +251,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 let strip = strip_rect(rect, height);
                 let (mut names, mut workspaces) = (Vec::new(), Vec::new());
                 for ws in &output.workspaces {
-                    names.push(self.layout.world.workspace(*ws)?.name.clone());
+                    let name = &self.layout.world.workspace(*ws)?.name;
+                    let slot = if badges {
+                        self.persist.slots.slot_of(name)
+                    } else {
+                        None
+                    };
+                    names.push(badge_label(name, slot, glyph));
                     workspaces.push(*ws);
                 }
                 let widths: Vec<i32> = names
@@ -366,6 +388,14 @@ mod tests {
 
     fn strip() -> Rect {
         Rect::new(100, 0, 300, 24)
+    }
+
+    #[test]
+    fn badge_labels() {
+        assert_eq!(badge_label("work", None, true), "work");
+        assert_eq!(badge_label("work", None, false), "work");
+        assert_eq!(badge_label("work", Some(3), true), "\u{2318}3 work");
+        assert_eq!(badge_label("work", Some(3), false), "S-3 work");
     }
 
     #[test]

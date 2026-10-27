@@ -53,6 +53,12 @@ impl Slots {
         self.pins.get(&n).map(String::as_str)
     }
 
+    /// The lowest slot pinned to `name`, if any.
+    #[must_use]
+    pub fn slot_of(&self, name: &str) -> Option<u8> {
+        self.pins.iter().find(|(_, v)| *v == name).map(|(k, _)| *k)
+    }
+
     /// Pins `name` to slot `n`, overwriting any previous pin. The same name may sit in several
     /// slots. Slots above 9 are ignored (returns `false`).
     pub fn pin(&mut self, n: u8, name: &str) -> bool {
@@ -203,6 +209,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cde-slots-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn slot_of_finds_the_lowest_pinned_slot() {
+        let mut s = Slots::new();
+        s.pin(7, "a");
+        s.pin(2, "a");
+        s.pin(4, "b");
+        assert_eq!(s.slot_of("a"), Some(2));
+        assert_eq!(s.slot_of("b"), Some(4));
+        assert_eq!(s.slot_of("c"), None);
     }
 
     #[test]

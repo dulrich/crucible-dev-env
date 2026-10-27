@@ -33,7 +33,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ///
     /// Overlays are modal for chords as for clicks: a chord pressed while an overlay is mapped closes
     /// it first, then runs (see [`chord_closes_overlay`]).
-    pub(super) fn handle_key_action(&mut self, action: Action) {
+    pub(crate) fn handle_key_action(&mut self, action: Action) {
         if chord_closes_overlay(self.mapped_overlay().is_some(), &action) {
             self.close_mapped_overlay();
         }

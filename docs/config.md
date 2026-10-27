@@ -1,6 +1,6 @@
 # CDE configuration
 
-CDE reads one KDL (v2) file: `$XDG_CONFIG_HOME/cde/config.kdl`, falling back to `$HOME/.config/cde/config.kdl`. A missing file means the built-in defaults, which are CDE's behaviour with no config. An invalid file is logged at startup as an error with its line and column, and CDE then runs on the defaults. Every key is optional.
+CDE reads one KDL (v2) file: `$XDG_CONFIG_HOME/cde/config.kdl`, falling back to `$HOME/.config/cde/config.kdl`. A missing file means the built-in defaults, which are CDE's behaviour with no config. An invalid file is logged at startup as an error with its line and column, and CDE then runs on the defaults. Every key is optional. KDL v2 comments are valid: `//` line comments, `/* */` block comments, and `/-` to comment out a whole node.
 
 Reload: WP-5 reloads on file change; until then restart.
 
@@ -85,6 +85,7 @@ header {
     mode "toggle"
     font "DejaVu Sans"
     size 14
+    slots #false
 }
 ```
 
@@ -93,6 +94,7 @@ A clickable workspace strip at the top of every output, listing that output's wo
 - `mode` — `"off"`, `"always"` or `"toggle"` (default); any other value (including the old `"alt"`) is a config error. `off`: no strip and no input effect; `toggle-header` does nothing. `always`: the strip is always shown and its height is reserved at the top of each output (tiles, rings and X11 placement all shrink by exactly that height). `toggle`: the strip is hidden until the `toggle-header` action (default `Super+B`) shows it; while shown it reserves its height exactly like `always` (every window is re-configured to the reflowed rects), and `Super+B` again hides it and gives the space back.
 - `font` — a font file path (a value containing `/`) or a fontconfig family name resolved with `fc-match`. Default `"DejaVu Sans"`. If no font can be loaded the strip still draws its background and highlight, without labels (one warning is logged).
 - `size` — label size in pixels, an integer from 6 to 96; default 14. The strip height is the size plus padding.
+- `slots` — `#true` or `#false` (default `#false`). When on, the label of a workspace pinned to a slot shows the slot digit with a Super glyph (`⌘` + digit, e.g. `⌘3 name`); if the header font lacks the glyph the badge falls back to `S-3 name`. Unpinned labels are unchanged.
 
 Clicking a workspace name focuses that output and switches it to that workspace (the press and its release are consumed by the strip, never sent to the window beneath). A click never hides the strip; in `toggle` mode only `toggle-header` does. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
 
@@ -139,7 +141,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `pin-slot <n>` | Pin the active workspace to slot `n` (0-9); pins persist in `$XDG_STATE_HOME/cde/slots.kdl` |
 | `open-picker` | Open the workspace picker (`crucible pick`) |
 | `open-launcher` | Open the program launcher (`crucible launch`) |
-| `open-settings` | Open the read-only settings overlay (`crucible keys`): the effective keybindings |
+| `open-settings` | Open the settings overlay (`crucible keys`): the effective keybindings; Enter runs the selected binding |
 | `toggle-header` | Show/hide the workspace header strip (`header { mode "toggle" }` only; a no-op in `always` and `off`) |
 | `rename-workspace` | Rename the active workspace (the picker in rename mode) |
 | `none` | Unbind the chord |

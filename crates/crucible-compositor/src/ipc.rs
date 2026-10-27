@@ -121,6 +121,8 @@ pub enum Request {
     Save,
     /// `run <command>` — run a shell command line (`/bin/sh -c 'exec <command>'`) into the focused pane.
     Run(String),
+    /// `exec <action>` — run a keybinding action text (the `binds` grammar) as if its chord was pressed.
+    Exec(String),
     /// `run-in-terminal <command>` — run a shell command line in a new terminal (`crucible resume --now`).
     RunInTerminal(String),
     /// `relaunch` — swap the calling placeholder window (found by peer PID) for its app.
@@ -158,6 +160,7 @@ impl Request {
             "new" => need(arg).map(Request::New),
             "rename" => need(arg).map(Request::Rename),
             "run" => need(arg).map(Request::Run),
+            "exec" => need(arg).map(Request::Exec),
             "run-in-terminal" => need(arg).map(Request::RunInTerminal),
             other => Err(format!("unknown request {other:?}")),
         }
@@ -177,6 +180,7 @@ impl Request {
             Request::New(n) => format!("new {}", encode_field(n)),
             Request::Rename(n) => format!("rename {}", encode_field(n)),
             Request::Run(c) => format!("run {}", encode_field(c)),
+            Request::Exec(a) => format!("exec {}", encode_field(a)),
             Request::RunInTerminal(c) => format!("run-in-terminal {}", encode_field(c)),
         }
     }
@@ -510,6 +514,7 @@ mod tests {
             Request::Rename("r\r".into()),
             Request::Run("sh -c 'echo 100%: a\tb'".into()),
             Request::RunInTerminal("htop -d 5: 100%".into()),
+            Request::Exec("split-right".into()),
         ];
         for r in reqs {
             assert_eq!(Request::parse(&r.to_line()), Ok(r.clone()));
