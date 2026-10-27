@@ -72,7 +72,9 @@ run -- --winit`. Logging verbosity is controlled by `RUST_LOG` (e.g. `RUST_LOG=d
 
 Focus follows the mouse by default: hovering a window focuses it, like clicking it. Turn it off with
 `focus-follows-mouse #false` in `~/.config/cde/config.kdl`; see [`docs/config.md`](docs/config.md) for the
-full config schema (terminal, tiling (per-class gap and focus ring; the old `gaps` node was removed), picker roots, rebinding chords).
+full config schema (terminal, tiling (per-class gap and focus ring; the old `gaps` node was removed), picker roots, the `header` workspace strip, rebinding chords).
+
+**Workspace header.** Each output can show a clickable strip of its workspace names (the active one highlighted). `header { mode "alt" }` (the default) hides it until you tap **Alt** on its own (Alt pressed and released with no other key or button between; Alt is still passed to apps), `mode "always"` keeps it shown and reserves its height, `mode "off"` disables it. Click a name to switch to that workspace; see `docs/config.md`.
 
 Once inside, press **`Super+Shift+Return`** to spawn your first terminal, then **`Super+\`** to split. See
 the full keymap below.

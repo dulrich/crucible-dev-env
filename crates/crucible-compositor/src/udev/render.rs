@@ -185,6 +185,9 @@ impl CrucibleState<UdevData> {
         let empty_focus_rect = self.focused_empty_pane_rect();
         let overlay_chrome = self.overlay_chrome();
         let chrome_classes = self.chrome_classes();
+        let header_layouts = self.header_layouts();
+        let header_size = self.config.header.size;
+        let header_output = crate::layout::model_output_id(&output);
 
         // Select a renderer: same-GPU is a single renderer, cross-GPU needs the scanout format.
         let format = self.backend_data.backends[&node].surfaces[&crtc]
@@ -214,6 +217,19 @@ impl CrucibleState<UdevData> {
             .into_iter()
             .map(CustomRenderElements::SolidColor)
             .collect();
+
+        // Header strip (labels, highlight, background) in front of the chrome. `header_text` is a
+        // disjoint field from the `backend_data` the renderer borrows.
+        let mut header_elements = crate::header::build_header_elements(
+            &header_layouts,
+            header_output,
+            (output_geo.loc.x, output_geo.loc.y),
+            header_size,
+            &mut self.header_text,
+            &mut renderer,
+        );
+        header_elements.append(&mut chrome);
+        chrome = header_elements;
 
         // Cursor element, drawn only on the output the pointer is over (on top of chrome).
         if output_geo.to_f64().contains(pointer_location) {

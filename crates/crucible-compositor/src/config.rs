@@ -71,6 +71,22 @@ impl<B: Backend + 'static> CrucibleState<B> {
             // re-configured) with the new geometry instead of diffing to nothing.
             self.projection = crucible_layout::Projection::default();
         }
+        if config.header != self.config.header {
+            // The `always` reservation may have changed height: re-place every window.
+            self.projection = crucible_layout::Projection::default();
+            if config.header.mode != crucible_config::HeaderMode::Alt {
+                self.header.visible = false;
+            }
+        }
+        // Load lazily (also on the first apply, when the header equals the default): only when
+        // the strip can ever show and the font spec differs from what is loaded.
+        if config.header.mode != crucible_config::HeaderMode::Off
+            && self.header.font_loaded.as_deref() != Some(config.header.font.as_str())
+        {
+            self.header_text =
+                crate::text::TextRenderer::load(config.header.font_path(), &config.header.font);
+            self.header.font_loaded = Some(config.header.font.clone());
+        }
         self.focus_follows_mouse = config.focus_follows_mouse;
         self.config = config;
         self.apply_layout();

@@ -1,0 +1,475 @@
+//! The workspace header strip (plan 06 WP-6): one strip per output listing that output's workspace
+//! stack, the active one highlighted; clickable, shown always / on a bare-Alt tap / never.
+//!
+//! ## Layout
+//! The decision logic is **pure** and Smithay-free (top of this module): [`segment_rects`] maps
+//! name widths to segment rects, [`hit_test`] maps a point to a segment, [`AltTap`] detects a bare
+//! Alt tap, [`ConsumedButtons`] pairs a consumed press with its release, and [`reserved_height`] /
+//! [`shrink_top`] give the `always` mode's reflow. The compositor glue (segments from the live
+//! model, render elements) is below.
+//!
+//! ## Modes
+//! - `always`: the strip's height is subtracted from the output rect handed to the projection
+//!   ([`CrucibleState::output_bindings`]), so tiles, rings and X11 placement all agree.
+//! - `alt`: hidden until a bare Alt tap toggles it; drawn over the tiles, never reflowing. The Alt
+//!   key events are **forwarded to clients unchanged** — the detector only observes.
+//! - `off`: no strip, no input effect.
+//!
+//! Strip geometry is in logical pixels and, like the rest of the chrome, drawn at scale 1.
+
+use std::collections::BTreeSet;
+
+use crucible_config::{HeaderConfig, HeaderMode};
+use crucible_layout::{OutputId, Rect, WorkspaceId};
+use smithay::{
+    backend::renderer::{
+        ImportAll, ImportMem, Renderer,
+        element::{Id, Kind, solid::SolidColorRenderElement},
+        utils::CommitCounter,
+    },
+    utils::{Physical, Point, Rectangle},
+};
+
+use crate::{
+    chrome::BORDER_COLOR,
+    layout::model_output_id,
+    render::CustomRenderElements,
+    state::{Backend, CrucibleState},
+    text::TextRenderer,
+};
+
+/// Vertical padding above and below the label, in pixels.
+pub const PAD_Y: i32 = 5;
+/// Horizontal padding on each side of a label, in pixels.
+pub const PAD_X: i32 = 10;
+/// Strip background (a dark neutral, distinct from the ring accent).
+pub const STRIP_BG: [f32; 4] = [0.09, 0.10, 0.12, 1.0];
+/// Inactive label colour (straight RGBA).
+pub const LABEL_RGBA: [u8; 4] = [205, 208, 214, 255];
+/// Label colour on the highlighted (active) segment (straight RGBA).
+pub const LABEL_ACTIVE_RGBA: [u8; 4] = [10, 14, 16, 255];
+/// Width estimate per character when no font is loaded (so the strip still has segments).
+const FALLBACK_CHAR_FRACTION: f32 = 0.6;
+
+// ---- pure core -------------------------------------------------------------------------------
+
+/// The strip's height for font `size`: the size plus padding top and bottom.
+#[must_use]
+pub fn strip_height(size: u32) -> i32 {
+    i32::try_from(size).unwrap_or(i32::MAX / 4) + 2 * PAD_Y
+}
+
+/// The height `always` mode reserves at the top of each output; `0` for `off` and `alt`.
+#[must_use]
+pub fn reserved_height(config: &HeaderConfig) -> i32 {
+    if config.mode == HeaderMode::Always {
+        strip_height(config.size)
+    } else {
+        0
+    }
+}
+
+/// `rect` with `height` removed from its top (clamped so at least half the height remains).
+#[must_use]
+pub fn shrink_top(rect: Rect, height: i32) -> Rect {
+    let h = height.clamp(0, rect.height / 2);
+    Rect::new(rect.x, rect.y + h, rect.width, rect.height - h)
+}
+
+/// Whether the strip is drawn (and clickable) given the mode and the `alt` toggle.
+#[must_use]
+pub fn is_shown(mode: HeaderMode, alt_visible: bool) -> bool {
+    match mode {
+        HeaderMode::Off => false,
+        HeaderMode::Always => true,
+        HeaderMode::Alt => alt_visible,
+    }
+}
+
+/// The strip rect across the top of `output` (global coordinates).
+#[must_use]
+pub fn strip_rect(output: Rect, height: i32) -> Rect {
+    Rect::new(output.x, output.y, output.width, height.min(output.height))
+}
+
+/// Whether the point lies inside `rect`.
+#[must_use]
+pub fn contains(rect: Rect, x: i32, y: i32) -> bool {
+    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
+}
+
+/// One workspace label's clickable/drawn area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Segment {
+    /// Index into the output's workspace stack.
+    pub index: usize,
+    /// The segment rect (global coordinates), full strip height.
+    pub rect: Rect,
+}
+
+/// Lays out one segment per label width, left to right from the strip's left edge, each
+/// `width + 2 * PAD_X` wide. Segments are clipped to the strip: one that starts past the right
+/// edge is dropped, the last visible one is truncated.
+#[must_use]
+pub fn segment_rects(widths: &[i32], strip: Rect) -> Vec<Segment> {
+    let mut out = Vec::new();
+    let mut x = strip.x;
+    let right = strip.x + strip.width;
+    for (index, w) in widths.iter().enumerate() {
+        if x >= right {
+            break;
+        }
+        let width = (w.max(&0) + 2 * PAD_X).min(right - x);
+        out.push(Segment {
+            index,
+            rect: Rect::new(x, strip.y, width, strip.height),
+        });
+        x += width;
+    }
+    out
+}
+
+/// The segment index under `(x, y)`, if any.
+#[must_use]
+pub fn hit_test(segments: &[Segment], x: i32, y: i32) -> Option<usize> {
+    segments
+        .iter()
+        .find(|s| contains(s.rect, x, y))
+        .map(|s| s.index)
+}
+
+/// Detects a bare Alt tap: Alt pressed then released with no other key press and no button press in
+/// between. Pure state machine; it only observes, so Alt is always forwarded to clients.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AltTap {
+    armed: bool,
+}
+
+impl AltTap {
+    /// Observes one key event; returns `true` when it completes a bare Alt tap.
+    /// `other_mods_held` is whether Super/Shift/Ctrl was already down when Alt was pressed (such a
+    /// press is a chord, not a bare Alt).
+    pub fn key(&mut self, is_alt: bool, pressed: bool, other_mods_held: bool) -> bool {
+        match (is_alt, pressed) {
+            (true, true) => {
+                self.armed = !other_mods_held;
+                false
+            }
+            (true, false) => std::mem::take(&mut self.armed),
+            (false, true) => {
+                self.armed = false;
+                false
+            }
+            (false, false) => false,
+        }
+    }
+
+    /// A pointer button press voids a pending tap.
+    pub fn button_press(&mut self) {
+        self.armed = false;
+    }
+}
+
+/// Physical button codes whose press the strip consumed; their paired release is swallowed
+/// (audit E8: a release must never be forwarded for a press that was not).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ConsumedButtons(BTreeSet<u32>);
+
+impl ConsumedButtons {
+    /// Records `button`'s press as consumed.
+    pub fn consume_press(&mut self, button: u32) {
+        self.0.insert(button);
+    }
+
+    /// Whether `button`'s release is swallowed (its press was consumed); clears the record.
+    pub fn consume_release(&mut self, button: u32) -> bool {
+        self.0.remove(&button)
+    }
+}
+
+// ---- compositor glue -------------------------------------------------------------------------
+
+/// Per-session header state, held on [`CrucibleState`].
+#[derive(Debug, Default)]
+pub struct HeaderState {
+    /// The `alt`-mode toggle: whether the strip is currently shown.
+    pub visible: bool,
+    /// Bare-Alt detector.
+    pub alt: AltTap,
+    /// Buttons whose press the strip consumed.
+    pub consumed: ConsumedButtons,
+    /// The font spec the text renderer was last loaded for.
+    pub font_loaded: Option<String>,
+}
+
+/// One output's strip as derived from the live model.
+#[derive(Debug, Clone)]
+pub struct HeaderLayout {
+    /// The model output.
+    pub output: OutputId,
+    /// The output's global rect (unshrunk).
+    pub output_rect: Rect,
+    /// The strip rect (global).
+    pub strip: Rect,
+    /// Workspace names in stack order.
+    pub names: Vec<String>,
+    /// Workspace ids in stack order.
+    pub workspaces: Vec<WorkspaceId>,
+    /// Index of the active workspace.
+    pub active: usize,
+    /// Segment rects for `names`.
+    pub segments: Vec<Segment>,
+}
+
+fn phys(r: Rect, origin: (i32, i32)) -> Rectangle<i32, Physical> {
+    Rectangle::new(
+        (r.x - origin.0, r.y - origin.1).into(),
+        (r.width, r.height).into(),
+    )
+}
+
+fn solid(r: Rectangle<i32, Physical>, color: [f32; 4]) -> SolidColorRenderElement {
+    SolidColorRenderElement::new(
+        Id::new(),
+        r,
+        CommitCounter::default(),
+        color,
+        Kind::Unspecified,
+    )
+}
+
+impl<B: Backend + 'static> CrucibleState<B> {
+    /// Whether the strip is currently shown.
+    pub(crate) fn header_shown(&self) -> bool {
+        is_shown(self.config.header.mode, self.header.visible)
+    }
+
+    /// Every output's strip layout; empty while the strip is hidden.
+    pub(crate) fn header_layouts(&self) -> Vec<HeaderLayout> {
+        if !self.header_shown() {
+            return Vec::new();
+        }
+        let size = self.config.header.size;
+        let height = strip_height(size);
+        self.raw_output_rects()
+            .into_iter()
+            .filter_map(|(id, rect)| {
+                let output = self.layout.world.output(id)?;
+                let strip = strip_rect(rect, height);
+                let (mut names, mut workspaces) = (Vec::new(), Vec::new());
+                for ws in &output.workspaces {
+                    names.push(self.layout.world.workspace(*ws)?.name.clone());
+                    workspaces.push(*ws);
+                }
+                let widths: Vec<i32> = names
+                    .iter()
+                    .map(|n| {
+                        self.header_text
+                            .measure(n, size)
+                            .unwrap_or_else(|| fallback_width(n, size))
+                    })
+                    .collect();
+                let segments = segment_rects(&widths, strip);
+                Some(HeaderLayout {
+                    output: id,
+                    output_rect: rect,
+                    strip,
+                    names,
+                    workspaces,
+                    active: output.active,
+                    segments,
+                })
+            })
+            .collect()
+    }
+
+    /// The strip hit under global `(x, y)`: the output and, on a label, its workspace.
+    /// `None` when the strip is hidden or the point is outside every strip.
+    pub(crate) fn header_hit(&self, x: i32, y: i32) -> Option<(OutputId, Option<WorkspaceId>)> {
+        self.header_layouts()
+            .into_iter()
+            .find(|l| contains(l.strip, x, y))
+            .map(|l| {
+                let ws = hit_test(&l.segments, x, y).and_then(|i| l.workspaces.get(i).copied());
+                (l.output, ws)
+            })
+    }
+
+    /// Feeds one key event to the bare-Alt detector (`alt` mode only); toggles the strip on a tap.
+    pub(crate) fn header_observe_key(&mut self, is_alt: bool, pressed: bool, others: bool) {
+        if self.config.header.mode != HeaderMode::Alt {
+            return;
+        }
+        if self.header.alt.key(is_alt, pressed, others) {
+            self.header.visible = !self.header.visible;
+        }
+    }
+
+    /// Handles a consumed press on the strip: focus the output and switch to the clicked
+    /// workspace; in `alt` mode the strip hides again.
+    pub(crate) fn header_click(&mut self, output: OutputId, workspace: Option<WorkspaceId>) {
+        if let Some(ws) = workspace {
+            let target = self
+                .space
+                .outputs()
+                .find(|o| model_output_id(o) == Some(output))
+                .cloned();
+            if let Some(target) = target {
+                self.focus_output(&target);
+            }
+            if let Err(err) = self.with_model(|world| world.switch_workspace(ws)) {
+                tracing::warn!(%err, "header click: workspace switch failed");
+            }
+        }
+        if self.config.header.mode == HeaderMode::Alt {
+            self.header.visible = false;
+        }
+    }
+}
+
+/// Width estimate used when no font is loaded.
+fn fallback_width(name: &str, size: u32) -> i32 {
+    (name.chars().count() as f32 * size as f32 * FALLBACK_CHAR_FRACTION).ceil() as i32
+}
+
+/// Builds the strip's render elements (front-to-back: labels, then highlight and background
+/// solids) for `output` (all layouts when `None`), positioned in the output's frame at
+/// `origin`. Without a loaded font only the backgrounds and highlight are produced.
+pub fn build_header_elements<R>(
+    layouts: &[HeaderLayout],
+    only: Option<OutputId>,
+    origin: (i32, i32),
+    size: u32,
+    text: &mut TextRenderer,
+    renderer: &mut R,
+) -> Vec<CustomRenderElements<R>>
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    let mut labels = Vec::new();
+    let mut solids = Vec::new();
+    for l in layouts
+        .iter()
+        .filter(|l| only.is_none_or(|o| o == l.output))
+    {
+        let line = (size as f32 * 1.2).round() as i32;
+        let text_y = l.strip.y + (l.strip.height - line) / 2;
+        for seg in &l.segments {
+            let active = seg.index == l.active;
+            if active {
+                solids.push(solid(phys(seg.rect, origin), BORDER_COLOR));
+            }
+            let rgba = if active {
+                LABEL_ACTIVE_RGBA
+            } else {
+                LABEL_RGBA
+            };
+            let loc = Point::<f64, Physical>::from((
+                f64::from(seg.rect.x + PAD_X - origin.0),
+                f64::from(text_y - origin.1),
+            ));
+            if let Some(el) = text.element(renderer, loc, &l.names[seg.index], size, rgba, 1) {
+                labels.push(CustomRenderElements::Text(el));
+            }
+        }
+        solids.push(solid(phys(l.strip, origin), STRIP_BG));
+    }
+    labels.extend(solids.into_iter().map(CustomRenderElements::SolidColor));
+    labels
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strip() -> Rect {
+        Rect::new(100, 0, 300, 24)
+    }
+
+    #[test]
+    fn segments_are_laid_out_left_to_right_and_clipped() {
+        let segs = segment_rects(&[20, 30], strip());
+        assert_eq!(segs[0].rect, Rect::new(100, 0, 40, 24));
+        assert_eq!(segs[1].rect, Rect::new(140, 0, 50, 24));
+        // Overflowing: the last visible is truncated, later ones dropped.
+        let segs = segment_rects(&[200, 200, 200], strip());
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[1].rect.width, 300 - 220);
+        assert!(segment_rects(&[], strip()).is_empty());
+    }
+
+    #[test]
+    fn hit_test_maps_points_to_segments() {
+        let segs = segment_rects(&[20, 30], strip());
+        assert_eq!(hit_test(&segs, 100, 0), Some(0));
+        assert_eq!(hit_test(&segs, 139, 23), Some(0));
+        assert_eq!(hit_test(&segs, 140, 5), Some(1));
+        assert_eq!(hit_test(&segs, 190, 5), None); // past the last label
+        assert_eq!(hit_test(&segs, 120, 24), None); // below the strip
+    }
+
+    #[test]
+    fn bare_alt_tap_toggles_and_other_input_voids_it() {
+        let mut t = AltTap::default();
+        assert!(!t.key(true, true, false));
+        assert!(t.key(true, false, false)); // tap
+        assert!(!t.key(true, false, false)); // no stray second toggle
+
+        // Another key between voids it (Alt+Tab).
+        t.key(true, true, false);
+        t.key(false, true, false);
+        t.key(false, false, false);
+        assert!(!t.key(true, false, false));
+
+        // A button press between voids it.
+        t.key(true, true, false);
+        t.button_press();
+        assert!(!t.key(true, false, false));
+
+        // Alt pressed while another modifier is held is a chord, not a bare Alt.
+        t.key(true, true, true);
+        assert!(!t.key(true, false, false));
+    }
+
+    #[test]
+    fn consumed_press_swallows_exactly_its_release() {
+        const LEFT: u32 = 0x110;
+        const RIGHT: u32 = 0x111;
+        let mut c = ConsumedButtons::default();
+        // A release whose press was forwarded is forwarded.
+        assert!(!c.consume_release(RIGHT));
+        c.consume_press(LEFT);
+        assert!(!c.consume_release(RIGHT)); // unrelated button forwarded
+        // Swallowed even if the strip was hidden in between (the record is independent of it).
+        assert!(c.consume_release(LEFT));
+        assert!(!c.consume_release(LEFT)); // cleared
+    }
+
+    #[test]
+    fn always_reserves_exactly_the_strip_height() {
+        let mut cfg = HeaderConfig::default();
+        let out = Rect::new(0, 0, 1920, 1080);
+        for mode in [HeaderMode::Off, HeaderMode::Alt] {
+            cfg.mode = mode;
+            assert_eq!(shrink_top(out, reserved_height(&cfg)), out);
+        }
+        cfg.mode = HeaderMode::Always;
+        let h = strip_height(cfg.size);
+        assert_eq!(h, 14 + 2 * PAD_Y);
+        assert_eq!(
+            shrink_top(out, reserved_height(&cfg)),
+            Rect::new(0, h, 1920, 1080 - h)
+        );
+        // Never swallows more than half the output.
+        assert_eq!(shrink_top(Rect::new(0, 0, 10, 20), 500).height, 10);
+    }
+
+    #[test]
+    fn shown_by_mode() {
+        assert!(!is_shown(HeaderMode::Off, true));
+        assert!(is_shown(HeaderMode::Always, false));
+        assert!(is_shown(HeaderMode::Alt, true));
+        assert!(!is_shown(HeaderMode::Alt, false));
+    }
+}

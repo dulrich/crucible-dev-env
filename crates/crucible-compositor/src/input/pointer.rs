@@ -133,7 +133,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let state = wl_pointer::ButtonState::from(evt.state());
 
         if wl_pointer::ButtonState::Pressed == state {
+            self.header.alt.button_press();
+            if self.consume_header_press(button) {
+                return;
+            }
             self.update_keyboard_focus_under_pointer(serial);
+        } else if self.header.consumed.consume_release(button) {
+            // The paired release of a press the header strip consumed: never forward a release
+            // whose press the client did not see (audit E8).
+            return;
         }
 
         let pointer = self.pointer.clone();
@@ -147,6 +155,25 @@ impl<B: Backend + 'static> CrucibleState<B> {
             },
         );
         pointer.frame(self);
+    }
+
+    /// Consumes a button press that lands inside a visible header strip, recording `button` so its
+    /// release is swallowed too. Returns whether the press was consumed.
+    ///
+    /// Overlays are modal: with one mapped the press is **not** consumed and behaves like any
+    /// outside click (closes the overlay) — it never switches workspace.
+    fn consume_header_press(&mut self, button: u32) -> bool {
+        if self.mapped_overlay().is_some() {
+            return false;
+        }
+        let at = self.pointer.current_location();
+        let Some((output, workspace)) = self.header_hit(at.x.floor() as i32, at.y.floor() as i32)
+        else {
+            return false;
+        };
+        self.header.consumed.consume_press(button);
+        self.header_click(output, workspace);
+        true
     }
 
     /// Delivers a scroll axis frame to the seat.

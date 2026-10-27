@@ -201,12 +201,26 @@ pub fn run_winit() {
             // Chrome (focus border + stack badges) — built before the backend borrow below since
             // SolidColorRenderElement needs no renderer reference.
             let mut chrome: Vec<CustomRenderElements<GlesRenderer>> = state.chrome_elements();
+            let header_layouts = state.header_layouts();
+            let header_size = state.config.header.size;
+            let header_output = crate::layout::model_output_id(&output);
 
             let backend = &mut state.backend_data.backend;
             let damage_tracker = &mut state.backend_data.damage_tracker;
             let age = backend.buffer_age().unwrap_or(0);
 
             let render_res = backend.bind().and_then(|(renderer, mut fb)| {
+                // Header strip (labels, highlight, background) in front of the chrome.
+                let mut header_elements = crate::header::build_header_elements(
+                    &header_layouts,
+                    header_output,
+                    (0, 0),
+                    header_size,
+                    &mut state.header_text,
+                    renderer,
+                );
+                header_elements.append(&mut chrome);
+                chrome = header_elements;
                 // Cursor on top of chrome.
                 let cursor_elements: Vec<CustomRenderElements<GlesRenderer>> =
                     smithay::backend::renderer::element::AsRenderElements::render_elements(

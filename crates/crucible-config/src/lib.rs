@@ -287,6 +287,76 @@ impl Default for OverlayConfig {
     }
 }
 
+/// When the workspace header strip is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderMode {
+    /// Never shown.
+    Off,
+    /// Always shown; its height is reserved at the top of each output.
+    Always,
+    /// Hidden until a bare Alt tap toggles it; drawn over the tiles without reflow (the default).
+    Alt,
+}
+
+impl HeaderMode {
+    /// The config spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Always => "always",
+            Self::Alt => "alt",
+        }
+    }
+
+    /// Parses the exact spelling; anything else is `None`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "off" => Some(Self::Off),
+            "always" => Some(Self::Always),
+            "alt" => Some(Self::Alt),
+            _ => None,
+        }
+    }
+}
+
+/// Smallest accepted header font size, in logical pixels.
+pub const HEADER_SIZE_MIN: u32 = 6;
+/// Largest accepted header font size, in logical pixels.
+pub const HEADER_SIZE_MAX: u32 = 96;
+/// Default header font family (resolved through `fc-match`).
+pub const DEFAULT_HEADER_FONT: &str = "DejaVu Sans";
+
+/// Workspace header strip settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderConfig {
+    /// When the strip is shown.
+    pub mode: HeaderMode,
+    /// A font file path (contains `/`) or a fontconfig family name.
+    pub font: String,
+    /// Font size in logical pixels, within [`HEADER_SIZE_MIN`]..=[`HEADER_SIZE_MAX`].
+    pub size: u32,
+}
+
+impl Default for HeaderConfig {
+    fn default() -> Self {
+        Self {
+            mode: HeaderMode::Alt,
+            font: DEFAULT_HEADER_FONT.to_string(),
+            size: 14,
+        }
+    }
+}
+
+impl HeaderConfig {
+    /// The font as a path override when it contains `/`, else `None` (it is a family name).
+    #[must_use]
+    pub fn font_path(&self) -> Option<&Path> {
+        self.font.contains('/').then(|| Path::new(&self.font))
+    }
+}
+
 /// The parsed CDE configuration. `Default` is CDE's behaviour with no config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -300,6 +370,8 @@ pub struct Config {
     pub picker_roots: Vec<PathBuf>,
     /// Overlay border, style and terminal arguments.
     pub overlay: OverlayConfig,
+    /// Workspace header strip mode, font and size.
+    pub header: HeaderConfig,
     /// Binding overrides as raw `(chord, action)` strings, in file order.
     pub binds: Vec<(String, String)>,
 }
@@ -312,6 +384,7 @@ impl Default for Config {
             focus_follows_mouse: true,
             picker_roots: Vec::new(),
             overlay: OverlayConfig::default(),
+            header: HeaderConfig::default(),
             binds: Vec::new(),
         }
     }
@@ -379,7 +452,13 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
         let at = locate(text, node.span().offset());
         if matches!(
             name,
-            "terminal" | "tiling" | "focus-follows-mouse" | "picker" | "overlay" | "binds"
+            "terminal"
+                | "tiling"
+                | "focus-follows-mouse"
+                | "picker"
+                | "overlay"
+                | "header"
+                | "binds"
         ) && seen.contains(&name)
         {
             return Err(ConfigError::Duplicate {
@@ -407,6 +486,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             }
             "picker" => config.picker_roots = parse_picker(text, node)?,
             "overlay" => config.overlay = parse_overlay(text, node)?,
+            "header" => config.header = parse_header(text, node)?,
             "binds" => config.binds = parse_binds(text, node)?,
             other => {
                 return Err(ConfigError::UnknownNode {
@@ -774,6 +854,62 @@ fn parse_overlay(text: &str, node: &KdlNode) -> Result<OverlayConfig, ConfigErro
     Ok(out)
 }
 
+fn parse_header(text: &str, node: &KdlNode) -> Result<HeaderConfig, ConfigError> {
+    let mut out = HeaderConfig::default();
+    let mut seen: Vec<&str> = Vec::new();
+    for child in block_children(text, node)? {
+        let name = child.name().value();
+        let at = locate(text, child.span().offset());
+        if seen.contains(&name) {
+            return Err(ConfigError::Duplicate {
+                at,
+                name: name.to_string(),
+            });
+        }
+        no_properties(text, child)?;
+        match name {
+            "mode" => {
+                let s = string_args(text, child, &["a mode string"])?[0];
+                out.mode = HeaderMode::from_name(s).ok_or_else(|| ConfigError::InvalidValue {
+                    at,
+                    node: node_name(child),
+                    what: "argument".to_string(),
+                    message: format!("`{s}` is not one of off, always, alt"),
+                })?;
+            }
+            "font" => {
+                let s = string_args(text, child, &["a font path or family string"])?[0];
+                nonempty(text, child, "font", s)?;
+                out.font = s.to_string();
+            }
+            "size" => {
+                let v = single_arg(text, child, "an integer")?;
+                let n = v
+                    .as_integer()
+                    .ok_or_else(|| wrong_type(text, child, "argument".into(), "an integer"))?;
+                out.size = u32::try_from(n)
+                    .ok()
+                    .filter(|n| (HEADER_SIZE_MIN..=HEADER_SIZE_MAX).contains(n))
+                    .ok_or_else(|| ConfigError::InvalidValue {
+                        at,
+                        node: node_name(child),
+                        what: "argument".to_string(),
+                        message: format!("{n} is outside {HEADER_SIZE_MIN}..={HEADER_SIZE_MAX}"),
+                    })?;
+            }
+            other => {
+                return Err(ConfigError::UnknownNode {
+                    at,
+                    name: other.to_string(),
+                    context: "header",
+                });
+            }
+        }
+        seen.push(name);
+    }
+    Ok(out)
+}
+
 fn parse_binds(text: &str, node: &KdlNode) -> Result<Vec<(String, String)>, ConfigError> {
     let mut binds = Vec::new();
     for child in block_children(text, node)? {
@@ -1122,5 +1258,51 @@ binds {
     fn overlay_terminal_args_must_be_strings() {
         let err = parse("overlay {\n terminal-args 3\n}\n").unwrap_err();
         assert!(matches!(err, ConfigError::WrongType { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn header_defaults_and_modes() {
+        let d = Config::default().header;
+        assert_eq!(
+            (d.mode, d.size, d.font.as_str()),
+            (HeaderMode::Alt, 14, "DejaVu Sans")
+        );
+        for (name, mode) in [
+            ("off", HeaderMode::Off),
+            ("always", HeaderMode::Always),
+            ("alt", HeaderMode::Alt),
+        ] {
+            let c = parse(&format!("header {{\n mode \"{name}\"\n}}\n")).unwrap();
+            assert_eq!(c.header.mode, mode);
+        }
+        let err = parse("header {\n mode \"sometimes\"\n}\n").unwrap_err();
+        assert!(err.to_string().contains("off, always, alt"), "{err}");
+    }
+
+    #[test]
+    fn header_size_bounds() {
+        assert_eq!(parse("header {\n size 6\n}\n").unwrap().header.size, 6);
+        assert_eq!(parse("header {\n size 96\n}\n").unwrap().header.size, 96);
+        for bad in ["5", "97", "0", "-3"] {
+            let err = parse(&format!("header {{\n size {bad}\n}}\n")).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidValue { .. }),
+                "{bad}: {err:?}"
+            );
+        }
+        let err = parse("header {\n size 1.5\n}\n").unwrap_err();
+        assert!(matches!(err, ConfigError::WrongType { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn header_font_path_versus_family() {
+        let c = parse("header {\n font \"/usr/share/fonts/x.ttf\"\n}\n").unwrap();
+        assert_eq!(
+            c.header.font_path(),
+            Some(Path::new("/usr/share/fonts/x.ttf"))
+        );
+        let c = parse("header {\n font \"Noto Sans\"\n}\n").unwrap();
+        assert_eq!(c.header.font_path(), None);
+        assert_eq!(c.header.font, "Noto Sans");
     }
 }

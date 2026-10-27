@@ -207,6 +207,25 @@ impl TextRenderer {
         self.font.is_some()
     }
 
+    /// Width in pixels `text` lays out to at `px` (no rasterization); `None` when text is
+    /// disabled. Used by the WP-6 header to size segments and hit-test clicks.
+    pub fn measure(&self, text: &str, px: u32) -> Option<i32> {
+        use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
+        let font = self.font.as_ref()?;
+        let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+        layout.reset(&LayoutSettings::default());
+        layout.append(&[font], &TextStyle::new(text, px as f32, 0));
+        Some(
+            layout
+                .glyphs()
+                .iter()
+                .map(|g| (g.x + g.width as f32).ceil() as i32)
+                .max()
+                .unwrap_or(0)
+                .max(0),
+        )
+    }
+
     /// Number of rasterizations (cache misses) so far.
     pub fn rasterized_count(&self) -> usize {
         self.rasterized

@@ -217,6 +217,10 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub hover_target: Option<HoverTarget>,
     /// Workspace persistence, IPC and picker state; see [`crate::persist`].
     pub persist: crate::persist::PersistState,
+    /// Workspace header strip toggle, Alt-tap detector and consumed-button record.
+    pub header: crate::header::HeaderState,
+    /// Font + glyph cache for the header labels; disabled until the config selects a font.
+    pub header_text: crate::text::TextRenderer,
 }
 
 /// What the pointer hovers, for focus-follows-mouse enter detection.
@@ -415,6 +419,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             bindings: Bindings::default(),
             hover_target: None,
             persist: crate::persist::PersistState::new(crucible_persist::store::store_dir()),
+            header: crate::header::HeaderState::default(),
+            header_text: crate::text::TextRenderer::from_font(None),
         }
     }
 }

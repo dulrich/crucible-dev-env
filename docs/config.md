@@ -68,6 +68,24 @@ Presentation of the picker, launcher and settings overlays. Every child is optio
 - `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` (default) or `"n1-light"`; any other value is a config error. `terminal` keeps the terminal's own look and the teal ring; the N1 styles paint opaque surrounds with an orange ring. The chosen style is passed to overlay programs as `CDE_OVERLAY_STYLE`.
 - `terminal-args` — extra terminal arguments, zero or more strings, inserted before the exec flag on overlay spawns only. Default: none. As a ghostty example only, `terminal-args "--window-padding-color=extend-always" "--window-padding-balance=true"` fills ghostty's window padding (and the leftover strip where the cell grid does not divide the overlay evenly) with the N1 surround and spreads it evenly, so the surround reaches the border on every side (verified on host-b, ghostty 1.3.1; `--background-opacity=1` is not needed); `--config-file=<path>` adds to the user config, while `--config-default-files=false` replaces it.
 
+### `header`
+
+```kdl
+header {
+    mode "alt"
+    font "DejaVu Sans"
+    size 14
+}
+```
+
+A clickable workspace strip at the top of every output, listing that output's workspaces in stack order with the active one highlighted in the focus-ring accent. Every child is optional and may appear once.
+
+- `mode` — `"off"`, `"always"` or `"alt"` (default); any other value is a config error. `off`: no strip and no input effect. `always`: the strip is always shown and its height is reserved at the top of each output (tiles, rings and X11 placement all shrink by exactly that height). `alt`: the strip is hidden until you tap **Alt** on its own (press and release with no other key or mouse button in between), which toggles it; it is drawn over the tiles and never reflows them. Alt key events are still delivered to the focused app unchanged, so Alt chords in apps keep working; Alt held with another modifier (or any other key) is not a tap.
+- `font` — a font file path (a value containing `/`) or a fontconfig family name resolved with `fc-match`. Default `"DejaVu Sans"`. If no font can be loaded the strip still draws its background and highlight, without labels (one warning is logged).
+- `size` — label size in pixels, an integer from 6 to 96; default 14. The strip height is the size plus padding.
+
+Clicking a workspace name focuses that output and switches it to that workspace (the press and its release are consumed by the strip, never sent to the window beneath). In `alt` mode any click on the strip hides it again. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
+
 ### `binds`
 
 ```kdl
@@ -136,6 +154,11 @@ overlay {
     border #true
     style "n1-med"
     terminal-args "--window-padding-color=extend-always" "--window-padding-balance=true"
+}
+header {
+    mode "alt"
+    font "DejaVu Sans"
+    size 14
 }
 binds {
     bind "Super+P" "open-picker"

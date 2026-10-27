@@ -51,5 +51,8 @@ pub mod ipc;
 /// Workspace persistence in the compositor: auto-save, capture, restore, picker overlay.
 pub mod persist;
 
+/// Workspace header strip: pure layout/hit-test/Alt-tap core plus render and click glue.
+pub mod header;
+
 /// Compositor-drawn text: font resolution, fontdue rasterization, memory render element.
 pub mod text;
