@@ -353,11 +353,7 @@ impl Reader<'_> {
         }
         let focused_pane = focused_pane.ok_or_else(|| self.missing(n, "focused-pane"))?;
         let tree = self.tree(tree_node_.ok_or_else(|| self.missing(n, "a pane or split"))?)?;
-        let pane_count = {
-            let mut v = Vec::new();
-            collect(&tree, &mut v);
-            v.len()
-        };
+        let pane_count = tree.pane_count();
         if focused_pane >= pane_count {
             return Err(self.invalid(n, "focused-pane", "an index below the pane count"));
         }
@@ -443,16 +439,6 @@ impl Reader<'_> {
                 })
             }
             _ => Err(self.unknown_node(n)),
-        }
-    }
-}
-
-fn collect<'a>(t: &'a RecordNode, out: &mut Vec<&'a PaneRecord>) {
-    match t {
-        RecordNode::Pane(p) => out.push(p),
-        RecordNode::Split { first, second, .. } => {
-            collect(first, out);
-            collect(second, out);
         }
     }
 }

@@ -60,7 +60,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ///
     /// The **first** compositor output adopts the model's pre-existing `World::new()` output (which
     /// is otherwise unbound); every subsequent output calls [`World::add_output`] to get its own
-    /// independent workspace stack. Either way the chosen model [`OutputId`] is stashed in the
+    /// independent workspace stack, its seed named by `new_workspace_name` off the live and saved
+    /// names. Either way the chosen model [`OutputId`] is stashed in the
     /// Smithay output's `user_data()` and its stored rect is set to `rect` (the live pixel geometry
     /// in global Space coordinates). Returns the model [`OutputId`]. Idempotent: re-registering an
     /// already-bound output only refreshes its rect.
@@ -73,21 +74,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
         // The binding decision (adopt the initial model output vs. allocate) is the model half of
         // registration and lives on `LayoutState` so it is testable without a `Space`.
         let bound: HashSet<OutputId> = self.space.outputs().filter_map(model_output_id).collect();
-        let fresh = self.layout.world.output_ids().all(|id| bound.contains(&id));
-        let model_id = self.layout.bind_output(&bound, rect);
+        // A freshly allocated output's seed is named off the saved names so it never shadows one.
+        let saved = self.persist.saved_names();
+        let model_id = self.layout.bind_output(&bound, rect, &saved);
         set_model_output_id(output, model_id);
         self.apply_layout();
-        if fresh {
-            // A freshly allocated output's seed workspace must not shadow a saved one.
-            if let Some(seed) = self
-                .layout
-                .world
-                .output(model_id)
-                .map(crucible_layout::Output::active_workspace)
-            {
-                self.rename_seed_off_saved(seed);
-            }
-        }
         model_id
     }
 

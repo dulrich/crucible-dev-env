@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn single_pane_fills_output_minus_outer_gap() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let win = w.open_window();
         let ws_id = w.active_workspace_id();
         let ws = w.workspace(ws_id).unwrap();
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn single_pane_no_gaps_fills_entire_output() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let _ = w.open_window();
         let ws_id = w.active_workspace_id();
         let ws = w.workspace(ws_id).unwrap();
@@ -254,7 +254,7 @@ mod tests {
 
     #[test]
     fn horizontal_split_two_panes_sum_to_width() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let _ = w.open_window();
         let _ = w.split(Direction::Right); // now two panes, split horizontally
 
@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn vertical_split_two_panes_sum_to_height() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let _ = w.open_window();
         let _ = w.split(Direction::Down); // two panes, split vertically
 
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn non_default_ratio_distributes_correctly() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let _ = w.open_window();
         let _ = w.split(Direction::Right);
         // Push ratio to 0.75 (first pane gets 75%)
@@ -333,7 +333,7 @@ mod tests {
     #[test]
     fn nested_splits_cover_full_area_no_gaps() {
         // Build:  H(V(p0, p1), p2)  — left column top/bottom, right side full height.
-        let mut w = World::new();
+        let mut w = World::new("1");
         let _ = w.open_window(); // pane 0 focused
         let _ = w.split(Direction::Right); // pane 1 to the right (horizontal split)
         w.focus(Direction::Left); // go back to pane 0
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn nested_splits_with_gaps_cover_full_area_exactly() {
         // Same topology, with gaps — total pane area + gap pixels must equal output area.
-        let mut w = World::new();
+        let mut w = World::new("1");
         let _ = w.open_window();
         let _ = w.split(Direction::Right);
         w.focus(Direction::Left);
@@ -381,7 +381,7 @@ mod tests {
 
     #[test]
     fn stacked_pane_rect_follows_focused_window() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let win_a = w.open_window();
         // Push a second window onto the same pane's stack.
         let win_b = w.stack_window();
@@ -407,11 +407,11 @@ mod tests {
 
     #[test]
     fn inactive_workspace_panes_get_no_rect() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let win_a = w.open_window();
 
         // Create and switch to a new workspace.
-        let _ = w.new_workspace("2");
+        let _ = w.new_workspace("2").unwrap();
         let win_b = w.open_window();
 
         let output_id = w.focused_output();
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn empty_pane_contributes_no_rect() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         // Split first to get two panes; don't open a window in the second.
         let _ = w.split(Direction::Right);
 
@@ -466,7 +466,7 @@ mod tests {
         ];
 
         for &(outer, inner, splits) in configs {
-            let mut w = World::new();
+            let mut w = World::new("1");
             let _ = w.open_window();
             for i in 0..splits {
                 let dir = if i % 2 == 0 {

@@ -50,6 +50,13 @@ pub fn new_workspace_name(world: &World, saved: &HashSet<String>) -> String {
     first_free_number(|n| world.workspace_by_name(n).is_some() || saved.contains(n))
 }
 
+/// The startup seed name: [`new_workspace_name`] over a world with no live workspaces yet, i.e.
+/// the first number not in `saved`.
+#[must_use]
+pub fn startup_seed_name(saved: &HashSet<String>) -> String {
+    first_free_number(|n| saved.contains(n))
+}
+
 /// Records each output's **active** workspace as last viewed on that output's connector name.
 /// `viewed` holds one `(model output, active workspace, connector name)` triple per connected,
 /// bound output. Workspaces not active anywhere (e.g. migrated inactive by an unplug) keep their
@@ -129,9 +136,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
             let saved = self.persist.saved_names();
             let name = new_workspace_name(&self.layout.world, &saved);
-            let mut seed = None;
-            self.update_model(|w| seed = Some(w.new_workspace(name)));
-            let seed = seed.expect("set");
+            let mut created = None;
+            if let Err(err) = self.with_model(|w| {
+                created = Some(w.new_workspace(name)?);
+                Ok(())
+            }) {
+                warn!(%err, "close-all-workspaces: cannot create a fresh seed");
+                continue;
+            }
+            let Some(seed) = created else { continue };
             let others: Vec<WorkspaceId> = self
                 .layout
                 .world
@@ -164,28 +177,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
             warn!(%err, "close-all-workspaces: cannot restore the focused output");
         }
         self.write_session();
-    }
-
-    /// Renames seed workspace `ws` to a fresh auto-name when its name is already saved on disk, so
-    /// a later save never overwrites the saved workspace. Called at startup and for every freshly
-    /// allocated output's seed.
-    pub(crate) fn rename_seed_off_saved(&mut self, ws: WorkspaceId) {
-        let saved = self.persist.saved_names();
-        let Some(seed_name) = self.layout.world.workspace(ws).map(|w| w.name.clone()) else {
-            return;
-        };
-        if !saved.contains(&seed_name) {
-            return;
-        }
-        let name = new_workspace_name(&self.layout.world, &saved);
-        info!(
-            from = seed_name,
-            to = name,
-            "seed workspace name is saved; renaming"
-        );
-        if let Err(err) = self.with_model(|w| w.rename_workspace(ws, name)) {
-            warn!(%err, "seed rename failed");
-        }
     }
 
     /// Notes every connected, bound output's active workspace as last viewed there. Called by
@@ -378,10 +369,19 @@ mod tests {
 
     #[test]
     fn new_workspace_name_skips_live_and_saved() {
-        let world = World::new(); // live "1"
+        let world = World::new("1"); // live "1"
         let saved: HashSet<String> = ["2".to_string()].into();
         assert_eq!(new_workspace_name(&world, &saved), "3");
         assert_eq!(new_workspace_name(&world, &HashSet::new()), "2");
+    }
+
+    /// The startup seed equals the old name-then-rename path: the first decimal not saved.
+    #[test]
+    fn startup_seed_skips_saved_names() {
+        let saved = |names: &[&str]| names.iter().map(|n| (*n).to_string()).collect();
+        assert_eq!(startup_seed_name(&saved(&[])), "1");
+        assert_eq!(startup_seed_name(&saved(&["1"])), "2");
+        assert_eq!(startup_seed_name(&saved(&["2"])), "1");
     }
 
     #[test]
@@ -439,9 +439,11 @@ mod tests {
     /// and returns to A once it reconnects.
     #[test]
     fn unplug_migration_keeps_the_last_viewed_output() {
-        let mut world = World::new();
+        let mut world = World::new("1");
         let a = world.focused_output();
-        let b = world.add_output(crucible_layout::Rect::new(1920, 0, 1920, 1080));
+        let b = world
+            .add_output(crucible_layout::Rect::new(1920, 0, 1920, 1080), "2")
+            .unwrap();
         let on_a = world.active_workspace_id();
         let on_b = world.output(b).unwrap().active_workspace();
         let mut map = HashMap::new();
@@ -464,7 +466,9 @@ mod tests {
         note_last_viewed(&mut map, &viewed(&world, &[(b, "HDMI-1")]));
         assert_eq!(map.get(&on_a).map(String::as_str), Some("DP-1"));
         // A reconnects as a fresh model output; the record (output = DP-1) targets it.
-        let a2 = world.add_output(crucible_layout::Rect::new(0, 0, 1920, 1080));
+        let a2 = world
+            .add_output(crucible_layout::Rect::new(0, 0, 1920, 1080), "3")
+            .unwrap();
         let connected = vec![("HDMI-1".to_string(), b), ("DP-1".to_string(), a2)];
         assert_eq!(
             restore_target(map.get(&on_a).map(String::as_str), &connected, b),

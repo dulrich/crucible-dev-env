@@ -297,7 +297,7 @@ impl CrucibleState<UdevData> {
 
         // Register this connector with the model now that the `device` borrow is released: the first
         // compositor output adopts the existing `World::new()` output; subsequent connectors get
-        // their own independent workspace stack via `add_output`.
+        // their own independent workspace stack via `add_output`, seeded off the live and saved names.
         self.register_output(&register_output, register_rect);
 
         // Kick off rendering for the new output.

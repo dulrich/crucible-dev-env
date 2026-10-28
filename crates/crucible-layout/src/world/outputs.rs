@@ -6,15 +6,17 @@ use crate::{OutputId, geometry::Rect};
 impl World {
     /// Adds a new output with `rect`, giving it its own independent initial workspace + empty pane.
     ///
-    /// Mirrors what [`World::new`] does for the first output, except the seed workspace is named
-    /// with the first decimal name (`"1"`, `"2"`, ...) not held by any live workspace. The new output starts with no windows
-    /// and is **not** made the focused output, so nothing currently visible changes. Returns the new
-    /// [`OutputId`].
-    pub fn add_output(&mut self, rect: Rect) -> OutputId {
+    /// Mirrors what [`World::new`] does for the first output: the seed workspace is named `seed`
+    /// (the caller owns naming). The new output starts with no windows and is **not** made the
+    /// focused output, so nothing currently visible changes. Returns the new [`OutputId`], or
+    /// [`LayoutError::DuplicateName`] (mutating nothing) when a live workspace already holds `seed`.
+    pub fn add_output(
+        &mut self,
+        rect: Rect,
+        seed: impl Into<String>,
+    ) -> Result<OutputId, LayoutError> {
+        let (workspace_id, _) = self.create_workspace(seed.into(), &WorkspaceLayout::single(()))?;
         let output_id = OutputId::from_raw(self.output_ids.alloc());
-        let seed_name =
-            first_unused_decimal_name(self.workspaces.values().map(|w| w.name.as_str()));
-        let workspace_id = self.build_workspace(seed_name);
         self.outputs.insert(
             output_id,
             Output {
@@ -24,7 +26,7 @@ impl World {
             },
         );
         // New output is empty and not focused: nothing visible changes.
-        output_id
+        Ok(output_id)
     }
 
     /// Removes an output **without destroying any windows**.
@@ -96,37 +98,34 @@ impl World {
     }
 }
 
-/// First decimal name `"1"`, `"2"`, ... not present in `names`.
-fn first_unused_decimal_name<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
-    let taken: std::collections::BTreeSet<&str> = names.into_iter().collect();
-    (1u64..)
-        .map(|n| n.to_string())
-        .find(|n| !taken.contains(n.as_str()))
-        .expect("u64 decimal names are not exhausted")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn first_unused_name_skips_taken_and_fills_gaps() {
-        assert_eq!(first_unused_decimal_name([]), "1");
-        assert_eq!(first_unused_decimal_name(["1", "2", "x"]), "3");
-        assert_eq!(first_unused_decimal_name(["2", "3"]), "1");
-    }
-
-    #[test]
-    fn add_output_seed_names_are_distinct() {
-        let mut w = World::new();
-        let a = w.add_output(Rect::new(0, 0, 10, 10));
-        let b = w.add_output(Rect::new(10, 0, 10, 10));
-        let name = |o: OutputId| {
+    fn add_output_uses_the_caller_seed_and_refuses_a_duplicate() {
+        let mut w = World::new("1");
+        let a = w.add_output(Rect::new(0, 0, 10, 10), "x").unwrap();
+        let name = |w: &World, o: OutputId| {
             let ws = w.output(o).unwrap().active_workspace();
             w.workspace(ws).unwrap().name.clone()
         };
-        assert_eq!(name(a), "2");
-        assert_eq!(name(b), "3");
+        assert_eq!(name(&w, a), "x");
+        let before = w.clone();
+        assert_eq!(
+            w.add_output(Rect::new(10, 0, 10, 10), "1"),
+            Err(LayoutError::DuplicateName("1".into()))
+        );
+        assert_eq!(w, before, "a refused add_output mutates nothing");
+        w.check_invariants();
+    }
+
+    #[test]
+    #[should_panic(expected = "is unique")]
+    fn check_invariants_panics_on_a_duplicate_name() {
+        let mut w = World::new("1");
+        let ws = w.new_workspace("2").unwrap();
+        w.workspaces.get_mut(&ws).unwrap().name = "1".into();
         w.check_invariants();
     }
 }

@@ -21,7 +21,7 @@ const R2: Rect = Rect::new(1920, 0, 1280, 1024);
 
 /// A `World` with one output sized [`SCREEN`], so `project_stored` yields real rects.
 fn world() -> World {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let output = w.focused_output();
     w.set_output_rect(output, SCREEN).unwrap();
     w
@@ -29,7 +29,7 @@ fn world() -> World {
 
 #[test]
 fn new_world_has_one_output_one_workspace_one_empty_pane() {
-    let w = World::new();
+    let w = World::new("1");
     w.check_invariants();
     assert_eq!(w.window_count(), 0);
     assert_eq!(w.focused_window(), None);
@@ -60,7 +60,7 @@ fn open_window_focuses_it_and_the_projection_shows_it_full_screen() {
 
 #[test]
 fn ids_are_unique_across_opens() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window();
     let b = w.open_window();
     let c = w.open_window();
@@ -95,7 +95,7 @@ fn close_window_drops_it_from_the_projection_and_updates_focus() {
 
 #[test]
 fn close_unknown_window_errors() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window();
     w.close_window(a).unwrap();
     let err = w.close_window(a).unwrap_err();
@@ -104,7 +104,7 @@ fn close_unknown_window_errors() {
 
 #[test]
 fn closing_last_window_of_only_pane_keeps_the_empty_pane() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window();
     let pane_before = w.focused_pane_id();
     w.close_window(a).unwrap();
@@ -120,7 +120,7 @@ fn closing_last_window_of_only_pane_keeps_the_empty_pane() {
 
 #[test]
 fn split_creates_new_focused_empty_pane() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     w.open_window();
     let new_pane = w.split(Right);
     w.check_invariants();
@@ -133,7 +133,7 @@ fn split_creates_new_focused_empty_pane() {
 
 #[test]
 fn split_then_open_lands_window_in_new_pane() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.open_window();
     w.split(Right);
     let second = w.open_window();
@@ -149,7 +149,7 @@ fn split_then_open_lands_window_in_new_pane() {
 #[test]
 fn split_all_directions_keep_invariants() {
     for dir in [Left, Right, Up, Down] {
-        let mut w = World::new();
+        let mut w = World::new("1");
         w.open_window();
         w.split(dir);
         w.open_window();
@@ -163,7 +163,7 @@ fn split_all_directions_keep_invariants() {
 
 #[test]
 fn stack_window_pushes_onto_focused_pane() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window();
     let b = w.stack_window();
     w.check_invariants();
@@ -179,7 +179,7 @@ fn stack_window_pushes_onto_focused_pane() {
 
 #[test]
 fn cycle_stack_wraps_around() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window();
     let b = w.open_window();
     let c = w.open_window();
@@ -198,7 +198,7 @@ fn cycle_stack_wraps_around() {
 
 #[test]
 fn focus_moves_between_panes_directionally() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let left = w.open_window(); // pane 1
     w.split(Right); // new pane to the right, focused
     let right = w.open_window(); // pane 2
@@ -216,7 +216,7 @@ fn focus_then_opposite_is_identity_for_sibling_pair() {
     // focus(opposite) returns to the origin. (In deeper trees descent bias can pick a different
     // sibling, so the strict inverse property is asserted on the unambiguous two-pane case.)
     for (split_dir, fwd, back) in [(Right, Right, Left), (Down, Down, Up)] {
-        let mut w = World::new();
+        let mut w = World::new("1");
         w.open_window();
         w.split(split_dir);
         w.open_window();
@@ -236,7 +236,7 @@ fn focus_then_opposite_is_identity_for_sibling_pair() {
 
 #[test]
 fn focus_at_edge_is_noop() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     w.open_window();
     let origin = w.focused_pane_id();
     // Single pane: every direction is an edge.
@@ -248,7 +248,7 @@ fn focus_at_edge_is_noop() {
 
 #[test]
 fn move_swaps_panes_and_focus_follows() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window(); // pane A on the left
     w.split(Right);
     let b = w.open_window(); // pane B on the right, focused
@@ -263,7 +263,7 @@ fn move_swaps_panes_and_focus_follows() {
 
 #[test]
 fn move_at_edge_is_noop() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     w.open_window();
     w.split(Right);
     w.open_window();
@@ -276,7 +276,7 @@ fn move_at_edge_is_noop() {
 
 #[test]
 fn resize_adjusts_ratio_without_changing_focus_or_panes() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window();
     w.split(Right);
     let _b = w.open_window();
@@ -295,7 +295,7 @@ fn resize_adjusts_ratio_without_changing_focus_or_panes() {
 
 #[test]
 fn close_window_keeps_emptied_pane() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let _a = w.open_window(); // pane A
     w.split(Right);
     let b = w.open_window(); // pane B, focused
@@ -310,7 +310,7 @@ fn close_window_keeps_emptied_pane() {
 
 #[test]
 fn close_window_in_focused_pane_keeps_focus_on_empty_pane() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     w.open_window();
     w.split(Right);
     let pane_b = w.focused_pane_id();
@@ -323,7 +323,7 @@ fn close_window_in_focused_pane_keeps_focus_on_empty_pane() {
 
 #[test]
 fn close_pane_removes_empty_pane_and_focuses_promoted_sibling() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window(); // pane A
     w.split(Right); // [A | B]
     let pane_b = w.focused_pane_id();
@@ -341,7 +341,7 @@ fn close_pane_removes_empty_pane_and_focuses_promoted_sibling() {
 
 #[test]
 fn close_pane_refuses_non_empty_pane() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     w.open_window();
     w.split(Right);
     let pane_b = w.focused_pane_id();
@@ -355,7 +355,7 @@ fn close_pane_refuses_non_empty_pane() {
 
 #[test]
 fn close_pane_refuses_last_pane() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let before = w.clone();
     assert_eq!(w.close_pane(), Err(LayoutError::LastPane));
     assert_eq!(w, before);
@@ -364,7 +364,7 @@ fn close_pane_refuses_last_pane() {
 
 #[test]
 fn open_window_after_close_pane_lands_in_newly_focused_pane() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     w.split(Right); // [A | B], B focused, both empty
     w.focus(Left);
     let pane_a = w.focused_pane_id();
@@ -382,10 +382,10 @@ fn open_window_after_close_pane_lands_in_newly_focused_pane() {
 
 #[test]
 fn new_workspace_switches_to_a_fresh_empty_workspace() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     w.open_window();
     let original = w.active_workspace_id();
-    let ws2 = w.new_workspace("code");
+    let ws2 = w.new_workspace("code").unwrap();
     w.check_invariants();
     assert_ne!(ws2, original);
     assert_eq!(w.active_workspace_id(), ws2);
@@ -397,10 +397,10 @@ fn new_workspace_switches_to_a_fresh_empty_workspace() {
 
 #[test]
 fn switch_workspace_changes_visible_set() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window();
     let original = w.active_workspace_id();
-    let ws2 = w.new_workspace("two");
+    let ws2 = w.new_workspace("two").unwrap();
     let b = w.open_window();
     assert_eq!(w.visible_windows(), vec![b]);
     w.switch_workspace(original).unwrap();
@@ -413,8 +413,8 @@ fn switch_workspace_changes_visible_set() {
 
 #[test]
 fn switch_to_unknown_workspace_errors() {
-    let mut w = World::new();
-    let other = w.new_workspace("x");
+    let mut w = World::new("1");
+    let other = w.new_workspace("x").unwrap();
     // A raw id far beyond any allocated workspace is guaranteed absent.
     let foreign = WorkspaceId::from_raw(u64::MAX);
     let err = w.switch_workspace(foreign).unwrap_err();
@@ -425,10 +425,10 @@ fn switch_to_unknown_workspace_errors() {
 
 #[test]
 fn cycle_workspace_wraps() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.active_workspace_id();
-    let second = w.new_workspace("b");
-    let third = w.new_workspace("c");
+    let second = w.new_workspace("b").unwrap();
+    let third = w.new_workspace("c").unwrap();
     // active is third; cycle forward wraps to first.
     w.cycle_workspace(1);
     assert_eq!(w.active_workspace_id(), first);
@@ -441,7 +441,7 @@ fn cycle_workspace_wraps() {
 
 #[test]
 fn rename_workspace_updates_name_and_errors_on_unknown() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let id = w.active_workspace_id();
     w.rename_workspace(id, "main").unwrap();
     assert_eq!(w.workspace(id).unwrap().name, "main");
@@ -453,12 +453,12 @@ fn rename_workspace_updates_name_and_errors_on_unknown() {
 
 #[test]
 fn move_window_to_workspace_transfers_and_keeps_source_pane() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window(); // workspace 1, pane A
     w.split(Right);
     let b = w.open_window(); // workspace 1, pane B (focused)
     let ws1 = w.active_workspace_id();
-    let ws2 = w.new_workspace("two");
+    let ws2 = w.new_workspace("two").unwrap();
     w.switch_workspace(ws1).unwrap();
 
     // Move b (in pane B) to ws2. Pane B empties but persists.
@@ -476,7 +476,7 @@ fn move_window_to_workspace_transfers_and_keeps_source_pane() {
 
 #[test]
 fn move_window_to_same_workspace_errors() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window();
     let here = w.active_workspace_id();
     let err = w.move_window_to_workspace(a, here).unwrap_err();
@@ -485,8 +485,8 @@ fn move_window_to_same_workspace_errors() {
 
 #[test]
 fn move_unknown_window_to_workspace_errors() {
-    let mut w = World::new();
-    let ws2 = w.new_workspace("two");
+    let mut w = World::new("1");
+    let ws2 = w.new_workspace("two").unwrap();
     let fw = WindowId::from_raw(u64::MAX);
     let err = w.move_window_to_workspace(fw, ws2).unwrap_err();
     assert!(matches!(err, LayoutError::UnknownWindow(_)));
@@ -494,14 +494,14 @@ fn move_unknown_window_to_workspace_errors() {
 
 #[test]
 fn model_is_clone_and_independent() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     w.open_window();
     w.split(Right);
     w.open_window();
     let snapshot = w.clone();
     // Mutate the original; the clone is unaffected.
     w.open_window();
-    w.new_workspace("scratch");
+    w.new_workspace("scratch").unwrap();
     assert_ne!(snapshot, w);
     snapshot.check_invariants();
     // The snapshot still has its two windows and two panes.
@@ -517,7 +517,7 @@ fn model_is_clone_and_independent() {
 
 #[test]
 fn total_pane_and_window_counts_stay_consistent_under_churn() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let mut windows = Vec::new();
     // Build a busy layout.
     for i in 0..6 {
@@ -541,7 +541,7 @@ fn total_pane_and_window_counts_stay_consistent_under_churn() {
 
 #[test]
 fn close_then_reopen_keeps_invariants() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window();
     w.split(Down);
     let b = w.open_window();
@@ -560,7 +560,7 @@ fn deep_nested_focus_ascent_never_surfaces_parent() {
     // Layout V( H(1,3), 2 ): top row is [1 | 3], the bottom row is the full-width pane 2.
     // From pane 3 (top-right), focusing Down must ascend across the inner H split to the outer V
     // split to reach pane 2 — a single directional move, never a surfaced "focus parent" climb.
-    let mut w = World::new();
+    let mut w = World::new("1");
     let one = w.open_window(); // pane 1 (top, before the H split)
     w.split(Down);
     let two = w.open_window(); // pane 2 (full-width bottom)
@@ -582,7 +582,7 @@ fn deep_nested_focus_ascent_never_surfaces_parent() {
 
 #[test]
 fn add_then_remove_output_preserves_all_windows_end_to_end() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
     w.set_output_rect(first, Rect::new(0, 0, 1920, 1080))
         .unwrap();
@@ -591,7 +591,7 @@ fn add_then_remove_output_preserves_all_windows_end_to_end() {
     let win_a = w.open_window();
 
     // Add a second output, focus it, and open a window there (on its own workspace stack).
-    let second = w.add_output(Rect::new(1920, 0, 1280, 1024));
+    let second = w.add_output(Rect::new(1920, 0, 1280, 1024), "o2").unwrap();
     w.set_focused_output(second).unwrap();
     let win_b = w.open_window();
     w.check_invariants();
@@ -609,7 +609,7 @@ fn add_then_remove_output_preserves_all_windows_end_to_end() {
 
 #[test]
 fn last_output_cannot_be_removed() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let only = w.focused_output();
     assert_eq!(w.remove_output(only), Err(LayoutError::LastOutput));
     w.check_invariants();
@@ -656,7 +656,7 @@ fn projection_follows_workspace_switching() {
     let mut w = world();
     let a = w.open_window();
     let ws1 = w.active_workspace_id();
-    let ws2 = w.new_workspace("two");
+    let ws2 = w.new_workspace("two").unwrap();
     let b = w.open_window();
 
     let on_two = w.project_stored(GAPS);
@@ -692,12 +692,12 @@ fn focus_only_change_leaves_geometry_untouched() {
 
 #[test]
 fn projection_places_each_output_at_its_own_offset() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
     w.set_output_rect(first, Rect::new(0, 0, 800, 600)).unwrap();
     let a = w.open_window();
 
-    let second = w.add_output(Rect::new(800, 0, 1024, 768));
+    let second = w.add_output(Rect::new(800, 0, 1024, 768), "o2").unwrap();
     w.set_focused_output(second).unwrap();
     let b = w.open_window();
 
@@ -715,7 +715,7 @@ fn projection_ignores_output_bindings_the_model_does_not_know() {
 
     // A stale binding (an output removed from the model, or never registered) contributes nothing
     // and does not disturb the surviving outputs.
-    let stale = w.add_output(Rect::new(800, 0, 640, 480));
+    let stale = w.add_output(Rect::new(800, 0, 640, 480), "o2").unwrap();
     let bindings = [(real, SCREEN), (stale, Rect::new(800, 0, 640, 480))];
     w.remove_output(stale).unwrap();
 
@@ -729,7 +729,7 @@ fn projection_ignores_output_bindings_the_model_does_not_know() {
 
 #[test]
 fn new_world_has_one_output_with_placeholder_rect() {
-    let w = World::new();
+    let w = World::new("1");
     assert_eq!(w.output_count(), 1);
     let id = w.focused_output();
     assert_eq!(w.output(id).unwrap().rect, Rect::new(0, 0, 0, 0));
@@ -738,10 +738,10 @@ fn new_world_has_one_output_with_placeholder_rect() {
 
 #[test]
 fn add_output_creates_an_independent_stack() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
     let before = w.project_stored(GAPS);
-    let second = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
     // New output starts empty and does not become focused; no visible change.
     assert!(before.diff(&w.project_stored(GAPS)).is_empty());
     assert_ne!(first, second);
@@ -758,15 +758,15 @@ fn add_output_creates_an_independent_stack() {
 
 #[test]
 fn ops_on_focused_output_do_not_disturb_other_outputs() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
-    let second = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
 
     let second_before = w.output(second).unwrap().clone();
     // All of these act on `first` (the focused output).
     w.open_window();
     w.split(Right);
-    w.new_workspace("scratch");
+    w.new_workspace("scratch").unwrap();
 
     // The second output is byte-for-byte unchanged.
     assert_eq!(w.output(second).unwrap(), &second_before);
@@ -777,16 +777,16 @@ fn ops_on_focused_output_do_not_disturb_other_outputs() {
 
 #[test]
 fn switching_focused_output_then_ops_affect_only_that_output() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
-    let second = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
 
     let first_before = w.output(first).unwrap().clone();
     w.set_focused_output(second).unwrap();
     assert_eq!(w.focused_output(), second);
 
     let win = w.open_window();
-    w.new_workspace("2");
+    w.new_workspace("2").unwrap();
 
     // First output untouched.
     assert_eq!(w.output(first).unwrap(), &first_before);
@@ -798,10 +798,10 @@ fn switching_focused_output_then_ops_affect_only_that_output() {
 
 #[test]
 fn per_output_geometry_is_independent() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
     w.set_output_rect(first, R1).unwrap();
-    let second = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
 
     // A window on the first output.
     let win1 = w.open_window();
@@ -828,14 +828,14 @@ fn per_output_geometry_is_independent() {
 
 #[test]
 fn remove_output_migrates_workspaces_and_windows_without_loss() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
-    let second = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
 
     // Put a window on the second output (on its own workspace).
     w.set_focused_output(second).unwrap();
     let win = w.open_window();
-    w.new_workspace("extra"); // second now has 2 workspaces
+    w.new_workspace("extra").unwrap(); // second now has 2 workspaces
     let win2 = w.open_window();
     assert_eq!(w.window_count(), 2);
 
@@ -865,9 +865,9 @@ fn remove_output_migrates_workspaces_and_windows_without_loss() {
 
 #[test]
 fn remove_focused_output_repoints_focus_to_survivor() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
-    let second = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
 
     w.set_focused_output(second).unwrap();
     assert_eq!(w.focused_output(), second);
@@ -880,7 +880,7 @@ fn remove_focused_output_repoints_focus_to_survivor() {
 
 #[test]
 fn remove_last_output_errors() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let only = w.focused_output();
     assert_eq!(w.remove_output(only), Err(LayoutError::LastOutput));
     w.check_invariants();
@@ -888,7 +888,7 @@ fn remove_last_output_errors() {
 
 #[test]
 fn remove_unknown_output_errors() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let bogus = OutputId::from_raw(999);
     assert_eq!(
         w.remove_output(bogus),
@@ -898,7 +898,7 @@ fn remove_unknown_output_errors() {
 
 #[test]
 fn set_output_rect_and_set_focused_errors_on_unknown() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let bogus = OutputId::from_raw(999);
     assert_eq!(
         w.set_output_rect(bogus, R1),
@@ -914,10 +914,10 @@ fn set_output_rect_and_set_focused_errors_on_unknown() {
 fn remove_survivor_is_lowest_id_when_focused_is_removed() {
     // Three outputs; focus the highest, remove it -> survivor should be the focused-if-survives
     // rule; but when focused is removed, survivor is the lowest remaining id.
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
-    let second = w.add_output(R2);
-    let third = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
+    let third = w.add_output(R2, "o3").unwrap();
 
     w.set_focused_output(third).unwrap();
     w.remove_output(third).unwrap();
@@ -961,11 +961,11 @@ fn focus_window_selects_its_pane_and_stack_position() {
 
 #[test]
 fn focus_window_on_another_output_moves_output_focus() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
     w.set_output_rect(first, R1).unwrap();
     let a = w.open_window();
-    let second = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
     w.set_focused_output(second).unwrap();
     let b = w.open_window();
     let ws_b = w.active_workspace_id();
@@ -985,10 +985,10 @@ fn focus_window_on_another_output_moves_output_focus() {
 
 #[test]
 fn focus_window_activates_a_hidden_workspace() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let a = w.open_window();
     let ws1 = w.active_workspace_id();
-    w.new_workspace("two");
+    w.new_workspace("two").unwrap();
     let b = w.open_window();
     assert_eq!(w.visible_windows(), vec![b]);
 
@@ -1013,7 +1013,7 @@ fn focus_unknown_window_errors_without_mutation() {
 
 #[test]
 fn focus_path_tracks_output_workspace_pane_and_window() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let empty = w.focus_path();
     assert_eq!(empty.output, w.focused_output());
     assert_eq!(empty.workspace, w.active_workspace_id());
@@ -1030,7 +1030,7 @@ fn focus_path_tracks_output_workspace_pane_and_window() {
     w.focus(Left);
     assert_eq!(w.focus_path().window, Some(id));
 
-    w.new_workspace("code");
+    w.new_workspace("code").unwrap();
     let ws2 = w.focus_path();
     assert_eq!(ws2.workspace_name, "code");
     assert_eq!(ws2.window, None);
@@ -1038,7 +1038,7 @@ fn focus_path_tracks_output_workspace_pane_and_window() {
 
 #[test]
 fn focus_path_display_is_one_compact_line() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let empty = w.focus_path();
     let expected_empty = format!(
         "output={} workspace={}:\"1\" pane={} window=-",
@@ -1094,10 +1094,10 @@ fn pane_at_returns_none_in_gaps_and_off_output() {
 
 #[test]
 fn pane_at_resolves_a_point_on_a_second_output() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
     w.set_output_rect(first, R1).unwrap();
-    let second = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
     let second_pane = w
         .workspace(w.output(second).unwrap().active_workspace())
         .unwrap()
@@ -1132,9 +1132,9 @@ fn focus_pane_on_an_empty_pane_then_open_lands_there() {
 
 #[test]
 fn focus_pane_moves_focused_output_and_errors_on_unknown() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
-    let second = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
     let second_pane = w
         .workspace(w.output(second).unwrap().active_workspace())
         .unwrap()
@@ -1153,6 +1153,19 @@ fn focus_pane_moves_focused_output_and_errors_on_unknown() {
 // ---- Phase 3 persistence core: topology snapshot, stack replay, unique names ----
 
 use crucible_layout::{LayoutNode, WorkspaceLayout};
+
+/// The pane ids of a returned tree, in tree order.
+fn leaf_ids(root: &LayoutNode<PaneId>) -> Vec<PaneId> {
+    root.leaves().into_iter().copied().collect()
+}
+
+/// The shape of a layout with its leaf payloads erased.
+fn shape<P>(layout: &WorkspaceLayout<P>) -> WorkspaceLayout<()> {
+    WorkspaceLayout {
+        root: layout.root.map_ref(|_| ()),
+        focused_pane: layout.focused_pane,
+    }
+}
 
 /// Builds a nested 4-pane workspace with non-0.5 ratios and returns its id.
 fn nested_workspace(w: &mut World) -> WorkspaceId {
@@ -1179,11 +1192,15 @@ fn topology_round_trips_through_insert_workspace() {
     assert!((*ratio - 0.6).abs() < 1e-9);
 
     let out = w.focused_output();
-    let (new_ws, panes) = w.insert_workspace(out, "copy", &snap).unwrap();
+    let (new_ws, root) = w.insert_workspace(out, "copy", &snap).unwrap();
+    let panes = leaf_ids(&root);
     w.check_invariants();
     assert_eq!(panes.len(), 4);
     assert_eq!(w.workspace(new_ws).unwrap().panes(), panes);
-    assert_eq!(w.workspace_layout(new_ws).unwrap(), snap);
+    let copied = w.workspace_layout(new_ws).unwrap();
+    // The returned tree is exactly the new workspace's snapshot (same pane ids, tree order).
+    assert_eq!(copied.root, root);
+    assert_eq!(shape(&copied), shape(&snap));
     // Not switched to, and appended last.
     assert_eq!(w.active_workspace_id(), ws);
     assert_eq!(w.output(out).unwrap().workspaces().last(), Some(&new_ws));
@@ -1194,12 +1211,13 @@ fn topology_round_trips_through_insert_workspace() {
 fn single_pane_snapshot_round_trips() {
     let mut w = world();
     let snap = w.workspace_layout(w.active_workspace_id()).unwrap();
-    assert_eq!(snap.root, LayoutNode::Pane);
+    assert_eq!(snap.root, LayoutNode::Pane(w.focused_pane_id()));
     let out = w.focused_output();
     let (id, panes) = w.insert_workspace(out, "solo", &snap).unwrap();
+    let panes = leaf_ids(&panes);
     w.check_invariants();
     assert_eq!(panes.len(), 1);
-    assert_eq!(w.workspace_layout(id).unwrap(), snap);
+    assert_eq!(shape(&w.workspace_layout(id).unwrap()), shape(&snap));
 }
 
 #[test]
@@ -1207,10 +1225,11 @@ fn insert_workspace_clamps_focus_and_rejects_bad_input() {
     let mut w = world();
     let out = w.focused_output();
     let mut snap = WorkspaceLayout {
-        root: LayoutNode::Pane,
+        root: LayoutNode::Pane(()),
         focused_pane: 9,
     };
     let (id, panes) = w.insert_workspace(out, "a", &snap).unwrap();
+    let panes = leaf_ids(&panes);
     assert_eq!(w.workspace(id).unwrap().focused_pane, panes[0]);
     assert_eq!(w.workspace_layout(id).unwrap().focused_pane, 0);
 
@@ -1223,8 +1242,8 @@ fn insert_workspace_clamps_focus_and_rejects_bad_input() {
     snap.root = LayoutNode::Split {
         axis: crucible_layout::Axis::Horizontal,
         ratio: 1.5,
-        first: Box::new(LayoutNode::Pane),
-        second: Box::new(LayoutNode::Pane),
+        first: Box::new(LayoutNode::Pane(())),
+        second: Box::new(LayoutNode::Pane(())),
     };
     assert_eq!(
         w.insert_workspace(out, "b", &snap),
@@ -1288,6 +1307,7 @@ fn open_window_at_preserves_focus_and_active_state() {
     let out = w.focused_output();
     let snap = w.workspace_layout(ws).unwrap();
     let (other, panes) = w.insert_workspace(out, "other", &snap).unwrap();
+    let panes = leaf_ids(&panes);
     let d = w.open_window_at(panes[0], 0).unwrap();
     w.check_invariants();
     assert_eq!(w.active_workspace_id(), ws);
@@ -1352,7 +1372,7 @@ fn move_window_below_focus_keeps_focused_window() {
     let b = w.open_window();
     let _c = w.open_window();
     w.set_stack_focus(pane, 1).unwrap();
-    let other = w.new_workspace("other");
+    let other = w.new_workspace("other").unwrap();
     w.switch_workspace(home).unwrap();
     w.move_window_to_workspace(a, other).unwrap();
     assert_eq!(w.pane(pane).unwrap().focused_window(), Some(b));
@@ -1363,12 +1383,12 @@ fn move_window_below_focus_keeps_focused_window() {
 /// `switch_workspace` to a workspace on a non-focused output focuses that output and activates it.
 #[test]
 fn switch_workspace_crosses_outputs() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     let first = w.focused_output();
-    let second = w.add_output(R2);
+    let second = w.add_output(R2, "o2").unwrap();
     let target = w.output(second).unwrap().active_workspace();
     w.set_focused_output(second).unwrap();
-    let other = w.new_workspace("x");
+    let other = w.new_workspace("x").unwrap();
     w.set_focused_output(first).unwrap();
     assert_eq!(w.output(second).unwrap().active_workspace(), other);
     w.switch_workspace(target).unwrap();
@@ -1410,6 +1430,7 @@ fn stack_replay_in_shuffled_order_reproduces_order_and_focus() {
     let mut dst = world();
     let out = dst.focused_output();
     let (_, panes) = dst.insert_workspace(out, "replay", &snap).unwrap();
+    let panes = leaf_ids(&panes);
 
     // Windows "map" in a shuffled order: (pane index, saved stack index).
     let mut work: Vec<(usize, usize)> = record

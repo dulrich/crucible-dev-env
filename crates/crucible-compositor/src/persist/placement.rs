@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn slot_for_reports_current_index_and_focus() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let a = w.open_window();
         let b = w.open_window();
         let pane = w.focused_pane_id();
@@ -323,7 +323,7 @@ mod tests {
     /// Audit E1: the slot is the placeholder's live index, not its saved-order index.
     #[test]
     fn relaunch_slot_uses_live_index_not_saved_order() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let pane = w.focused_pane_id();
         let t1 = w.open_window_at(pane, 0).unwrap();
         let p = w.open_window_at(pane, 1).unwrap();

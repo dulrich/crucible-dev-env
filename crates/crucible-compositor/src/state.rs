@@ -297,7 +297,7 @@ mod hover_tests {
         use super::{HoverTarget, hover_pane_key};
         use crucible_layout::{Direction, World};
 
-        let mut w = World::new();
+        let mut w = World::new("1");
         let win = w.open_window();
         let left = w.pane_of_window(win).unwrap();
         let right = w.split(Direction::Right);
@@ -387,6 +387,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         // Create the seat with keyboard + pointer capabilities. NB: this only *advertises* the
         // capabilities; routing events into the keyboard/pointer is [`crate::input`]'s job.
         let seat_name = backend_data.seat_name();
+        // The startup seed is named off the saved workspaces once, before the model exists, so it
+        // never shadows a saved name (no later rename).
+        let store_dir = crucible_persist::store::store_dir();
+        let saved: std::collections::HashSet<String> =
+            crucible_persist::store::list_saved(&store_dir)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect();
+        let seed = crate::persist::startup_seed_name(&saved);
         let mut seat = seat_state.new_wl_seat(&dh, seat_name.clone());
         let pointer = seat.add_pointer();
         seat.add_keyboard(XkbConfig::default(), 200, 25)
@@ -401,7 +410,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             clock,
             space: Space::default(),
             popups: PopupManager::default(),
-            layout: LayoutState::new(),
+            layout: LayoutState::new(seed),
             projection: Projection::default(),
             compositor_state,
             shm_state,
@@ -423,7 +432,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             config: Config::default(),
             bindings: Bindings::default(),
             hover_target: None,
-            persist: crate::persist::PersistState::new(crucible_persist::store::store_dir()),
+            persist: crate::persist::PersistState::new(store_dir),
             header: crate::header::HeaderState::default(),
             header_text: crate::text::TextRenderer::from_font(None),
             session_lock,

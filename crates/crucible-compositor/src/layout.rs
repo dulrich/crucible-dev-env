@@ -46,7 +46,8 @@
 //! Each physical Smithay [`Output`](smithay::output::Output) is mapped 1:1 to a model
 //! [`crucible_layout::OutputId`], stashed in the Smithay output's `user_data()` (see
 //! [`model_output_id`] / [`set_model_output_id`]). The **first** compositor output adopts the
-//! existing `World::new()` output; each subsequent connector calls [`World::add_output`]. The
+//! existing `World::new` output (seeded at startup off the saved names); each subsequent connector
+//! calls [`World::add_output`] with a seed named the same way. The
 //! projection asks the model for *each* output's own active workspace, so each monitor shows an
 //! independent workspace stack.
 

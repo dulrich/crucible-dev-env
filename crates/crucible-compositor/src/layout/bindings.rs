@@ -7,6 +7,7 @@ use crucible_layout::{LayoutError, OutputId, PaneId, Rect, WindowId, WorkspaceId
 
 use super::WindowClass;
 use crate::element::WindowElement;
+use crate::persist::new_workspace_name;
 
 /// Per-window compositor metadata, bound to a managed window for exactly as long as its payload.
 ///
@@ -94,18 +95,13 @@ pub struct LayoutState<E = WindowElement> {
     unmanaged: Vec<E>,
 }
 
-impl<E: Payload> Default for LayoutState<E> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl<E: Payload> LayoutState<E> {
-    /// Creates a fresh layout state with the default one-output/one-workspace/one-pane `World`.
+    /// Creates a fresh layout state with a one-output/one-workspace/one-pane `World` whose seed
+    /// workspace is named `seed` (the caller picks it, e.g. off the names saved on disk).
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(seed: impl Into<String>) -> Self {
         Self {
-            world: World::new(),
+            world: World::new(seed),
             by_id: HashMap::new(),
             unmanaged: Vec::new(),
         }
@@ -245,11 +241,23 @@ impl<E: Payload> LayoutState<E> {
     /// Chooses the model output that backs a newly registered compositor output and stores `rect`.
     ///
     /// `bound` is the set of model outputs already claimed by live compositor outputs. The first
-    /// compositor output adopts the unbound output `World::new()` created; every later one
-    /// allocates a fresh model output. Either way the chosen output carries `rect` on return.
-    pub fn bind_output(&mut self, bound: &HashSet<OutputId>, rect: Rect) -> OutputId {
+    /// compositor output adopts the unbound output `World::new` created; every later one
+    /// allocates a fresh model output whose seed workspace is named by
+    /// [`new_workspace_name`] (the first number neither live nor in `saved`, the names saved on
+    /// disk). Either way the chosen output carries `rect` on return.
+    pub fn bind_output(
+        &mut self,
+        bound: &HashSet<OutputId>,
+        rect: Rect,
+        saved: &HashSet<String>,
+    ) -> OutputId {
         let unbound = self.world.output_ids().find(|id| !bound.contains(id));
-        let id = unbound.unwrap_or_else(|| self.world.add_output(rect));
+        let id = unbound.unwrap_or_else(|| {
+            let seed = new_workspace_name(&self.world, saved);
+            self.world
+                .add_output(rect, seed)
+                .expect("new_workspace_name never returns a live name")
+        });
         self.world
             .set_output_rect(id, rect)
             .expect("output was just found or allocated in this model");
@@ -337,7 +345,7 @@ mod tests {
     }
 
     fn state() -> LayoutState<TestElement> {
-        LayoutState::new()
+        LayoutState::new("1")
     }
 
     fn app() -> WindowMeta {
@@ -386,7 +394,7 @@ mod tests {
         let mut layout = state();
         let first = layout.world.active_workspace_id();
         let kept = layout.open_managed(TestElement::new(1), app());
-        let ws = layout.world.new_workspace("two");
+        let ws = layout.world.new_workspace("two").unwrap();
         let pane = layout.world.workspace(ws).unwrap().panes()[0];
         let a = layout
             .open_managed_at(TestElement::new(2), terminal(7), pane, 0)
@@ -576,7 +584,7 @@ mod tests {
         let mut layout = state();
         let initial = layout.world.focused_output();
 
-        let id = layout.bind_output(&HashSet::new(), R1);
+        let id = layout.bind_output(&HashSet::new(), R1, &HashSet::new());
 
         assert_eq!(id, initial);
         assert_eq!(layout.world.output_ids().count(), 1);
@@ -586,9 +594,9 @@ mod tests {
     #[test]
     fn a_second_compositor_output_allocates_a_fresh_model_output() {
         let mut layout = state();
-        let first = layout.bind_output(&HashSet::new(), R1);
+        let first = layout.bind_output(&HashSet::new(), R1, &HashSet::new());
 
-        let second = layout.bind_output(&HashSet::from([first]), R2);
+        let second = layout.bind_output(&HashSet::from([first]), R2, &HashSet::new());
 
         assert_ne!(second, first);
         assert_eq!(layout.world.output_ids().count(), 2);
@@ -597,12 +605,24 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_output_seed_skips_live_and_saved_names() {
+        // Live {"1"}, saved {"2"}: the old add-then-rename path named this seed "3"; so must this.
+        let mut layout = state();
+        let first = layout.bind_output(&HashSet::new(), R1, &HashSet::new());
+        let saved = HashSet::from(["2".to_string()]);
+        let second = layout.bind_output(&HashSet::from([first]), R2, &saved);
+        let seed = layout.world.output(second).unwrap().active_workspace();
+        assert_eq!(layout.world.workspace(seed).unwrap().name, "3");
+        layout.world.check_invariants();
+    }
+
+    #[test]
     fn binding_never_steals_an_output_another_compositor_output_holds() {
         let mut layout = state();
-        let first = layout.bind_output(&HashSet::new(), R1);
-        let second = layout.bind_output(&HashSet::from([first]), R2);
+        let first = layout.bind_output(&HashSet::new(), R1, &HashSet::new());
+        let second = layout.bind_output(&HashSet::from([first]), R2, &HashSet::new());
 
-        let third = layout.bind_output(&HashSet::from([first, second]), R1);
+        let third = layout.bind_output(&HashSet::from([first, second]), R1, &HashSet::new());
 
         assert!(third != first && third != second);
         assert_eq!(layout.world.output_ids().count(), 3);
@@ -611,7 +631,7 @@ mod tests {
     #[test]
     fn a_stale_rect_update_is_reported_and_leaves_survivors_untouched() {
         let mut layout = state();
-        let live = layout.bind_output(&HashSet::new(), R1);
+        let live = layout.bind_output(&HashSet::new(), R1, &HashSet::new());
         let before = layout.world.clone();
         let stale = OutputId::from_raw(u64::MAX);
 
@@ -625,7 +645,7 @@ mod tests {
     #[test]
     fn releasing_the_last_output_is_refused_and_changes_nothing() {
         let mut layout = state();
-        let only = layout.bind_output(&HashSet::new(), R1);
+        let only = layout.bind_output(&HashSet::new(), R1, &HashSet::new());
         layout.open_managed(TestElement::new(1), app());
         let before = layout.world.clone();
 
@@ -637,8 +657,8 @@ mod tests {
     #[test]
     fn releasing_a_bound_output_keeps_its_windows_on_a_survivor() {
         let mut layout = state();
-        let first = layout.bind_output(&HashSet::new(), R1);
-        let second = layout.bind_output(&HashSet::from([first]), R2);
+        let first = layout.bind_output(&HashSet::new(), R1, &HashSet::new());
+        let second = layout.bind_output(&HashSet::from([first]), R2, &HashSet::new());
         layout.world.set_focused_output(second).unwrap();
         let id = layout.open_managed(TestElement::new(7), app());
 

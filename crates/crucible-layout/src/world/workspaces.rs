@@ -1,21 +1,21 @@
 //! Workspace lifecycle (create, rename, switch, cycle) and moving windows between workspaces.
 
 use super::*;
-use crate::{OutputId, PaneId, WindowId, WorkspaceId, WorkspaceLayout, tree::SplitTree};
+use crate::{
+    LayoutNode, OutputId, PaneId, WindowId, WorkspaceId, WorkspaceLayout, tree::SplitTree,
+};
 
 impl World {
-    /// Creates a new empty workspace on the focused output, pushes it on the stack, and switches to
-    /// it. Returns the new workspace id.
+    /// Creates a new empty workspace (one empty pane) on the focused output, pushes it on the
+    /// stack, and switches to it. Returns the new workspace id.
     ///
-    /// Does **not** check name uniqueness (the compositor passes unique names); use
-    /// [`World::insert_workspace`] / [`World::workspace_by_name`] where uniqueness matters.
-    pub fn new_workspace(&mut self, name: impl Into<String>) -> WorkspaceId {
-        let workspace_id = self.build_workspace(name);
-
-        let output = self.outputs.get_mut(&self.focused_output).expect("output");
-        output.stack.push(workspace_id);
-
-        workspace_id
+    /// Errors with [`LayoutError::DuplicateName`] (mutating nothing) when a live workspace already
+    /// holds `name`.
+    pub fn new_workspace(&mut self, name: impl Into<String>) -> Result<WorkspaceId, LayoutError> {
+        let (workspace_id, _) =
+            self.insert_workspace(self.focused_output, name, &WorkspaceLayout::single(()))?;
+        self.activate(workspace_id, None)?;
+        Ok(workspace_id)
     }
 
     /// Renames a workspace. Errors if the id is unknown, or if a *different* workspace already
@@ -46,9 +46,10 @@ impl World {
     }
 
     /// Snapshots the topology of workspace `id` (split tree + focused pane index), or `None` if the
-    /// id is unknown. Stack contents and stack focus are not part of the snapshot.
+    /// id is unknown. Leaves carry the pane ids in tree order. Stack contents and stack focus are
+    /// not part of the snapshot.
     #[must_use]
-    pub fn workspace_layout(&self, id: WorkspaceId) -> Option<WorkspaceLayout> {
+    pub fn workspace_layout(&self, id: WorkspaceId) -> Option<WorkspaceLayout<PaneId>> {
         let ws = self.workspaces.get(&id)?;
         let focused_pane = ws
             .tree
@@ -65,20 +66,39 @@ impl World {
     /// Builds a workspace named `name` shaped like `layout`, with **empty** panes, and appends it
     /// to `output`'s workspace stack without switching to it (use [`World::switch_workspace`]).
     ///
-    /// Returns the workspace id and its pane ids in tree order. A `layout.focused_pane` that is out
-    /// of range is clamped to pane 0. Errors (and mutates nothing) on an unknown output, a name
-    /// held by another workspace ([`LayoutError::DuplicateName`]), or a split ratio that is not
-    /// finite and strictly inside `(0, 1)` ([`LayoutError::InvalidRatio`]).
-    pub fn insert_workspace(
+    /// The leaf payloads `P` are ignored (only the shape is used). Returns the workspace id and its
+    /// tree with the new pane ids as leaves (tree order). A `layout.focused_pane` that is out of
+    /// range is clamped to pane 0. Errors (and mutates nothing) on an unknown output, a name held
+    /// by another workspace ([`LayoutError::DuplicateName`]), or a split ratio that is not finite
+    /// and strictly inside `(0, 1)` ([`LayoutError::InvalidRatio`]).
+    pub fn insert_workspace<P>(
         &mut self,
         output: OutputId,
         name: impl Into<String>,
-        layout: &WorkspaceLayout,
-    ) -> Result<(WorkspaceId, Vec<PaneId>), LayoutError> {
+        layout: &WorkspaceLayout<P>,
+    ) -> Result<(WorkspaceId, LayoutNode<PaneId>), LayoutError> {
         let name = name.into();
         if !self.outputs.contains_key(&output) {
             return Err(LayoutError::UnknownOutput(output));
         }
+        let (workspace_id, root) = self.create_workspace(name, layout)?;
+        self.outputs
+            .get_mut(&output)
+            .expect("checked")
+            .stack
+            .extend([workspace_id]);
+        Ok((workspace_id, root))
+    }
+
+    /// Validates `name` and `layout`, then builds the workspace (empty panes) into the arena maps
+    /// without attaching it to any output. The one workspace-creation path: shared by
+    /// [`World::new`], [`World::add_output`] and [`World::insert_workspace`] (hence
+    /// [`World::new_workspace`]). Mutates nothing on error.
+    pub(super) fn create_workspace<P>(
+        &mut self,
+        name: String,
+        layout: &WorkspaceLayout<P>,
+    ) -> Result<(WorkspaceId, LayoutNode<PaneId>), LayoutError> {
         if self.workspace_by_name(&name).is_some() {
             return Err(LayoutError::DuplicateName(name));
         }
@@ -93,6 +113,7 @@ impl World {
         }
         let workspace_id = WorkspaceId::from_raw(self.workspace_ids.alloc());
         let focused = panes.get(layout.focused_pane).copied().unwrap_or(panes[0]);
+        let root = tree.to_layout();
         self.workspaces.insert(
             workspace_id,
             Workspace {
@@ -102,12 +123,7 @@ impl World {
                 tree,
             },
         );
-        self.outputs
-            .get_mut(&output)
-            .expect("checked")
-            .stack
-            .extend([workspace_id]);
-        Ok((workspace_id, panes))
+        Ok((workspace_id, root))
     }
 
     /// Makes `target` the active workspace of the output that owns it, and focuses that output.
@@ -259,27 +275,6 @@ impl World {
         let removed = o.stack.remove_item(&ws);
         debug_assert!(removed, "owned");
     }
-
-    /// Creates a fresh empty workspace (one empty pane) and inserts both into the arena maps.
-    ///
-    /// Shared by [`super::World::new`]-style seeding, [`super::World::add_output`], and
-    /// [`World::new_workspace`]. Returns the new workspace id. Does **not** attach the workspace to
-    /// any output.
-    pub(super) fn build_workspace(&mut self, name: impl Into<String>) -> WorkspaceId {
-        let workspace_id = WorkspaceId::from_raw(self.workspace_ids.alloc());
-        let pane_id = PaneId::from_raw(self.pane_ids.alloc());
-        self.panes.insert(pane_id, Pane::empty(pane_id));
-        self.workspaces.insert(
-            workspace_id,
-            Workspace {
-                id: workspace_id,
-                name: name.into(),
-                focused_pane: pane_id,
-                tree: SplitTree::new(pane_id),
-            },
-        );
-        workspace_id
-    }
 }
 
 #[cfg(test)]
@@ -289,11 +284,29 @@ mod tests {
 
     /// Focused output with workspaces "1" (initial), plus "a" and "b"; "b" active.
     fn world3() -> (World, WorkspaceId, WorkspaceId, WorkspaceId) {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let first = w.active_workspace_id();
-        let a = w.new_workspace("a");
-        let b = w.new_workspace("b");
+        let a = w.new_workspace("a").unwrap();
+        let b = w.new_workspace("b").unwrap();
         (w, first, a, b)
+    }
+
+    #[test]
+    fn new_workspace_refuses_a_live_name_without_mutation() {
+        let (mut w, _, a, _) = world3();
+        let before = w.clone();
+        for name in ["1", "a", "b"] {
+            assert_eq!(
+                w.new_workspace(name),
+                Err(LayoutError::DuplicateName(name.into()))
+            );
+        }
+        assert_eq!(w, before, "a refused new_workspace mutates nothing");
+        // A name freed by rename becomes usable again.
+        w.rename_workspace(a, "c").unwrap();
+        let again = w.new_workspace("a").unwrap();
+        assert_eq!(w.active_workspace_id(), again);
+        w.check_invariants();
     }
 
     #[test]
@@ -361,7 +374,7 @@ mod tests {
 
     #[test]
     fn remove_last_workspace_is_refused_without_mutation() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let only = w.active_workspace_id();
         let before = w.clone();
         assert_eq!(
@@ -378,9 +391,9 @@ mod tests {
     }
 
     fn two_outputs() -> (World, OutputId, OutputId) {
-        let mut w = World::new();
+        let mut w = World::new("1");
         let o1 = w.focused_output();
-        let o2 = w.add_output(Rect::new(10, 0, 10, 10));
+        let o2 = w.add_output(Rect::new(10, 0, 10, 10), "o2").unwrap();
         (w, o1, o2)
     }
 
@@ -388,7 +401,7 @@ mod tests {
     fn move_workspace_fixes_source_target_and_focus() {
         let (mut w, o1, o2) = two_outputs();
         let first = w.active_workspace_id();
-        let a = w.new_workspace("a"); // o1: [first, a], a active
+        let a = w.new_workspace("a").unwrap(); // o1: [first, a], a active
         w.move_workspace_to_output(a, o2).unwrap();
         assert_eq!(w.output(o1).unwrap().workspaces(), &[first]);
         assert_eq!(w.output(o1).unwrap().active_workspace(), first);
@@ -404,7 +417,7 @@ mod tests {
     fn move_inactive_workspace_keeps_source_active() {
         let (mut w, o1, o2) = two_outputs();
         let first = w.active_workspace_id();
-        let a = w.new_workspace("a"); // a active
+        let a = w.new_workspace("a").unwrap(); // a active
         w.move_workspace_to_output(first, o2).unwrap();
         assert_eq!(w.output(o1).unwrap().active_workspace(), a);
         assert_eq!(w.output(o2).unwrap().active_workspace(), first);

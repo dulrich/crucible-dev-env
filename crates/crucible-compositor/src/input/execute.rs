@@ -145,9 +145,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     .collect();
                 let name = new_workspace_name(&self.layout.world, &saved);
                 info!(name, "Super+N: creating new workspace");
-                self.update_model(|w| {
-                    w.new_workspace(name);
-                });
+                if let Err(err) = self.with_model(|w| w.new_workspace(name).map(drop)) {
+                    warn!(%err, "Super+N: cannot create the workspace");
+                }
             }
             Action::VtSwitch(vt) => {
                 dispatch_vt_switch(&mut self.backend_data, vt);
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn close_pane_dispatches_to_world_close_pane() {
-        let mut world = World::new();
+        let mut world = World::new("1");
         world.split(Direction::Right); // empty, non-last focused pane
         assert_dispatches(world, Action::ClosePane, |w| {
             w.close_pane().unwrap();
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn close_pane_refusal_leaves_world_unchanged() {
-        let mut world = World::new();
+        let mut world = World::new("1");
         let before = world.clone();
         assert_eq!(
             apply_model_action(&mut world, LayoutVerb::ClosePane),
@@ -407,7 +407,7 @@ mod tests {
 
     #[test]
     fn focus_dispatches_to_world_focus() {
-        let mut world = World::new();
+        let mut world = World::new("1");
         world.split(Direction::Right); // creates a neighbour so focus has somewhere to go
         assert_dispatches(world, Action::Focus(Direction::Left), |w| {
             w.focus(Direction::Left);
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn move_dispatches_to_world_move() {
-        let mut world = World::new();
+        let mut world = World::new("1");
         world.split(Direction::Right);
         assert_dispatches(world, Action::Move(Direction::Left), |w| {
             w.move_(Direction::Left);
@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn split_dispatches_to_world_split() {
-        let world = World::new();
+        let world = World::new("1");
         assert_dispatches(world, Action::Split(Direction::Down), |w| {
             w.split(Direction::Down);
         });
@@ -433,7 +433,7 @@ mod tests {
 
     #[test]
     fn resize_dispatches_to_world_resize_with_the_edge_delta() {
-        let mut world = World::new();
+        let mut world = World::new("1");
         world.split(Direction::Right);
         assert_dispatches(world, Action::Resize(Direction::Left), |w| {
             w.resize(Direction::Left, RESIZE_DELTA);
@@ -442,7 +442,7 @@ mod tests {
 
     #[test]
     fn cycle_stack_dispatches_to_world_cycle_stack() {
-        let mut world = World::new();
+        let mut world = World::new("1");
         world.open_window();
         world.open_window();
         assert_dispatches(world, Action::CycleStack(-1), |w| {
@@ -452,8 +452,8 @@ mod tests {
 
     #[test]
     fn cycle_workspace_dispatches_to_world_cycle_workspace() {
-        let mut world = World::new();
-        world.new_workspace("ws2");
+        let mut world = World::new("1");
+        world.new_workspace("ws2").unwrap();
         assert_dispatches(world, Action::CycleWorkspace(-1), |w| {
             w.cycle_workspace(-1);
         });
@@ -461,9 +461,9 @@ mod tests {
 
     #[test]
     fn move_window_to_workspace_dispatches_to_world_move_window_to_workspace() {
-        let mut world = World::new();
+        let mut world = World::new("1");
         let window = world.open_window();
-        world.new_workspace("ws2"); // now active; output = [ws0, ws2]
+        world.new_workspace("ws2").unwrap(); // now active; output = [ws0, ws2]
         let ws0 = world.output(world.focused_output()).unwrap().workspaces()[0];
         world.switch_workspace(ws0).unwrap(); // back on ws0, `window` is focused again
 
@@ -477,8 +477,8 @@ mod tests {
     fn move_window_to_workspace_is_a_noop_without_a_focused_window() {
         // A freshly-closed pane's workspace has no window at all; the model action must not
         // panic or error, just leave the world untouched (mirrors the compositor's silent no-op).
-        let mut world = World::new();
-        world.new_workspace("ws2");
+        let mut world = World::new("1");
+        world.new_workspace("ws2").unwrap();
         let before = world.clone();
         apply_model_action(&mut world, LayoutVerb::MoveWindowToWorkspace(1)).unwrap();
         assert_eq!(world, before);
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     fn move_window_to_workspace_is_a_noop_with_only_one_workspace() {
-        let mut world = World::new();
+        let mut world = World::new("1");
         world.open_window();
         let before = world.clone();
         apply_model_action(&mut world, LayoutVerb::MoveWindowToWorkspace(1)).unwrap();

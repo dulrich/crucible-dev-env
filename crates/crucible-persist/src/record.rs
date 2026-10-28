@@ -1,6 +1,6 @@
 //! The saved shape of a workspace: topology plus per-pane window stacks.
 
-use crucible_layout::{Axis, LayoutNode, PaneId, WindowId, WorkspaceId, WorkspaceLayout, World};
+use crucible_layout::{LayoutNode, WindowId, WorkspaceId, WorkspaceLayout, World};
 use std::path::PathBuf;
 
 /// One window as persisted.
@@ -32,23 +32,8 @@ pub struct PaneRecord {
     pub windows: Vec<WindowRecord>,
 }
 
-/// A node of the persisted split tree.
-#[derive(Debug, Clone, PartialEq)]
-pub enum RecordNode {
-    /// A split of two sub-trees.
-    Split {
-        /// Orientation of the split.
-        axis: Axis,
-        /// Fraction of space given to `first`, strictly inside `(0, 1)`.
-        ratio: f64,
-        /// The first (left/top) child.
-        first: Box<RecordNode>,
-        /// The second (right/bottom) child.
-        second: Box<RecordNode>,
-    },
-    /// A pane leaf.
-    Pane(PaneRecord),
-}
+/// A node of the persisted split tree: the layout tree with a [`PaneRecord`] on every leaf.
+pub type RecordNode = LayoutNode<PaneRecord>;
 
 /// A whole workspace as persisted; one file holds one record.
 #[derive(Debug, Clone, PartialEq)]
@@ -66,35 +51,6 @@ pub struct WorkspaceRecord {
     pub tree: RecordNode,
 }
 
-impl RecordNode {
-    fn to_layout(&self) -> LayoutNode {
-        match self {
-            RecordNode::Pane(_) => LayoutNode::Pane,
-            RecordNode::Split {
-                axis,
-                ratio,
-                first,
-                second,
-            } => LayoutNode::Split {
-                axis: *axis,
-                ratio: *ratio,
-                first: Box::new(first.to_layout()),
-                second: Box::new(second.to_layout()),
-            },
-        }
-    }
-
-    fn collect_panes<'a>(&'a self, out: &mut Vec<&'a PaneRecord>) {
-        match self {
-            RecordNode::Pane(p) => out.push(p),
-            RecordNode::Split { first, second, .. } => {
-                first.collect_panes(out);
-                second.collect_panes(out);
-            }
-        }
-    }
-}
-
 impl WorkspaceRecord {
     /// Captures workspace `ws` of `world`, mapping each window through `window`. Returns `None`
     /// if the workspace id is unknown. `root` is stored as given.
@@ -106,8 +62,13 @@ impl WorkspaceRecord {
     ) -> Option<WorkspaceRecord> {
         let workspace = world.workspace(ws)?;
         let layout = world.workspace_layout(ws)?;
-        let mut panes = workspace.panes().into_iter();
-        let tree = Self::build(&layout.root, &mut panes, world, &window);
+        let tree = layout.root.map(|id| {
+            let pane = world.pane(id).expect("workspace pane exists");
+            PaneRecord {
+                focused: pane.focused_index(),
+                windows: pane.windows().iter().map(|w| window(*w)).collect(),
+            }
+        });
         Some(WorkspaceRecord {
             name: workspace.name.clone(),
             root,
@@ -117,40 +78,11 @@ impl WorkspaceRecord {
         })
     }
 
-    fn build(
-        node: &LayoutNode,
-        panes: &mut impl Iterator<Item = PaneId>,
-        world: &World,
-        window: &impl Fn(WindowId) -> WindowRecord,
-    ) -> RecordNode {
-        match node {
-            LayoutNode::Pane => {
-                let id = panes.next().expect("layout and pane order agree");
-                let pane = world.pane(id).expect("workspace pane exists");
-                RecordNode::Pane(PaneRecord {
-                    focused: pane.focused_index(),
-                    windows: pane.windows().iter().map(|w| window(*w)).collect(),
-                })
-            }
-            LayoutNode::Split {
-                axis,
-                ratio,
-                first,
-                second,
-            } => RecordNode::Split {
-                axis: *axis,
-                ratio: *ratio,
-                first: Box::new(Self::build(first, panes, world, window)),
-                second: Box::new(Self::build(second, panes, world, window)),
-            },
-        }
-    }
-
     /// The topology to hand to `World::insert_workspace`.
     #[must_use]
-    pub fn layout(&self) -> WorkspaceLayout {
+    pub fn layout(&self) -> WorkspaceLayout<()> {
         WorkspaceLayout {
-            root: self.tree.to_layout(),
+            root: self.tree.map_ref(|_| ()),
             focused_pane: self.focused_pane,
         }
     }
@@ -158,9 +90,7 @@ impl WorkspaceRecord {
     /// The panes in tree order — the same order `insert_workspace` returns pane ids in.
     #[must_use]
     pub fn panes(&self) -> Vec<&PaneRecord> {
-        let mut out = Vec::new();
-        self.tree.collect_panes(&mut out);
-        out
+        self.tree.leaves()
     }
 }
 
@@ -178,7 +108,7 @@ mod tests {
 
     #[test]
     fn from_world_captures_shape_stacks_and_focus() {
-        let mut w = World::new();
+        let mut w = World::new("1");
         w.split(Right);
         w.split(Down);
         let ws = w.active_workspace_id();
@@ -209,12 +139,14 @@ mod tests {
         assert!(recs[1].windows.is_empty());
         assert_eq!(recs[2].windows, vec![term(3)]);
         // layout() agrees with the world's own snapshot.
-        assert_eq!(rec.layout(), w.workspace_layout(ws).unwrap());
+        let snap = w.workspace_layout(ws).unwrap();
+        assert_eq!(rec.layout().root, snap.root.map_ref(|_| ()));
+        assert_eq!(rec.layout().focused_pane, snap.focused_pane);
     }
 
     #[test]
     fn from_world_unknown_workspace_is_none() {
-        let w = World::new();
+        let w = World::new("1");
         assert!(
             WorkspaceRecord::from_world(&w, WorkspaceId::from_raw(77), None, |_| term(0)).is_none()
         );

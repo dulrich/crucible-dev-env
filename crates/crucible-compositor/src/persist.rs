@@ -35,13 +35,13 @@ mod spawn;
 mod workspace;
 
 pub use spawn::{SpawnKind, SpawnRecord};
-pub use workspace::new_workspace_name;
+pub use workspace::{new_workspace_name, startup_seed_name};
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
-use crucible_layout::{OutputId, WindowId, WorkspaceId};
+use crucible_layout::{OutputId, PaneId, WindowId, WorkspaceId};
 use crucible_persist::session::{Session, plan_restore, session_path};
 use crucible_persist::slots::{Slots, slots_path};
 use crucible_persist::{WindowRecord, WorkspaceRecord, store};
@@ -118,7 +118,7 @@ impl PersistState {
         }
     }
 
-    fn saved_names(&self) -> HashSet<String> {
+    pub(crate) fn saved_names(&self) -> HashSet<String> {
         store::list_saved(&self.store_dir)
             .into_iter()
             .map(|(n, _)| n)
@@ -272,17 +272,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     /// The startup session step, called once by each backend after its initial outputs are
-    /// registered: renames the seed off a saved name, then reopens the last session when
-    /// `restore-session` is on and the record yields a plan; otherwise (cold start) opens the
-    /// picker when saved workspaces exist. Then pre-warms the overlay host. Idempotent.
+    /// registered (the seed was already named off the saved names when `LayoutState` was built):
+    /// reopens the last session when `restore-session` is on and the record yields a plan;
+    /// otherwise (cold start) opens the picker when saved workspaces exist. Then pre-warms the
+    /// overlay host. Idempotent.
     pub fn start_session(&mut self) {
         if self.persist.session_started {
             return;
         }
         self.persist.session_started = true;
         let saved = self.persist.saved_names();
-        let seed = self.layout.world.active_workspace_id();
-        self.rename_seed_off_saved(seed);
         let restored = self.config.restore_session && self.restore_session(&saved);
         if !restored && !saved.is_empty() {
             self.open_picker(false);
@@ -614,8 +613,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.with_model(|w| {
             // Focus the target output, then show the new workspace there.
             w.set_focused_output(output)?;
-            let (ws, panes) = w.insert_workspace(output, record.name.clone(), &record.layout())?;
+            let (ws, root) = w.insert_workspace(output, record.name.clone(), &record.layout())?;
             w.switch_workspace(ws)?;
+            // Tree-order pane ids: `job.pane_index` indexes `record.panes()` in the same order.
+            let panes: Vec<PaneId> = root.leaves().into_iter().copied().collect();
             created = Some((ws, panes));
             Ok(())
         })
@@ -668,8 +669,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     fn create_named(&mut self, name: String, root: Option<PathBuf>) -> Result<(), String> {
         let mut created = None;
-        self.update_model(|w| created = Some(w.new_workspace(name)));
-        let ws = created.expect("set");
+        self.with_model(|w| {
+            created = Some(w.new_workspace(name)?);
+            Ok(())
+        })
+        .map_err(|err| err.to_string())?;
+        let Some(ws) = created else {
+            return Err("workspace was not created".into());
+        };
         if let Some(root) = root {
             self.persist.workspace.roots.insert(ws, root);
         }

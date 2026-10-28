@@ -3,10 +3,10 @@
 //!
 //! `World` is the single source of truth for focus, stacking, and workspace membership (decision #1
 //! in `plans/02-tiling-model.md`). It holds arena-style maps keyed by typed ids and a per-workspace
-//! [`SplitTree`] of panes. It is `Clone` and free of compositor types so it can be exhaustively
+//! [`SplitTree`](crate::tree::SplitTree) of panes. It is `Clone` and free of compositor types so it can be exhaustively
 //! unit-tested. Rect math lives in `crate::geometry`; [`World::geometry`] runs it over the model.
 
-use crate::{OutputId, PaneId, WindowId, WorkspaceId, geometry::Rect, ids::IdGen, tree::SplitTree};
+use crate::{OutputId, PaneId, WindowId, WorkspaceId, WorkspaceLayout, geometry::Rect, ids::IdGen};
 use std::collections::BTreeMap;
 
 mod outputs;
@@ -90,49 +90,36 @@ impl World {
     /// Creates a `World` with one output bearing one empty default workspace with one empty pane.
     ///
     /// This guarantees the core invariants from the start: a focused output exists, its active
-    /// workspace exists, and that workspace has a focused pane.
+    /// workspace exists, and that workspace has a focused pane. The seed workspace is named `seed`;
+    /// naming policy (e.g. avoiding names saved on disk) belongs to the caller.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(seed: impl Into<String>) -> Self {
         let mut output_ids = IdGen::new();
-        let mut workspace_ids = IdGen::new();
-        let mut pane_ids = IdGen::new();
-
         let output_id = OutputId::from_raw(output_ids.alloc());
-        let workspace_id = WorkspaceId::from_raw(workspace_ids.alloc());
-        let pane_id = PaneId::from_raw(pane_ids.alloc());
-
-        let pane = Pane::empty(pane_id);
-        let workspace = Workspace {
-            id: workspace_id,
-            name: "1".to_string(),
-            focused_pane: pane_id,
-            tree: SplitTree::new(pane_id),
-        };
-        let output = Output {
-            id: output_id,
-            stack: stack::Stack::of(workspace_id),
-            // Placeholder; the compositor calls `set_output_rect` with the real pixel size.
-            rect: Rect::new(0, 0, 0, 0),
-        };
-
-        let mut outputs = BTreeMap::new();
-        outputs.insert(output_id, output);
-        let mut workspaces = BTreeMap::new();
-        workspaces.insert(workspace_id, workspace);
-        let mut panes = BTreeMap::new();
-        panes.insert(pane_id, pane);
-
-        Self {
-            outputs,
-            workspaces,
-            panes,
+        let mut world = Self {
+            outputs: BTreeMap::new(),
+            workspaces: BTreeMap::new(),
+            panes: BTreeMap::new(),
             windows: BTreeMap::new(),
             focused_output: output_id,
             output_ids,
-            workspace_ids,
-            pane_ids,
+            workspace_ids: IdGen::new(),
+            pane_ids: IdGen::new(),
             window_ids: IdGen::new(),
-        }
+        };
+        let (workspace_id, _) = world
+            .create_workspace(seed.into(), &WorkspaceLayout::single(()))
+            .expect("an empty world holds no names and a single pane has no ratios");
+        world.outputs.insert(
+            output_id,
+            Output {
+                id: output_id,
+                stack: stack::Stack::of(workspace_id),
+                // Placeholder; the compositor calls `set_output_rect` with the real pixel size.
+                rect: Rect::new(0, 0, 0, 0),
+            },
+        );
+        world
     }
 
     /// Asserts the model's core invariants. Exposed (hidden) so integration tests can call it; it is
@@ -200,6 +187,15 @@ impl World {
                 }
             }
         }
+        // Workspace names are unique across the World.
+        let mut names = std::collections::BTreeSet::new();
+        for w in self.workspaces.values() {
+            assert!(
+                names.insert(w.name.as_str()),
+                "workspace name {:?} is unique",
+                w.name
+            );
+        }
         // Every window lives in exactly one pane.
         let mut counts: BTreeMap<WindowId, usize> = BTreeMap::new();
         for pane in self.panes.values() {
@@ -214,11 +210,5 @@ impl World {
                 "window in one pane"
             );
         }
-    }
-}
-
-impl Default for World {
-    fn default() -> Self {
-        Self::new()
     }
 }

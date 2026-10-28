@@ -117,7 +117,7 @@ fn single_pane_workspace_has_no_split() {
 
 #[test]
 fn world_to_kdl_to_layout_round_trip() {
-    let mut w = World::new();
+    let mut w = World::new("1");
     w.split(Direction::Right);
     w.resize(Direction::Right, 0.1);
     w.split(Direction::Down);
@@ -129,7 +129,9 @@ fn world_to_kdl_to_layout_round_trip() {
     let rec = WorkspaceRecord::from_world(&w, ws, None, |_| term("/x", Some("vim 'a b'"))).unwrap();
     let back = WorkspaceRecord::from_kdl(&rec.to_kdl().unwrap()).unwrap();
     assert_eq!(back, rec);
-    assert_eq!(back.layout(), w.workspace_layout(ws).unwrap());
+    let snap = w.workspace_layout(ws).unwrap();
+    assert_eq!(back.layout().root, snap.root.map_ref(|_| ()));
+    assert_eq!(back.layout().focused_pane, snap.focused_pane);
     assert_eq!(back.panes().len(), 3);
     assert_eq!(back.panes()[0].focused, 1);
 }

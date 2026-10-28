@@ -112,6 +112,7 @@ const RATIO_EPS: f64 = 0.05;
 
 impl<L: Copy + PartialEq> SplitTree<L> {
     /// Creates a tree consisting of a single leaf carrying `value`.
+    #[cfg(test)]
     pub(crate) fn new(value: L) -> Self {
         let nodes = vec![Some(Node::Leaf {
             value,
@@ -127,7 +128,10 @@ impl<L: Copy + PartialEq> SplitTree<L> {
     /// Builds a tree shaped like `node`, allocating each leaf's payload from `next` in tree order.
     ///
     /// Returns the tree and the payloads in tree order. The caller validates ratios beforehand.
-    pub(crate) fn from_layout(node: &LayoutNode, mut next: impl FnMut() -> L) -> (Self, Vec<L>) {
+    pub(crate) fn from_layout<P>(
+        node: &LayoutNode<P>,
+        mut next: impl FnMut() -> L,
+    ) -> (Self, Vec<L>) {
         let mut tree = Self {
             nodes: Vec::new(),
             root: NodeId(0),
@@ -139,15 +143,15 @@ impl<L: Copy + PartialEq> SplitTree<L> {
         (tree, leaves)
     }
 
-    fn build(
+    fn build<P>(
         &mut self,
-        node: &LayoutNode,
+        node: &LayoutNode<P>,
         parent: Option<NodeId>,
         next: &mut impl FnMut() -> L,
         leaves: &mut Vec<L>,
     ) -> NodeId {
         match node {
-            LayoutNode::Pane => {
+            LayoutNode::Pane(_) => {
                 let value = next();
                 leaves.push(value);
                 self.alloc(Node::Leaf { value, parent })
@@ -175,14 +179,14 @@ impl<L: Copy + PartialEq> SplitTree<L> {
         }
     }
 
-    /// Snapshots the tree shape with leaves mapped to [`LayoutNode::Pane`].
-    pub(crate) fn to_layout(&self) -> LayoutNode {
+    /// Snapshots the tree shape; each leaf becomes a [`LayoutNode::Pane`] carrying its payload.
+    pub(crate) fn to_layout(&self) -> LayoutNode<L> {
         self.layout_of(self.root)
     }
 
-    fn layout_of(&self, id: NodeId) -> LayoutNode {
+    fn layout_of(&self, id: NodeId) -> LayoutNode<L> {
         match self.node(id) {
-            Node::Leaf { .. } => LayoutNode::Pane,
+            Node::Leaf { value, .. } => LayoutNode::Pane(*value),
             Node::Split {
                 axis,
                 ratio,
