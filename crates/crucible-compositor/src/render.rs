@@ -183,6 +183,7 @@ where
             view.header_size,
             header_text,
             renderer,
+            view.scale,
         ));
     }
     custom.extend(
@@ -193,6 +194,7 @@ where
             view.overlay,
             origin,
             view.tiling,
+            view.scale,
         )
         .into_iter()
         .map(CustomRenderElements::SolidColor),

@@ -15,7 +15,10 @@
 //!   ([`CrucibleState::set_header_visible`]). Clicking a label never hides it.
 //! - `off`: no strip, no input effect.
 //!
-//! Strip geometry is in logical pixels and, like the rest of the chrome, drawn at scale 1.
+//! Strip geometry is in logical pixels. Like the rest of the chrome it is drawn at the output's fractional scale: the
+//! strip and segment rects go through [`PhysicalMap`] (edge rounding, so segments stay contiguous), the padding and
+//! vertical centring scale with them, and the label text is rasterized at `size x scale` physical pixels
+//! ([`TextRenderer::element`]), never upscaled. Hit-testing stays in logical pixels.
 
 use std::collections::BTreeSet;
 
@@ -23,11 +26,11 @@ use crucible_config::{HeaderConfig, HeaderMode};
 use crucible_layout::{OutputId, Rect, WorkspaceId};
 use smithay::{
     backend::renderer::{ImportAll, ImportMem, Renderer},
-    utils::{Physical, Point},
+    utils::{Physical, Point, Scale},
 };
 
 use crate::{
-    chrome::{BORDER_COLOR, solid},
+    chrome::{BORDER_COLOR, PhysicalMap, solid},
     layout::model_output_id,
     render::CustomRenderElements,
     state::{Backend, CrucibleState},
@@ -311,23 +314,26 @@ pub fn build_header_elements<R>(
     size: u32,
     text: &mut TextRenderer,
     renderer: &mut R,
+    scale: Scale<f64>,
 ) -> Vec<CustomRenderElements<R>>
 where
     R: Renderer + ImportAll + ImportMem,
     R::TextureId: Send + Clone + 'static,
 {
+    let map = PhysicalMap::plain(scale);
+    let to_origin = |r: Rect| r.translate(-origin.0, -origin.1);
     let mut labels = Vec::new();
     let mut solids = Vec::new();
     for l in layouts.iter().filter(|l| l.output == output) {
-        let line = (size as f32 * 1.2).round() as i32;
-        let text_y = l.strip.y + (l.strip.height - line) / 2;
+        let strip = map.rect(to_origin(l.strip));
+        let line = (f64::from(size) * 1.2 * scale.y).round() as i32;
+        let text_y = strip.loc.y + (strip.size.h - line) / 2;
+        let pad_x = (f64::from(PAD_X) * scale.x).round() as i32;
         for seg in &l.segments {
             let active = seg.index == l.active;
+            let seg_rect = map.rect(to_origin(seg.rect));
             if active {
-                solids.push(solid(
-                    seg.rect.translate(-origin.0, -origin.1),
-                    BORDER_COLOR,
-                ));
+                solids.push(solid(seg_rect, BORDER_COLOR));
             }
             let rgba = if active {
                 LABEL_ACTIVE_RGBA
@@ -335,14 +341,14 @@ where
                 LABEL_RGBA
             };
             let loc = Point::<f64, Physical>::from((
-                f64::from(seg.rect.x + PAD_X - origin.0),
-                f64::from(text_y - origin.1),
+                f64::from(seg_rect.loc.x + pad_x),
+                f64::from(text_y),
             ));
-            if let Some(el) = text.element(renderer, loc, &l.names[seg.index], size, rgba, 1) {
+            if let Some(el) = text.element(renderer, loc, &l.names[seg.index], size, rgba, scale) {
                 labels.push(CustomRenderElements::Text(el));
             }
         }
-        solids.push(solid(l.strip.translate(-origin.0, -origin.1), STRIP_BG));
+        solids.push(solid(strip, STRIP_BG));
     }
     labels.extend(solids.into_iter().map(CustomRenderElements::SolidColor));
     labels
@@ -436,5 +442,36 @@ mod tests {
             assert!(!toggled_visible(mode, false));
             assert!(toggled_visible(mode, true));
         }
+    }
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+
+    #[test]
+    fn scaled_strip_and_segments_stay_contiguous() {
+        let s = Scale::from(170.0 / 120.0);
+        let map = PhysicalMap::plain(s);
+        let strip = Rect::new(100, 0, 300, 24);
+        let segs = segment_rects(&[20, 30], strip);
+        let (ps, p0, p1) = (
+            map.rect(strip),
+            map.rect(segs[0].rect),
+            map.rect(segs[1].rect),
+        );
+        // Strip: round(100*s)=142 .. round(400*s)=567, height round(24*s)=34.
+        assert_eq!(
+            (ps.loc.x, ps.size.w, ps.loc.y, ps.size.h),
+            (142, 425, 0, 34)
+        );
+        // Segments abut (shared edge) and start at the strip's left edge, full strip height.
+        assert_eq!(p0.loc.x, ps.loc.x);
+        assert_eq!(p0.loc.x + p0.size.w, p1.loc.x);
+        assert_eq!((p0.loc.y, p0.size.h), (ps.loc.y, ps.size.h));
+        assert!(p1.loc.x + p1.size.w <= ps.loc.x + ps.size.w);
+        // At scale 1 the strip is unchanged.
+        let one = PhysicalMap::plain(Scale::from(1.0)).rect(strip);
+        assert_eq!((one.loc.x, one.size.w, one.size.h), (100, 300, 24));
     }
 }

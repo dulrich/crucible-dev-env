@@ -9,7 +9,7 @@
 //! [`Rect`] in `crucible-layout`): [`stack_pips`], [`plan_tile`] and [`plan_chrome`]. The entry
 //! point [`build_chrome_elements`] reads `layout.world` (model stack state) and the projection last
 //! applied to the `Space`, and converts each planned rect to Smithay exactly once, through
-//! [`solid`]. No model mutation; no stale cache — the elements are rebuilt each frame.
+//! [`PhysicalMap`] (at the output's fractional scale) and [`solid`]. No model mutation; no stale cache — the elements are rebuilt each frame.
 //!
 //! ## Per-output correctness
 //! The projection is derived across every output's **own** active workspace's visible windows (each
@@ -27,6 +27,8 @@ use smithay::backend::renderer::{
     element::{Id, Kind, solid::SolidColorRenderElement},
     utils::CommitCounter,
 };
+
+use smithay::utils::{Physical, Rectangle, Scale};
 
 use crucible_config::{OverlayStyle, Rgb, TilingConfig};
 use crucible_layout::{Projection, Rect};
@@ -68,19 +70,102 @@ pub const PIP_INACTIVE_COLOR: [f32; 4] = [0.45, 0.45, 0.45, 0.85];
 // The one layout-to-Smithay conversion.
 // ---------------------------------------------------------------------------
 
-/// A solid-colour render element covering `rect` (already in the output's frame).
+/// A solid-colour render element covering the physical `rect` (in the output's frame). Build the
+/// rect from a logical one with [`PhysicalMap::rect`].
 #[must_use]
-pub fn solid(rect: Rect, color: [f32; 4]) -> SolidColorRenderElement {
+pub fn solid(rect: Rectangle<i32, Physical>, color: [f32; 4]) -> SolidColorRenderElement {
     SolidColorRenderElement::new(
         Id::new(),
-        smithay::utils::Rectangle::<i32, smithay::utils::Physical>::new(
-            (rect.x, rect.y).into(),
-            (rect.width, rect.height).into(),
-        ),
+        rect,
         CommitCounter::default(),
         color,
         Kind::Unspecified,
     )
+}
+
+/// The one logical-to-physical conversion for chrome rects (output-relative, logical) at an
+/// output's fractional scale `s`.
+///
+/// ## Rounding rule
+/// 1. **Edges, not sizes.** A rect's physical extent is `[round(x*s), round((x+w)*s))` per axis, so
+///    two logical rects that share an edge share the physical edge: chrome stays seamless (no gap,
+///    no overlap, area sum preserved).
+/// 2. **Window edges follow smithay.** Smithay places a window at the rounded origin
+///    `round(x*s)` and ends it at `origin + round(w*s)` (`space/mod.rs` rounds the location,
+///    `element/surface.rs` sizes the surface relative to it), which can differ from
+///    `round((x+w)*s)` by one pixel. For each registered window rect `(x, w)`, a chrome edge at
+///    `x` lands on `round(x*s)` and an edge at `x + w` lands on `round(x*s) + round(w*s)`, so the
+///    ring / fill bordering a window meets the client surface exactly. A window only snaps the
+///    edges of rects that overlap it on the other axis (closed interval), and the first matching
+///    window wins.
+///
+/// At scale 1 both rules reduce to the identity, so the output is unchanged.
+#[derive(Debug, Clone)]
+pub struct PhysicalMap {
+    scale: Scale<f64>,
+    windows: Vec<Rect>,
+}
+
+impl PhysicalMap {
+    /// A map at `scale` whose rule 2 applies to `windows` (output-relative logical window rects).
+    #[must_use]
+    pub fn new(scale: Scale<f64>, windows: Vec<Rect>) -> Self {
+        Self { scale, windows }
+    }
+
+    /// A map with no window edges to meet: plain edge rounding.
+    #[must_use]
+    pub fn plain(scale: Scale<f64>) -> Self {
+        Self::new(scale, Vec::new())
+    }
+
+    /// The output scale this map converts at.
+    #[must_use]
+    pub fn scale(&self) -> Scale<f64> {
+        self.scale
+    }
+
+    /// The physical rect of the logical `r`.
+    #[must_use]
+    pub fn rect(&self, r: Rect) -> Rectangle<i32, Physical> {
+        let near =
+            |lo: i32, len: i32, w_lo: i32, w_len: i32| lo <= w_lo + w_len && w_lo <= lo + len;
+        let xs: Vec<(i32, i32)> = self
+            .windows
+            .iter()
+            .filter(|w| near(r.y, r.height, w.y, w.height))
+            .map(|w| (w.x, w.width))
+            .collect();
+        let ys: Vec<(i32, i32)> = self
+            .windows
+            .iter()
+            .filter(|w| near(r.x, r.width, w.x, w.width))
+            .map(|w| (w.y, w.height))
+            .collect();
+        let (x0, x1) = (
+            snap(r.x, &xs, self.scale.x),
+            snap(r.x + r.width, &xs, self.scale.x),
+        );
+        let (y0, y1) = (
+            snap(r.y, &ys, self.scale.y),
+            snap(r.y + r.height, &ys, self.scale.y),
+        );
+        Rectangle::new((x0, y0).into(), ((x1 - x0).max(0), (y1 - y0).max(0)).into())
+    }
+}
+
+/// Rounds a logical coordinate to physical, honouring window `(start, len)` spans (rule 2).
+fn snap(coord: i32, spans: &[(i32, i32)], s: f64) -> i32 {
+    let round = |v: i32| (f64::from(v) * s).round() as i32;
+    for &(start, len) in spans {
+        if coord == start {
+            return round(start);
+        }
+        if coord == start + len {
+            return round(start) + round(len);
+        }
+    }
+    round(coord)
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +392,8 @@ pub fn plan_chrome(
 /// iterates every output's active workspace's panes; for panes with `> 1` window, builds pip
 /// indicators via [`stack_pips_with_margin`].
 ///
+/// Rects are converted to physical pixels at `scale` through [`PhysicalMap`].
+///
 /// Returns an empty vec when [`ENABLE_CHROME`] is `false`. The elements sit above the windows and
 /// below the header and cursor ([`crate::render::frame_elements`] owns that order).
 pub fn build_chrome_elements(
@@ -316,6 +403,7 @@ pub fn build_chrome_elements(
     overlay: Option<OverlayChrome>,
     output_origin: (i32, i32),
     tiling: &TilingConfig,
+    scale: Scale<f64>,
 ) -> Vec<SolidColorRenderElement> {
     if !ENABLE_CHROME {
         return Vec::new();
@@ -376,6 +464,18 @@ pub fn build_chrome_elements(
         }
     }
 
+    // Window rects (output-relative) whose edges the chrome must meet exactly (rule 2).
+    let mut windows: Vec<Rect> = projection
+        .windows()
+        .iter()
+        .map(|&(id, tile)| {
+            window_rect(tile, layout.window_class(id), tiling)
+                .translate(-output_origin.0, -output_origin.1)
+        })
+        .collect();
+    windows.extend(overlay.map(|o| o.rect.translate(-output_origin.0, -output_origin.1)));
+    let map = PhysicalMap::new(scale, windows);
+
     plan_chrome(
         &ring,
         &fills,
@@ -385,7 +485,7 @@ pub fn build_chrome_elements(
         output_origin,
     )
     .into_iter()
-    .map(|(rect, color)| solid(rect, color))
+    .map(|(rect, color)| solid(map.rect(rect), color))
     .collect()
 }
 
@@ -679,5 +779,103 @@ mod tests {
         let pips = stack_pips_with_margin(rect(0, 0, 400, 300), 0, 2, pip_margin(12));
         assert_eq!(pips[1].0.y, 2);
         assert_eq!(pips[1].0.x + PIP_SIZE, 400 - 2);
+    }
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+
+    fn s170() -> Scale<f64> {
+        Scale::from(170.0 / 120.0)
+    }
+
+    fn area(r: Rectangle<i32, Physical>) -> i64 {
+        i64::from(r.size.w) * i64::from(r.size.h)
+    }
+
+    #[test]
+    fn scale_one_reproduces_the_unscaled_rects() {
+        let window = Rect::new(13, 10, 380, 280);
+        let map = PhysicalMap::new(Scale::from(1.0), vec![window]);
+        for r in [
+            Rect::new(0, 0, 400, 300),
+            Rect::new(13, 10, 380, 280),
+            Rect::new(393, 6, 4, 288),
+            Rect::new(9, 6, 388, 4),
+        ] {
+            let p = map.rect(r);
+            assert_eq!(
+                (p.loc.x, p.loc.y, p.size.w, p.size.h),
+                (r.x, r.y, r.width, r.height)
+            );
+        }
+    }
+
+    #[test]
+    fn scaled_app_ring_and_fill_tile_the_inset_without_gaps() {
+        let tile = Rect::new(7, 9, 401, 299);
+        for (gap, ring, focused) in [(10, 4, true), (10, 10, true), (10, 0, true), (3, 3, false)] {
+            let mut t = TilingConfig::default();
+            t.app.gap = gap;
+            t.app.ring = ring;
+            let window = window_rect(tile, WindowClass::App, &t);
+            let map = PhysicalMap::new(s170(), vec![window]);
+            let plan = plan_tile(tile, WindowClass::App, &t, focused);
+            let pieces: Vec<_> = plan
+                .ring
+                .iter()
+                .chain(&plan.fill)
+                .map(|&r| map.rect(r))
+                .collect();
+            let (ptile, pwin) = (map.rect(tile), map.rect(window));
+            assert_eq!(
+                pieces.iter().map(|&p| area(p)).sum::<i64>(),
+                area(ptile) - area(pwin),
+                "gap={gap} ring={ring}"
+            );
+            for (i, a) in pieces.iter().enumerate() {
+                assert!(ptile.contains_rect(*a), "{a:?} leaves {ptile:?}");
+                assert!(!a.overlaps(pwin), "{a:?} over window {pwin:?}");
+                for b in &pieces[i + 1..] {
+                    assert!(!a.overlaps(*b), "overlap {a:?} {b:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_meets_the_window_at_smithays_edge() {
+        // x=13, w=380 at 170/120: smithay places the window at round(18.42)=18 and ends it at
+        // 18 + round(538.33) = 556, one pixel short of plain edge rounding (round(556.75) = 557).
+        let s = s170();
+        let window = Rect::new(13, 10, 380, 280);
+        let map = PhysicalMap::new(s, vec![window]);
+        let smithay_end = (13.0_f64 * s.x).round() as i32 + (380.0_f64 * s.x).round() as i32;
+        assert_eq!(smithay_end, 556);
+        let plain = PhysicalMap::plain(s).rect(Rect::new(393, 10, 4, 280));
+        assert_eq!(plain.loc.x, 557);
+        let pwin = map.rect(window);
+        assert_eq!((pwin.loc.x, pwin.loc.x + pwin.size.w), (18, 556));
+        let right = map.rect(Rect::new(393, 10, 4, 280));
+        let left = map.rect(Rect::new(9, 10, 4, 280));
+        assert_eq!(right.loc.x, 556, "no gap or overlap on the right");
+        assert_eq!(
+            left.loc.x + left.size.w,
+            18,
+            "no gap or overlap on the left"
+        );
+        // Vertically the same rule: y=10, h=280.
+        let top = map.rect(Rect::new(13, 6, 380, 4));
+        let bottom = map.rect(Rect::new(13, 290, 380, 4));
+        assert_eq!(top.loc.y + top.size.h, pwin.loc.y);
+        assert_eq!(bottom.loc.y, pwin.loc.y + pwin.size.h);
+        // A terminal ring drawn inside a tile that is the window ends at the same edge.
+        let right_edge = ring_strips(window, 3)
+            .iter()
+            .map(|&r| map.rect(r))
+            .map(|p| p.loc.x + p.size.w)
+            .max();
+        assert_eq!(right_edge, Some(556));
     }
 }
