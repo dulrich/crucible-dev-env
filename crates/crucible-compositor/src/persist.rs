@@ -584,8 +584,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .into_iter()
             .map(|(n, _)| n)
             .collect();
-        let mut out = build_candidates(live, saved, folder_entries(&self.config.picker_roots));
-        if self.config.picker_slots {
+        let mut out = build_candidates(live, saved, folder_entries(&self.config.picker.roots));
+        if self.config.picker.slots {
             apply_slots(&mut out, |n| self.persist.slots.slot_of(n));
         }
         out

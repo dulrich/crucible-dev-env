@@ -354,7 +354,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .env(TERMINAL_EXEC_FLAG_ENV, &self.config.terminal.exec_flag);
         if kind == SpawnKind::Overlay {
             cmd.env(OVERLAY_STYLE_ENV, self.config.overlay.style.as_str());
-            cmd.env(LAUNCHER_TUI_ENV, self.config.launcher_tui.join(":"));
+            cmd.env(LAUNCHER_TUI_ENV, self.config.launcher.tui.join(":"));
         }
         let record = SpawnRecord {
             origin,

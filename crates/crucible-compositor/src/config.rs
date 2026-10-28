@@ -60,7 +60,7 @@ pub fn warm_key(config: &Config, terminal: String) -> WarmKey {
         terminal,
         config.terminal.exec_flag.clone(),
         config.overlay.terminal_args.clone(),
-        config.launcher_tui.clone(),
+        config.launcher.tui.clone(),
     )
 }
 
@@ -132,7 +132,9 @@ mod tests {
     fn warm_key_tracks_launcher_entries() {
         let a = Config::default();
         let b = Config {
-            launcher_tui: vec!["k9s".into()],
+            launcher: crucible_config::LauncherConfig {
+                tui: vec!["k9s".into()],
+            },
             ..Config::default()
         };
         assert_eq!(warm_key(&a, "t".into()), warm_key(&a.clone(), "t".into()));
