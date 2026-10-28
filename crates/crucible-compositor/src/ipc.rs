@@ -131,6 +131,9 @@ pub enum Request {
     /// `run-tui <command>` — like `exec run-in-terminal`, but the terminal closes when the command
     /// exits (`crucible resume --now --exit`).
     RunTui(String),
+    /// `run-term <program>` — spawn the bare emulator `program` (no arguments) as a CDE terminal in
+    /// the focused pane; the launcher's TERM rows.
+    RunTerm(String),
     /// `relaunch` — swap the calling placeholder window (found by peer PID) for its app.
     Relaunch,
 }
@@ -160,6 +163,7 @@ impl Request {
             | Request::Rename(_)
             | Request::Exec(_)
             | Request::RunTui(_)
+            | Request::RunTerm(_)
             | Request::Relaunch => true,
         }
     }
@@ -195,6 +199,7 @@ impl Request {
             "rename" => need(arg).map(Request::Rename),
             "exec" => need(arg).map(Request::Exec),
             "run-tui" => need(arg).map(Request::RunTui),
+            "run-term" => need(arg).map(Request::RunTerm),
             other => Err(format!("unknown request {other:?}")),
         }
     }
@@ -214,6 +219,7 @@ impl Request {
             Request::Rename(n) => format!("rename {}", encode_field(n)),
             Request::Exec(a) => format!("exec {}", encode_field(a)),
             Request::RunTui(c) => format!("run-tui {}", encode_field(c)),
+            Request::RunTerm(c) => format!("run-term {}", encode_field(c)),
         }
     }
 }
@@ -574,6 +580,7 @@ mod tests {
             Request::Exec("run sh -c 'echo 100%: a\tb'".into()),
             Request::Exec("run-in-terminal htop -d 5: 100%".into()),
             Request::RunTui("'/usr/bin/vim' a:b 100%".into()),
+            Request::RunTerm("/opt/my term/ghostty".into()),
             Request::Exec("split-right".into()),
         ];
         for r in reqs {
@@ -600,6 +607,7 @@ mod tests {
             Request::New("n".into()),
             Request::Rename("r".into()),
             Request::RunTui("htop".into()),
+            Request::RunTerm("ghostty".into()),
             Request::Relaunch,
         ] {
             assert!(r.acts(), "{r:?}");

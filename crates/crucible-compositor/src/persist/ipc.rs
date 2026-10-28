@@ -82,6 +82,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Request::RunTui(cmd) => {
                 return run_response(self.run_tui_checked(&cmd));
             }
+            Request::RunTerm(program) => {
+                return run_response(self.run_term_checked(&program));
+            }
             Request::Open(name) => {
                 let r = self.ipc_open(&name);
                 self.complete_pending_pin(r)
@@ -345,6 +348,7 @@ mod tests {
             Request::New("n".into()),
             Request::Rename("r".into()),
             Request::RunTui("htop".into()),
+            Request::RunTerm("ghostty".into()),
             Request::Relaunch,
         ] {
             assert_eq!(admit_request(true, &r), Err(ActionError::Locked), "{r:?}");

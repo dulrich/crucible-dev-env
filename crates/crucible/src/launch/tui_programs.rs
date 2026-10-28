@@ -226,6 +226,7 @@ mod tests {
             name: "Htop".into(),
             exec: "/usr/bin/htop".into(),
             terminal: true,
+            terminal_emulator: false,
         }];
         let items = tui_items(&programs, &entries);
         assert_eq!(items.len(), 1);

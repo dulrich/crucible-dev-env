@@ -254,6 +254,56 @@ pub fn preflight_command(
     if found { Ok(()) } else { Err(word.to_string()) }
 }
 
+/// Strictly resolves a TERM `program` to an executable regular file, unlike [`preflight_command`]
+/// (a shell-line check that lets builtins and shell syntax through). A word containing `/` must
+/// itself be an executable file (relative to `cwd` if not absolute); a bare word must be one in a
+/// `path` directory (empty or relative entries resolve against `cwd`).
+///
+/// # Errors
+/// The unresolved program (empty for an empty program).
+pub fn resolve_program(
+    program: &str,
+    cwd: &Path,
+    path: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf, String> {
+    if program.is_empty() {
+        return Err(String::new());
+    }
+    let resolve = |p: &Path| {
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            cwd.join(p)
+        }
+    };
+    if program.contains('/') {
+        let full = resolve(Path::new(program));
+        return if is_executable_file(&full) {
+            Ok(full)
+        } else {
+            Err(program.to_string())
+        };
+    }
+    path.into_iter()
+        .flat_map(std::env::split_paths)
+        .map(|dir| {
+            if dir.as_os_str().is_empty() {
+                cwd.join(program)
+            } else {
+                resolve(&dir).join(program)
+            }
+        })
+        .find(|candidate| is_executable_file(candidate))
+        .ok_or_else(|| program.to_string())
+}
+
+/// Whether two program names are the same executable by basename (`/usr/bin/ghostty` and
+/// `ghostty`).
+fn same_program(a: &str, b: &str) -> bool {
+    let base = |s: &str| Path::new(s).file_name().map(std::ffi::OsStr::to_os_string);
+    matches!((base(a), base(b)), (Some(x), Some(y)) if x == y)
+}
+
 /// The terminal arguments for an app relaunch placeholder: `<exec-flag> <crucible> relaunch
 /// [--app-id <id>] -- <cmdline>` (the cmdline is ONE element).
 #[must_use]
@@ -474,6 +524,39 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let root = self.persist.workspace.roots.get(&ws).cloned();
         let args = self.with_tiling_args(Vec::new());
         self.spawn_process(program, &args, root.as_deref(), SpawnKind::Terminal);
+    }
+
+    /// `run-term`: spawns the emulator `program` as a CDE terminal ([`SpawnKind::Terminal`]) in the
+    /// active workspace's root. Invariants: `program` is a bare program with NO desktop arguments
+    /// (single-instance forwarding would hand the window to another process and defeat the
+    /// exact-pid classification in `persist/placement.rs`), and the `tiling.terminal-args` are
+    /// applied only when `program` is the configured terminal (same basename). The program is
+    /// resolved strictly ([`resolve_program`]) and the resolved path is what is spawned.
+    ///
+    /// # Errors
+    /// `unknown command <word>` when `program` does not resolve to an executable file, `spawn
+    /// failed` when the spawn does.
+    pub fn run_term_checked(&mut self, program: &str) -> Result<u32, String> {
+        let ws = self.layout.world.active_workspace_id();
+        let root = self.persist.workspace.roots.get(&ws).cloned();
+        let cwd = root
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let resolved = resolve_program(program, &cwd, Self::spawn_path().as_deref())
+            .map_err(|word| format!("unknown command {word}"))?;
+        let args = if same_program(program, &self.terminal_program()) {
+            self.with_tiling_args(Vec::new())
+        } else {
+            Vec::new()
+        };
+        self.spawn_process(
+            &resolved.to_string_lossy(),
+            &args,
+            root.as_deref(),
+            SpawnKind::Terminal,
+        )
+        .ok_or_else(|| "spawn failed".to_string())
     }
 
     /// Runs `cmd` (a shell command line) into the focused pane via `/bin/sh -c 'exec <cmd>'`, so the
@@ -903,6 +986,41 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::write(path, b"#!/bin/sh\n").unwrap();
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[test]
+    fn resolve_program_is_strict() {
+        let d = scratch("resolve");
+        touch(&d.join("goodterm"), 0o755);
+        touch(&d.join("plain"), 0o644);
+        let path = std::ffi::OsString::from(d.as_os_str());
+        let p = Some(path.as_os_str());
+        let root = Path::new("/");
+        assert_eq!(resolve_program("goodterm", root, p), Ok(d.join("goodterm")));
+        assert_eq!(resolve_program("plain", root, p), Err("plain".into()));
+        assert_eq!(resolve_program("missing", root, p), Err("missing".into()));
+        assert_eq!(resolve_program("cd", root, p), Err("cd".into()));
+        assert_eq!(
+            resolve_program("goodterm", root, None),
+            Err("goodterm".into())
+        );
+        assert_eq!(resolve_program("", root, p), Err(String::new()));
+        let abs = d.join("goodterm");
+        assert_eq!(resolve_program(abs.to_str().unwrap(), root, None), Ok(abs));
+        assert_eq!(
+            resolve_program("./goodterm", &d, None),
+            Ok(d.join("./goodterm"))
+        );
+        assert!(resolve_program("./plain", &d, None).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn same_program_compares_basenames() {
+        assert!(same_program("ghostty", "/usr/bin/ghostty"));
+        assert!(same_program("/a/kitty", "/b/kitty"));
+        assert!(!same_program("ghostty", "kitty"));
+        assert!(!same_program("", ""));
     }
 
     #[test]

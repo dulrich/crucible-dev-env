@@ -13,6 +13,8 @@ pub struct DesktopEntry {
     pub exec: String,
     /// `Terminal=true`.
     pub terminal: bool,
+    /// `Categories` contains exactly the item `TerminalEmulator`.
+    pub terminal_emulator: bool,
 }
 
 /// Removes the desktop-entry field codes (`%f %F %u %U %d %D %n %N %i %c %k %v %m`) wherever they
@@ -50,6 +52,7 @@ pub fn parse_desktop_entry(text: &str) -> Option<DesktopEntry> {
     let mut in_group = false;
     let (mut name, mut exec, mut kind) = (None, None, None);
     let (mut no_display, mut hidden, mut terminal) = (false, false, false);
+    let mut terminal_emulator = false;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -73,6 +76,9 @@ pub fn parse_desktop_entry(text: &str) -> Option<DesktopEntry> {
             "NoDisplay" => no_display = value == "true",
             "Hidden" => hidden = value == "true",
             "Terminal" => terminal = value == "true",
+            "Categories" => {
+                terminal_emulator = value.split(';').any(|c| c.trim() == "TerminalEmulator")
+            }
             _ => {}
         }
     }
@@ -88,6 +94,7 @@ pub fn parse_desktop_entry(text: &str) -> Option<DesktopEntry> {
         name,
         exec,
         terminal,
+        terminal_emulator,
     })
 }
 
@@ -197,7 +204,25 @@ mod tests {
             name: name.into(),
             exec: exec.into(),
             terminal,
+            terminal_emulator: false,
         }
+    }
+
+    #[test]
+    fn categories_flag_terminal_emulators_exactly() {
+        let parse = |cats: &str| {
+            parse_desktop_entry(&format!(
+                "[Desktop Entry]\nType=Application\nName=T\nExec=t\nCategories={cats}\n"
+            ))
+            .unwrap()
+            .terminal_emulator
+        };
+        assert!(parse("System;TerminalEmulator;"));
+        assert!(parse("TerminalEmulator"));
+        assert!(!parse("System;Utility;"));
+        assert!(!parse("System;TerminalEmulatorX;"));
+        let none = parse_desktop_entry("[Desktop Entry]\nType=Application\nName=T\nExec=t\n");
+        assert!(!none.unwrap().terminal_emulator);
     }
 
     #[test]

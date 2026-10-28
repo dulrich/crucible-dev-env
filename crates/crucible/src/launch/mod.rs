@@ -21,19 +21,23 @@ use desktop::{DesktopEntry, data_dirs_from_env, desktop_entries};
 use tui_programs::{resolve_tui, tui_items, tui_patterns};
 
 /// Usage text for `crucible launch --help`.
-pub const USAGE: &str = "usage: crucible launch\n\nThe CDE program launcher (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Return).\nLists installed desktop applications (XDG .desktop entries), each labelled GUI or TUI\n(Terminal=true), plus TUI programs from a built-in list (htop, vim, lazygit, …) and the config's\nlauncher { tui } entries when they are found on PATH. Type to filter by name; Up/Down or\nCtrl+P/Ctrl+N move; Enter launches the selection into the focused pane; Esc or Ctrl+C closes. TUI entries run in the configured terminal\n($CDE_TERMINAL, exported by CDE), which closes when the program exits, and are hidden when it is unknown.\n\nShell-line mode: start the query with ! to type a shell command instead. Enter runs it in a\nterminal; Alt+Enter runs it detached without a terminal. An empty command does nothing.\n";
+pub const USAGE: &str = "usage: crucible launch\n\nThe CDE program launcher (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Return).\nLists installed desktop applications (XDG .desktop entries), each labelled GUI, TUI\n(Terminal=true) or TERM (Categories has TerminalEmulator; launched as a CDE terminal), plus TUI programs from a built-in list (htop, vim, lazygit, …) and the config's\nlauncher { tui } entries when they are found on PATH. Type to filter by name; Up/Down or\nCtrl+P/Ctrl+N move; Enter launches the selection into the focused pane; Esc or Ctrl+C closes. TUI entries run in the configured terminal\n($CDE_TERMINAL, exported by CDE), which closes when the program exits, and are hidden when it is unknown.\n\nShell-line mode: start the query with ! to type a shell command instead. Enter runs it in a\nterminal; Alt+Enter runs it detached without a terminal. An empty command shows a hint, and Enter with no\nmatching row shows `unknown app <query>`.\n";
 
 /// How a row is launched: a GUI application, or a TUI program run inside the configured terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchClass {
     Gui,
     Tui,
+    Term,
 }
 
 impl LaunchClass {
-    /// `Terminal=true` entries and PATH-resolved programs are TUI; everything else is GUI.
-    fn of_desktop(terminal: bool) -> LaunchClass {
-        if terminal {
+    /// `TerminalEmulator` entries are TERM (winning over `Terminal=true`); `Terminal=true` entries
+    /// and PATH-resolved programs are TUI; everything else is GUI.
+    fn of_desktop(e: &DesktopEntry) -> LaunchClass {
+        if e.terminal_emulator {
+            LaunchClass::Term
+        } else if e.terminal {
             LaunchClass::Tui
         } else {
             LaunchClass::Gui
@@ -45,6 +49,7 @@ impl LaunchClass {
         match self {
             LaunchClass::Gui => "GUI",
             LaunchClass::Tui => "TUI",
+            LaunchClass::Term => "TERM",
         }
     }
 
@@ -53,7 +58,23 @@ impl LaunchClass {
         match self {
             LaunchClass::Gui => Request::run(cmd),
             LaunchClass::Tui => Request::RunTui(cmd),
+            LaunchClass::Term => Request::RunTerm(cmd),
         }
+    }
+}
+
+/// The bare program of an `Exec` line (field codes already stripped): the text between a leading
+/// pair of double quotes, else the first whitespace-separated word. Desktop arguments are dropped
+/// so a single-instance emulator is never asked to forward the window to another process.
+fn term_program(exec: &str) -> String {
+    let exec = exec.trim_start();
+    match exec.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or_default().to_string(),
+        None => exec
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_string(),
     }
 }
 
@@ -68,7 +89,8 @@ pub struct Item {
 
 /// The launcher's rows: desktop entries first, then the PATH-resolved TUI `programs`. A TUI row
 /// keeps its bare command (the compositor wraps it in the terminal via `run-tui`) and is left out
-/// unless `terminal_known` -- the one place that gating is applied.
+/// unless `terminal_known` -- the one place that gating is applied. A TERM row is itself a
+/// terminal, so it is never gated.
 #[must_use]
 pub fn build_items(
     entries: &[DesktopEntry],
@@ -80,8 +102,11 @@ pub fn build_items(
         .map(|e| Item {
             filter: e.name.clone(),
             label: e.name.clone(),
-            class: LaunchClass::of_desktop(e.terminal),
-            cmd: e.exec.clone(),
+            class: LaunchClass::of_desktop(e),
+            cmd: match LaunchClass::of_desktop(e) {
+                LaunchClass::Term => term_program(&e.exec),
+                _ => e.exec.clone(),
+            },
         })
         .collect();
     items.extend(tui_items(programs, entries));
@@ -121,11 +146,12 @@ impl Launcher {
         self.list.query.strip_prefix('!').map(str::trim_start)
     }
 
-    /// Enter (run in a terminal) / Alt+Enter (run detached) in `!` mode; an empty command does
-    /// nothing.
-    fn enter_shell(&self, cmd: &str, key: Key) -> Outcome {
+    /// Enter (run in a terminal) / Alt+Enter (run detached) in `!` mode; an empty command sends
+    /// nothing and says so.
+    fn enter_shell(&mut self, cmd: &str, key: Key) -> Outcome {
         let cmd = cmd.trim_end();
         if cmd.is_empty() {
+            self.list.status = Some("type a command after !".into());
             return Outcome::Continue;
         }
         let cmd = cmd.to_string();
@@ -136,14 +162,18 @@ impl Launcher {
         })
     }
 
-    /// Enter / Alt+Enter outside `!` mode: launch the selected item.
-    fn enter_row(&self) -> Outcome {
+    /// Enter / Alt+Enter outside `!` mode: launch the selected item; no match sets `unknown app
+    /// <query>` (nothing after it when the query is empty).
+    fn enter_row(&mut self) -> Outcome {
         match self.rows().get(self.list.selected) {
             Some(&i) => {
                 let item = &self.items[i];
                 Outcome::Send(item.class.request(item.cmd.clone()))
             }
-            None => Outcome::Continue,
+            None => {
+                self.list.status = Some(format!("unknown app {}", self.list.query.trim()));
+                Outcome::Continue
+            }
         }
     }
 
@@ -165,8 +195,8 @@ impl Overlay for Launcher {
                 Outcome::Continue
             }
             Applied::Moved | Applied::Ignored => Outcome::Continue,
-            Applied::Enter(key) => match self.shell_line() {
-                Some(cmd) => self.enter_shell(cmd, key),
+            Applied::Enter(key) => match self.shell_line().map(str::to_string) {
+                Some(cmd) => self.enter_shell(&cmd, key),
                 None => self.enter_row(),
             },
         }
@@ -258,6 +288,14 @@ mod tests {
             name: name.into(),
             exec: exec.into(),
             terminal,
+            terminal_emulator: false,
+        }
+    }
+
+    fn term_entry(name: &str, exec: &str, terminal: bool) -> DesktopEntry {
+        DesktopEntry {
+            terminal_emulator: true,
+            ..entry(name, exec, terminal)
         }
     }
 
@@ -310,8 +348,27 @@ mod tests {
     fn launch_class_carries_the_label_and_the_request() {
         assert_eq!(LaunchClass::Gui.label(), "GUI");
         assert_eq!(LaunchClass::Tui.label(), "TUI");
-        assert_eq!(LaunchClass::of_desktop(false), LaunchClass::Gui);
-        assert_eq!(LaunchClass::of_desktop(true), LaunchClass::Tui);
+        assert_eq!(LaunchClass::Term.label(), "TERM");
+        assert_eq!(
+            LaunchClass::of_desktop(&entry("a", "a", false)),
+            LaunchClass::Gui
+        );
+        assert_eq!(
+            LaunchClass::of_desktop(&entry("a", "a", true)),
+            LaunchClass::Tui
+        );
+        assert_eq!(
+            LaunchClass::of_desktop(&term_entry("a", "a", false)),
+            LaunchClass::Term
+        );
+        assert_eq!(
+            LaunchClass::of_desktop(&term_entry("a", "a", true)),
+            LaunchClass::Term
+        );
+        assert_eq!(
+            LaunchClass::Term.request("ghostty".into()),
+            Request::RunTerm("ghostty".into())
+        );
         assert_eq!(
             LaunchClass::Gui.request("ff".into()),
             Request::Exec("run ff".into())
@@ -320,6 +377,54 @@ mod tests {
             LaunchClass::Tui.request("vim".into()),
             Request::RunTui("vim".into())
         );
+    }
+
+    #[test]
+    fn term_program_is_the_bare_first_word() {
+        assert_eq!(term_program("kitty"), "kitty");
+        assert_eq!(
+            term_program("ghostty --gtk-single-instance=true"),
+            "ghostty"
+        );
+        assert_eq!(
+            term_program("\"/opt/my term/bin\" --x y"),
+            "/opt/my term/bin"
+        );
+        assert_eq!(term_program(""), "");
+    }
+
+    #[test]
+    fn term_rows_launch_the_bare_program_and_survive_no_terminal() {
+        let entries = [
+            term_entry("Ghostty", "ghostty --gtk-single-instance=true", true),
+            entry("Editor", "vim", true),
+        ];
+        let items = build_items(&entries, &[], false);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].class, LaunchClass::Term);
+        assert_eq!(items[0].cmd, "ghostty");
+        let mut l = Launcher::new(items);
+        assert!(l.render(60, 8).contains("TERM  Ghostty"));
+        assert_eq!(
+            l.step(Key::Enter),
+            Outcome::Send(Request::RunTerm("ghostty".into()))
+        );
+    }
+
+    #[test]
+    fn enter_without_a_match_says_unknown_app() {
+        let mut l = shell_launcher("zz");
+        assert_eq!(l.step(Key::Enter), Outcome::Continue);
+        assert!(l.render(60, 8).contains("unknown app zz"));
+        l.step(Key::Backspace);
+        assert!(!l.render(60, 8).contains("unknown app"));
+    }
+
+    #[test]
+    fn empty_shell_command_says_to_type_one() {
+        let mut l = shell_launcher("!  ");
+        assert_eq!(l.step(Key::Enter), Outcome::Continue);
+        assert!(l.render(60, 8).contains("type a command after !"));
     }
 
     #[test]

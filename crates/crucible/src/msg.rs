@@ -6,7 +6,7 @@ use crate::Parsed;
 use crate::client::{Client, socket_from_env};
 
 /// Usage text for `crucible msg --help`.
-pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | save | open <name> | open-folder <path> | new <name> | rename <name> | exec <action> | run <command...> | run-in-terminal <command...> | run-tui <command...> | relaunch\n\n`exec` runs a keybinding action (the `binds` action grammar, for example `crucible msg exec focus left`); a failed action answers `err <reason>`.\n`run` and `run-in-terminal` are shorthands for `exec run <command>` and `exec run-in-terminal <command>`: they take the rest of the arguments as one command line (joined with single spaces) and encode it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. `run-tui` encodes its command the same way. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`). While the session is locked, every request but `candidates`, `bindings` and `save` answers `err session locked`.\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
+pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | save | open <name> | open-folder <path> | new <name> | rename <name> | exec <action> | run <command...> | run-in-terminal <command...> | run-tui <command...> | run-term <program> | relaunch\n\n`exec` runs a keybinding action (the `binds` action grammar, for example `crucible msg exec focus left`); a failed action answers `err <reason>`.\n`run` and `run-in-terminal` are shorthands for `exec run <command>` and `exec run-in-terminal <command>`: they take the rest of the arguments as one command line (joined with single spaces) and encode it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. `run-tui` encodes its command the same way. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`). While the session is locked, every request but `candidates`, `bindings` and `save` answers `err session locked`.\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
 
 /// Joins the arguments into one protocol line and validates it.
 ///
@@ -18,11 +18,11 @@ pub fn build_line(args: &[String]) -> Result<String, String> {
     }
     let verb = args[0].as_str();
     let line = match verb {
-        "run" | "run-in-terminal" | "run-tui" => {
+        "run" | "run-in-terminal" | "run-tui" | "run-term" => {
             // The command is free text: encode it so `:`, `%` and friends survive the wire.
             let cmd = args[1..].join(" ");
-            if verb == "run-tui" {
-                format!("run-tui {}", encode_field(&cmd))
+            if verb == "run-tui" || verb == "run-term" {
+                format!("{verb} {}", encode_field(&cmd))
             } else if cmd.trim().is_empty() {
                 return Err(format!("{verb} needs a command"));
             } else {
@@ -142,6 +142,17 @@ mod tests {
             Ok(Request::RunTui("htop 50%:x".into()))
         );
         assert!(build_line(&v(&["run-tui"])).is_err());
+    }
+
+    #[test]
+    fn run_term_encodes_the_program() {
+        let line = build_line(&v(&["run-term", "/opt/my", "term"])).unwrap();
+        assert_eq!(line, "run-term /opt/my term");
+        assert_eq!(
+            Request::parse(&line),
+            Ok(Request::RunTerm("/opt/my term".into()))
+        );
+        assert!(build_line(&v(&["run-term"])).is_err());
     }
 
     #[test]

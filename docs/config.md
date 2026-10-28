@@ -29,7 +29,7 @@ Tiles are edge to edge: they abut and cover the output, so no background shows b
 - `terminal` — CDE-spawned terminals. The window fills its whole tile; `gap` is the padding the terminal draws itself (see `terminal-args`) and the focus ring (`ring`) is drawn inside the tile, in that padding. Defaults: `gap=6`, `ring=3`.
 - `app` — every other window. The window is inset by `gap` on each side; the focus ring is drawn outside the window, in the gap, and the rest of the gap is painted `fill` (`"#rrggbb"`, default `#737373`) so no background shows. Defaults: `gap=0`, `ring=0` (no ring, nothing drawn).
 - A `ring` larger than its `gap` is clamped to `gap` (logged as a warning).
-- `terminal-args` — zero or more strings inserted before the exec flag on terminal spawns only (`Super+Shift+Return`, `run-in-terminal`, restored terminals; not overlays, which use `overlay.terminal-args`, and not apps). `{gap}` in an argument is replaced by the terminal `gap`. As a ghostty example, the arguments above make ghostty pad `gap` pixels on each side in its own background so the compositor ring never covers a cell. Default: none, in which case the terminal ring is drawn over the terminal's outermost pixels.
+- `terminal-args` — zero or more strings inserted before the exec flag on terminal spawns only (`Super+Shift+Return`, `run-in-terminal`, restored terminals, and launcher TERM rows via `run-term` -- applied only when the TERM program is the configured terminal, compared by basename; not overlays, which use `overlay.terminal-args`, and not apps). `{gap}` in an argument is replaced by the terminal `gap`. As a ghostty example, the arguments above make ghostty pad `gap` pixels on each side in its own background so the compositor ring never covers a cell. Default: none, in which case the terminal ring is drawn over the terminal's outermost pixels.
 
 The old `gaps` node was removed; a config that still has one is rejected with an error naming `tiling`.
 
@@ -91,6 +91,10 @@ Each `tui` node takes one or more string arguments (no properties); each is a ba
 A program is listed only when it is found as an executable file on `PATH`; one that is not installed produces no row and no error. `PATH` is the one CDE spawns the launcher with (CDE's own plus the `crucible` executable's directory); there is no `PATH` setting. A glob lists every matching executable, the earlier `PATH` directory winning a duplicate name. Rows run the resolved absolute path in the configured terminal (CDE wraps it in `crucible resume --now --exit`), which closes when the program exits, and are omitted when the terminal is unknown.
 
 A program is not listed twice: if a desktop entry's `Exec` starts with the same program name (compared by basename, e.g. `Exec=htop`), only the desktop entry is shown. Wrapper commands such as `Exec=env FOO=1 vim` are not recognised, so such a program can appear twice.
+
+Desktop entries whose `Categories` contain `TerminalEmulator` show as `TERM` rows. They launch the bare emulator program (the first word of `Exec`; desktop arguments are dropped) as a CDE terminal through the `run-term` request, so the window gets the terminal gap and ring and is saved and restored as a terminal. TERM rows are shown even when the terminal is unknown, and TERM wins over `Terminal=true`. A TERM emulator that is not the configured terminal is restored with the configured terminal, keeping its cwd and command. The program must resolve to an executable on `PATH` (or an executable path), else `run-term` answers `err unknown command <word>`.
+
+Enter with no matching row shows `unknown app <query>`, and Enter on an empty `!` command shows `type a command after !`; both leave the launcher open and clear on the next edit. `!bogus` still sends, and the compositor's `unknown command bogus` reply shows.
 
 A config save takes effect on the next launcher open (the pre-warmed launcher is restarted when these entries change).
 
@@ -171,7 +175,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `close-workspace` | Save, then close the active workspace and end its windows (refused on the output's last workspace) |
 | `close-all-workspaces` | Save and close every open workspace, leaving one fresh workspace per output (unbound by default) |
 | `move-workspace-to-output <n>` | Send the active workspace `n` outputs over (wraparound) |
-| `slot <n>` | Switch to the workspace pinned to slot `n` (0-9); a closed or saved one reopens on the monitor it was last viewed on, an unpinned slot opens the workspace picker, and the workspace chosen there is pinned to `n` |
+| `slot <n>` | Switch to the workspace pinned to slot `n` (0-9); a closed or saved one reopens on the monitor it was last viewed on, an unpinned slot opens the workspace picker, and the workspace chosen there is pinned to `n`; a slot pinned to a workspace that is neither live nor saved opens the picker in pin mode the same way, while other open failures do nothing |
 | `pin-slot <n>` | Pin the active workspace to slot `n` (0-9); pins persist in `$XDG_STATE_HOME/cde/slots.kdl` |
 | `open-picker` | Open the workspace picker (`crucible pick`) |
 | `open-launcher` | Open the program launcher (`crucible launch`) |
