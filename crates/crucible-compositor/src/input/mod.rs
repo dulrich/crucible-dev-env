@@ -12,7 +12,7 @@
 //!   changed in between (`reviews/2026-09-07-tn-code-review.md` F10).
 //! - [`pointer`] — pointer I/O: absolute/relative motion, buttons, axis frames, and
 //!   click-to-focus.
-//! - [`execute`] — action execution: [`CrucibleState::handle_key_action`] dispatches a resolved
+//! - [`execute`] — the action gate: [`CrucibleState::handle_key_action`] (lock → overlay → execute) dispatches a resolved
 //!   [`crucible_keys::Action`] to a compositor-level effect (`Quit`/`RunTerminal`/`Run`/
 //!   `VtSwitch`) or, for every model verb, through the single model-mutation entry point
 //!   (`update_model`/`with_model`, see [`crate::layout`]) — one execution arm per verb.
@@ -32,6 +32,8 @@
 //! (see [`crate::focus`]).
 
 mod execute;
+
+pub(crate) use execute::{ActionError, Origin, admit};
 mod keyboard;
 mod pointer;
 

@@ -124,20 +124,46 @@ pub enum Request {
     Rename(String),
     /// `save` — flush every dirty workspace now.
     Save,
-    /// `run <command>` — run a shell command line (`/bin/sh -c 'exec <command>'`) into the focused pane.
-    Run(String),
-    /// `exec <action>` — run a keybinding action text (the `binds` grammar) as if its chord was pressed.
+    /// `exec <action>` — run an action text (the `crucible_keys::Action` grammar, e.g.
+    /// `run <command>` or `run-in-terminal <command>`) as if its chord was pressed; a failed action
+    /// answers `err <reason>`.
     Exec(String),
-    /// `run-in-terminal <command>` — run a shell command line in a new terminal (`crucible resume --now`).
-    RunInTerminal(String),
-    /// `run-tui <command>` — like `run-in-terminal`, but the terminal closes when the command exits
-    /// (`crucible resume --now --exit`).
+    /// `run-tui <command>` — like `exec run-in-terminal`, but the terminal closes when the command
+    /// exits (`crucible resume --now --exit`).
     RunTui(String),
     /// `relaunch` — swap the calling placeholder window (found by peer PID) for its app.
     Relaunch,
 }
 
 impl Request {
+    /// `exec run <cmd>`: run a shell command line into the focused pane.
+    #[must_use]
+    pub fn run(cmd: impl Into<String>) -> Request {
+        Request::Exec(crucible_keys::Action::Run(cmd.into()).to_string())
+    }
+
+    /// `exec run-in-terminal <cmd>`: run a shell command line in a new terminal.
+    #[must_use]
+    pub fn run_in_terminal(cmd: impl Into<String>) -> Request {
+        Request::Exec(crucible_keys::Action::RunInTerminal(cmd.into()).to_string())
+    }
+
+    /// Whether this request acts (changes the model, spawns, or touches overlays). Acting requests
+    /// are refused while the session is locked; `candidates`, `bindings` and `save` are not acting.
+    #[must_use]
+    pub fn acts(&self) -> bool {
+        match self {
+            Request::Candidates | Request::Bindings | Request::Save => false,
+            Request::Open(_)
+            | Request::OpenFolder(_)
+            | Request::New(_)
+            | Request::Rename(_)
+            | Request::Exec(_)
+            | Request::RunTui(_)
+            | Request::Relaunch => true,
+        }
+    }
+
     /// Parses one request line (without its trailing newline; a trailing `\r` is not stripped
     /// because CR is always encoded). Errors carry a human-readable reason.
     pub fn parse(line: &str) -> Result<Request, String> {
@@ -167,9 +193,7 @@ impl Request {
             "open-folder" => need(arg).map(|p| Request::OpenFolder(PathBuf::from(p))),
             "new" => need(arg).map(Request::New),
             "rename" => need(arg).map(Request::Rename),
-            "run" => need(arg).map(Request::Run),
             "exec" => need(arg).map(Request::Exec),
-            "run-in-terminal" => need(arg).map(Request::RunInTerminal),
             "run-tui" => need(arg).map(Request::RunTui),
             other => Err(format!("unknown request {other:?}")),
         }
@@ -188,9 +212,7 @@ impl Request {
             Request::OpenFolder(p) => format!("open-folder {}", encode_field(&p.to_string_lossy())),
             Request::New(n) => format!("new {}", encode_field(n)),
             Request::Rename(n) => format!("rename {}", encode_field(n)),
-            Request::Run(c) => format!("run {}", encode_field(c)),
             Request::Exec(a) => format!("exec {}", encode_field(a)),
-            Request::RunInTerminal(c) => format!("run-in-terminal {}", encode_field(c)),
             Request::RunTui(c) => format!("run-tui {}", encode_field(c)),
         }
     }
@@ -549,13 +571,38 @@ mod tests {
             Request::OpenFolder(PathBuf::from("/tmp/x:y/100%")),
             Request::New("n\nl".into()),
             Request::Rename("r\r".into()),
-            Request::Run("sh -c 'echo 100%: a\tb'".into()),
-            Request::RunInTerminal("htop -d 5: 100%".into()),
+            Request::Exec("run sh -c 'echo 100%: a\tb'".into()),
+            Request::Exec("run-in-terminal htop -d 5: 100%".into()),
             Request::RunTui("'/usr/bin/vim' a:b 100%".into()),
             Request::Exec("split-right".into()),
         ];
         for r in reqs {
             assert_eq!(Request::parse(&r.to_line()), Ok(r.clone()));
+        }
+    }
+
+    #[test]
+    fn retired_run_requests_no_longer_parse() {
+        // `run`/`run-in-terminal` travel as `exec run …`/`exec run-in-terminal …` now.
+        assert!(Request::parse("run firefox").is_err());
+        assert!(Request::parse("run-in-terminal htop").is_err());
+    }
+
+    #[test]
+    fn only_read_only_requests_do_not_act() {
+        for r in [Request::Candidates, Request::Bindings, Request::Save] {
+            assert!(!r.acts(), "{r:?}");
+        }
+        for r in [
+            Request::Exec("quit".into()),
+            Request::Open("a".into()),
+            Request::OpenFolder(PathBuf::from("/tmp")),
+            Request::New("n".into()),
+            Request::Rename("r".into()),
+            Request::RunTui("htop".into()),
+            Request::Relaunch,
+        ] {
+            assert!(r.acts(), "{r:?}");
         }
     }
 

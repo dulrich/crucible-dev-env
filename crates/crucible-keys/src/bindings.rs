@@ -16,10 +16,8 @@
 //!
 //! ## Action grammar
 //!
-//! `quit`, `close-pane`, `run-terminal`, `run <command…>`, `new-workspace`, `open-picker`, `open-launcher`, `open-settings`,
-//! `rename-workspace`, `focus|move|split|resize <left|right|up|down>`, `cycle-stack <±n>`,
-//! `cycle-workspace <±n>`, `move-window-to-workspace <±n>`, `slot <0-9>`, `pin-slot <0-9>`, and `none`
-//! (unbind the chord). `Super+Shift+<digit>` also binds the digit's US shifted symbol (`exclam`, ...),
+//! Every verb of the [`Action`] verb table (its `FromStr`; see [`crate::action`]), plus `none`
+//! (unbind the chord) via [`BindTarget`]. `Super+Shift+<digit>` also binds the digit's US shifted symbol (`exclam`, ...),
 //! since the compositor delivers the modified keysym.
 
 use std::collections::HashMap;
@@ -27,7 +25,9 @@ use std::collections::HashMap;
 use crucible_layout::Direction;
 use xkeysym::Keysym;
 
-use crate::action::Action;
+use std::str::FromStr;
+
+use crate::action::{Action, ActionParseError};
 use crate::chord::Modifiers;
 
 /// A keyboard chord: modifier set plus keysym.
@@ -167,14 +167,14 @@ impl Bindings {
         let mut bindings = Self::default();
         for (chord_text, action_text) in overrides {
             let chord = parse_chord(chord_text)?;
-            let action = parse_action(chord_text, action_text)?;
+            let target = parse_target(chord_text, action_text)?;
             for keysym in aliases(chord.modifiers, chord.keysym) {
                 let key = Chord { keysym, ..chord };
-                match &action {
-                    Some(action) => {
+                match &target {
+                    BindTarget::Action(action) => {
                         bindings.map.insert(key, action.clone());
                     }
-                    None => {
+                    BindTarget::Unbind => {
                         bindings.map.remove(&key);
                     }
                 }
@@ -462,110 +462,42 @@ fn parse_chord(text: &str) -> Result<Chord, BindError> {
     Ok(Chord { modifiers, keysym })
 }
 
-/// Parses a bare action string (the `binds` action grammar); `Ok(None)` is `none`. Errors carry
-/// an empty chord.
-///
-/// # Errors
-/// [`BindError::BadAction`] for an unknown or malformed action.
-pub fn parse_action_text(text: &str) -> Result<Option<Action>, BindError> {
-    parse_action("", text)
+/// What a `binds` entry binds its chord to: an [`Action`] (the [`Action`] `FromStr` grammar), or
+/// `none`, which unbinds the chord.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindTarget {
+    /// Bind the chord to this action.
+    Action(Action),
+    /// `none`: remove the chord's binding.
+    Unbind,
 }
 
-/// Parses an action string; `Ok(None)` is `none` (unbind).
-fn parse_action(chord: &str, text: &str) -> Result<Option<Action>, BindError> {
-    let bad = |reason: String| BindError::BadAction {
-        chord: chord.to_string(),
-        action: text.to_string(),
-        reason,
-    };
-    let words: Vec<&str> = text.split_whitespace().collect();
-    let direction = |arg: Option<&&str>| -> Result<Direction, BindError> {
-        match arg.map(|s| s.to_ascii_lowercase()).as_deref() {
-            Some("left") => Ok(Direction::Left),
-            Some("right") => Ok(Direction::Right),
-            Some("up") => Ok(Direction::Up),
-            Some("down") => Ok(Direction::Down),
-            Some(other) => Err(bad(format!(
-                "`{other}` is not a direction (left, right, up, down)"
-            ))),
-            None => Err(bad("expected a direction (left, right, up, down)".into())),
-        }
-    };
-    let delta = |arg: Option<&&str>| -> Result<i64, BindError> {
-        let arg = arg.ok_or_else(|| bad("expected a signed integer step".into()))?;
-        arg.parse::<i64>()
-            .map_err(|_| bad(format!("`{arg}` is not an integer")))
-    };
-    let slot_index = |arg: Option<&&str>| -> Result<u8, BindError> {
-        let arg = arg.ok_or_else(|| bad("expected a slot number 0-9".into()))?;
-        match arg.parse::<u8>() {
-            Ok(n) if n <= 9 => Ok(n),
-            Ok(_) => Err(bad(format!("slot `{arg}` is out of range (0-9)"))),
-            Err(_) => Err(bad(format!("`{arg}` is not a slot number 0-9"))),
-        }
-    };
-    let nullary = |action: Action| -> Result<Option<Action>, BindError> {
-        match words.get(1) {
-            None => Ok(Some(action)),
-            Some(extra) => Err(bad(format!("unexpected argument `{extra}`"))),
-        }
-    };
-    let unary = |action: Action| -> Result<Option<Action>, BindError> {
-        match words.get(2) {
-            None => Ok(Some(action)),
-            Some(extra) => Err(bad(format!("unexpected argument `{extra}`"))),
-        }
-    };
+impl FromStr for BindTarget {
+    type Err = ActionParseError;
 
-    let Some(verb) = words.first() else {
-        return Err(bad("empty action".into()));
-    };
-    match verb.to_ascii_lowercase().as_str() {
-        "none" => nullary(Action::Quit).map(|_| None),
-        "quit" => nullary(Action::Quit),
-        "close-pane" => nullary(Action::ClosePane),
-        "run-terminal" => nullary(Action::RunTerminal),
-        "run" => {
-            // The command is the rest of the original text after the verb, verbatim.
-            let rest = text.trim().get(verb.len()..).unwrap_or("").trim();
-            if rest.is_empty() {
-                Err(bad("`run` needs a command".into()))
-            } else {
-                Ok(Some(Action::Run(rest.to_string())))
-            }
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let mut words = text.split_whitespace();
+        if words
+            .next()
+            .is_some_and(|verb| verb.eq_ignore_ascii_case("none"))
+        {
+            return match words.next() {
+                None => Ok(Self::Unbind),
+                Some(extra) => Err(ActionParseError(format!("unexpected argument `{extra}`"))),
+            };
         }
-        "run-in-terminal" => {
-            let rest = text.trim().get(verb.len()..).unwrap_or("").trim();
-            if rest.is_empty() {
-                Err(bad("`run-in-terminal` needs a command".into()))
-            } else {
-                Ok(Some(Action::RunInTerminal(rest.to_string())))
-            }
-        }
-        "stack-window" => Err(bad(
-            "`stack-window` was retired: every launch already stacks into the focused pane; use `run-terminal`".into(),
-        )),
-        "new-workspace" => nullary(Action::NewWorkspace),
-        "open-picker" => nullary(Action::OpenPicker),
-        "open-launcher" => nullary(Action::OpenLauncher),
-        "open-settings" => nullary(Action::OpenSettings),
-        "toggle-header" => nullary(Action::ToggleHeader),
-        "rename-workspace" => nullary(Action::RenameWorkspace),
-        "focus" => unary(Action::Focus(direction(words.get(1))?)),
-        "move" => unary(Action::Move(direction(words.get(1))?)),
-        "split" => unary(Action::Split(direction(words.get(1))?)),
-        "resize" => unary(Action::Resize(direction(words.get(1))?)),
-        "cycle-stack" => unary(Action::CycleStack(delta(words.get(1))?)),
-        "cycle-workspace" => unary(Action::CycleWorkspace(delta(words.get(1))?)),
-        "move-window-to-workspace" => unary(Action::MoveWindowToWorkspace(delta(words.get(1))?)),
-        "close-workspace" => nullary(Action::CloseWorkspace),
-        "close-all-workspaces" => nullary(Action::CloseAllWorkspaces),
-        "lock" => nullary(Action::Lock),
-        "move-workspace-to-output" => unary(Action::MoveWorkspaceToOutput(delta(words.get(1))?)),
-        "slot" => unary(Action::Slot(slot_index(words.get(1))?)),
-        "pin-slot" => unary(Action::PinSlot(slot_index(words.get(1))?)),
-        other => Err(bad(format!("unknown action `{other}`"))),
+        text.parse().map(Self::Action)
     }
+}
+
+/// Parses a `binds` action string, naming `chord` in the error.
+fn parse_target(chord: &str, text: &str) -> Result<BindTarget, BindError> {
+    text.parse()
+        .map_err(|ActionParseError(reason)| BindError::BadAction {
+            chord: chord.to_string(),
+            action: text.to_string(),
+            reason,
+        })
 }
 
 #[cfg(test)]
@@ -573,12 +505,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn action_text_round_trips_through_display() {
-        let a = parse_action_text("focus left").unwrap().unwrap();
-        assert_eq!(a.to_string(), "focus left");
-        assert_eq!(parse_action_text(&a.to_string()).unwrap(), Some(a));
-        assert_eq!(parse_action_text("none").unwrap(), None);
-        assert!(parse_action_text("bogus").is_err());
+    fn bind_target_parses_actions_and_none() {
+        assert_eq!(
+            "focus left".parse(),
+            Ok(BindTarget::Action(Action::Focus(Direction::Left)))
+        );
+        assert_eq!("none".parse(), Ok(BindTarget::Unbind));
+        assert_eq!("NONE".parse(), Ok(BindTarget::Unbind));
+        assert!("none now".parse::<BindTarget>().is_err());
+        assert!("bogus".parse::<BindTarget>().is_err());
+    }
+
+    #[test]
+    fn vt_switch_is_not_bindable() {
+        let err = Bindings::with_overrides(&[pair("Super+F3", "vt-switch 3")]).unwrap_err();
+        assert!(
+            matches!(&err, BindError::BadAction { chord, action, .. }
+                if chord == "Super+F3" && action == "vt-switch 3"),
+            "{err}"
+        );
     }
 
     fn pair(c: &str, a: &str) -> (String, String) {

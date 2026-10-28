@@ -1,16 +1,16 @@
-//! Action execution: dispatches a resolved [`crucible_keys::Action`] to the compositor.
+//! Action execution: the one gate every [`crucible_keys::Action`] passes through.
 //!
-//! [`CrucibleState::handle_key_action`] is the **one** execution arm per verb the review asked for
-//! (`reviews/2026-07-30-tn-code-review.md` F3): compositor-level verbs (`Quit`, `RunTerminal`,
-//! `Run`, `VtSwitch`) are handled directly; every model verb is routed through
-//! [`apply_model_action`] and the single mutation entry point ([`CrucibleState::with_model`]).
-//! [`apply_model_action`] itself only touches a bare `crucible_layout::World`, so the verb→call mapping is unit-tested
-//! below without any compositor state — the same spirit as `crate::layout`'s `LayoutState<TestElement>`
-//! tests, minus the payload bindings this logic never needs.
+//! [`CrucibleState::handle_key_action`] is the single, fallible action gate shared by the
+//! keyboard and IPC `exec`: lock ([`admit`]) → overlay ([`closes_overlay`]) → execute. It is also
+//! the **one** execution arm per verb (`reviews/2026-07-30-tn-code-review.md` F3):
+//! compositor-level verbs are handled directly; every model verb ([`LayoutVerb`]) is routed
+//! through [`apply_model_action`] and the single mutation entry point
+//! ([`CrucibleState::with_model`]). [`apply_model_action`] and the gate's decisions only touch
+//! plain values, so they are unit-tested below without any compositor state.
 
 use std::sync::atomic::Ordering;
 
-use crucible_keys::Action;
+use crucible_keys::{Action, LayoutVerb};
 use crucible_layout::{LayoutError, World};
 use tracing::{debug, info, warn};
 
@@ -23,27 +23,85 @@ use crate::state::{Backend, CrucibleState};
 /// `Resize` verb moves (see `crucible_keys::Action::Resize`'s docs).
 const RESIZE_DELTA: f64 = 0.05;
 
+/// Where an action came from; selects the overlay policy ([`closes_overlay`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Origin {
+    /// A keyboard chord.
+    Chord,
+    /// An IPC `exec` request (the `crucible keys` overlay, the launcher, `crucible msg`).
+    Ipc,
+}
+
+/// Why an action did not run (or failed). `Display` is the reason sent to IPC clients.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ActionError {
+    /// The session is locked and the action is not allowed while locked.
+    #[error("session locked")]
+    Locked,
+    /// A spawn was refused (e.g. `unknown command foo`).
+    #[error("{0}")]
+    Spawn(String),
+    /// The model refused the verb (anything but the expected `SameWorkspace` no-op).
+    #[error("{0}")]
+    Model(LayoutError),
+}
+
+/// The lock admission for an action: [`Action::allowed_while_locked`] is the one lock predicate,
+/// shared with the keyboard filter (which forwards every non-admitted key to the locker).
+///
+/// # Errors
+/// [`ActionError::Locked`] while `locked` for every action but a VT switch.
+pub(crate) fn admit(locked: bool, action: &Action) -> Result<(), ActionError> {
+    if locked && !action.allowed_while_locked() {
+        Err(ActionError::Locked)
+    } else {
+        Ok(())
+    }
+}
+
+/// The overlay policy: whether `action` from `origin` closes the mapped overlay before running.
+///
+/// Chords follow [`chord_closes_overlay`]. IPC `exec` closes first unconditionally, except `run`
+/// and `run-in-terminal`: the launcher overlay sends those and shows an `err` reply in its own
+/// status line, and closing the overlay would kill it before the reply arrives.
+#[must_use]
+pub(crate) fn closes_overlay(origin: Origin, overlay_mapped: bool, action: &Action) -> bool {
+    match origin {
+        Origin::Chord => chord_closes_overlay(overlay_mapped, action),
+        Origin::Ipc => {
+            overlay_mapped && !matches!(action, Action::Run(_) | Action::RunInTerminal(_))
+        }
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
-    /// Dispatches a resolved [`Action`] to its compositor effect or `World` op.
+    /// The single action gate: lock ([`admit`]) → overlay ([`closes_overlay`]) → execute.
     ///
-    /// `Quit`/`RunTerminal`/`Run`/`OpenPicker`/`RenameWorkspace`/`VtSwitch` are compositor-level and return immediately; every
-    /// other verb is a model mutation applied through [`Self::with_model`], the single entry point
-    /// (`SameWorkspace` is logged at debug level as an expected no-op; anything else surfaces as a
-    /// warning without panicking).
+    /// Compositor-level verbs run directly; every [`LayoutVerb`] is a model mutation applied
+    /// through [`Self::with_model`], the single entry point (`SameWorkspace` is logged at debug
+    /// level as an expected no-op and is `Ok`; close-pane refusals are logged at debug level,
+    /// other model failures and spawn refusals as warnings, and all of them return `Err`).
     ///
-    /// Overlays are modal for chords as for clicks: a chord pressed while an overlay is mapped closes
-    /// it first, then runs (see [`chord_closes_overlay`]).
-    pub(crate) fn handle_key_action(&mut self, action: Action) {
-        if chord_closes_overlay(self.mapped_overlay().is_some(), &action) {
+    /// # Errors
+    /// [`ActionError`] when the gate refuses the action or the action fails.
+    pub(crate) fn handle_key_action(
+        &mut self,
+        action: Action,
+        origin: Origin,
+    ) -> Result<(), ActionError> {
+        admit(self.is_session_locked(), &action)?;
+        if closes_overlay(origin, self.mapped_overlay().is_some(), &action) {
             self.close_mapped_overlay();
         }
-        let model_action = match action {
+        if let Some(verb) = action.layout_verb() {
+            return self.apply_layout_verb(verb);
+        }
+        match action {
             Action::Quit => {
                 info!("Super+Shift+Q: flushing workspaces and quitting");
                 self.flush_workspaces();
                 self.remove_ipc_socket();
                 self.running.store(false, Ordering::SeqCst);
-                return;
             }
             // Spawning causes the client to connect, map a toplevel, and flow through
             // `new_toplevel` -> `map_new_window`, which pushes the window onto the focused pane's
@@ -53,66 +111,32 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 let cmd = self.terminal_program();
                 info!(cmd, "spawning terminal into focused pane");
                 self.spawn_terminal_here(&cmd);
-                return;
             }
             Action::Run(cmd) => {
                 info!(cmd, "running command into focused pane");
                 if let Err(reason) = self.run_checked(&cmd) {
                     warn!(cmd, reason, "run keybind not spawned");
+                    return Err(ActionError::Spawn(reason));
                 }
-                return;
             }
             Action::RunInTerminal(cmd) => {
                 info!(cmd, "running command in a new terminal");
                 if let Err(reason) = self.run_in_terminal_checked(&cmd) {
                     warn!(cmd, reason, "run-in-terminal keybind not spawned");
+                    return Err(ActionError::Spawn(reason));
                 }
-                return;
             }
-            Action::OpenPicker => {
-                self.open_picker(false);
-                return;
-            }
-            Action::CloseWorkspace => {
-                self.close_workspace();
-                return;
-            }
-            Action::CloseAllWorkspaces => {
-                self.close_all_workspaces();
-                return;
-            }
-            Action::Slot(n) => {
-                self.slot_open(n);
-                return;
-            }
-            Action::PinSlot(n) => {
-                self.pin_slot(n);
-                return;
-            }
-            Action::MoveWorkspaceToOutput(delta) => {
-                self.move_active_workspace_to_output(delta);
-                return;
-            }
-            Action::RenameWorkspace => {
-                self.open_picker(true);
-                return;
-            }
-            Action::OpenLauncher => {
-                self.open_launcher();
-                return;
-            }
-            Action::ToggleHeader => {
-                self.toggle_header();
-                return;
-            }
-            Action::OpenSettings => {
-                self.open_settings();
-                return;
-            }
-            Action::Lock => {
-                self.spawn_locker();
-                return;
-            }
+            Action::OpenPicker => self.open_picker(false),
+            Action::CloseWorkspace => self.close_workspace(),
+            Action::CloseAllWorkspaces => self.close_all_workspaces(),
+            Action::Slot(n) => self.slot_open(n),
+            Action::PinSlot(n) => self.pin_slot(n),
+            Action::MoveWorkspaceToOutput(delta) => self.move_active_workspace_to_output(delta),
+            Action::RenameWorkspace => self.open_picker(true),
+            Action::OpenLauncher => self.open_launcher(),
+            Action::ToggleHeader => self.toggle_header(),
+            Action::OpenSettings => self.open_settings(),
+            Action::Lock => self.spawn_locker(),
             // Auto-names skip live AND saved names, so a fresh "2" never overwrites a saved "2".
             Action::NewWorkspace => {
                 let saved = crucible_persist::store::list_saved(&self.persist.store_dir)
@@ -124,30 +148,43 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.update_model(|w| {
                     w.new_workspace(name);
                 });
-                return;
             }
             Action::VtSwitch(vt) => {
                 dispatch_vt_switch(&mut self.backend_data, vt);
-                return;
             }
-            other => other,
-        };
+            Action::Focus(_)
+            | Action::Move(_)
+            | Action::Split(_)
+            | Action::Resize(_)
+            | Action::CycleStack(_)
+            | Action::CycleWorkspace(_)
+            | Action::MoveWindowToWorkspace(_)
+            | Action::ClosePane => unreachable!("layout verbs are routed by layout_verb above"),
+        }
+        Ok(())
+    }
 
-        match self.with_model(|world| apply_model_action(world, &model_action)) {
+    /// Applies a model verb through [`Self::with_model`], logging its outcome.
+    fn apply_layout_verb(&mut self, verb: LayoutVerb) -> Result<(), ActionError> {
+        match self.with_model(|world| apply_model_action(world, verb)) {
             // One info line per layout verb (not per keystroke) with the resulting model focus,
             // so hardware logs show where the next split/spawn/workspace verb will land.
             Ok(()) => {
-                info!(action = ?model_action, focus = %self.layout.world.focus_path(), "layout action");
+                info!(action = ?verb, focus = %self.layout.world.focus_path(), "layout action");
+                Ok(())
             }
             Err(LayoutError::SameWorkspace) => {
                 debug!("move-window-to-workspace: already on target workspace");
+                Ok(())
             }
             // close-pane refusals are expected no-ops (non-empty or last pane), not failures.
             Err(err @ (LayoutError::PaneNotEmpty | LayoutError::LastPane)) => {
                 debug!(%err, "close-pane refused; no-op");
+                Err(ActionError::Model(err))
             }
             Err(err) => {
-                warn!(action = ?model_action, %err, "model action failed");
+                warn!(action = ?verb, %err, "model action failed");
+                Err(ActionError::Model(err))
             }
         }
     }
@@ -168,63 +205,34 @@ fn dispatch_vt_switch<B: Backend>(backend: &mut B, vt: i32) -> bool {
     accepted
 }
 
-/// Applies a resolved model verb's effect to `world`.
-///
-/// One arm per verb (F3): parameterized directions/deltas replace what used to be one match arm
-/// per direction/sign. Operates on a bare [`World`], so the verb→call mapping is unit-tested
-/// without any compositor state (see `mod tests`).
-///
-/// # Panics
-/// Panics if given a non-model [`Action`] (`Quit`, `RunTerminal`, `Run`, `OpenPicker`, `RenameWorkspace`, `VtSwitch`);
-/// [`CrucibleState::handle_key_action`] always routes those before this function is reached.
-fn apply_model_action(world: &mut World, action: &Action) -> Result<(), LayoutError> {
-    match action {
-        Action::Focus(dir) => {
-            world.focus(*dir);
-            Ok(())
+/// Applies a model verb's effect to `world`; one arm per [`LayoutVerb`] (F3). Operates on a bare
+/// [`World`], so the verb→call mapping is unit-tested without any compositor state.
+fn apply_model_action(world: &mut World, verb: LayoutVerb) -> Result<(), LayoutError> {
+    match verb {
+        LayoutVerb::Focus(dir) => {
+            world.focus(dir);
         }
-        Action::Move(dir) => {
-            world.move_(*dir);
-            Ok(())
+        LayoutVerb::Move(dir) => {
+            world.move_(dir);
         }
-        Action::Split(dir) => {
-            world.split(*dir);
-            Ok(())
+        LayoutVerb::Split(dir) => {
+            world.split(dir);
         }
-        Action::Resize(dir) => {
-            world.resize(*dir, RESIZE_DELTA);
-            Ok(())
+        LayoutVerb::Resize(dir) => {
+            world.resize(dir, RESIZE_DELTA);
         }
-        Action::CycleStack(delta) => {
-            world.cycle_stack(*delta);
-            Ok(())
+        LayoutVerb::CycleStack(delta) => {
+            world.cycle_stack(delta);
         }
-        Action::CycleWorkspace(delta) => {
-            world.cycle_workspace(*delta);
-            Ok(())
+        LayoutVerb::CycleWorkspace(delta) => {
+            world.cycle_workspace(delta);
         }
-        Action::MoveWindowToWorkspace(delta) => move_window_to_adjacent_workspace(world, *delta),
-        Action::ClosePane => world.close_pane(),
-        Action::Quit
-        | Action::RunTerminal
-        | Action::Run(_)
-        | Action::RunInTerminal(_)
-        | Action::OpenPicker
-        | Action::OpenLauncher
-        | Action::OpenSettings
-        | Action::ToggleHeader
-        | Action::RenameWorkspace
-        | Action::CloseWorkspace
-        | Action::CloseAllWorkspaces
-        | Action::MoveWorkspaceToOutput(_)
-        | Action::Slot(_)
-        | Action::PinSlot(_)
-        | Action::Lock
-        | Action::NewWorkspace
-        | Action::VtSwitch(_) => {
-            unreachable!("compositor-level action; handle_key_action routes it before with_model")
+        LayoutVerb::MoveWindowToWorkspace(delta) => {
+            return move_window_to_adjacent_workspace(world, delta);
         }
+        LayoutVerb::ClosePane => return world.close_pane(),
     }
+    Ok(())
 }
 
 /// Moves the focused window `delta` workspaces from the active one on the focused output
@@ -301,6 +309,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn locked_admits_only_vt_switch() {
+        assert_eq!(admit(true, &Action::VtSwitch(2)), Ok(()));
+        for action in [
+            Action::Quit,
+            Action::CloseAllWorkspaces,
+            Action::Run("firefox".into()),
+            Action::Focus(Direction::Left),
+            Action::Lock,
+        ] {
+            assert_eq!(admit(true, &action), Err(ActionError::Locked), "{action}");
+            assert_eq!(admit(false, &action), Ok(()), "{action}");
+        }
+        assert_eq!(ActionError::Locked.to_string(), "session locked");
+    }
+
+    #[test]
+    fn spawn_errors_keep_the_spawn_reason_verbatim() {
+        let reason = "unknown command bogus".to_string();
+        assert_eq!(ActionError::Spawn(reason.clone()).to_string(), reason);
+    }
+
+    #[test]
+    fn ipc_exec_closes_the_overlay_first_except_run_verbs() {
+        for action in [
+            Action::Slot(7),
+            Action::OpenPicker,
+            Action::ToggleHeader,
+            Action::RunTerminal,
+            Action::Quit,
+        ] {
+            assert!(closes_overlay(Origin::Ipc, true, &action), "{action}");
+            assert!(!closes_overlay(Origin::Ipc, false, &action), "{action}");
+        }
+        for action in [
+            Action::Run("firefox".into()),
+            Action::RunInTerminal("htop".into()),
+        ] {
+            assert!(!closes_overlay(Origin::Ipc, true, &action), "{action}");
+        }
+    }
+
+    #[test]
+    fn chord_origin_follows_chord_closes_overlay() {
+        for action in [
+            Action::Slot(7),
+            Action::OpenPicker,
+            Action::VtSwitch(2),
+            Action::Run("firefox".into()),
+        ] {
+            assert_eq!(
+                closes_overlay(Origin::Chord, true, &action),
+                chord_closes_overlay(true, &action),
+                "{action}"
+            );
+        }
+    }
+
     // ---- model action execution: each verb dispatches the right `World` call ----------------
     //
     // Differential style: clone the world, apply the `Action` through `apply_model_action`, apply
@@ -310,7 +376,8 @@ mod tests {
 
     fn assert_dispatches<F: FnOnce(&mut World)>(mut world: World, action: Action, expected: F) {
         let mut want = world.clone();
-        apply_model_action(&mut world, &action).expect("model action succeeds");
+        apply_model_action(&mut world, action.layout_verb().expect("a model verb"))
+            .expect("model action succeeds");
         expected(&mut want);
         assert_eq!(
             world, want,
@@ -332,7 +399,7 @@ mod tests {
         let mut world = World::new();
         let before = world.clone();
         assert_eq!(
-            apply_model_action(&mut world, &Action::ClosePane),
+            apply_model_action(&mut world, LayoutVerb::ClosePane),
             Err(LayoutError::LastPane)
         );
         assert_eq!(world, before);
@@ -413,7 +480,7 @@ mod tests {
         let mut world = World::new();
         world.new_workspace("ws2");
         let before = world.clone();
-        apply_model_action(&mut world, &Action::MoveWindowToWorkspace(1)).unwrap();
+        apply_model_action(&mut world, LayoutVerb::MoveWindowToWorkspace(1)).unwrap();
         assert_eq!(world, before);
     }
 
@@ -422,7 +489,7 @@ mod tests {
         let mut world = World::new();
         world.open_window();
         let before = world.clone();
-        apply_model_action(&mut world, &Action::MoveWindowToWorkspace(1)).unwrap();
+        apply_model_action(&mut world, LayoutVerb::MoveWindowToWorkspace(1)).unwrap();
         assert_eq!(world, before);
     }
 

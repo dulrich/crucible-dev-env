@@ -99,10 +99,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     };
                     let action = crucible_keys::resolve(&state.bindings, mods, keysym);
                     // While locked only VT switching runs; every other key goes to the locker.
-                    let action = action.filter(|a| {
-                        !state.is_session_locked()
-                            || matches!(a, crucible_keys::Action::VtSwitch(_))
-                    });
+                    // Same predicate as the action gate (`admit`).
+                    let action =
+                        action.filter(|a| super::admit(state.is_session_locked(), a).is_ok());
                     if action.is_some() {
                         state.suppressed_keys.consume_press(raw_keycode);
                     }
@@ -123,7 +122,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         // `input` returns `Option<FilterResult::Intercept(_)>`; the outer `Option` is `None` when
         // the key was forwarded. A release carries `Some(None)` (intercepted, no action).
         if let Some(Some(action)) = action {
-            self.handle_key_action(action);
+            // Failures are already logged by the gate at their usual levels.
+            let _ = self.handle_key_action(action, super::Origin::Chord);
         }
     }
 

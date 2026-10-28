@@ -13,8 +13,10 @@ use tracing::info;
 use super::placement::{ANCESTOR_DEPTH, Pending, Target, match_pending, slot_for};
 use super::workspace::folder_workspace_name;
 use super::{close_element, proc_root};
+use crate::input::{ActionError, Origin};
 use crate::ipc::{Request, Response};
 use crate::state::{Backend, CrucibleState};
+use crucible_keys::{Action, BindTarget};
 
 /// The IPC response for a checked spawn: `ok` once spawned, else the refusal reason.
 fn run_response(spawned: Result<u32, String>) -> Response {
@@ -24,12 +26,38 @@ fn run_response(spawned: Result<u32, String>) -> Response {
     }
 }
 
+/// The lock admission for an IPC request: while `locked`, every request that acts
+/// ([`Request::acts`]) is refused; `candidates`, `bindings` and `save` stay allowed. No `exec`
+/// action is allowed while locked (`vt-switch`, the only one that would be, is not parseable).
+fn admit_request(locked: bool, request: &Request) -> Result<(), ActionError> {
+    if locked && request.acts() {
+        Err(ActionError::Locked)
+    } else {
+        Ok(())
+    }
+}
+
+/// Parses an `exec` action text; the error is the reply reason. `none` (bind-only) is refused.
+fn parse_exec(text: &str) -> Result<Action, String> {
+    match text.parse::<BindTarget>() {
+        Ok(BindTarget::Action(action)) => Ok(action),
+        Ok(BindTarget::Unbind) => Err("`none` is not a runnable action".to_string()),
+        Err(reason) => Err(format!("bad action `{text}`: {reason}")),
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     // ---- IPC -----------------------------------------------------------------------------------
 
     /// Answers one IPC request. `peer` is the connecting process's PID (`SO_PEERCRED`); only
     /// `relaunch` uses it.
+    ///
+    /// Every acting request passes the lock admission first ([`admit_request`]); `exec` then goes
+    /// through the action gate (`handle_key_action`), which answers a failed action with `err`.
     pub fn handle_ipc(&mut self, request: Request, peer: Option<u32>) -> Response {
+        if let Err(err) = admit_request(self.is_session_locked(), &request) {
+            return Response::Err(err.to_string());
+        }
         let result = match request {
             Request::Relaunch => self.ipc_relaunch(peer),
             Request::Candidates => {
@@ -42,22 +70,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.flush_workspaces();
                 Ok(())
             }
-            Request::Run(cmd) => {
-                return run_response(self.run_checked(&cmd));
-            }
             Request::Exec(text) => {
-                return match crucible_keys::bindings::parse_action_text(&text) {
-                    Err(e) => Response::Err(e.to_string()),
-                    Ok(None) => Response::Err("`none` is not a runnable action".to_string()),
-                    Ok(Some(action)) => {
-                        self.close_mapped_overlay();
-                        self.handle_key_action(action);
-                        Response::Ok(String::new())
-                    }
+                return match parse_exec(&text) {
+                    Err(reason) => Response::Err(reason),
+                    Ok(action) => match self.handle_key_action(action, Origin::Ipc) {
+                        Ok(()) => Response::Ok(String::new()),
+                        Err(err) => Response::Err(err.to_string()),
+                    },
                 };
-            }
-            Request::RunInTerminal(cmd) => {
-                return run_response(self.run_in_terminal_checked(&cmd));
             }
             Request::RunTui(cmd) => {
                 return run_response(self.run_tui_checked(&cmd));
@@ -313,6 +333,52 @@ fn finish_rename(
 mod tests {
     use super::*;
     use crucible_persist::{PaneRecord, RecordNode};
+
+    #[test]
+    fn locked_refuses_every_acting_request() {
+        for r in [
+            Request::Exec("quit".into()),
+            Request::Exec("run firefox".into()),
+            Request::Exec("run-in-terminal htop".into()),
+            Request::Open("a".into()),
+            Request::OpenFolder("/tmp".into()),
+            Request::New("n".into()),
+            Request::Rename("r".into()),
+            Request::RunTui("htop".into()),
+            Request::Relaunch,
+        ] {
+            assert_eq!(admit_request(true, &r), Err(ActionError::Locked), "{r:?}");
+            assert_eq!(admit_request(false, &r), Ok(()), "{r:?}");
+        }
+        assert_eq!(
+            Response::Err(ActionError::Locked.to_string()),
+            Response::Err("session locked".into())
+        );
+    }
+
+    #[test]
+    fn locked_allows_read_only_requests() {
+        for r in [Request::Candidates, Request::Bindings, Request::Save] {
+            assert_eq!(admit_request(true, &r), Ok(()), "{r:?}");
+        }
+    }
+
+    #[test]
+    fn exec_parses_actions_and_refuses_none_and_garbage() {
+        assert_eq!(
+            parse_exec("run firefox --new"),
+            Ok(Action::Run("firefox --new".into()))
+        );
+        assert_eq!(
+            parse_exec("none"),
+            Err("`none` is not a runnable action".to_string())
+        );
+        assert_eq!(
+            parse_exec("bogus"),
+            Err("bad action `bogus`: unknown action `bogus`".to_string())
+        );
+        assert!(parse_exec("vt-switch 3").is_err());
+    }
 
     fn record(name: &str) -> WorkspaceRecord {
         WorkspaceRecord {

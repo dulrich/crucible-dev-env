@@ -432,9 +432,9 @@ impl Launcher {
                 }
                 let cmd = cmd.to_string();
                 return Outcome::Send(if key == Key::Enter {
-                    Request::RunInTerminal(cmd)
+                    Request::run_in_terminal(cmd)
                 } else {
-                    Request::Run(cmd)
+                    Request::run(cmd)
                 });
             }
             Key::Enter | Key::AltEnter => {
@@ -445,7 +445,7 @@ impl Launcher {
                         Outcome::Send(if item.tui {
                             Request::RunTui(cmd)
                         } else {
-                            Request::Run(cmd)
+                            Request::run(cmd)
                         })
                     }
                     None => Outcome::Continue,
@@ -690,7 +690,7 @@ mod tests {
         let mut l = Launcher::new(items);
         assert_eq!(
             l.step(Key::Enter),
-            Outcome::Send(Request::Run("firefox --new".into()))
+            Outcome::Send(Request::Exec("run firefox --new".into()))
         );
         l.step(Key::Down);
         assert_eq!(
@@ -793,12 +793,9 @@ mod tests {
         assert!(out.contains("ls -l") && out.contains("Alt+Enter"));
         assert_eq!(
             l.step(Key::Enter),
-            Outcome::Send(Request::RunInTerminal("ls -l".into()))
+            Outcome::Send(Request::run_in_terminal("ls -l"))
         );
-        assert_eq!(
-            l.step(Key::AltEnter),
-            Outcome::Send(Request::Run("ls -l".into()))
-        );
+        assert_eq!(l.step(Key::AltEnter), Outcome::Send(Request::run("ls -l")));
     }
 
     #[test]
@@ -813,10 +810,7 @@ mod tests {
     #[test]
     fn alt_enter_outside_shell_mode_is_enter() {
         let mut l = shell_launcher("");
-        assert_eq!(
-            l.step(Key::AltEnter),
-            Outcome::Send(Request::Run("a".into()))
-        );
+        assert_eq!(l.step(Key::AltEnter), Outcome::Send(Request::run("a")));
     }
 
     #[test]

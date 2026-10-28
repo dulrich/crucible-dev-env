@@ -6,6 +6,20 @@
 //! that used to be one variant per direction/sign (`FocusLeft`, `FocusDown`, …) are parameterized
 //! over [`crucible_layout::Direction`] instead, so the compositor needs exactly one execution arm
 //! per verb (`reviews/2026-07-30-tn-code-review.md` F1, F3).
+//!
+//! ## The verb table
+//!
+//! [`Action`]'s `Display` and `FromStr` impls are the **one** verb table: `Display` prints the
+//! action grammar and `FromStr` parses it back. Verbs: `quit`, `close-pane`, `run-terminal`,
+//! `run <command…>`, `run-in-terminal <command…>`, `focus|move|split|resize <left|right|up|down>`,
+//! `cycle-stack <±n>`, `cycle-workspace <±n>`, `new-workspace`, `move-window-to-workspace <±n>`,
+//! `close-workspace`, `close-all-workspaces`, `slot <0-9>`, `pin-slot <0-9>`,
+//! `move-workspace-to-output <±n>`, `open-picker`, `open-launcher`, `open-settings`,
+//! `toggle-header`, `rename-workspace` and `lock`. `vt-switch <n>` is printed but deliberately
+//! **not** parsed: VT switches come only from libinput's `Ctrl+Alt+F<n>` keysyms, never from a
+//! bind or an IPC `exec`. The bind-only `none` (unbind) is [`crate::bindings::BindTarget`].
+
+use std::str::FromStr;
 
 use crucible_layout::Direction;
 
@@ -115,7 +129,7 @@ pub enum Action {
 }
 
 impl std::fmt::Display for Action {
-    /// The exact `binds` action grammar (`parse_action` accepts every form but `vt-switch`).
+    /// The exact action grammar (`FromStr` accepts every form but `vt-switch`).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let dir = |d: &Direction| match d {
             Direction::Left => "left",
@@ -153,6 +167,165 @@ impl std::fmt::Display for Action {
     }
 }
 
+/// A model verb: an [`Action`] that is one `crucible_layout::World` operation, applied by the
+/// compositor through its single mutation entry point. Produced by [`Action::layout_verb`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutVerb {
+    /// [`Action::Focus`].
+    Focus(Direction),
+    /// [`Action::Move`].
+    Move(Direction),
+    /// [`Action::Split`].
+    Split(Direction),
+    /// [`Action::Resize`].
+    Resize(Direction),
+    /// [`Action::CycleStack`].
+    CycleStack(i64),
+    /// [`Action::CycleWorkspace`].
+    CycleWorkspace(i64),
+    /// [`Action::MoveWindowToWorkspace`].
+    MoveWindowToWorkspace(i64),
+    /// [`Action::ClosePane`].
+    ClosePane,
+}
+
+impl Action {
+    /// The model verb this action is, or `None` for a compositor-level verb (spawn, quit, UI,
+    /// workspace bookkeeping, lock, VT switch).
+    #[must_use]
+    pub fn layout_verb(&self) -> Option<LayoutVerb> {
+        match self {
+            Self::Focus(d) => Some(LayoutVerb::Focus(*d)),
+            Self::Move(d) => Some(LayoutVerb::Move(*d)),
+            Self::Split(d) => Some(LayoutVerb::Split(*d)),
+            Self::Resize(d) => Some(LayoutVerb::Resize(*d)),
+            Self::CycleStack(n) => Some(LayoutVerb::CycleStack(*n)),
+            Self::CycleWorkspace(n) => Some(LayoutVerb::CycleWorkspace(*n)),
+            Self::MoveWindowToWorkspace(n) => Some(LayoutVerb::MoveWindowToWorkspace(*n)),
+            Self::ClosePane => Some(LayoutVerb::ClosePane),
+            Self::Quit
+            | Self::RunTerminal
+            | Self::Run(_)
+            | Self::RunInTerminal(_)
+            | Self::NewWorkspace
+            | Self::CloseWorkspace
+            | Self::CloseAllWorkspaces
+            | Self::Slot(_)
+            | Self::PinSlot(_)
+            | Self::MoveWorkspaceToOutput(_)
+            | Self::OpenPicker
+            | Self::OpenLauncher
+            | Self::OpenSettings
+            | Self::ToggleHeader
+            | Self::RenameWorkspace
+            | Self::Lock
+            | Self::VtSwitch(_) => None,
+        }
+    }
+
+    /// The lock rule: whether this action may run while the session is locked. Only VT switching
+    /// does; every other key goes to the locker and every acting IPC request is refused. The
+    /// compositor's keyboard filter and its action gate share this one predicate.
+    #[must_use]
+    pub fn allowed_while_locked(&self) -> bool {
+        matches!(self, Self::VtSwitch(_))
+    }
+}
+
+/// Why an action string does not parse ([`Action`]'s `FromStr`). The message is the reason only;
+/// callers add context (the `binds` chord, the IPC request).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct ActionParseError(pub String);
+
+impl FromStr for Action {
+    type Err = ActionParseError;
+
+    /// Parses the action grammar printed by `Display` (every form but `vt-switch`). `run` and
+    /// `run-in-terminal` take the rest of the text verbatim (trimmed).
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let bad = ActionParseError;
+        let words: Vec<&str> = text.split_whitespace().collect();
+        let direction = |arg: Option<&&str>| -> Result<Direction, ActionParseError> {
+            match arg.map(|s| s.to_ascii_lowercase()).as_deref() {
+                Some("left") => Ok(Direction::Left),
+                Some("right") => Ok(Direction::Right),
+                Some("up") => Ok(Direction::Up),
+                Some("down") => Ok(Direction::Down),
+                Some(other) => Err(bad(format!(
+                    "`{other}` is not a direction (left, right, up, down)"
+                ))),
+                None => Err(bad("expected a direction (left, right, up, down)".into())),
+            }
+        };
+        let delta = |arg: Option<&&str>| -> Result<i64, ActionParseError> {
+            let arg = arg.ok_or_else(|| bad("expected a signed integer step".into()))?;
+            arg.parse::<i64>()
+                .map_err(|_| bad(format!("`{arg}` is not an integer")))
+        };
+        let slot_index = |arg: Option<&&str>| -> Result<u8, ActionParseError> {
+            let arg = arg.ok_or_else(|| bad("expected a slot number 0-9".into()))?;
+            match arg.parse::<u8>() {
+                Ok(n) if n <= 9 => Ok(n),
+                Ok(_) => Err(bad(format!("slot `{arg}` is out of range (0-9)"))),
+                Err(_) => Err(bad(format!("`{arg}` is not a slot number 0-9"))),
+            }
+        };
+        // `nullary` rejects any argument; `unary` rejects a second one.
+        let nullary = |action: Self| match words.get(1) {
+            None => Ok(action),
+            Some(extra) => Err(bad(format!("unexpected argument `{extra}`"))),
+        };
+        let unary = |action: Self| match words.get(2) {
+            None => Ok(action),
+            Some(extra) => Err(bad(format!("unexpected argument `{extra}`"))),
+        };
+        // The command is the rest of the original text after the verb, verbatim.
+        let command = |verb: &str| -> Result<String, ActionParseError> {
+            let rest = text.trim().get(verb.len()..).unwrap_or("").trim();
+            if rest.is_empty() {
+                Err(bad(format!("`{verb}` needs a command")))
+            } else {
+                Ok(rest.to_string())
+            }
+        };
+
+        let Some(verb) = words.first() else {
+            return Err(bad("empty action".into()));
+        };
+        match verb.to_ascii_lowercase().as_str() {
+            "quit" => nullary(Self::Quit),
+            "close-pane" => nullary(Self::ClosePane),
+            "run-terminal" => nullary(Self::RunTerminal),
+            "run" => command("run").map(Self::Run),
+            "run-in-terminal" => command("run-in-terminal").map(Self::RunInTerminal),
+            "stack-window" => Err(bad(
+                "`stack-window` was retired: every launch already stacks into the focused pane; use `run-terminal`".into(),
+            )),
+            "new-workspace" => nullary(Self::NewWorkspace),
+            "open-picker" => nullary(Self::OpenPicker),
+            "open-launcher" => nullary(Self::OpenLauncher),
+            "open-settings" => nullary(Self::OpenSettings),
+            "toggle-header" => nullary(Self::ToggleHeader),
+            "rename-workspace" => nullary(Self::RenameWorkspace),
+            "focus" => unary(Self::Focus(direction(words.get(1))?)),
+            "move" => unary(Self::Move(direction(words.get(1))?)),
+            "split" => unary(Self::Split(direction(words.get(1))?)),
+            "resize" => unary(Self::Resize(direction(words.get(1))?)),
+            "cycle-stack" => unary(Self::CycleStack(delta(words.get(1))?)),
+            "cycle-workspace" => unary(Self::CycleWorkspace(delta(words.get(1))?)),
+            "move-window-to-workspace" => unary(Self::MoveWindowToWorkspace(delta(words.get(1))?)),
+            "close-workspace" => nullary(Self::CloseWorkspace),
+            "close-all-workspaces" => nullary(Self::CloseAllWorkspaces),
+            "lock" => nullary(Self::Lock),
+            "move-workspace-to-output" => unary(Self::MoveWorkspaceToOutput(delta(words.get(1))?)),
+            "slot" => unary(Self::Slot(slot_index(words.get(1))?)),
+            "pin-slot" => unary(Self::PinSlot(slot_index(words.get(1))?)),
+            other => Err(bad(format!("unknown action `{other}`"))),
+        }
+    }
+}
+
 /// Resolves the terminal command: `$TERMINAL` if set and non-empty, else the first default.
 ///
 /// Pure aside from reading the environment; the actual lookup against `$PATH` happens when the
@@ -174,6 +347,86 @@ mod tests {
     /// this crate's tests on multiple threads, so mutating it from two tests concurrently would be
     /// racy (`resolve`'s own tests avoid the hazard entirely by never asserting on the exact
     /// string — see `chord::tests::super_return_runs_a_terminal`).
+    /// One instance of every variant (directions/deltas varied).
+    fn every_variant() -> Vec<Action> {
+        vec![
+            Action::Quit,
+            Action::ClosePane,
+            Action::RunTerminal,
+            Action::Run("echo 50%:a b".into()),
+            Action::RunInTerminal("htop -d 5".into()),
+            Action::Focus(Direction::Left),
+            Action::Move(Direction::Right),
+            Action::Split(Direction::Up),
+            Action::Resize(Direction::Down),
+            Action::CycleStack(-1),
+            Action::CycleWorkspace(1),
+            Action::NewWorkspace,
+            Action::MoveWindowToWorkspace(2),
+            Action::CloseWorkspace,
+            Action::CloseAllWorkspaces,
+            Action::Slot(3),
+            Action::PinSlot(0),
+            Action::MoveWorkspaceToOutput(-2),
+            Action::OpenPicker,
+            Action::OpenLauncher,
+            Action::OpenSettings,
+            Action::ToggleHeader,
+            Action::RenameWorkspace,
+            Action::Lock,
+            Action::VtSwitch(3),
+        ]
+    }
+
+    #[test]
+    fn every_bindable_variant_round_trips_through_display_and_from_str() {
+        for action in every_variant() {
+            if matches!(action, Action::VtSwitch(_)) {
+                continue;
+            }
+            assert_eq!(
+                action.to_string().parse::<Action>(),
+                Ok(action.clone()),
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn vt_switch_displays_but_does_not_parse() {
+        assert_eq!(Action::VtSwitch(3).to_string(), "vt-switch 3");
+        assert_eq!(
+            "vt-switch 3".parse::<Action>(),
+            Err(ActionParseError("unknown action `vt-switch`".into()))
+        );
+    }
+
+    #[test]
+    fn layout_verb_covers_exactly_the_model_verbs() {
+        let model = every_variant()
+            .into_iter()
+            .filter(|a| a.layout_verb().is_some())
+            .count();
+        assert_eq!(model, 8);
+        assert_eq!(
+            Action::MoveWindowToWorkspace(2).layout_verb(),
+            Some(LayoutVerb::MoveWindowToWorkspace(2))
+        );
+        assert_eq!(Action::ClosePane.layout_verb(), Some(LayoutVerb::ClosePane));
+        assert_eq!(Action::CloseWorkspace.layout_verb(), None);
+    }
+
+    #[test]
+    fn only_vt_switch_is_allowed_while_locked() {
+        for action in every_variant() {
+            assert_eq!(
+                action.allowed_while_locked(),
+                matches!(action, Action::VtSwitch(_)),
+                "{action}"
+            );
+        }
+    }
+
     static TERMINAL_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
