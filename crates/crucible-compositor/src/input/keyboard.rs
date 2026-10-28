@@ -76,6 +76,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let time = Event::time_msec(&evt);
 
         let keyboard = self.seat.get_keyboard().unwrap();
+        let locked = self.input_mode().is_locked();
 
         let action = keyboard.input(
             self,
@@ -100,8 +101,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     let action = crucible_keys::resolve(&state.bindings, mods, keysym);
                     // While locked only VT switching runs; every other key goes to the locker.
                     // Same predicate as the action gate (`admit`).
-                    let action =
-                        action.filter(|a| super::admit(state.is_session_locked(), a).is_ok());
+                    let action = action.filter(|a| super::admit(locked, a).is_ok());
                     if action.is_some() {
                         state.suppressed_keys.consume_press(raw_keycode);
                     }

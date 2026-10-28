@@ -12,10 +12,11 @@ use smithay::backend::input::{
 use smithay::desktop::WindowSurfaceType;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent};
 use smithay::reexports::wayland_server::protocol::wl_pointer;
-use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 
 use tracing::{info, warn};
 
+use super::modal::{InputMode, hover_moves_focus, hover_tracks, press_route};
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
 use crate::state::{Backend, CrucibleState, HoverTarget, hover_entered, hover_pane_key};
@@ -42,7 +43,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let serial = SERIAL_COUNTER.next_serial();
         let time = evt.time_msec();
 
-        let under = self.surface_under(pos);
+        let mode = self.input_mode();
+        let under = self.surface_under(&mode, pos);
         let pointer = self.pointer.clone();
         pointer.motion(
             self,
@@ -54,7 +56,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             },
         );
         pointer.frame(self);
-        self.focus_follows_pointer();
+        self.focus_follows_pointer(&mode);
     }
 
     /// Maps **relative** pointer motion (real input devices, via libinput) into the seat.
@@ -79,7 +81,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let mut location = pointer.current_location() + evt.delta();
         location = self.clamp_coords(location);
 
-        let under = self.surface_under(location);
+        let mode = self.input_mode();
+        let under = self.surface_under(&mode, location);
         pointer.relative_motion(
             self,
             under.clone(),
@@ -99,7 +102,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             },
         );
         pointer.frame(self);
-        self.focus_follows_pointer();
+        self.focus_follows_pointer(&mode);
     }
 
     /// Clamps a pointer location to the bounding box of all mapped outputs.
@@ -133,12 +136,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let state = wl_pointer::ButtonState::from(evt.state());
 
         if wl_pointer::ButtonState::Pressed == state {
-            // While locked: no header clicks, no click-to-focus; the press goes to the lock surface.
-            if !self.is_session_locked() {
-                if self.consume_header_press(button) {
-                    return;
-                }
-                self.update_keyboard_focus_under_pointer(serial);
+            let mode = self.input_mode();
+            let element_under = self
+                .space
+                .element_under(self.pointer.current_location())
+                .map(|(w, _)| w.clone());
+            let route = press_route(&mode, element_under.as_ref());
+            if route.try_header && self.consume_header_press(button) {
+                return;
+            }
+            if route.close_overlay {
+                // The slot is cleared later by `unmanaged_closed`, which stays its single owner.
+                self.close_mapped_overlay();
+            }
+            if route.click_focus {
+                self.update_keyboard_focus_under_pointer(element_under);
             }
         } else if self.header.consumed.consume_release(button) {
             // The paired release of a press the header strip consumed: never forward a release
@@ -162,12 +174,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Consumes a button press that lands inside a visible header strip, recording `button` so its
     /// release is swallowed too. Returns whether the press was consumed.
     ///
-    /// Overlays are modal: with one mapped the press is **not** consumed and behaves like any
-    /// outside click (closes the overlay) — it never switches workspace.
+    /// Only called when [`press_route`] allows a header click (`Normal` mode).
     fn consume_header_press(&mut self, button: u32) -> bool {
-        if self.mapped_overlay().is_some() {
-            return false;
-        }
         let at = self.pointer.current_location();
         let Some((output, workspace)) = self.header_hit(at.x.floor() as i32, at.y.floor() as i32)
         else {
@@ -228,9 +236,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// windows to a [`PointerFocusTarget::WlSurface`] (see [`WindowElement::surface_under`]).
     fn surface_under(
         &self,
+        mode: &InputMode,
         pos: Point<f64, Logical>,
     ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
-        if self.is_session_locked() {
+        if mode.is_locked() {
             return crate::lock::lock_surface_under(&self.session_lock, &self.space, pos);
         }
         self.space
@@ -251,18 +260,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Clicking a pane's area not covered by a window focuses that pane ([`crucible_layout::World::focus_pane`]);
     /// clicking a gap routes model focus to the output under the pointer. An unmanaged
     /// (override-redirect) element only gets keyboard focus; it is never enrolled in the model.
-    fn update_keyboard_focus_under_pointer(&mut self, _serial: Serial) {
+    fn update_keyboard_focus_under_pointer(&mut self, element_under: Option<WindowElement>) {
         let location = self.pointer.current_location();
-        let element_under = self.space.element_under(location).map(|(w, _)| w.clone());
-        // Overlays are modal: a click anywhere but on the mapped overlay closes it first. The slot
-        // is cleared later by `unmanaged_closed`, which stays its single owner.
-        let clicked_overlay = match (self.mapped_overlay(), &element_under) {
-            (Some(overlay), Some(under)) => overlay == under,
-            _ => false,
-        };
-        if click_closes_overlay(self.mapped_overlay().is_some(), clicked_overlay) {
-            self.close_mapped_overlay();
-        }
         match element_under {
             Some(window) => {
                 if let Some(id) = window.window_id() {
@@ -339,8 +338,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// still updates but no focus moves. Overlays are modal ([`hover_moves_focus`]): while one is
     /// mapped the tracker still updates but hovering never moves focus off it. Does nothing when
     /// the option is off.
-    fn focus_follows_pointer(&mut self) {
-        if !self.focus_follows_mouse || self.is_session_locked() {
+    fn focus_follows_pointer(&mut self, mode: &InputMode) {
+        if !self.focus_follows_mouse || !hover_tracks(mode) {
             return;
         }
         let location = self.pointer.current_location();
@@ -363,24 +362,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let mut stored = self.hover_target.take();
         let entered = hover_entered(&mut stored, current);
         self.hover_target = stored;
-        let overlay_mapped = self.mapped_overlay().is_some();
-        if !hover_moves_focus(entered, self.pointer.is_grabbed(), overlay_mapped) {
+        if !hover_moves_focus(mode, entered, self.pointer.is_grabbed()) {
             return;
         }
-        let managed = element_under.and_then(|w| w.window_id().map(|id| (id, w)));
+        let managed = element_under.and_then(|w| w.window_id());
         match (self.hover_target.clone(), managed) {
-            (Some(HoverTarget::Pane(_)), Some((id, window))) => {
-                if !self.focus_window_in_model(id, "hover") {
-                    return;
-                }
-                // If the model already pointed at `id` (no projected focus change), `apply_focus`
-                // did not run; sync keyboard focus to the entered window.
-                let now = match self.keyboard_focus() {
-                    Some(KeyboardFocusTarget::Window(w)) => w.window_id(),
-                    _ => None,
-                };
-                if now != Some(id) {
-                    self.focus_window(window);
+            (Some(HoverTarget::Pane(_)), Some(id)) => {
+                if self.focus_window_in_model(id, "hover") {
+                    // If the model already pointed at `id` (no projected focus change),
+                    // `apply_focus` did not run; reconcile syncs keyboard focus to it.
+                    self.reconcile_keyboard_focus();
                 }
             }
             (Some(HoverTarget::Pane(pane)), None) => self.focus_pane_in_model(pane, "hover"),
@@ -403,39 +394,5 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
         }
         self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(window)));
-    }
-}
-
-/// Whether a hover may move focus: only on a fresh enter, with no pointer grab and no modal
-/// overlay mapped.
-#[must_use]
-fn hover_moves_focus(entered: bool, grabbed: bool, overlay_mapped: bool) -> bool {
-    entered && !grabbed && !overlay_mapped
-}
-
-/// Whether a press closes the mapped overlay: an overlay is mapped and the click missed it.
-#[must_use]
-fn click_closes_overlay(overlay_mapped: bool, clicked_overlay: bool) -> bool {
-    overlay_mapped && !clicked_overlay
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn hover_moves_focus_only_when_unblocked() {
-        assert!(hover_moves_focus(true, false, false));
-        assert!(!hover_moves_focus(false, false, false), "no enter");
-        assert!(!hover_moves_focus(true, true, false), "grabbed");
-        assert!(!hover_moves_focus(true, false, true), "overlay mapped");
-    }
-
-    #[test]
-    fn click_closes_overlay_only_when_missing_a_mapped_overlay() {
-        assert!(click_closes_overlay(true, false));
-        assert!(!click_closes_overlay(true, true));
-        assert!(!click_closes_overlay(false, false));
-        assert!(!click_closes_overlay(false, true));
     }
 }

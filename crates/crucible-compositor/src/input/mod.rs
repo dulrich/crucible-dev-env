@@ -35,6 +35,7 @@ mod execute;
 
 pub(crate) use execute::{ActionError, Origin, admit};
 mod keyboard;
+mod modal;
 mod pointer;
 
 use smithay::backend::input::{InputBackend, InputEvent};

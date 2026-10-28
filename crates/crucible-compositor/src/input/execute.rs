@@ -14,6 +14,7 @@ use crucible_keys::{Action, LayoutVerb};
 use crucible_layout::{LayoutError, World};
 use tracing::{debug, info, warn};
 
+use super::modal::{InputMode, chord_closes_overlay};
 use crate::persist::new_workspace_name;
 use crate::state::{Backend, CrucibleState};
 
@@ -67,10 +68,19 @@ pub(crate) fn admit(locked: bool, action: &Action) -> Result<(), ActionError> {
 #[must_use]
 pub(crate) fn closes_overlay(origin: Origin, overlay_mapped: bool, action: &Action) -> bool {
     match origin {
-        Origin::Chord => chord_closes_overlay(overlay_mapped, action),
+        Origin::Chord => chord_closes_overlay(&overlay_mode(overlay_mapped), action),
         Origin::Ipc => {
             overlay_mapped && !matches!(action, Action::Run(_) | Action::RunInTerminal(_))
         }
+    }
+}
+
+/// The mode a bare `overlay_mapped` flag stands for (the lock is already handled by [`admit`]).
+fn overlay_mode(overlay_mapped: bool) -> InputMode<()> {
+    if overlay_mapped {
+        InputMode::Overlay(())
+    } else {
+        InputMode::Normal
     }
 }
 
@@ -89,8 +99,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         action: Action,
         origin: Origin,
     ) -> Result<(), ActionError> {
-        admit(self.is_session_locked(), &action)?;
-        if closes_overlay(origin, self.mapped_overlay().is_some(), &action) {
+        let mode = self.input_mode();
+        admit(mode.is_locked(), &action)?;
+        if closes_overlay(origin, mode.has_overlay(), &action) {
             self.close_mapped_overlay();
         }
         if let Some(verb) = action.layout_verb() {
@@ -261,53 +272,10 @@ fn move_window_to_adjacent_workspace(world: &mut World, delta: i64) -> Result<()
     world.move_window_to_workspace(window_id, target_ws)
 }
 
-/// Whether a chord closes the mapped overlay before it runs: the keyboard twin of the click rule
-/// (`click_closes_overlay`), so a workspace verb never leaves an overlay stranded over another
-/// workspace. Overlay-opening chords are exempt (they replace or toggle the overlay themselves),
-/// as are VT switches (the overlay is still there on return).
-#[must_use]
-fn chord_closes_overlay(overlay_mapped: bool, action: &Action) -> bool {
-    overlay_mapped
-        && !matches!(
-            action,
-            Action::OpenPicker
-                | Action::RenameWorkspace
-                | Action::OpenLauncher
-                | Action::OpenSettings
-                | Action::ToggleHeader
-                | Action::VtSwitch(_)
-        )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crucible_layout::Direction;
-
-    #[test]
-    fn chord_closes_a_mapped_overlay_except_overlay_openers_and_vt_switch() {
-        for action in [
-            Action::Slot(7),
-            Action::CycleWorkspace(1),
-            Action::NewWorkspace,
-            Action::CloseWorkspace,
-            Action::Focus(Direction::Left),
-            Action::RunTerminal,
-        ] {
-            assert!(chord_closes_overlay(true, &action), "{action}");
-            assert!(!chord_closes_overlay(false, &action), "{action}");
-        }
-        for action in [
-            Action::OpenPicker,
-            Action::RenameWorkspace,
-            Action::OpenLauncher,
-            Action::OpenSettings,
-            Action::ToggleHeader,
-            Action::VtSwitch(2),
-        ] {
-            assert!(!chord_closes_overlay(true, &action), "{action}");
-        }
-    }
 
     #[test]
     fn locked_admits_only_vt_switch() {
@@ -361,7 +329,7 @@ mod tests {
         ] {
             assert_eq!(
                 closes_overlay(Origin::Chord, true, &action),
-                chord_closes_overlay(true, &action),
+                chord_closes_overlay(&overlay_mode(true), &action),
                 "{action}"
             );
         }
