@@ -341,32 +341,104 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     /// `Action::Slot(n)`: opens the workspace pinned to slot `n` (live, else restored from disk
-    /// on its last-viewed output). An unpinned slot opens the picker in pin mode; a failed open is an `info!` no-op; a stale
+    /// on its last-viewed output). An unpinned slot, or a stale pin (the workspace is neither live
+    /// nor saved), opens the picker in pin mode; any other failed open is an `info!` no-op and the
     /// pin is kept.
     pub(crate) fn slot_open(&mut self, n: u8) {
-        let Some(name) = self.persist.slots.get(n).map(str::to_string) else {
-            info!(
-                slot = n,
-                "slot is not pinned; opening the picker in pin mode"
-            );
-            self.pin_event(PinEvent::SlotOpen(n));
-            self.open_picker(false);
-            return;
+        let pinned = self.persist.slots.get(n).map(str::to_string);
+        let target = match pinned {
+            None => SlotTarget::Unpinned,
+            Some(name) => {
+                let live = self.layout.world.workspace_by_name(&name).is_some();
+                // An invalid name has no saved file, so it counts as not saved (stale).
+                let saved = self.persist.file_of(&name).is_ok_and(|p| p.exists());
+                slot_target(Some(name), live, saved)
+            }
         };
-        if let Err(reason) = self.ipc_open(&name) {
-            info!(
-                slot = n,
-                workspace = name,
-                reason,
-                "slot workspace not opened"
-            );
+        match target {
+            SlotTarget::Unpinned => {
+                info!(
+                    slot = n,
+                    "slot is not pinned; opening the picker in pin mode"
+                );
+                self.pin_event(PinEvent::SlotOpen(n));
+                self.open_picker(false);
+            }
+            SlotTarget::Stale(name) => {
+                info!(
+                    slot = n,
+                    workspace = name,
+                    "pinned workspace no longer exists; opening the picker in pin mode"
+                );
+                self.pin_event(PinEvent::SlotOpen(n));
+                self.open_picker(false);
+            }
+            SlotTarget::Pinned(name) => {
+                if let Err(reason) = self.ipc_open(&name) {
+                    info!(
+                        slot = n,
+                        workspace = name,
+                        reason,
+                        "slot workspace not opened"
+                    );
+                }
+            }
         }
+    }
+}
+
+/// What a slot press resolves to.
+#[derive(Debug, PartialEq, Eq)]
+enum SlotTarget {
+    /// No pin: open the pin-mode picker.
+    Unpinned,
+    /// Pinned to a workspace that is neither live nor saved: open the pin-mode picker.
+    Stale(String),
+    /// Pinned to a live or saved workspace: open it (a failure is an `info!` no-op).
+    Pinned(String),
+}
+
+/// Pure decision for `slot_open`: `pinned` is the slot's pin, `live`/`saved` whether that
+/// workspace is live / has a saved file.
+fn slot_target(pinned: Option<String>, live: bool, saved: bool) -> SlotTarget {
+    match pinned {
+        None => SlotTarget::Unpinned,
+        Some(name) if live || saved => SlotTarget::Pinned(name),
+        Some(name) => SlotTarget::Stale(name),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_target_decisions() {
+        let pin = || Some("vault".to_string());
+        assert_eq!(slot_target(None, false, false), SlotTarget::Unpinned);
+        assert_eq!(
+            slot_target(pin(), false, false),
+            SlotTarget::Stale("vault".into())
+        );
+        assert_eq!(
+            slot_target(pin(), true, false),
+            SlotTarget::Pinned("vault".into())
+        );
+        assert_eq!(
+            slot_target(pin(), false, true),
+            SlotTarget::Pinned("vault".into())
+        );
+    }
+
+    #[test]
+    fn non_stale_pin_routes_to_open_so_failures_stay_a_no_op() {
+        // A saved-but-unrestorable workspace is Pinned, not Stale: slot_open calls ipc_open and
+        // only logs its error, never opening the picker.
+        assert!(matches!(
+            slot_target(Some("broken".into()), false, true),
+            SlotTarget::Pinned(_)
+        ));
+    }
 
     #[test]
     fn pending_pin_truth_table() {
