@@ -26,11 +26,29 @@ pub(super) struct WorkspaceState {
     pub(super) pending_pin: Option<u8>,
 }
 
-/// The pending-pin decision after an open/new/open-folder request: `(slot to pin now, pending pin
-/// afterwards)`. Success pins the pending slot; any outcome clears the pending pin.
+/// Something that changes the pending slot pin (see [`pin_transition`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PinEvent {
+    /// An unpinned `Super+<n>` opens the picker in pin mode.
+    SlotOpen(u8),
+    /// An overlay open was requested (before its decision: also when ignored or refocused);
+    /// `keeps_pin` only for the plain picker.
+    OpenOverlay { keeps_pin: bool },
+    /// The overlay closed or was given up.
+    OverlayClosed,
+    /// An open/new/open-folder request completed.
+    Completed { succeeded: bool },
+}
+
+/// The one pending-pin transition: `(slot to pin now, pending pin afterwards)`.
 #[must_use]
-pub(super) fn pin_after(pending: Option<u8>, succeeded: bool) -> (Option<u8>, Option<u8>) {
-    (pending.filter(|_| succeeded), None)
+pub(super) fn pin_transition(pending: Option<u8>, event: PinEvent) -> (Option<u8>, Option<u8>) {
+    match event {
+        PinEvent::SlotOpen(n) => (None, Some(n)),
+        PinEvent::OpenOverlay { keeps_pin: true } => (None, pending),
+        PinEvent::OpenOverlay { keeps_pin: false } | PinEvent::OverlayClosed => (None, None),
+        PinEvent::Completed { succeeded } => (pending.filter(|_| succeeded), None),
+    }
 }
 
 // ---- pure decisions ---------------------------------------------------------------------------
@@ -301,17 +319,24 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.save_slots();
     }
 
-    /// After an open/new/open-folder request: pins the now-active workspace to the pending slot on
-    /// success (see [`pin_after`]) and clears the pending pin either way.
-    pub(super) fn complete_pending_pin(
-        &mut self,
-        result: Result<(), String>,
-    ) -> Result<(), String> {
-        let (pin, rest) = pin_after(self.persist.workspace.pending_pin, result.is_ok());
+    /// Applies `event` to the pending slot pin (see [`pin_transition`]), pinning when it says so.
+    pub(super) fn pin_event(&mut self, event: PinEvent) {
+        let (pin, rest) = pin_transition(self.persist.workspace.pending_pin, event);
         self.persist.workspace.pending_pin = rest;
         if let Some(n) = pin {
             self.pin_slot(n);
         }
+    }
+
+    /// After an open/new/open-folder request: pins the now-active workspace to the pending slot on
+    /// success and clears the pending pin either way ([`PinEvent::Completed`]).
+    pub(super) fn complete_pending_pin(
+        &mut self,
+        result: Result<(), String>,
+    ) -> Result<(), String> {
+        self.pin_event(PinEvent::Completed {
+            succeeded: result.is_ok(),
+        });
         result
     }
 
@@ -324,7 +349,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 slot = n,
                 "slot is not pinned; opening the picker in pin mode"
             );
-            self.persist.workspace.pending_pin = Some(n);
+            self.pin_event(PinEvent::SlotOpen(n));
             self.open_picker(false);
             return;
         };
@@ -344,21 +369,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pin_after_pins_the_pending_slot_on_success_and_clears_it() {
-        // Open, New and OpenFolder all share this decision (`complete_pending_pin`).
-        assert_eq!(pin_after(Some(3), true), (Some(3), None));
-        assert_eq!(pin_after(Some(0), true), (Some(0), None));
-    }
-
-    #[test]
-    fn pin_after_pins_nothing_on_failure_but_still_clears() {
-        assert_eq!(pin_after(Some(3), false), (None, None));
-    }
-
-    #[test]
-    fn pin_after_without_a_pending_pin_never_pins() {
-        assert_eq!(pin_after(None, true), (None, None));
-        assert_eq!(pin_after(None, false), (None, None));
+    fn pending_pin_truth_table() {
+        use PinEvent::{Completed, OpenOverlay, OverlayClosed, SlotOpen};
+        // (events applied in order from no pending pin, pins made, pending pin at the end)
+        let rows: &[(&[PinEvent], &[u8], Option<u8>)] = &[
+            // (a) unpinned slot: pending, and the plain picker open (or refocus) keeps it.
+            (
+                &[SlotOpen(3), OpenOverlay { keeps_pin: true }],
+                &[],
+                Some(3),
+            ),
+            (
+                &[
+                    SlotOpen(3),
+                    OpenOverlay { keeps_pin: true },
+                    OpenOverlay { keeps_pin: true },
+                ],
+                &[],
+                Some(3),
+            ),
+            (&[SlotOpen(1), SlotOpen(2)], &[], Some(2)),
+            // (b) launcher / settings / rename picker clear it, even when ignored or refocused.
+            (&[SlotOpen(3), OpenOverlay { keeps_pin: false }], &[], None),
+            (
+                &[
+                    SlotOpen(3),
+                    OpenOverlay { keeps_pin: true },
+                    OpenOverlay { keeps_pin: false },
+                ],
+                &[],
+                None,
+            ),
+            // (c) an overlay close or the tick give-up clears it.
+            (
+                &[SlotOpen(3), OpenOverlay { keeps_pin: true }, OverlayClosed],
+                &[],
+                None,
+            ),
+            (&[OverlayClosed], &[], None),
+            // (d) open/new/open-folder pin on success and clear either way.
+            (&[SlotOpen(3), Completed { succeeded: true }], &[3], None),
+            (
+                &[
+                    SlotOpen(0),
+                    OpenOverlay { keeps_pin: true },
+                    Completed { succeeded: true },
+                ],
+                &[0],
+                None,
+            ),
+            (&[SlotOpen(3), Completed { succeeded: false }], &[], None),
+            (&[Completed { succeeded: true }], &[], None),
+            (&[Completed { succeeded: false }], &[], None),
+            (
+                &[SlotOpen(3), OverlayClosed, Completed { succeeded: true }],
+                &[],
+                None,
+            ),
+        ];
+        for (events, pins, end) in rows {
+            let mut pending = None;
+            let mut pinned = Vec::new();
+            for &event in *events {
+                let (pin, rest) = pin_transition(pending, event);
+                pinned.extend(pin);
+                pending = rest;
+            }
+            assert_eq!((pinned.as_slice(), pending), (*pins, *end), "{events:?}");
+        }
     }
 
     #[test]

@@ -162,7 +162,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         };
         let meta = WindowMeta { pid, class, origin };
         match pending.map(|p| p.target) {
-            Some(Target::Overlay) => self.map_overlay(element),
+            Some(Target::Overlay) => self.overlay_arrived(element, pid),
             Some(Target::WarmOverlay) => self.store_warm(element, pid),
             Some(Target::Pane {
                 pane,

@@ -32,6 +32,7 @@ mod ipc;
 mod overlay;
 mod placement;
 mod spawn;
+mod warm_slot;
 mod workspace;
 
 pub use spawn::{SpawnKind, SpawnRecord};
@@ -53,7 +54,7 @@ use tracing::{debug, error, info, warn};
 use crate::element::WindowElement;
 use crate::ipc::{Candidate, CandidateKind};
 use crate::state::{Backend, CrucibleState};
-use overlay::{Overlay, OverlayState};
+use overlay::Overlay;
 use placement::{PENDING_TTL, Pending, Target};
 use spawn::prepare_restore;
 use workspace::restore_target;
@@ -434,15 +435,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .pending
             .retain(|_, p| now.saturating_duration_since(p.since) < PENDING_TTL);
         if let Some(Overlay {
-            state: OverlayState::Launching(pid),
             kind,
-            ..
+            pid,
+            element: None,
         }) = self.persist.overlay.overlay
         {
             if !self.persist.placement.pending.contains_key(&pid) {
                 warn!(pid, ?kind, "overlay never mapped; giving up on it");
-                self.persist.overlay.overlay = None;
-                self.persist.workspace.pending_pin = None;
+                self.clear_overlay_slot();
             }
         }
         let reaped = self.persist.spawn.reap();

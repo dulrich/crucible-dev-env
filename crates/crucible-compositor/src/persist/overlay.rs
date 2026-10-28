@@ -1,5 +1,6 @@
-//! The single overlay slot (picker / launcher / keys) and the pre-warmed overlay host: slot and
-//! warm-slot decisions, the host's mode line and socket, and the open/map/close state transitions.
+//! The single overlay slot (picker / launcher / keys) and the pre-warmed overlay host: slot
+//! decisions, the host's mode line and socket, and the open/map/close state transitions (the warm
+//! slot's own transitions are pure, in [`super::warm_slot`]).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,8 @@ use super::placement::{Pending, Target};
 use super::spawn::{
     SpawnKind, epoch_ms_now, keys_args, launcher_args, picker_args, with_terminal_args,
 };
+use super::warm_slot::{WarmEffect, WarmHost, WarmSlot};
+use super::workspace::PinEvent;
 use crate::element::WindowElement;
 use crate::focus::KeyboardFocusTarget;
 use crate::layout::model_output_id;
@@ -25,12 +28,8 @@ use crate::state::{Backend, CrucibleState};
 #[derive(Debug, Default)]
 pub(super) struct OverlayRuntime {
     pub(super) overlay: Option<Overlay>,
-    /// The pre-warmed overlay host, if one is running.
-    pub(super) warm: Option<WarmHost>,
-    /// Whether a warm host that dies before use may be respawned (once per overlay close).
-    pub(super) warm_respawn_ok: bool,
-    /// Warming is off for the session (the warm host came up as an X11 window).
-    pub(super) warm_disabled: bool,
+    /// The pre-warmed overlay host's slot.
+    pub(super) warm: WarmSlot<WindowElement>,
     /// Counter making each warm host's socket path unique.
     pub(super) warm_counter: u32,
 }
@@ -43,22 +42,15 @@ pub(super) enum OverlayKind {
     Keys,
 }
 
-#[derive(Debug, Clone)]
-pub(super) enum OverlayState {
-    /// Spawned, waiting for its window to map.
-    Launching(u32),
-    /// Mapped as the overlay.
-    Mapped(WindowElement),
-}
-
 /// The single overlay slot's occupant.
 #[derive(Debug, Clone)]
 pub(super) struct Overlay {
     pub(super) kind: OverlayKind,
-    pub(super) state: OverlayState,
-    /// The spawned terminal's PID, kept once mapped so the overlay can be ended by killing it
-    /// (a polite close makes the terminal ask "close window?" while the TUI runs).
-    pub(super) pid: Option<u32>,
+    /// The spawned terminal's PID, so the overlay can be ended by killing it (a polite close makes
+    /// the terminal ask "close window?" while the TUI runs).
+    pub(super) pid: u32,
+    /// `None` while launching (waiting for its window to map), else the mapped element.
+    pub(super) element: Option<WindowElement>,
 }
 
 /// What opening an overlay of a requested kind does given the slot's current occupant.
@@ -85,47 +77,6 @@ pub(super) fn overlay_open_decision(
         Some((kind, true)) if kind == requested => OpenDecision::Refocus,
         Some((_, true)) => OpenDecision::ReplaceThenSpawn,
     }
-}
-
-/// A pre-warmed overlay terminal running `crucible overlay-host --socket <socket>`.
-#[derive(Debug, Clone)]
-pub(super) struct WarmHost {
-    /// The spawned terminal's PID (killed to end it, kept as the overlay's PID once used).
-    pub(super) pid: u32,
-    /// The host's mode socket.
-    pub(super) socket: PathBuf,
-    /// Its toplevel once it arrived (stored hidden; never in the Space while warm).
-    pub(super) element: Option<WindowElement>,
-    /// Monotonic spawn time (for the log line when it is used).
-    pub(super) spawned_at: Instant,
-}
-
-/// What `open_overlay` does with the warm slot when it has to spawn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum WarmUse {
-    /// The warm host is ready: hand it the mode and map it.
-    Use,
-    /// No ready warm host: kill any warm host (`kill`) and cold-spawn as before.
-    Cold {
-        /// Whether a (not ready) warm host exists and must be killed first.
-        kill: bool,
-    },
-}
-
-/// Pure warm-slot decision. `warm` is `None` without a warm host, else whether it is ready: its
-/// toplevel is stored, its initial configure has been sent, and its socket exists.
-pub(super) fn warm_use_decision(warm: Option<bool>) -> WarmUse {
-    match warm {
-        Some(true) => WarmUse::Use,
-        Some(false) => WarmUse::Cold { kill: true },
-        None => WarmUse::Cold { kill: false },
-    }
-}
-
-/// Pure respawn bound for a warm host that died before use: returns `(respawn, respawn_ok after)`.
-/// One respawn is allowed per overlay close (and at startup); the flag is re-armed only there.
-pub(super) fn warm_after_death(respawn_ok: bool) -> (bool, bool) {
-    (respawn_ok, false)
 }
 
 /// The warm host's socket path: under `$XDG_RUNTIME_DIR`, else the IPC socket's directory, else the
@@ -202,39 +153,27 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Opens the picker (or, with `rename`, the rename prompt); see [`Self::open_overlay`].
     pub fn open_picker(&mut self, rename: bool) {
-        let Some(crucible) = Self::crucible_exe("picker") else {
-            return;
-        };
-        if rename {
-            self.persist.workspace.pending_pin = None;
-        }
         let current = rename.then(|| self.layout.world.focus_path().workspace_name);
-        let args = picker_args(
-            &self.config.terminal.exec_flag,
-            &crucible,
-            current.as_deref(),
-        );
-        self.open_overlay(OverlayKind::Picker, args);
+        let exec_flag = self.config.terminal.exec_flag.clone();
+        self.open_overlay(OverlayKind::Picker, !rename, |crucible| {
+            picker_args(&exec_flag, crucible, current.as_deref())
+        });
     }
 
     /// Opens the program launcher; see [`Self::open_overlay`].
     pub fn open_launcher(&mut self) {
-        self.persist.workspace.pending_pin = None;
-        let Some(crucible) = Self::crucible_exe("launcher") else {
-            return;
-        };
-        let args = launcher_args(&self.config.terminal.exec_flag, &crucible);
-        self.open_overlay(OverlayKind::Launcher, args);
+        let exec_flag = self.config.terminal.exec_flag.clone();
+        self.open_overlay(OverlayKind::Launcher, false, |crucible| {
+            launcher_args(&exec_flag, crucible)
+        });
     }
 
     /// Opens the read-only settings overlay (`crucible keys`); see [`Self::open_overlay`].
     pub fn open_settings(&mut self) {
-        self.persist.workspace.pending_pin = None;
-        let Some(crucible) = Self::crucible_exe("settings") else {
-            return;
-        };
-        let args = keys_args(&self.config.terminal.exec_flag, &crucible);
-        self.open_overlay(OverlayKind::Keys, args);
+        let exec_flag = self.config.terminal.exec_flag.clone();
+        self.open_overlay(OverlayKind::Keys, false, |crucible| {
+            keys_args(&exec_flag, crucible)
+        });
     }
 
     pub(super) fn crucible_exe(what: &str) -> Option<PathBuf> {
@@ -247,43 +186,57 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// Opens an overlay of `kind` running the terminal with `args`. A mapped overlay of the same
-    /// kind is refocused, one still launching is left alone, and a mapped overlay of a different
-    /// kind is asked to close before the new one spawns.
-    pub(super) fn open_overlay(&mut self, kind: OverlayKind, args: Vec<OsString>) {
+    /// Opens an overlay of `kind` running the terminal with `args(crucible)`. Every open first
+    /// applies [`PinEvent::OpenOverlay`] (`keeps_pin` only for the plain picker), whatever the
+    /// decision. A mapped overlay of the same kind is refocused, one still launching is left alone,
+    /// and a mapped overlay of a different kind is asked to close before the new one spawns.
+    fn open_overlay(
+        &mut self,
+        kind: OverlayKind,
+        keeps_pin: bool,
+        args: impl FnOnce(&Path) -> Vec<OsString>,
+    ) {
+        self.pin_event(PinEvent::OpenOverlay { keeps_pin });
+        let what = match kind {
+            OverlayKind::Picker => "picker",
+            OverlayKind::Launcher => "launcher",
+            OverlayKind::Keys => "settings",
+        };
+        let Some(crucible) = Self::crucible_exe(what) else {
+            return;
+        };
+        let args = args(&crucible);
         let current = self.persist.overlay.overlay.clone();
-        let summary = current
-            .as_ref()
-            .map(|o| (o.kind, matches!(o.state, OverlayState::Mapped(_))));
-        match overlay_open_decision(summary, kind) {
-            OpenDecision::Ignore => return,
-            OpenDecision::Refocus => {
-                if let Some(Overlay {
-                    state: OverlayState::Mapped(element),
+        let summary = current.as_ref().map(|o| (o.kind, o.element.is_some()));
+        let replaced = match (overlay_open_decision(summary, kind), current) {
+            (OpenDecision::Ignore, _) => return,
+            (
+                OpenDecision::Refocus,
+                Some(Overlay {
+                    element: Some(element),
                     ..
-                }) = current
-                {
-                    self.space.raise_element(&element, true);
-                    self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element)));
-                }
+                }),
+            ) => {
+                self.space.raise_element(&element, true);
+                self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element)));
                 return;
             }
-            OpenDecision::ReplaceThenSpawn => {
-                if let Some(Overlay {
-                    state: OverlayState::Mapped(old),
+            (OpenDecision::Refocus, _) => return,
+            (
+                OpenDecision::ReplaceThenSpawn,
+                Some(Overlay {
+                    element: Some(old),
                     pid,
                     ..
-                }) = current
-                {
-                    self.end_overlay(&old, pid);
-                }
+                }),
+            ) => {
+                self.end_overlay(&old, pid);
+                true
             }
-            OpenDecision::Spawn => {}
-        }
-        let replaced = matches!(
-            overlay_open_decision(summary, kind),
-            OpenDecision::ReplaceThenSpawn
-        );
+            (OpenDecision::ReplaceThenSpawn | OpenDecision::Spawn, _) => false,
+        };
+        // Order matters: the ready warm host is consumed first, then the replaced overlay's close
+        // re-arms the warm slot and spawns the next host.
         let used_warm = self.try_open_warm(kind, &args);
         if replaced {
             // The replaced overlay is closing: that is an overlay close for the warm slot too.
@@ -304,8 +257,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             );
             self.persist.overlay.overlay = Some(Overlay {
                 kind,
-                state: OverlayState::Launching(pid),
-                pid: Some(pid),
+                pid,
+                element: None,
             });
         }
     }
@@ -321,7 +274,27 @@ impl<B: Backend + 'static> CrucibleState<B> {
             })
     }
 
-    pub(super) fn map_overlay(&mut self, element: WindowElement) {
+    /// A cold-spawned overlay's window arrived (`pid` from the arrival). It maps as the slot's
+    /// overlay; with an empty slot (the overlay was given up or replaced meanwhile) it is a stray and
+    /// is ended without being shown, like a stray warm host.
+    pub(super) fn overlay_arrived(&mut self, element: WindowElement, pid: Option<u32>) {
+        match self.persist.overlay.overlay.take() {
+            Some(overlay) => self.map_overlay(overlay, element),
+            None => {
+                warn!(
+                    ?pid,
+                    "overlay window arrived after its slot was cleared; ending it"
+                );
+                self.run_warm_effects(vec![WarmEffect::Kill {
+                    pid,
+                    element: Some(element),
+                }]);
+            }
+        }
+    }
+
+    /// Maps `element` as `overlay` and stores it in the slot.
+    pub(super) fn map_overlay(&mut self, overlay: Overlay, element: WindowElement) {
         let rect = overlay_rect(self.focused_output_rect());
         let size = Size::from((rect.width, rect.height));
         let loc = Point::from((rect.x, rect.y));
@@ -339,28 +312,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.map_unmanaged_element(element.clone(), loc);
         self.space.raise_element(&element, true);
         self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element.clone())));
-        let (kind, pid) = self
-            .persist
-            .overlay
-            .overlay
-            .as_ref()
-            .map_or((OverlayKind::Picker, None), |o| (o.kind, o.pid));
         self.persist.overlay.overlay = Some(Overlay {
-            kind,
-            state: OverlayState::Mapped(element),
-            pid,
+            element: Some(element),
+            ..overlay
         });
     }
 
     /// The overlay's element, only once it is mapped.
     pub(crate) fn mapped_overlay(&self) -> Option<&WindowElement> {
-        match &self.persist.overlay.overlay {
-            Some(Overlay {
-                state: OverlayState::Mapped(element),
-                ..
-            }) => Some(element),
-            _ => None,
-        }
+        self.persist.overlay.overlay.as_ref()?.element.as_ref()
     }
 
     /// The mapped overlay's actual global Space geometry, `None` while no overlay is mapped.
@@ -374,7 +334,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// surface goes away.
     pub(crate) fn close_mapped_overlay(&mut self) {
         let Some(Overlay {
-            state: OverlayState::Mapped(element),
+            element: Some(element),
             pid,
             ..
         }) = self.persist.overlay.overlay.clone()
@@ -386,21 +346,24 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Ends an overlay by killing its terminal process, so the terminal never asks to confirm
     /// closing a window with a running TUI. Falls back to a polite close when CDE holds no handle.
-    pub(super) fn end_overlay(&mut self, element: &WindowElement, pid: Option<u32>) {
-        if !pid.is_some_and(|p| self.persist.spawn.kill(p)) {
+    pub(super) fn end_overlay(&mut self, element: &WindowElement, pid: u32) {
+        if !self.persist.spawn.kill(pid) {
             close_element(element);
         }
+    }
+
+    /// Clears the overlay slot (its overlay closed or was given up) and applies
+    /// [`PinEvent::OverlayClosed`].
+    pub(super) fn clear_overlay_slot(&mut self) {
+        self.persist.overlay.overlay = None;
+        self.pin_event(PinEvent::OverlayClosed);
     }
 
     /// Called when an unmanaged element was torn down: if it was the mapped overlay, return keyboard
     /// focus to the layout's focused window. A stale close of a replaced overlay is ignored.
     pub(crate) fn unmanaged_closed(&mut self, element: &WindowElement) {
-        if matches!(
-            &self.persist.overlay.overlay,
-            Some(Overlay { state: OverlayState::Mapped(p), .. }) if p == element
-        ) {
-            self.persist.overlay.overlay = None;
-            self.persist.workspace.pending_pin = None;
+        if self.mapped_overlay() == Some(element) {
+            self.clear_overlay_slot();
             self.set_keyboard_focus(None);
             self.reconcile_keyboard_focus();
             self.rewarm_after_overlay_close();
@@ -409,22 +372,44 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     // ---- pre-warmed overlay host ---------------------------------------------------------------
 
+    /// Runs warm-slot effects in order: `Kill` forgets the pending placement and kills the PID,
+    /// else politely closes the element; `RemoveSocket` removes the file; `Spawn` spawns a host.
+    pub(super) fn run_warm_effects(&mut self, effects: Vec<WarmEffect<WindowElement>>) {
+        for effect in effects {
+            match effect {
+                WarmEffect::Kill { pid, element } => {
+                    if let Some(pid) = pid {
+                        self.persist.placement.pending.remove(&pid);
+                    }
+                    if !pid.is_some_and(|p| self.persist.spawn.kill(p)) {
+                        if let Some(element) = &element {
+                            close_element(element);
+                        }
+                    }
+                }
+                WarmEffect::RemoveSocket(socket) => {
+                    let _ = std::fs::remove_file(&socket);
+                }
+                WarmEffect::Spawn => self.spawn_warm(),
+            }
+        }
+    }
+
     /// Starts a warm overlay host at startup (once the compositor can spawn overlays).
     pub(crate) fn start_warm_overlay(&mut self) {
-        self.persist.overlay.warm_respawn_ok = true;
-        self.spawn_warm();
+        let effects = self.persist.overlay.warm.arm();
+        self.run_warm_effects(effects);
     }
 
     /// An overlay closed: re-arm the one-respawn allowance and start a warm host if none runs.
     pub(super) fn rewarm_after_overlay_close(&mut self) {
-        self.persist.overlay.warm_respawn_ok = true;
-        self.spawn_warm();
+        self.start_warm_overlay();
     }
 
     /// Spawns the warm host (terminal + exec flag + `crucible overlay-host --socket …`, with the
     /// overlay terminal args and the overlay env) unless warming is off or one already runs.
-    pub(super) fn spawn_warm(&mut self) {
-        if self.persist.overlay.warm_disabled || self.persist.overlay.warm.is_some() {
+    fn spawn_warm(&mut self) {
+        if !self.persist.overlay.warm.can_spawn() {
             return;
         }
         let Some(crucible) = Self::crucible_exe("warm overlay host") else {
@@ -451,53 +436,30 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     since: Instant::now(),
                 },
             );
-            self.persist.overlay.warm = Some(WarmHost {
-                pid,
-                socket,
-                element: None,
-                spawned_at: Instant::now(),
-            });
+            self.persist
+                .overlay
+                .warm
+                .spawned(pid, socket, Instant::now());
         }
     }
 
-    /// Kills the warm host (if any) and clears the slot; never respawns.
-    pub(super) fn discard_warm(&mut self) {
-        if let Some(warm) = self.persist.overlay.warm.take() {
-            self.persist.placement.pending.remove(&warm.pid);
-            if !self.persist.spawn.kill(warm.pid) {
-                if let Some(element) = &warm.element {
-                    close_element(element);
-                }
-            }
-            let _ = std::fs::remove_file(&warm.socket);
+    /// Runs the effects of a warm host's death before use, logging whether it respawns.
+    fn warm_died(&mut self, effects: Vec<WarmEffect<WindowElement>>) {
+        if effects.is_empty() {
+            return;
         }
-    }
-
-    /// The warm host died before use (reaped, or its surface was destroyed while hidden): clear the
-    /// slot and respawn at most once per overlay close.
-    pub(super) fn warm_died(&mut self) {
-        self.discard_warm();
-        let (respawn, ok) = warm_after_death(self.persist.overlay.warm_respawn_ok);
-        self.persist.overlay.warm_respawn_ok = ok;
-        if respawn {
+        if effects.contains(&WarmEffect::Spawn) {
             info!("warm overlay host died before use; respawning once");
-            self.spawn_warm();
         } else {
             info!("warm overlay host died before use; not respawning until an overlay closes");
         }
+        self.run_warm_effects(effects);
     }
 
     /// Called from the 1 s tick with the reaped PIDs.
     pub(super) fn warm_reaped(&mut self, reaped: &[u32]) {
-        if self
-            .persist
-            .overlay
-            .warm
-            .as_ref()
-            .is_some_and(|w| reaped.contains(&w.pid))
-        {
-            self.warm_died();
-        }
+        let effects = self.persist.overlay.warm.reaped(reaped);
+        self.warm_died(effects);
     }
 
     /// If `surface` is the hidden warm host's toplevel, treats it as dead and returns `true`.
@@ -507,11 +469,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ) -> bool {
         let hit = self.warm_element_for(surface).is_some();
         if hit {
-            // Already gone: drop the element so `discard_warm` does not try to close it.
-            if let Some(w) = self.persist.overlay.warm.as_mut() {
-                w.element = None;
-            }
-            self.warm_died();
+            let effects = self.persist.overlay.warm.died(true);
+            self.warm_died(effects);
         }
         hit
     }
@@ -525,52 +484,38 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.persist
             .overlay
             .warm
-            .as_ref()
-            .and_then(|w| w.element.as_ref())
+            .element()
             .filter(|e| e.wl_surface().is_some_and(|s| &*s == surface))
             .cloned()
     }
 
     /// Stores a newly arrived warm-host toplevel hidden in the warm slot (never in the Space). An
-    /// X11 window is killed and warming is disabled for the session.
+    /// X11 window is killed and warming is disabled for the session; a stray (no live host) is
+    /// ended without being shown.
     pub(super) fn store_warm(&mut self, element: WindowElement, pid: Option<u32>) {
-        let Some(warm_pid) = self.persist.overlay.warm.as_ref().map(|w| w.pid) else {
-            // The slot was discarded meanwhile: end the stray host without showing it.
-            if !pid.is_some_and(|p| self.persist.spawn.kill(p)) {
-                close_element(&element);
+        let x11 = element.x11_surface().is_some();
+        if let Some(warm_pid) = self.persist.overlay.warm.host().map(|h| h.pid) {
+            if x11 {
+                warn!(
+                    pid = warm_pid,
+                    "warm overlay host arrived as an X11 window; overlay pre-warming disabled for this session"
+                );
+            } else if let Some(toplevel) = element.toplevel() {
+                let rect = overlay_rect(self.focused_output_rect());
+                // The initial configure goes out on the first commit and carries this pending size.
+                toplevel
+                    .with_pending_state(|s| s.size = Some(Size::from((rect.width, rect.height))));
             }
-            return;
-        };
-        if element.x11_surface().is_some() {
-            warn!(
-                pid = warm_pid,
-                "warm overlay host arrived as an X11 window; overlay pre-warming disabled for this session"
-            );
-            self.persist.overlay.warm_disabled = true;
-            if !self.persist.spawn.kill(warm_pid) {
-                close_element(&element);
-            }
-            if let Some(w) = self.persist.overlay.warm.take() {
-                let _ = std::fs::remove_file(&w.socket);
-            }
-            return;
         }
-        if let Some(toplevel) = element.toplevel() {
-            let rect = overlay_rect(self.focused_output_rect());
-            // The initial configure goes out on the first commit and carries this pending size.
-            toplevel.with_pending_state(|s| s.size = Some(Size::from((rect.width, rect.height))));
-        }
-        if let Some(w) = self.persist.overlay.warm.as_mut() {
-            w.element = Some(element);
-        }
+        let effects = self.persist.overlay.warm.arrived(element, pid, x11);
+        self.run_warm_effects(effects);
     }
 
-    /// Whether the warm host is ready: toplevel stored, initial configure sent, socket bound.
-    pub(super) fn warm_ready(warm: &WarmHost) -> bool {
-        let Some(toplevel) = warm.element.as_ref().and_then(WindowElement::toplevel) else {
-            return false;
-        };
-        Self::initial_configure_sent(toplevel) && warm.socket.exists()
+    /// Whether the warm host is ready: initial configure of its stored toplevel sent, socket bound.
+    fn warm_ready(host: &WarmHost, element: &WindowElement) -> bool {
+        element
+            .toplevel()
+            .is_some_and(|t| Self::initial_configure_sent(t) && host.socket.exists())
     }
 
     /// Whether `toplevel`'s initial configure has gone out.
@@ -586,62 +531,64 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     /// On `Spawn`/`ReplaceThenSpawn`: hands the mode to a ready warm host and maps it as the
-    /// overlay; returns `true` when it did. Otherwise kills any warm host (the caller cold-spawns).
-    pub(super) fn try_open_warm(&mut self, kind: OverlayKind, args: &[OsString]) -> bool {
-        let ready = self.persist.overlay.warm.as_ref().map(Self::warm_ready);
-        match warm_use_decision(ready) {
-            WarmUse::Cold { kill } => {
-                if kill {
-                    info!("warm overlay host not ready; cold spawn");
-                    self.discard_warm();
-                }
-                false
+    /// overlay; returns `true` when it did. Otherwise discards any warm host (the caller
+    /// cold-spawns).
+    fn try_open_warm(&mut self, kind: OverlayKind, args: &[OsString]) -> bool {
+        let warm = &self.persist.overlay.warm;
+        let ready_socket = match (warm.host(), warm.element()) {
+            (Some(host), Some(element)) if Self::warm_ready(host, element) => {
+                Some(host.socket.clone())
             }
-            WarmUse::Use => {
-                let Some(warm) = self.persist.overlay.warm.clone() else {
-                    return false;
-                };
-                let sent = warm_mode_line(epoch_ms_now(), args)
-                    .ok_or_else(|| "unencodable mode".to_string())
-                    .and_then(|line| {
-                        send_mode_line(&warm.socket, &line).map_err(|e| e.to_string())
-                    });
-                let (Ok(()), Some(element)) = (sent.clone(), warm.element.clone()) else {
-                    warn!(err = ?sent.err(), "warm overlay host hand-off failed; cold spawn");
-                    self.discard_warm();
-                    return false;
-                };
-                let started = Instant::now();
-                self.persist.overlay.warm = None;
-                self.persist.overlay.overlay = Some(Overlay {
-                    kind,
-                    state: OverlayState::Launching(warm.pid),
-                    pid: Some(warm.pid),
-                });
-                self.map_overlay(element);
-                info!(
-                    kind = "warm-overlay",
-                    overlay = ?kind,
-                    pid = warm.pid,
-                    warm_age_ms = u64::try_from(warm.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                    "latency: request→map"
-                );
-                // Pre-warm the next host now, not at close: an overlay replaced directly by
-                // another (keys → launch) would otherwise always take the cold path.
-                self.start_warm_overlay();
-                true
+            _ => None,
+        };
+        let Some(socket) = ready_socket else {
+            let effects = self.persist.overlay.warm.discard();
+            if !effects.is_empty() {
+                info!("warm overlay host not ready; cold spawn");
+                self.run_warm_effects(effects);
             }
+            return false;
+        };
+        let sent = warm_mode_line(epoch_ms_now(), args)
+            .ok_or_else(|| "unencodable mode".to_string())
+            .and_then(|line| send_mode_line(&socket, &line).map_err(|e| e.to_string()));
+        if let Err(err) = sent {
+            warn!(err = ?Some(err), "warm overlay host hand-off failed; cold spawn");
+            let effects = self.persist.overlay.warm.discard();
+            self.run_warm_effects(effects);
+            return false;
         }
+        let Some((warm, element)) = self.persist.overlay.warm.take_ready() else {
+            return false;
+        };
+        let started = Instant::now();
+        let overlay = Overlay {
+            kind,
+            pid: warm.pid,
+            element: None,
+        };
+        self.map_overlay(overlay, element);
+        info!(
+            kind = "warm-overlay",
+            overlay = ?kind,
+            pid = warm.pid,
+            warm_age_ms = u64::try_from(warm.spawned_at.elapsed().as_millis()).unwrap_or(u64::MAX),
+            ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "latency: request→map"
+        );
+        // Pre-warm the next host now, not at close: an overlay replaced directly by
+        // another (keys → launch) would otherwise always take the cold path.
+        self.start_warm_overlay();
+        true
     }
 
     /// Config reload: a changed terminal program, exec flag or overlay terminal args invalidates
     /// the warm host; it is replaced with a fresh one.
     pub(crate) fn warm_config_changed(&mut self) {
-        if self.persist.overlay.warm.is_some() {
+        if self.persist.overlay.warm.host().is_some() {
             info!("overlay terminal config changed; restarting the warm overlay host");
-            self.discard_warm();
-            self.spawn_warm();
+            let effects = self.persist.overlay.warm.config_changed();
+            self.run_warm_effects(effects);
         }
     }
 }
@@ -687,18 +634,6 @@ mod tests {
             OpenDecision::Refocus
         );
     }
-
-    #[test]
-    fn warm_slot_uses_only_a_ready_host_and_respawns_once() {
-        assert_eq!(warm_use_decision(Some(true)), WarmUse::Use);
-        assert_eq!(warm_use_decision(Some(false)), WarmUse::Cold { kill: true });
-        assert_eq!(warm_use_decision(None), WarmUse::Cold { kill: false });
-        // Dead before use: one respawn after a close/startup, then none until re-armed.
-        let (respawn, ok) = warm_after_death(true);
-        assert!(respawn);
-        assert_eq!(warm_after_death(ok), (false, false));
-    }
-
     #[test]
     fn warm_socket_path_prefers_runtime_dir_then_ipc_dir() {
         assert_eq!(
