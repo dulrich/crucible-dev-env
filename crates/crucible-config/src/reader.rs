@@ -143,6 +143,16 @@ impl<'a> NodeReader<'a> {
             .ok_or_else(|| self.wrong_type("argument", "an integer"))
     }
 
+    /// Exactly one argument, a number: a KDL float (`1.4167`) or an integer (`2`, widened).
+    pub(crate) fn float_arg(&self) -> Result<f64, ConfigError> {
+        let value = self.single_arg("a number")?;
+        #[allow(clippy::cast_precision_loss)]
+        value
+            .as_float()
+            .or_else(|| value.as_integer().map(|n| n as f64))
+            .ok_or_else(|| self.wrong_type("argument", "a number"))
+    }
+
     /// Exactly `labels.len()` string arguments, `labels` naming each for a missing-argument error.
     pub(crate) fn string_args(&self, labels: &[&'static str]) -> Result<Vec<&'a str>, ConfigError> {
         let all = self.args();
@@ -255,8 +265,22 @@ impl<'a> NodeReader<'a> {
     ) -> Result<Children<'a>, ConfigError> {
         self.no_properties()?;
         self.no_args()?;
+        Ok(self.children_unchecked(repeatable))
+    }
+
+    /// Like [`NodeReader::children`] but leaves the block node's own arguments to the caller
+    /// (`output "DP-1" { … }`, whose one argument the caller reads first).
+    pub(crate) fn children_keeping_args(
+        &self,
+        repeatable: &'static [&'static str],
+    ) -> Result<Children<'a>, ConfigError> {
+        self.no_properties()?;
+        Ok(self.children_unchecked(repeatable))
+    }
+
+    fn children_unchecked(&self, repeatable: &'static [&'static str]) -> Children<'a> {
         let nodes = self.node.children().map_or(&[][..], KdlDocument::nodes);
-        Ok(Children::new(self.text, nodes, repeatable))
+        Children::new(self.text, nodes, repeatable)
     }
 }
 

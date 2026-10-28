@@ -136,6 +136,20 @@ A clickable workspace strip at the top of every output, listing that output's wo
 
 Clicking a workspace name focuses that output and switches it to that workspace (the press and its release are consumed by the strip, never sent to the window beneath). A click never hides the strip; in `toggle` mode only `toggle-header` does. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
 
+### `output`
+
+```kdl
+output "DP-1" {
+    scale 1.4167
+}
+```
+
+Per-output settings, keyed by the connector name (as in `DP-1`, `HDMI-A-1`). The block may repeat, once per connector; a second block for the same connector is a config error. The only child, `scale`, is optional and may appear once.
+
+- `scale` — a number (a float such as `1.4167` or an integer such as `2`) from 0.5 to 4.0 inclusive; anything outside the range is a config error, never clamped. The value is quantized to the nearest 1/120 (the unit of Wayland fractional scale), so `1.4167` becomes 170/120. An `output` block without `scale` means 1.
+
+An output with no `output` block has scale 1. Every Wayland app grows with the scale, ghostty included, so retune its `font-size` when you set one. X11 apps follow the largest scale among all configured `output` blocks (whether or not that connector is currently connected) unless `CDE_XWAYLAND_SCALE` is set, which overrides it; with no `output` blocks it is 1. XWayland's scale is fixed when XWayland starts, so a change to the largest scale reaches X11 apps after a CDE restart.
+
 ### `binds`
 
 ```kdl
@@ -222,6 +236,7 @@ header {
     font "DejaVu Sans"
     size 14
 }
+output "DP-1" { scale 1.4167 }
 binds {
     bind "Super+P" "open-picker"
     bind "Super+Backslash" "split right"

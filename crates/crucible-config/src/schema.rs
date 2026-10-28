@@ -7,8 +7,8 @@ use kdl::KdlDocument;
 use crate::error::{ConfigError, Location};
 use crate::model::{
     ClassTiling, Config, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderConfig, HeaderMode,
-    LauncherConfig, OverlayConfig, OverlayStyle, PickerConfig, Rgb, TerminalConfig, TilingConfig,
-    clamp_ring,
+    LauncherConfig, OUTPUT_SCALE_MAX, OUTPUT_SCALE_MIN, OUTPUT_SCALE_STEPS, OutputConfig,
+    OverlayConfig, OverlayStyle, PickerConfig, Rgb, TerminalConfig, TilingConfig, clamp_ring,
 };
 use crate::reader::{Children, NodeReader, locate};
 
@@ -31,7 +31,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
     })?;
 
     let mut config = Config::default();
-    for node in Children::new(text, doc.nodes(), &[]) {
+    for node in Children::new(text, doc.nodes(), &["output"]) {
         let node = node?;
         match node.name() {
             "terminal" => parse_terminal(node, &mut config.terminal)?,
@@ -55,6 +55,15 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "overlay" => config.overlay = parse_overlay(node)?,
             "launcher" => config.launcher = parse_launcher(node)?,
             "header" => config.header = parse_header(node)?,
+            "output" => {
+                let (name, out) = parse_output(node)?;
+                if config.outputs.insert(name.clone(), out).is_some() {
+                    return Err(ConfigError::Duplicate {
+                        at: node.at(),
+                        name: format!("output \"{name}\""),
+                    });
+                }
+            }
             "binds" => config.binds = parse_binds(node)?,
             "lock-command" => {
                 node.no_properties()?;
@@ -252,6 +261,35 @@ fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigError> {
     Ok(out)
 }
 
+fn parse_output(node: NodeReader<'_>) -> Result<(String, OutputConfig), ConfigError> {
+    node.no_properties()?;
+    let name = node.string_arg("a connector name string")?;
+    node.nonempty("connector name", name)?;
+    let mut out = OutputConfig::default();
+    for child in node.children_keeping_args(&[])? {
+        let child = child?;
+        child.no_properties()?;
+        match child.name() {
+            "scale" => {
+                let n = child.float_arg()?;
+                if !(OUTPUT_SCALE_MIN..=OUTPUT_SCALE_MAX).contains(&n) {
+                    return Err(child.invalid(
+                        "argument",
+                        format!("{n} is outside {OUTPUT_SCALE_MIN}..={OUTPUT_SCALE_MAX}"),
+                    ));
+                }
+                let steps = (n * f64::from(OUTPUT_SCALE_STEPS)).round();
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                {
+                    out.scale_120 = steps as u32;
+                }
+            }
+            _ => return Err(child.unknown_node("output")),
+        }
+    }
+    Ok((name.to_string(), out))
+}
+
 fn parse_binds(node: NodeReader<'_>) -> Result<Vec<(String, String)>, ConfigError> {
     let mut binds = Vec::new();
     for child in node.children(&["bind"])? {
@@ -359,6 +397,61 @@ binds {
         assert_eq!(c.terminal.exec_flag, "-e");
         let c = parse("terminal \"wezterm\" exec-flag=\"start\"\n").unwrap();
         assert_eq!(c.terminal.exec_flag, "start");
+    }
+
+    #[test]
+    fn output_scale_parses_float_and_integer_and_quantizes() {
+        let c =
+            parse("output \"DP-1\" { scale 1.4167; }\noutput \"HDMI-A-1\" { scale 2; }\n").unwrap();
+        assert_eq!(c.outputs["DP-1"].scale_120, 170);
+        assert_eq!(c.outputs["HDMI-A-1"].scale_120, 240);
+        assert!((c.output_scale("DP-1") - 170.0 / 120.0).abs() < 1e-12);
+        assert!((c.output_scale("HDMI-A-1") - 2.0).abs() < 1e-12);
+        assert!((c.max_output_scale() - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn output_scale_unlisted_or_unspecified_is_one() {
+        let c = parse("output \"DP-1\" { }\n").unwrap();
+        assert_eq!(c.outputs["DP-1"].scale_120, 120);
+        assert!((c.output_scale("DP-2") - 1.0).abs() < 1e-12);
+        assert!((Config::default().max_output_scale() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn output_scale_range_is_inclusive_and_enforced() {
+        assert_eq!(
+            parse("output \"A\" { scale 0.5; }\n").unwrap().outputs["A"].scale_120,
+            60
+        );
+        assert_eq!(
+            parse("output \"A\" { scale 4; }\n").unwrap().outputs["A"].scale_120,
+            480
+        );
+        for bad in ["0.49", "4.01", "0", "-1", "#nan"] {
+            let (err, at) = err_at(&format!("output \"A\" {{ scale {bad}; }}\n"));
+            assert!(matches!(err, ConfigError::InvalidValue { .. }), "{bad}");
+            assert_eq!(at.line, 1);
+        }
+    }
+
+    #[test]
+    fn output_errors_duplicate_unknown_child_missing_name_wrong_type() {
+        let (err, at) = err_at("output \"A\" { scale 1; }\noutput \"A\" { scale 2; }\n");
+        assert!(matches!(err, ConfigError::Duplicate { .. }));
+        assert_eq!(at.line, 2);
+        let (err, _) = err_at("output \"A\" { mode 1; }\n");
+        assert!(matches!(
+            err,
+            ConfigError::UnknownNode {
+                context: "output",
+                ..
+            }
+        ));
+        let (err, _) = err_at("output { scale 1; }\n");
+        assert!(matches!(err, ConfigError::MissingArgument { .. }));
+        let (err, _) = err_at("output \"A\" { scale \"big\"; }\n");
+        assert!(matches!(err, ConfigError::WrongType { .. }));
     }
 
     fn err_at(text: &str) -> (ConfigError, Location) {

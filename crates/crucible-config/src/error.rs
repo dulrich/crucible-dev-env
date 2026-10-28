@@ -43,8 +43,8 @@ pub enum ConfigError {
         at: Location,
         /// The node name.
         name: String,
-        /// `"the top level"`, `"tiling"`, `"picker"`, `"launcher"`, `"overlay"`, `"header"` or
-        /// `"binds"`.
+        /// `"the top level"`, `"tiling"`, `"picker"`, `"launcher"`, `"overlay"`, `"header"`,
+        /// `"output"` or `"binds"`.
         context: &'static str,
     },
     /// A property the node does not accept.

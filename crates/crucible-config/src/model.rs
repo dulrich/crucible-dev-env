@@ -1,5 +1,6 @@
 //! The parsed configuration model: plain data, defaults and the few pure helpers on it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// The terminal CDE spawns for `Super+Return` / `Super+Shift+Return`.
@@ -258,6 +259,36 @@ pub struct LauncherConfig {
     pub tui: Vec<String>,
 }
 
+/// Lowest accepted `output` scale.
+pub const OUTPUT_SCALE_MIN: f64 = 0.5;
+/// Highest accepted `output` scale.
+pub const OUTPUT_SCALE_MAX: f64 = 4.0;
+/// Fractional-scale steps per 1.0 (the `wp_fractional_scale_v1` unit).
+pub const OUTPUT_SCALE_STEPS: u32 = 120;
+
+/// One output's settings (`output "<connector>" { … }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OutputConfig {
+    /// The scale in 1/120 steps (120 = 1.0), quantized from the configured number.
+    pub scale_120: u32,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            scale_120: OUTPUT_SCALE_STEPS,
+        }
+    }
+}
+
+impl OutputConfig {
+    /// The scale as a float (`scale_120 / 120`).
+    #[must_use]
+    pub fn scale(&self) -> f64 {
+        f64::from(self.scale_120) / f64::from(OUTPUT_SCALE_STEPS)
+    }
+}
+
 /// The parsed CDE configuration. `Default` is CDE's behaviour with no config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -282,6 +313,26 @@ pub struct Config {
     pub launcher: LauncherConfig,
     /// Binding overrides as raw `(chord, action)` strings, in file order.
     pub binds: Vec<(String, String)>,
+    /// Per-output settings keyed by connector name (`output "DP-1" { … }`).
+    pub outputs: BTreeMap<String, OutputConfig>,
+}
+
+impl Config {
+    /// The configured scale for the output with connector name `connector`, or `1.0` when no
+    /// `output` block names it.
+    #[must_use]
+    pub fn output_scale(&self, connector: &str) -> f64 {
+        self.outputs.get(connector).map_or(1.0, OutputConfig::scale)
+    }
+
+    /// The largest scale among all configured `output` blocks (mapped or not), or `1.0` with none.
+    #[must_use]
+    pub fn max_output_scale(&self) -> f64 {
+        self.outputs
+            .values()
+            .map(OutputConfig::scale)
+            .fold(1.0, f64::max)
+    }
 }
 
 impl Default for Config {
@@ -296,6 +347,7 @@ impl Default for Config {
             header: HeaderConfig::default(),
             launcher: LauncherConfig::default(),
             binds: Vec::new(),
+            outputs: BTreeMap::new(),
             lock_command: "swaylock".to_string(),
         }
     }
