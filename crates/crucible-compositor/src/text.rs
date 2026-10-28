@@ -12,16 +12,12 @@
 //! bytes `[B, G, R, A]` — with **premultiplied** alpha, which is what Smithay's GLES/pixman
 //! renderers blend with.
 //!
-//! ## Element ordering contract (for WP-6)
-//! Text elements draw **above chrome** (and below the cursor). Render elements are collected
-//! front-to-back, so WP-6 should:
-//! - winit (`winit.rs`, the `chrome` vec built from `state.chrome_elements()`): insert the
-//!   [`CustomRenderElements::Text`](crate::render::CustomRenderElements) elements at the *front*
-//!   of `chrome` before the cursor elements are prepended;
-//! - udev (`udev/render.rs`, the `chrome` vec built from `build_chrome_elements`, ~L204–214): the
-//!   same — prepend text to `chrome` before the cursor block prepends the cursor.
-//!
-//! `output_elements` (`render.rs`) then places all custom elements in front of the windows.
+//! ## Element ordering contract
+//! Text elements (the header labels, as
+//! [`CustomRenderElements::Text`](crate::render::CustomRenderElements)) draw **above chrome** and
+//! below the cursor. Both backends get that order from the one shared composition,
+//! [`crate::render::frame_elements`]: cursor → header (labels, then its solids) → chrome →
+//! windows, front-to-back.
 
 use std::{
     collections::HashMap,

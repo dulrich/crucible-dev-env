@@ -6,7 +6,8 @@
 //!
 //! ## States
 //! - `Unlocked` — normal operation.
-//! - `Locking { pending }` — a locker was accepted; every output shows black (plus its lock
+//! - `Locking { pending, progress }` — a locker was accepted (its locker and per-output presented
+//!   set ride in the phase as [`LockProgress`]); every output shows black (plus its lock
 //!   surface) and CDE waits until each output has *presented* such a frame before it sends
 //!   `locked` (`SessionLocker::lock`).
 //! - `Locked { confirmed }` — `locked` was sent. If the confirmed lock object dies without a
@@ -53,13 +54,16 @@ pub const LOCK_CLEAR_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// The lock phase (see the module docs).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LockPhase<L> {
+pub enum LockPhase<L, P = ()> {
     /// Not locked.
     Unlocked,
     /// Blanked; waiting for every output to present a locked frame.
     Locking {
         /// The accepted, not yet confirmed lock.
         pending: L,
+        /// What only exists while locking (the glue's [`LockProgress`]); handed back on
+        /// confirmation and dropped with the phase otherwise.
+        progress: P,
     },
     /// `locked` was sent for `confirmed` (which may since have died).
     Locked {
@@ -68,14 +72,15 @@ pub enum LockPhase<L> {
     },
 }
 
-/// The pure lock state machine, generic over an opaque lock handle.
+/// The pure lock state machine, generic over an opaque lock handle `L` and the opaque payload `P`
+/// carried only while `Locking`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LockMachine<L> {
-    phase: LockPhase<L>,
+pub struct LockMachine<L, P = ()> {
+    phase: LockPhase<L, P>,
     unlock_candidate: bool,
 }
 
-impl<L> Default for LockMachine<L> {
+impl<L, P> Default for LockMachine<L, P> {
     fn default() -> Self {
         Self {
             phase: LockPhase::Unlocked,
@@ -84,11 +89,19 @@ impl<L> Default for LockMachine<L> {
     }
 }
 
-impl<L: Clone + Eq> LockMachine<L> {
+impl<L, P> LockMachine<L, P> {
     /// The current phase.
     #[must_use]
-    pub fn phase(&self) -> &LockPhase<L> {
+    pub fn phase(&self) -> &LockPhase<L, P> {
         &self.phase
+    }
+
+    /// The `Locking` payload, while locking.
+    pub fn progress_mut(&mut self) -> Option<&mut P> {
+        match &mut self.phase {
+            LockPhase::Locking { progress, .. } => Some(progress),
+            _ => None,
+        }
     }
 
     /// Whether the session is locked or locking (only lock surfaces and black are shown).
@@ -102,33 +115,39 @@ impl<L: Clone + Eq> LockMachine<L> {
     pub fn current(&self) -> Option<&L> {
         match &self.phase {
             LockPhase::Unlocked => None,
-            LockPhase::Locking { pending } => Some(pending),
+            LockPhase::Locking { pending, .. } => Some(pending),
             LockPhase::Locked { confirmed } => Some(confirmed),
         }
     }
 
-    /// A locker asks for the lock. `current_alive` is whether the current pending/confirmed lock
-    /// object is still alive. Returns whether the request is accepted (it then becomes pending).
-    pub fn request_lock(&mut self, handle: L, current_alive: bool) -> bool {
+    /// A locker asks for the lock with its `Locking` payload. `current_alive` is whether the
+    /// current pending/confirmed lock object is still alive. Returns whether the request is
+    /// accepted (it then becomes pending); a refused request drops `handle` and `progress`, and an
+    /// accepted one drops the payload of any lock it replaces.
+    pub fn request_lock(&mut self, handle: L, progress: P, current_alive: bool) -> bool {
         if self.is_locked() && current_alive {
             return false;
         }
-        self.phase = LockPhase::Locking { pending: handle };
+        self.phase = LockPhase::Locking {
+            pending: handle,
+            progress,
+        };
         self.unlock_candidate = false;
         true
     }
 
-    /// Every output presented a locked frame. Returns `true` when this confirms the pending lock
-    /// (the caller then sends `locked`).
-    pub fn all_outputs_presented(&mut self) -> bool {
-        match &self.phase {
-            LockPhase::Locking { pending } => {
-                self.phase = LockPhase::Locked {
-                    confirmed: pending.clone(),
-                };
-                true
+    /// Every output presented a locked frame. Returns the `Locking` payload when this confirms the
+    /// pending lock (the caller then sends `locked`), `None` otherwise.
+    pub fn all_outputs_presented(&mut self) -> Option<P> {
+        match std::mem::replace(&mut self.phase, LockPhase::Unlocked) {
+            LockPhase::Locking { pending, progress } => {
+                self.phase = LockPhase::Locked { confirmed: pending };
+                Some(progress)
             }
-            _ => false,
+            other => {
+                self.phase = other;
+                None
+            }
         }
     }
 
@@ -159,16 +178,22 @@ impl<L: Clone + Eq> LockMachine<L> {
 pub struct SessionLock {
     /// Smithay's `ext_session_lock_manager_v1` global state.
     pub manager: SessionLockManagerState,
-    /// The authoritative lock state.
-    pub machine: LockMachine<ExtSessionLockV1>,
-    /// The accepted locker, until every output presented a locked frame.
-    pending_locker: Option<SessionLocker>,
+    /// The authoritative lock state; while `Locking` it carries the [`LockProgress`].
+    pub machine: LockMachine<ExtSessionLockV1, LockProgress>,
     /// Lock surfaces, one per output.
     surfaces: Vec<(Output, LockSurface)>,
-    /// Outputs that presented a locked frame since the lock was accepted.
-    presented: Vec<Output>,
     /// Outputs (udev) whose last queued frame was rendered while locked.
     queued: Vec<Output>,
+}
+
+/// What exists only while a lock is pending: the accepted locker (consumed to send `locked`) and
+/// the outputs that presented a locked frame since it was accepted.
+#[derive(Debug)]
+pub struct LockProgress {
+    /// The accepted locker.
+    locker: SessionLocker,
+    /// Outputs that presented a locked frame since the lock was accepted.
+    presented: Vec<Output>,
 }
 
 impl SessionLock {
@@ -178,11 +203,16 @@ impl SessionLock {
         Self {
             manager,
             machine: LockMachine::default(),
-            pending_locker: None,
             surfaces: Vec::new(),
-            presented: Vec::new(),
             queued: Vec::new(),
         }
+    }
+
+    /// Forgets every lock surface and queued-locked-frame flag (on accepting a lock and on
+    /// unlocking).
+    fn reset_surfaces(&mut self) {
+        self.surfaces.clear();
+        self.queued.clear();
     }
 
     /// Whether the session is locked or locking.
@@ -302,25 +332,23 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Records that `output` presented a locked frame; confirms the lock once every output did.
     pub(crate) fn lock_output_presented(&mut self, output: &Output) {
-        if !matches!(self.session_lock.machine.phase(), LockPhase::Locking { .. }) {
+        let Some(progress) = self.session_lock.machine.progress_mut() else {
             return;
-        }
-        if !self.session_lock.presented.contains(output) {
-            self.session_lock.presented.push(output.clone());
+        };
+        if !progress.presented.contains(output) {
+            progress.presented.push(output.clone());
         }
         self.lock_confirm_if_presented();
     }
 
     fn lock_confirm_if_presented(&mut self) {
-        let all = self
-            .space
-            .outputs()
-            .all(|o| self.session_lock.presented.contains(o));
-        if all && self.session_lock.machine.all_outputs_presented() {
+        let LockPhase::Locking { progress, .. } = self.session_lock.machine.phase() else {
+            return;
+        };
+        let all = self.space.outputs().all(|o| progress.presented.contains(o));
+        if all && let Some(progress) = self.session_lock.machine.all_outputs_presented() {
             info!("lock: every output presented a locked frame; session locked");
-            if let Some(locker) = self.session_lock.pending_locker.take() {
-                locker.lock();
-            }
+            progress.locker.lock();
         }
     }
 
@@ -353,10 +381,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return;
         }
         info!("lock: session unlocked");
-        self.session_lock.pending_locker = None;
-        self.session_lock.surfaces.clear();
-        self.session_lock.presented.clear();
-        self.session_lock.queued.clear();
+        self.session_lock.reset_surfaces();
         self.force_keyboard_focus(None);
         self.hover_target = None;
         self.reconcile_keyboard_focus();
@@ -387,16 +412,21 @@ impl<B: Backend + 'static> SessionLockHandler for CrucibleState<B> {
     fn lock(&mut self, confirmation: SessionLocker) {
         let handle = confirmation.ext_session_lock().clone();
         let alive = self.session_lock.current_alive();
-        if !self.session_lock.machine.request_lock(handle, alive) {
+        let progress = LockProgress {
+            locker: confirmation,
+            presented: Vec::new(),
+        };
+        if !self
+            .session_lock
+            .machine
+            .request_lock(handle, progress, alive)
+        {
             info!("lock: refusing a lock request while already locked");
-            // Dropping the unconfirmed locker sends `finished`.
+            // The refused request dropped the unconfirmed locker, which sends `finished`.
             return;
         }
         info!("lock: lock accepted; blanking every output");
-        self.session_lock.pending_locker = Some(confirmation);
-        self.session_lock.surfaces.clear();
-        self.session_lock.presented.clear();
-        self.session_lock.queued.clear();
+        self.session_lock.reset_surfaces();
         self.close_mapped_overlay();
         self.force_keyboard_focus(None);
         self.lock_redraw_all();
@@ -455,9 +485,9 @@ mod tests {
     #[test]
     fn accept_confirm_and_valid_unlock() {
         let mut m = LockMachine::default();
-        assert!(m.request_lock(1, false));
+        assert!(m.request_lock(1, (), false));
         assert!(m.is_locked());
-        assert!(m.all_outputs_presented());
+        assert!(m.all_outputs_presented().is_some());
         assert_eq!(m.phase(), &LockPhase::Locked { confirmed: 1 });
         // Valid unlock_and_destroy: alive at the call, destroyed by the deferred check.
         assert!(m.unlock_called(true));
@@ -468,10 +498,10 @@ mod tests {
     #[test]
     fn b3_rejected_second_lock_and_its_invalid_unlock_leave_cde_locked() {
         let mut m = LockMachine::default();
-        assert!(m.request_lock(1, false));
-        assert!(m.all_outputs_presented());
+        assert!(m.request_lock(1, (), false));
+        assert!(m.all_outputs_presented().is_some());
         // A second locker while the confirmed one is alive is rejected.
-        assert!(!m.request_lock(2, true));
+        assert!(!m.request_lock(2, (), true));
         // Its invalid unlock: Smithay still calls unlock(); the confirmed lock stays alive.
         assert!(m.unlock_called(true));
         assert!(!m.unlock_check(true));
@@ -481,8 +511,8 @@ mod tests {
     #[test]
     fn unlock_after_locker_death_stays_locked() {
         let mut m = LockMachine::default();
-        assert!(m.request_lock(1, false));
-        assert!(m.all_outputs_presented());
+        assert!(m.request_lock(1, (), false));
+        assert!(m.all_outputs_presented().is_some());
         assert!(!m.unlock_called(false));
         assert!(!m.unlock_check(false));
         assert!(m.is_locked());
@@ -491,11 +521,17 @@ mod tests {
     #[test]
     fn new_locker_after_death_is_accepted_and_relocks() {
         let mut m = LockMachine::default();
-        assert!(m.request_lock(1, false));
-        assert!(m.all_outputs_presented());
-        assert!(m.request_lock(2, false));
-        assert_eq!(m.phase(), &LockPhase::Locking { pending: 2 });
-        assert!(m.all_outputs_presented());
+        assert!(m.request_lock(1, (), false));
+        assert!(m.all_outputs_presented().is_some());
+        assert!(m.request_lock(2, (), false));
+        assert_eq!(
+            m.phase(),
+            &LockPhase::Locking {
+                pending: 2,
+                progress: ()
+            }
+        );
+        assert!(m.all_outputs_presented().is_some());
         assert!(m.unlock_called(true));
         assert!(m.unlock_check(false));
         assert!(!m.is_locked());
@@ -504,14 +540,26 @@ mod tests {
     #[test]
     fn reject_while_locking_and_never_unlock_an_unconfirmed_lock() {
         let mut m = LockMachine::default();
-        assert!(m.request_lock(1, false));
-        assert!(!m.request_lock(2, true));
+        assert!(m.request_lock(1, (), false));
+        assert!(!m.request_lock(2, (), true));
         // An unlock while still Locking (unconfirmed) is never a candidate.
         assert!(!m.unlock_called(true));
         assert!(!m.unlock_check(false));
-        assert_eq!(m.phase(), &LockPhase::Locking { pending: 1 });
+        assert_eq!(
+            m.phase(),
+            &LockPhase::Locking {
+                pending: 1,
+                progress: ()
+            }
+        );
         // The pending locker died: a new locker may take over.
-        assert!(m.request_lock(3, false));
-        assert_eq!(m.phase(), &LockPhase::Locking { pending: 3 });
+        assert!(m.request_lock(3, (), false));
+        assert_eq!(
+            m.phase(),
+            &LockPhase::Locking {
+                pending: 3,
+                progress: ()
+            }
+        );
     }
 }

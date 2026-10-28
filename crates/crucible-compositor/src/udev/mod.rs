@@ -94,7 +94,7 @@ type UdevRenderer<'a> = MultiRenderer<
 
 /// The render-element type a [`DrmOutput`] is parameterized over for CDE's element collection.
 ///
-/// Matches the `(R, E)` pair [`output_elements`] yields for the udev renderer, so the same window
+/// Matches the `(R, E)` pair [`crate::render::frame_elements`] yields for the udev renderer, so the same window
 /// + cursor elements used by the winit path drive the DRM compositor.
 type OutputElements<'a> = OutputRenderElements<
     UdevRenderer<'a>,

@@ -188,21 +188,12 @@ impl World {
     /// This is the sole source of visible geometry and focus; mutating ops return no hints.
     #[must_use]
     pub fn project(&self, outputs: &[(OutputId, Rect)], gaps: GapConfig) -> Projection {
-        let mut windows: Vec<(WindowId, Rect)> = Vec::new();
-        for (output_id, global) in outputs {
-            let local = Rect::new(0, 0, global.width, global.height);
-            for (window, rect) in self.geometry(*output_id, local, gaps) {
-                windows.push((
-                    window,
-                    Rect::new(
-                        rect.x + global.x,
-                        rect.y + global.y,
-                        rect.width,
-                        rect.height,
-                    ),
-                ));
-            }
-        }
+        // Each visible pane's focused window takes the pane's rect ([`World::pane_rects`] owns
+        // the per-output iteration and origin offset).
+        let windows = self
+            .pane_rects(outputs, gaps)
+            .into_iter()
+            .filter_map(|(pane, rect)| Some((self.panes.get(&pane)?.focused_window()?, rect)));
         Projection::new(windows, self.focused_window())
     }
 

@@ -1,30 +1,39 @@
-//! Per-frame rendering: scene assembly and output presentation.
+//! Per-frame rendering: scene assembly shared by both backends.
 //!
-//! Assembles the list of render elements for an output each frame and drives damage-tracked
-//! rendering through the GL ES renderer. Backend-agnostic: it consumes the mapped windows from the
-//! desktop [`Space`](smithay::desktop::Space) plus the compositor-drawn cursor element from
-//! [`crate::drawing`], composites them with an [`OutputDamageTracker`], and presents to the backend.
+//! [`frame_elements`] assembles the front-to-back element list (and clear colour) for one output
+//! each frame: while the session is locked only the output's lock surface over
+//! [`LOCK_CLEAR_COLOR`](crate::lock::LOCK_CLEAR_COLOR); otherwise the cursor, the header strip, the
+//! chrome (focus-ring borders, fills, stack indicators) and the mapped windows from the desktop
+//! [`Space`](smithay::desktop::Space). It is generic over the renderer so the winit and udev
+//! backends share it unchanged; each backend keeps only its own present/feedback logic.
 //!
 //! ## Scope
-//! Renders mapped surfaces, the cursor, and the chrome (focus-ring borders, stack indicators);
-//! window previews are not rendered. The element-collection helpers ([`output_elements`] /
-//! [`render_output`]) are written generically over the renderer so both backends reuse them
-//! unchanged (presentation feedback is the udev backend's own concern).
+//! Window previews are not rendered.
 
+use crucible_config::TilingConfig;
+use crucible_layout::{OutputId, Projection, Rect};
 use smithay::{
     backend::renderer::{
         Color32F, ImportAll, ImportMem, Renderer,
-        damage::{Error as OutputDamageTrackerError, OutputDamageTracker, RenderOutputResult},
         element::{
-            Wrap, memory::MemoryRenderBufferRenderElement, solid::SolidColorRenderElement,
-            surface::WaylandSurfaceRenderElement,
+            AsRenderElements, Wrap, memory::MemoryRenderBufferRenderElement,
+            solid::SolidColorRenderElement, surface::WaylandSurfaceRenderElement,
         },
     },
     desktop::space::{Space, SpaceRenderElements},
     output::Output,
+    utils::{Physical, Point, Scale},
 };
 
-use crate::{drawing::PointerRenderElement, element::WindowElement};
+use crate::{
+    chrome::OverlayChrome,
+    drawing::{PointerElement, PointerRenderElement},
+    element::WindowElement,
+    header::HeaderLayout,
+    layout::LayoutState,
+    lock::SessionLock,
+    text::TextRenderer,
+};
 
 smithay::backend::renderer::element::render_elements! {
     /// Compositor-drawn render elements that are not part of the desktop [`Space`]: the cursor,
@@ -80,11 +89,53 @@ impl<
 }
 
 /// Window render element produced for a [`WindowElement`] by a renderer `R`.
-type WindowRenderElement<R> =
-    <WindowElement as smithay::backend::renderer::element::AsRenderElements<R>>::RenderElement;
+pub type WindowRenderElement<R> = <WindowElement as AsRenderElements<R>>::RenderElement;
 
-/// Collects the render elements for `output`: the compositor `custom_elements` (the cursor) on top,
-/// then the mapped windows from `space` below.
+/// One frame's composited element list (front-to-back) for renderer `R`.
+pub type FrameElements<R> = Vec<OutputRenderElements<R, WindowRenderElement<R>>>;
+
+/// The read-only state one output's frame is composed from: disjoint borrows of
+/// [`CrucibleState`](crate::state::CrucibleState) fields, taken by each backend beside its own
+/// renderer borrow (which holds the backend data).
+pub struct FrameView<'a> {
+    /// The output being rendered.
+    pub output: &'a Output,
+    /// Its fractional scale.
+    pub scale: Scale<f64>,
+    /// The mapped windows (the model's visible set).
+    pub space: &'a Space<WindowElement>,
+    /// The session lock (selects the lock branch and supplies the lock surface).
+    pub session_lock: &'a SessionLock,
+    /// The model, read for the chrome's stack indicators and window classes.
+    pub layout: &'a LayoutState,
+    /// The projection last applied to the `Space`.
+    pub projection: &'a Projection,
+    /// The focused empty pane's tile, if any (it gets the terminal ring).
+    pub empty_focus_rect: Option<Rect>,
+    /// The mapped overlay's chrome settings, if an overlay is mapped.
+    pub overlay: Option<OverlayChrome>,
+    /// Per-class tiling settings (rings, gaps, fill).
+    pub tiling: &'a TilingConfig,
+    /// Every output's header strip layout.
+    pub header_layouts: &'a [HeaderLayout],
+    /// The model id of `output`; `None` (an output the model has not bound) draws no header.
+    pub header_output: Option<OutputId>,
+    /// The header font size.
+    pub header_size: u32,
+}
+
+/// Composes one output's frame: the element list (front-to-back) and the clear colour.
+///
+/// - **Locked** (or locking): only `output`'s lock surface, over
+///   [`LOCK_CLEAR_COLOR`](crate::lock::LOCK_CLEAR_COLOR). Chrome, header, cursor and windows are
+///   not built.
+/// - **Unlocked**: cursor (only when `cursor` is `Some`, at that output-local physical location)
+///   → header strip → chrome → the mapped windows from the `space`, over
+///   [`CLEAR_COLOR`](crate::winit::CLEAR_COLOR).
+///
+/// Chrome and header are positioned in the output's frame: both take the output's global origin
+/// from `space.output_geometry(output)`. Whether and where the cursor is drawn is the backend's
+/// rule (udev: only on the output containing the pointer; winit: always), so it is passed in.
 ///
 /// ## Visibility (decision #4)
 /// The `space` is already the model's **visible** set: [`CrucibleState::apply_layout`]
@@ -93,55 +144,70 @@ type WindowRenderElement<R> =
 /// collecting from `space` here renders exactly the visible windows — no extra per-element filtering
 /// is needed, and we deliberately avoid a separate `Space` per workspace.
 ///
-/// Returns the element list (front-to-back) and the clear color the damage tracker uses for any
-/// uncovered region.
-pub fn output_elements<R>(
-    output: &Output,
-    space: &Space<WindowElement>,
-    custom_elements: impl IntoIterator<Item = CustomRenderElements<R>>,
+/// [`CrucibleState::apply_layout`]: crate::state::CrucibleState
+pub fn frame_elements<R>(
+    view: FrameView<'_>,
+    header_text: &mut TextRenderer,
+    pointer: &PointerElement,
+    cursor: Option<Point<i32, Physical>>,
     renderer: &mut R,
-) -> (
-    Vec<OutputRenderElements<R, WindowRenderElement<R>>>,
-    Color32F,
-)
+) -> (FrameElements<R>, Color32F)
 where
     R: Renderer + ImportAll + ImportMem,
-    R::TextureId: Clone + 'static,
+    R::TextureId: Send + Clone + 'static,
 {
-    // Custom (cursor) elements render in front of the windows.
-    let mut elements: Vec<OutputRenderElements<R, WindowRenderElement<R>>> = custom_elements
-        .into_iter()
-        .map(OutputRenderElements::from)
-        .collect();
+    if view.session_lock.is_locked() {
+        let elements =
+            crate::lock::lock_render_elements(view.session_lock, view.output, renderer, view.scale)
+                .into_iter()
+                .map(OutputRenderElements::Custom)
+                .collect();
+        return (elements, crate::lock::LOCK_CLEAR_COLOR.into());
+    }
 
+    let origin = view
+        .space
+        .output_geometry(view.output)
+        .map_or((0, 0), |g| (g.loc.x, g.loc.y));
+
+    // Front-to-back: cursor → header → chrome → windows.
+    let mut custom: Vec<CustomRenderElements<R>> = match cursor {
+        Some(location) => pointer.render_elements(renderer, location, view.scale, 1.0),
+        None => Vec::new(),
+    };
+    if let Some(output_id) = view.header_output {
+        custom.extend(crate::header::build_header_elements(
+            view.header_layouts,
+            output_id,
+            origin,
+            view.header_size,
+            header_text,
+            renderer,
+        ));
+    }
+    custom.extend(
+        crate::chrome::build_chrome_elements(
+            view.layout,
+            view.projection,
+            view.empty_focus_rect,
+            view.overlay,
+            origin,
+            view.tiling,
+        )
+        .into_iter()
+        .map(CustomRenderElements::SolidColor),
+    );
+
+    let mut elements: FrameElements<R> =
+        custom.into_iter().map(OutputRenderElements::from).collect();
     let space_elements = smithay::desktop::space::space_render_elements::<_, WindowElement, _>(
         renderer,
-        [space],
-        output,
+        [view.space],
+        view.output,
         1.0,
     )
     .expect("output without mode?");
     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
 
     (elements, crate::winit::CLEAR_COLOR.into())
-}
-
-/// Composites `output` for one frame: collects the elements via [`output_elements`] and drives the
-/// `damage_tracker` to render them into `framebuffer`.
-#[allow(clippy::too_many_arguments)]
-pub fn render_output<'d, R>(
-    output: &Output,
-    space: &Space<WindowElement>,
-    custom_elements: impl IntoIterator<Item = CustomRenderElements<R>>,
-    renderer: &mut R,
-    framebuffer: &mut R::Framebuffer<'_>,
-    damage_tracker: &'d mut OutputDamageTracker,
-    age: usize,
-) -> Result<RenderOutputResult<'d>, OutputDamageTrackerError<R::Error>>
-where
-    R: Renderer + ImportAll + ImportMem,
-    R::TextureId: Clone + 'static,
-{
-    let (elements, clear_color) = output_elements(output, space, custom_elements, renderer);
-    damage_tracker.render_output(renderer, framebuffer, age, &elements, clear_color)
 }

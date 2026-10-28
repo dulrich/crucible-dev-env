@@ -17,7 +17,7 @@ use smithay::{
     backend::{
         SwapBuffersError,
         drm::{DrmAccessError, DrmError, DrmEventMetadata, DrmNode, compositor::FrameFlags},
-        renderer::{damage::Error as OutputDamageTrackerError, element::AsRenderElements},
+        renderer::damage::Error as OutputDamageTrackerError,
     },
     input::pointer::CursorImageStatus,
     reexports::{
@@ -31,12 +31,12 @@ use smithay::{
 use tracing::{debug, error, warn};
 
 use crate::{
-    render::{CustomRenderElements, OutputRenderElements, output_elements},
+    render::{FrameView, frame_elements},
     state::{CrucibleState, take_presentation_feedback, update_primary_scanout_output},
 };
 
+use super::UdevData;
 use super::output::{UdevOutputId, output_for};
-use super::{UdevData, UdevRenderer};
 
 impl CrucibleState<UdevData> {
     /// Handles a completed page-flip (VBlank): delivers presentation feedback and schedules the next
@@ -150,7 +150,7 @@ impl CrucibleState<UdevData> {
     }
     /// Composites and submits one frame for the output on `(node, crtc)`.
     ///
-    /// Reuses the backend-agnostic [`output_elements`] collection (so Wayland *and* XWayland windows
+    /// Reuses the backend-agnostic [`frame_elements`] composition (so Wayland *and* XWayland windows
     /// render), submits the frame through the [`DrmOutput`], records the primary-scanout output for
     /// every surface, queues presentation feedback, and sends frame callbacks. Re-schedules a repaint
     /// when the frame produced no damage.
@@ -190,8 +190,12 @@ impl CrucibleState<UdevData> {
         let empty_focus_rect = self.focused_empty_pane_rect();
         let overlay_chrome = self.overlay_chrome();
         let header_layouts = self.header_layouts();
-        let header_size = self.config.header.size;
-        let header_output = crate::layout::model_output_id(&output);
+        // The cursor is drawn only on the output the pointer is over, output-local.
+        let cursor = output_geo.to_f64().contains(pointer_location).then(|| {
+            (pointer_location - output_geo.loc.to_f64())
+                .to_physical(scale)
+                .to_i32_round()
+        });
 
         // Select a renderer: same-GPU is a single renderer, cross-GPU needs the scanout format.
         let format = self.backend_data.backends[&node].surfaces[&crtc]
@@ -206,73 +210,30 @@ impl CrucibleState<UdevData> {
         }
         .unwrap();
 
-        // Chrome (focus border + stack badges) — built here using the free function directly to
-        // avoid a whole-`self` borrow conflict with `renderer` (which holds `&mut self.backend_data`).
-        // SolidColorRenderElement is renderer-agnostic; no renderer reference is needed.
-        let mut chrome: Vec<CustomRenderElements<UdevRenderer<'_>>> =
-            crate::chrome::build_chrome_elements(
-                &self.layout,
-                &self.projection,
-                empty_focus_rect,
-                overlay_chrome,
-                (output_geo.loc.x, output_geo.loc.y),
-                &self.config.tiling,
-            )
-            .into_iter()
-            .map(CustomRenderElements::SolidColor)
-            .collect();
-
-        // While locked: only the lock surface over black (no space, chrome, header, cursor).
+        // Compose from disjoint field borrows: `renderer` holds `self.backend_data.gpus`, the
+        // pointer element is the separate `self.backend_data.pointer_element` field.
         let locked = self.session_lock.is_locked();
-
-        // Header strip (labels, highlight, background) in front of the chrome. `header_text` is a
-        // disjoint field from the `backend_data` the renderer borrows.
-        if !locked {
-            let mut header_elements = crate::header::build_header_elements(
-                &header_layouts,
-                header_output,
-                (output_geo.loc.x, output_geo.loc.y),
-                header_size,
-                &mut self.header_text,
-                &mut renderer,
-            );
-            header_elements.append(&mut chrome);
-            chrome = header_elements;
-        }
-
-        // Cursor element, drawn only on the output the pointer is over (on top of chrome).
-        if !locked && output_geo.to_f64().contains(pointer_location) {
-            let cursor_pos = pointer_location - output_geo.loc.to_f64();
-            let cursor_elements: Vec<CustomRenderElements<UdevRenderer<'_>>> =
-                self.backend_data.pointer_element.render_elements(
-                    &mut renderer,
-                    cursor_pos.to_physical(scale).to_i32_round(),
-                    scale,
-                    1.0,
-                );
-            // Front-to-back: cursor → chrome → windows.
-            let mut all = cursor_elements;
-            all.append(&mut chrome);
-            chrome = all;
-        }
-
-        let (elements, clear_color) = if locked {
-            let lock_elements = crate::lock::lock_render_elements(
-                &self.session_lock,
-                &output,
-                &mut renderer,
-                scale,
-            );
-            (
-                lock_elements
-                    .into_iter()
-                    .map(OutputRenderElements::Custom)
-                    .collect(),
-                crate::lock::LOCK_CLEAR_COLOR.into(),
-            )
-        } else {
-            output_elements(&output, &self.space, chrome, &mut renderer)
+        let view = FrameView {
+            output: &output,
+            scale,
+            space: &self.space,
+            session_lock: &self.session_lock,
+            layout: &self.layout,
+            projection: &self.projection,
+            empty_focus_rect,
+            overlay: overlay_chrome,
+            tiling: &self.config.tiling,
+            header_layouts: &header_layouts,
+            header_output: crate::layout::model_output_id(&output),
+            header_size: self.config.header.size,
         };
+        let (elements, clear_color) = frame_elements(
+            view,
+            &mut self.header_text,
+            &self.backend_data.pointer_element,
+            cursor,
+            &mut renderer,
+        );
 
         let surface = self
             .backend_data

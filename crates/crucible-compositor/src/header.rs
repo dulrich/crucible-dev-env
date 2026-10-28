@@ -4,7 +4,7 @@
 //! ## Layout
 //! The decision logic is **pure** and Smithay-free (top of this module): [`segment_rects`] maps
 //! name widths to segment rects, [`hit_test`] maps a point to a segment, [`ConsumedButtons`] pairs a consumed press with its release, and [`reserved_height`] /
-//! [`shrink_top`] give the reflow while the strip is shown. The compositor glue (segments from the live
+//! [`Rect::shrink_top`] give the reflow while the strip is shown. The compositor glue (segments from the live
 //! model, render elements) is below.
 //!
 //! ## Modes
@@ -22,16 +22,12 @@ use std::collections::BTreeSet;
 use crucible_config::{HeaderConfig, HeaderMode};
 use crucible_layout::{OutputId, Rect, WorkspaceId};
 use smithay::{
-    backend::renderer::{
-        ImportAll, ImportMem, Renderer,
-        element::{Id, Kind, solid::SolidColorRenderElement},
-        utils::CommitCounter,
-    },
-    utils::{Physical, Point, Rectangle},
+    backend::renderer::{ImportAll, ImportMem, Renderer},
+    utils::{Physical, Point},
 };
 
 use crate::{
-    chrome::BORDER_COLOR,
+    chrome::{BORDER_COLOR, solid},
     layout::model_output_id,
     render::CustomRenderElements,
     state::{Backend, CrucibleState},
@@ -70,13 +66,6 @@ pub fn reserved_height(config: &HeaderConfig, visible: bool) -> i32 {
     }
 }
 
-/// `rect` with `height` removed from its top (clamped so at least half the height remains).
-#[must_use]
-pub fn shrink_top(rect: Rect, height: i32) -> Rect {
-    let h = height.clamp(0, rect.height / 2);
-    Rect::new(rect.x, rect.y + h, rect.width, rect.height - h)
-}
-
 /// Whether the strip is drawn (and clickable) given the mode and the `toggle` state.
 #[must_use]
 pub fn is_shown(mode: HeaderMode, toggle_visible: bool) -> bool {
@@ -91,12 +80,6 @@ pub fn is_shown(mode: HeaderMode, toggle_visible: bool) -> bool {
 #[must_use]
 pub fn strip_rect(output: Rect, height: i32) -> Rect {
     Rect::new(output.x, output.y, output.width, height.min(output.height))
-}
-
-/// Whether the point lies inside `rect`.
-#[must_use]
-pub fn contains(rect: Rect, x: i32, y: i32) -> bool {
-    x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height
 }
 
 /// One workspace label's clickable/drawn area.
@@ -135,7 +118,7 @@ pub fn segment_rects(widths: &[i32], strip: Rect) -> Vec<Segment> {
 pub fn hit_test(segments: &[Segment], x: i32, y: i32) -> Option<usize> {
     segments
         .iter()
-        .find(|s| contains(s.rect, x, y))
+        .find(|s| s.rect.contains(x, y))
         .map(|s| s.index)
 }
 
@@ -212,23 +195,6 @@ fn badge_label(name: &str, slot: Option<u8>, glyph: bool) -> String {
     }
 }
 
-fn phys(r: Rect, origin: (i32, i32)) -> Rectangle<i32, Physical> {
-    Rectangle::new(
-        (r.x - origin.0, r.y - origin.1).into(),
-        (r.width, r.height).into(),
-    )
-}
-
-fn solid(r: Rectangle<i32, Physical>, color: [f32; 4]) -> SolidColorRenderElement {
-    SolidColorRenderElement::new(
-        Id::new(),
-        r,
-        CommitCounter::default(),
-        color,
-        Kind::Unspecified,
-    )
-}
-
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Whether the strip is currently shown.
     pub(crate) fn header_shown(&self) -> bool {
@@ -287,7 +253,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(crate) fn header_hit(&self, x: i32, y: i32) -> Option<(OutputId, Option<WorkspaceId>)> {
         self.header_layouts()
             .into_iter()
-            .find(|l| contains(l.strip, x, y))
+            .find(|l| l.strip.contains(x, y))
             .map(|l| {
                 let ws = hit_test(&l.segments, x, y).and_then(|i| l.workspaces.get(i).copied());
                 (l.output, ws)
@@ -336,11 +302,11 @@ fn fallback_width(name: &str, size: u32) -> i32 {
 }
 
 /// Builds the strip's render elements (front-to-back: labels, then highlight and background
-/// solids) for `output` (all layouts when `None`), positioned in the output's frame at
+/// solids) for `output` only, positioned in the output's frame at
 /// `origin`. Without a loaded font only the backgrounds and highlight are produced.
 pub fn build_header_elements<R>(
     layouts: &[HeaderLayout],
-    only: Option<OutputId>,
+    output: OutputId,
     origin: (i32, i32),
     size: u32,
     text: &mut TextRenderer,
@@ -352,16 +318,16 @@ where
 {
     let mut labels = Vec::new();
     let mut solids = Vec::new();
-    for l in layouts
-        .iter()
-        .filter(|l| only.is_none_or(|o| o == l.output))
-    {
+    for l in layouts.iter().filter(|l| l.output == output) {
         let line = (size as f32 * 1.2).round() as i32;
         let text_y = l.strip.y + (l.strip.height - line) / 2;
         for seg in &l.segments {
             let active = seg.index == l.active;
             if active {
-                solids.push(solid(phys(seg.rect, origin), BORDER_COLOR));
+                solids.push(solid(
+                    seg.rect.translate(-origin.0, -origin.1),
+                    BORDER_COLOR,
+                ));
             }
             let rgba = if active {
                 LABEL_ACTIVE_RGBA
@@ -376,7 +342,7 @@ where
                 labels.push(CustomRenderElements::Text(el));
             }
         }
-        solids.push(solid(phys(l.strip, origin), STRIP_BG));
+        solids.push(solid(l.strip.translate(-origin.0, -origin.1), STRIP_BG));
     }
     labels.extend(solids.into_iter().map(CustomRenderElements::SolidColor));
     labels
@@ -443,15 +409,15 @@ mod tests {
         let shrunk = Rect::new(0, h, 1920, 1080 - h);
         for visible in [false, true] {
             cfg.mode = HeaderMode::Off;
-            assert_eq!(shrink_top(out, reserved_height(&cfg, visible)), out);
+            assert_eq!(out.shrink_top(reserved_height(&cfg, visible)), out);
             cfg.mode = HeaderMode::Always;
-            assert_eq!(shrink_top(out, reserved_height(&cfg, visible)), shrunk);
+            assert_eq!(out.shrink_top(reserved_height(&cfg, visible)), shrunk);
         }
         cfg.mode = HeaderMode::Toggle;
-        assert_eq!(shrink_top(out, reserved_height(&cfg, false)), out);
-        assert_eq!(shrink_top(out, reserved_height(&cfg, true)), shrunk);
+        assert_eq!(out.shrink_top(reserved_height(&cfg, false)), out);
+        assert_eq!(out.shrink_top(reserved_height(&cfg, true)), shrunk);
         // Never swallows more than half the output.
-        assert_eq!(shrink_top(Rect::new(0, 0, 10, 20), 500).height, 10);
+        assert_eq!(Rect::new(0, 0, 10, 20).shrink_top(500).height, 10);
     }
 
     #[test]

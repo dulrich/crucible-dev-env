@@ -10,8 +10,9 @@ use crate::geometry::{GapConfig, geometry_of_workspace};
 impl World {
     /// Every pane rect of each bound output's **active** workspace, in global coordinates.
     ///
-    /// Laid out exactly like [`World::project`]: in the output's local space, then offset by the
-    /// output origin. Includes empty panes. Output ids the model does not know contribute nothing.
+    /// Laid out in the output's local space, then offset by the output origin; this is the one
+    /// per-output iteration [`World::project`] is built on. Includes empty panes. Output ids the
+    /// model does not know contribute nothing.
     #[must_use]
     pub fn pane_rects(&self, outputs: &[(OutputId, Rect)], gaps: GapConfig) -> Vec<(PaneId, Rect)> {
         let mut rects = Vec::new();
@@ -23,17 +24,11 @@ impl World {
                 continue;
             };
             let local = Rect::new(0, 0, global.width, global.height);
-            for (pane, rect) in geometry_of_workspace(workspace, local, gaps) {
-                rects.push((
-                    pane,
-                    Rect::new(
-                        rect.x + global.x,
-                        rect.y + global.y,
-                        rect.width,
-                        rect.height,
-                    ),
-                ));
-            }
+            rects.extend(
+                geometry_of_workspace(workspace, local, gaps)
+                    .into_iter()
+                    .map(|(pane, rect)| (pane, rect.translate(global.x, global.y))),
+            );
         }
         rects
     }
@@ -51,7 +46,7 @@ impl World {
     ) -> Option<PaneId> {
         self.pane_rects(outputs, gaps)
             .into_iter()
-            .find(|(_, r)| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height)
+            .find(|(_, r)| r.contains(x, y))
             .map(|(pane, _)| pane)
     }
 

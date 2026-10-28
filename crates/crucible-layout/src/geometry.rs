@@ -81,6 +81,115 @@ impl Rect {
             height,
         }
     }
+
+    /// This rect grown by `by` pixels on every side (no clamping; the inverse of an unclamped
+    /// [`Rect::inset`]).
+    #[must_use]
+    pub fn outset(self, by: i32) -> Self {
+        Self::new(
+            self.x - by,
+            self.y - by,
+            self.width + 2 * by,
+            self.height + 2 * by,
+        )
+    }
+
+    /// This rect moved by `(dx, dy)`. Translating into the frame of an output whose global origin
+    /// is `(ox, oy)` is `translate(-ox, -oy)`.
+    #[must_use]
+    pub fn translate(self, dx: i32, dy: i32) -> Self {
+        Self::new(self.x + dx, self.y + dy, self.width, self.height)
+    }
+
+    /// Whether the rect has non-zero area.
+    #[must_use]
+    pub fn has_area(self) -> bool {
+        self.width > 0 && self.height > 0
+    }
+
+    /// Whether the two rects overlap with non-zero area (touching edges do not intersect).
+    #[must_use]
+    pub fn intersects(self, other: Self) -> bool {
+        self.x < other.x + other.width
+            && other.x < self.x + self.width
+            && self.y < other.y + other.height
+            && other.y < self.y + self.height
+    }
+
+    /// Whether the point `(x, y)` lies inside the rect (left/top edges inclusive, right/bottom
+    /// exclusive).
+    #[must_use]
+    pub fn contains(self, x: i32, y: i32) -> bool {
+        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
+    }
+
+    /// This rect with `height` removed from its top, clamped so at least half the height remains.
+    #[must_use]
+    pub fn shrink_top(self, height: i32) -> Self {
+        let h = height.clamp(0, self.height / 2);
+        Self::new(self.x, self.y + h, self.width, self.height - h)
+    }
+
+    /// The frame between `self` (outer) and `inner` (which must lie within it) as
+    /// `[top, bottom, left, right]`: the horizontal strips span the outer width, the vertical
+    /// strips fill the height between them. Together they tile `self \ inner` exactly.
+    #[must_use]
+    pub fn frame_strips(self, inner: Self) -> [Self; 4] {
+        let inner_right = inner.x + inner.width;
+        let inner_bottom = inner.y + inner.height;
+        [
+            Self::new(self.x, self.y, self.width, inner.y - self.y),
+            Self::new(
+                self.x,
+                inner_bottom,
+                self.width,
+                self.y + self.height - inner_bottom,
+            ),
+            Self::new(self.x, inner.y, inner.x - self.x, inner.height),
+            Self::new(
+                inner_right,
+                inner.y,
+                self.x + self.width - inner_right,
+                inner.height,
+            ),
+        ]
+    }
+
+    /// The four strips `[top, bottom, left, right]` of a border `thickness` pixels wide drawn
+    /// inside this rect. The thickness is clamped to `0..=min(width, height) / 2`, so strips never
+    /// have negative size; a zero thickness yields zero-area strips.
+    #[must_use]
+    pub fn border_strips(self, thickness: i32) -> [Self; 4] {
+        let t = thickness.max(0).min(self.width / 2).min(self.height / 2);
+        let (x, y, w, h) = (self.x, self.y, self.width, self.height);
+        [
+            Self::new(x, y, w, t),
+            Self::new(x, y + h - t, w, t),
+            Self::new(x, y + t, t, h - 2 * t),
+            Self::new(x + w - t, y + t, t, h - 2 * t),
+        ]
+    }
+
+    /// This rect minus `hole`: up to four non-overlapping rects covering exactly the part outside
+    /// `hole`. A disjoint hole returns the rect whole.
+    #[must_use]
+    pub fn subtract(self, hole: Self) -> Vec<Self> {
+        if !self.intersects(hole) {
+            return vec![self];
+        }
+        let x = hole.x.max(self.x);
+        let y = hole.y.max(self.y);
+        let clipped = Self::new(
+            x,
+            y,
+            (hole.x + hole.width).min(self.x + self.width) - x,
+            (hole.y + hole.height).min(self.y + self.height) - y,
+        );
+        self.frame_strips(clipped)
+            .into_iter()
+            .filter(|r| r.has_area())
+            .collect()
+    }
 }
 
 /// Gap configuration passed to the geometry pass.
@@ -586,5 +695,87 @@ mod tests {
         let inset = r.inset(20);
         assert_eq!(inset.width, 0);
         assert_eq!(inset.height, 0);
+    }
+
+    // ---- Rect algebra (moved from the compositor's chrome module) ---------------------
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        Rect::new(x, y, w, h)
+    }
+
+    #[test]
+    fn output_local_translation_moves_second_output_chrome_on_screen() {
+        // Two 3840-wide outputs side by side: a ring on the right output (global x=3850) must land
+        // at local x=10 on it, and a ring on the left output must fall off the right one.
+        let right_ring = rect(3850, 20, 1900, 2100).translate(-3840, 0);
+        assert_eq!(right_ring, rect(10, 20, 1900, 2100));
+        let left_ring_on_right = rect(10, 20, 1900, 2100).translate(-3840, 0);
+        assert!(left_ring_on_right.x + left_ring_on_right.width <= 0);
+        // The origin output is unchanged.
+        assert_eq!(rect(10, 20, 30, 40).translate(0, 0), rect(10, 20, 30, 40));
+    }
+
+    #[test]
+    fn border_frames_window_with_correct_thickness() {
+        let t = 4;
+        let [top, bottom, left, right] = rect(10, 20, 400, 300).border_strips(t);
+        assert_eq!(top, rect(10, 20, 400, t));
+        assert_eq!(bottom, rect(10, 20 + 300 - t, 400, t));
+        assert_eq!(left, rect(10, 20 + t, t, 300 - 2 * t));
+        assert_eq!(right, rect(10 + 400 - t, 20 + t, t, 300 - 2 * t));
+    }
+
+    #[test]
+    fn border_zero_thickness_produces_zero_area_strips() {
+        for s in rect(0, 0, 100, 100).border_strips(0) {
+            assert!(!s.has_area(), "expected zero-area strip: {s:?}");
+        }
+    }
+
+    #[test]
+    fn border_strips_are_within_window_bounds() {
+        for strip in rect(50, 50, 200, 150).border_strips(5) {
+            assert!(strip.x >= 50);
+            assert!(strip.y >= 50);
+            assert!(strip.x + strip.width <= 50 + 200);
+            assert!(strip.y + strip.height <= 50 + 150);
+        }
+    }
+
+    #[test]
+    fn border_thickness_clamped_to_half_rect_size() {
+        // Extremely thick border on a small rect must not produce negative inner sizes.
+        for strip in rect(0, 0, 10, 6).border_strips(99) {
+            assert!(strip.width >= 0, "negative width: {strip:?}");
+            assert!(strip.height >= 0, "negative height: {strip:?}");
+        }
+    }
+
+    #[test]
+    fn subtracting_an_overlay_leaves_only_the_uncovered_part() {
+        let r = rect(0, 0, 100, 10);
+        assert_eq!(r.subtract(rect(200, 0, 5, 5)), vec![r]);
+        let rest = r.subtract(rect(40, -5, 20, 30));
+        assert_eq!(
+            rest.iter().map(|p| p.area()).sum::<i64>(),
+            100 * 10 - 20 * 10
+        );
+        assert!(rest.iter().all(|p| !p.intersects(rect(40, -5, 20, 30))));
+    }
+
+    #[test]
+    fn rect_intersection_excludes_touching_edges() {
+        assert!(rect(0, 0, 10, 10).intersects(rect(9, 9, 10, 10)));
+        assert!(!rect(0, 0, 10, 10).intersects(rect(10, 0, 10, 10)));
+    }
+
+    #[test]
+    fn rect_contains_is_half_open_and_outset_shrink_top_round_trip() {
+        let r = rect(10, 20, 30, 40);
+        assert!(r.contains(10, 20) && r.contains(39, 59));
+        assert!(!r.contains(40, 20) && !r.contains(10, 60) && !r.contains(9, 20));
+        assert_eq!(r.outset(3).inset(3), r);
+        assert_eq!(r.shrink_top(5), rect(10, 25, 30, 35));
+        assert_eq!(r.shrink_top(500).height, 20);
     }
 }

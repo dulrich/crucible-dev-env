@@ -9,8 +9,8 @@
 //!
 //! ## Render path
 //! Each frame collects the mapped windows from the desktop
-//! [`Space`](smithay::desktop::Space) as [`WaylandSurfaceRenderElement`]s (via
-//! [`crate::render::render_output`]) and composites a cursor element on top, then sends frame
+//! [`Space`](smithay::desktop::Space), the chrome, header and cursor (or, while locked, only the
+//! lock surface) via the shared [`crate::render::frame_elements`], presents them, then sends frame
 //! callbacks so clients keep drawing. `space.refresh()` / `popups.cleanup()` run each iteration.
 //! Input events are handed to [`CrucibleState::process_input_event`].
 
@@ -34,7 +34,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     drawing::PointerElement,
-    render::{CustomRenderElements, render_output},
+    render::{FrameView, frame_elements},
     state::{Backend, CrucibleState},
 };
 
@@ -200,74 +200,46 @@ pub fn run_winit() {
             let cursor_pos = state.pointer.current_location();
             let cursor_phys = cursor_pos.to_physical(scale).to_i32_round();
 
-            // Chrome (focus border + stack badges) — built before the backend borrow below since
-            // SolidColorRenderElement needs no renderer reference.
-            let mut chrome: Vec<CustomRenderElements<GlesRenderer>> = state.chrome_elements();
+            // Inputs that need `&state` as a whole are read before the backend borrow below; the
+            // frame is then composed from disjoint field borrows beside the renderer.
             let header_layouts = state.header_layouts();
-            let header_size = state.config.header.size;
-            let header_output = crate::layout::model_output_id(&output);
+            let empty_focus_rect = state.focused_empty_pane_rect();
+            let overlay = state.overlay_chrome();
 
             let backend = &mut state.backend_data.backend;
             let damage_tracker = &mut state.backend_data.damage_tracker;
             let age = backend.buffer_age().unwrap_or(0);
-
-            // While locked: only the lock surface over black (no space, chrome, header, cursor).
             let locked = state.session_lock.is_locked();
-            let lock = &state.session_lock;
+            let view = FrameView {
+                output: &output,
+                scale,
+                space: &state.space,
+                session_lock: &state.session_lock,
+                layout: &state.layout,
+                projection: &state.projection,
+                empty_focus_rect,
+                overlay,
+                tiling: &state.config.tiling,
+                header_layouts: &header_layouts,
+                header_output: crate::layout::model_output_id(&output),
+                header_size: state.config.header.size,
+            };
+            let header_text = &mut state.header_text;
             let render_res = backend.bind().and_then(|(renderer, mut fb)| {
-                if locked {
-                    let elements =
-                        crate::lock::lock_render_elements(lock, &output, renderer, scale);
-                    return damage_tracker
-                        .render_output(
-                            renderer,
-                            &mut fb,
-                            age,
-                            &elements,
-                            crate::lock::LOCK_CLEAR_COLOR,
-                        )
-                        .map_err(|err| match err {
-                            OutputDamageTrackerError::Rendering(err) => err.into(),
-                            OutputDamageTrackerError::OutputNoMode(_) => unreachable!(),
-                        });
-                }
-                // Header strip (labels, highlight, background) in front of the chrome.
-                let mut header_elements = crate::header::build_header_elements(
-                    &header_layouts,
-                    header_output,
-                    (0, 0),
-                    header_size,
-                    &mut state.header_text,
+                // winit draws the cursor unconditionally at the pointer position.
+                let (elements, clear_color) = frame_elements(
+                    view,
+                    header_text,
+                    &pointer_element,
+                    Some(cursor_phys),
                     renderer,
                 );
-                header_elements.append(&mut chrome);
-                chrome = header_elements;
-                // Cursor on top of chrome.
-                let cursor_elements: Vec<CustomRenderElements<GlesRenderer>> =
-                    smithay::backend::renderer::element::AsRenderElements::render_elements(
-                        &pointer_element,
-                        renderer,
-                        cursor_phys,
-                        scale,
-                        1.0,
-                    );
-                // Front-to-back: cursor → chrome → windows.
-                let mut all_elements = cursor_elements;
-                all_elements.append(&mut chrome);
-
-                render_output(
-                    &output,
-                    &state.space,
-                    all_elements,
-                    renderer,
-                    &mut fb,
-                    damage_tracker,
-                    age,
-                )
-                .map_err(|err| match err {
-                    OutputDamageTrackerError::Rendering(err) => err.into(),
-                    OutputDamageTrackerError::OutputNoMode(_) => unreachable!(),
-                })
+                damage_tracker
+                    .render_output(renderer, &mut fb, age, &elements, clear_color)
+                    .map_err(|err| match err {
+                        OutputDamageTrackerError::Rendering(err) => err.into(),
+                        OutputDamageTrackerError::OutputNoMode(_) => unreachable!(),
+                    })
             });
 
             // A locked frame counts as presented once submitted (or when nothing changed since the

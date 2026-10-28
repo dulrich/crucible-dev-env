@@ -38,7 +38,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let reserved = crate::header::reserved_height(&self.config.header, self.header.visible);
         self.raw_output_rects()
             .into_iter()
-            .map(|(id, rect)| (id, crate::header::shrink_top(rect, reserved)))
+            .map(|(id, rect)| (id, rect.shrink_top(reserved)))
             .collect()
     }
 

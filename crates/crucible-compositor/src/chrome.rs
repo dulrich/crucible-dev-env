@@ -2,36 +2,31 @@
 //!
 //! Produces [`SolidColorRenderElement`]s drawn **above** the windows every frame (they ride in the
 //! [`CustomRenderElements`](crate::render::CustomRenderElements) layer, which sits on top of the
-//! `Space` window elements in `output_elements`).
+//! `Space` window elements; see [`crate::render::frame_elements`]).
 //!
 //! ## Design
-//! All geometry math is factored into **pure, unit-tested helpers** at the bottom of this module
-//! ([`border_rects`] and [`stack_pips`]).  The compositor-side entry point
-//! [`CrucibleState::chrome_elements`] calls those helpers with data read from
-//! `self.layout.world` (model stack state) and `self.projection` (the projection last applied to
-//! the `Space`).  No model mutation; no stale cache — the elements are rebuilt from live model state
-//! each frame.
+//! All planning is **pure** and works in layout [`Rect`]s (the generic rect algebra lives on
+//! [`Rect`] in `crucible-layout`): [`stack_pips`], [`plan_tile`] and [`plan_chrome`]. The entry
+//! point [`build_chrome_elements`] reads `layout.world` (model stack state) and the projection last
+//! applied to the `Space`, and converts each planned rect to Smithay exactly once, through
+//! [`solid`]. No model mutation; no stale cache — the elements are rebuilt each frame.
 //!
 //! ## Per-output correctness
 //! The projection is derived across every output's **own** active workspace's visible windows (each
 //! shifted to global Space coordinates).  Chrome reads those same rects, so it covers only
 //! currently-visible windows across all outputs.  Render elements, however, are positioned in the
 //! *output's* frame, so [`build_chrome_elements`] takes the rendered output's global origin and
-//! translates every rect by it ([`to_output_local`]); without that, a second output mirrors the
+//! translates every rect by it ([`Rect::translate`]); without that, a second output mirrors the
 //! first output's chrome and never shows its own.
 //!
 //! ## Phase 3 seam
 //! The constants below (`ENABLE_CHROME`, `BORDER_THICKNESS`, `BORDER_COLOR`, …) are hard-coded for
 //! Phase 2.  Phase 3 should source them from `crucible-config` (KDL) and pass them in; the helpers
-//! (`border_rects`, `stack_pips`) already accept all geometry parameters explicitly so they need no
-//! changes.
+//! already accept all geometry parameters explicitly so they need no changes.
 
-use smithay::{
-    backend::renderer::{
-        element::{Id, Kind, solid::SolidColorRenderElement},
-        utils::CommitCounter,
-    },
-    utils::{Physical, Rectangle},
+use smithay::backend::renderer::{
+    element::{Id, Kind, solid::SolidColorRenderElement},
+    utils::CommitCounter,
 };
 
 use crucible_config::{OverlayStyle, Rgb, TilingConfig};
@@ -39,7 +34,6 @@ use crucible_layout::{Projection, Rect};
 
 use crate::{
     layout::{LayoutState, WindowClass, window_rect},
-    render::CustomRenderElements,
     state::{Backend, CrucibleState},
 };
 
@@ -72,38 +66,27 @@ pub const PIP_ACTIVE_COLOR: [f32; 4] = [0.20, 0.80, 0.80, 1.0];
 pub const PIP_INACTIVE_COLOR: [f32; 4] = [0.45, 0.45, 0.45, 0.85];
 
 // ---------------------------------------------------------------------------
-// Pure geometry helpers — unit-tested, no compositor types.
+// The one layout-to-Smithay conversion.
 // ---------------------------------------------------------------------------
 
-/// Computes the four border-strip rects that frame `window` with a border of `thickness` pixels.
-///
-/// The strips are ordered `[top, bottom, left, right]` and together form a complete rectangular
-/// frame with no gaps or overlaps at the corners (the horizontal strips span the full width;
-/// the vertical strips fill the remaining height between them).
-///
-/// # Guarantees
-/// - Each strip is strictly within or touching the outer boundary of `window`.
-/// - The union of the four strips covers exactly the frame pixels.
-/// - For `thickness == 0` or a zero-size rect all strips have zero area.
-/// - `x`/`y` values are never negative relative to the window origin.
+/// A solid-colour render element covering `rect` (already in the output's frame).
 #[must_use]
-pub fn border_rects(window: Rect, thickness: i32) -> [Rectangle<i32, Physical>; 4] {
-    let t = thickness
-        .max(0)
-        .min(window.width / 2)
-        .min(window.height / 2);
-    let x = window.x;
-    let y = window.y;
-    let w = window.width;
-    let h = window.height;
-
-    let top = Rectangle::new((x, y).into(), (w, t).into());
-    let bottom = Rectangle::new((x, y + h - t).into(), (w, t).into());
-    let left = Rectangle::new((x, y + t).into(), (t, h - 2 * t).into());
-    let right = Rectangle::new((x + w - t, y + t).into(), (t, h - 2 * t).into());
-
-    [top, bottom, left, right]
+pub fn solid(rect: Rect, color: [f32; 4]) -> SolidColorRenderElement {
+    SolidColorRenderElement::new(
+        Id::new(),
+        smithay::utils::Rectangle::<i32, smithay::utils::Physical>::new(
+            (rect.x, rect.y).into(),
+            (rect.width, rect.height).into(),
+        ),
+        CommitCounter::default(),
+        color,
+        Kind::Unspecified,
+    )
 }
+
+// ---------------------------------------------------------------------------
+// Pure planning helpers — unit-tested, no compositor types.
+// ---------------------------------------------------------------------------
 
 /// Computes pip rectangles for a pane-stack indicator.
 ///
@@ -118,11 +101,7 @@ pub fn border_rects(window: Rect, thickness: i32) -> [Rectangle<i32, Physical>; 
 /// - Exactly one pip has `is_focused == true`, at position `focused` (clamped to `0..len`).
 /// - All pips are contained within `pane_rect` (when `pane_rect` is large enough for them).
 #[must_use]
-pub fn stack_pips(
-    pane_rect: Rect,
-    focused: usize,
-    len: usize,
-) -> Vec<(Rectangle<i32, Physical>, bool)> {
+pub fn stack_pips(pane_rect: Rect, focused: usize, len: usize) -> Vec<(Rect, bool)> {
     stack_pips_with_margin(pane_rect, focused, len, PIP_MARGIN)
 }
 
@@ -144,7 +123,7 @@ pub fn stack_pips_with_margin(
     focused: usize,
     len: usize,
     margin: i32,
-) -> Vec<(Rectangle<i32, Physical>, bool)> {
+) -> Vec<(Rect, bool)> {
     if len <= 1 {
         return Vec::new();
     }
@@ -161,26 +140,9 @@ pub fn stack_pips_with_margin(
     (0..len)
         .map(|i| {
             let x = row_x + i as i32 * (PIP_SIZE + PIP_GAP);
-            let rect = Rectangle::new((x, row_y).into(), (PIP_SIZE, PIP_SIZE).into());
-            (rect, i == focused)
+            (Rect::new(x, row_y, PIP_SIZE, PIP_SIZE), i == focused)
         })
         .collect()
-}
-
-/// Translates a global-Space `rect` into the frame of the output whose global origin is `origin`.
-#[must_use]
-pub fn to_output_local(rect: Rect, origin: (i32, i32)) -> Rect {
-    Rect {
-        x: rect.x - origin.0,
-        y: rect.y - origin.1,
-        ..rect
-    }
-}
-
-/// Whether two rects overlap with non-zero area.
-#[must_use]
-pub fn rects_intersect(a: Rect, b: Rect) -> bool {
-    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
 }
 
 /// Border colour for an overlay of `style`: the N1 accent, or [`BORDER_COLOR`] for `terminal`.
@@ -206,82 +168,12 @@ pub struct OverlayChrome {
     pub style: OverlayStyle,
 }
 
-/// `rect` grown by `by` pixels on every side.
-#[must_use]
-pub fn outset(rect: Rect, by: i32) -> Rect {
-    Rect {
-        x: rect.x - by,
-        y: rect.y - by,
-        width: rect.width + 2 * by,
-        height: rect.height + 2 * by,
-    }
-}
-
-/// The frame between `outer` and `inner` (which must lie within `outer`) as
-/// `[top, bottom, left, right]`: the horizontal strips span `outer`'s full width, the vertical
-/// strips fill the height between them. Together they tile `outer \ inner` exactly.
-#[must_use]
-pub fn frame_strips(outer: Rect, inner: Rect) -> [Rect; 4] {
-    let inner_right = inner.x + inner.width;
-    let inner_bottom = inner.y + inner.height;
-    [
-        Rect {
-            x: outer.x,
-            y: outer.y,
-            width: outer.width,
-            height: inner.y - outer.y,
-        },
-        Rect {
-            x: outer.x,
-            y: inner_bottom,
-            width: outer.width,
-            height: outer.y + outer.height - inner_bottom,
-        },
-        Rect {
-            x: outer.x,
-            y: inner.y,
-            width: inner.x - outer.x,
-            height: inner.height,
-        },
-        Rect {
-            x: inner_right,
-            y: inner.y,
-            width: outer.x + outer.width - inner_right,
-            height: inner.height,
-        },
-    ]
-}
-
-/// Like [`border_rects`] but in layout [`Rect`]s.
-#[must_use]
-pub fn border_strips(window: Rect, thickness: i32) -> [Rect; 4] {
-    border_rects(window, thickness).map(|r| Rect {
-        x: r.loc.x,
-        y: r.loc.y,
-        width: r.size.w,
-        height: r.size.h,
-    })
-}
-
-/// Whether a rect has area.
-fn has_area(r: &Rect) -> bool {
-    r.width > 0 && r.height > 0
-}
-
-/// `rect` minus `hole`: up to four non-overlapping rects covering exactly the part of `rect`
-/// outside `hole`. A disjoint hole returns `rect` whole.
-#[must_use]
-pub fn subtract_rect(rect: Rect, hole: Rect) -> Vec<Rect> {
-    if !rects_intersect(rect, hole) {
-        return vec![rect];
-    }
-    let h = Rect {
-        x: hole.x.max(rect.x),
-        y: hole.y.max(rect.y),
-        width: (hole.x + hole.width).min(rect.x + rect.width) - hole.x.max(rect.x),
-        height: (hole.y + hole.height).min(rect.y + rect.height) - hole.y.max(rect.y),
-    };
-    frame_strips(rect, h).into_iter().filter(has_area).collect()
+/// The strips of a `thickness` border inside `rect` that have area.
+fn ring_strips(rect: Rect, thickness: i32) -> Vec<Rect> {
+    rect.border_strips(thickness)
+        .into_iter()
+        .filter(|r| r.has_area())
+        .collect()
 }
 
 /// The chrome rects of one visible tile (global coordinates).
@@ -305,13 +197,10 @@ pub fn plan_tile(tile: Rect, class: WindowClass, tiling: &TilingConfig, focused:
     match class {
         WindowClass::Terminal => TilePlan {
             ring: if focused {
-                border_strips(
+                ring_strips(
                     tile,
                     i32::try_from(tiling.terminal.ring).unwrap_or(i32::MAX),
                 )
-                .into_iter()
-                .filter(has_area)
-                .collect()
             } else {
                 Vec::new()
             },
@@ -327,19 +216,17 @@ pub fn plan_tile(tile: Rect, class: WindowClass, tiling: &TilingConfig, focused:
             } else {
                 0
             };
-            let ring_outer = outset(window, ring_t);
+            let ring_outer = window.outset(ring_t);
             TilePlan {
                 ring: if ring_t > 0 {
-                    border_strips(ring_outer, ring_t)
-                        .into_iter()
-                        .filter(has_area)
-                        .collect()
+                    ring_strips(ring_outer, ring_t)
                 } else {
                     Vec::new()
                 },
-                fill: frame_strips(tile, ring_outer)
+                fill: tile
+                    .frame_strips(ring_outer)
                     .into_iter()
-                    .filter(has_area)
+                    .filter(|r| r.has_area())
                     .collect(),
             }
         }
@@ -371,23 +258,20 @@ pub fn plan_chrome(
     pips: &[(Rect, bool)],
     overlay: Option<OverlayChrome>,
     output_origin: (i32, i32),
-) -> Vec<(Rectangle<i32, Physical>, [f32; 4])> {
-    let local = |r: Rect| {
-        let l = to_output_local(r, output_origin);
-        Rectangle::new((l.x, l.y).into(), (l.width, l.height).into())
-    };
+) -> Vec<(Rect, [f32; 4])> {
+    let local = |r: Rect| r.translate(-output_origin.0, -output_origin.1);
     let mut out = Vec::new();
     if let Some(o) = overlay
         && o.border
     {
         let t = BORDER_THICKNESS;
         let color = overlay_border_color(o.style);
-        for strip in border_rects(to_output_local(outset(o.rect, t), output_origin), t) {
+        for strip in local(o.rect.outset(t)).border_strips(t) {
             out.push((strip, color));
         }
     }
     for &(pip, is_focused) in pips {
-        if overlay.is_some_and(|o| rects_intersect(pip, o.rect)) {
+        if overlay.is_some_and(|o| pip.intersects(o.rect)) {
             continue;
         }
         let color = if is_focused {
@@ -404,11 +288,7 @@ pub fn plan_chrome(
     }
     for &rect in fills {
         match overlay {
-            Some(o) => out.extend(
-                subtract_rect(rect, o.rect)
-                    .into_iter()
-                    .map(|r| (local(r), fill)),
-            ),
+            Some(o) => out.extend(rect.subtract(o.rect).into_iter().map(|r| (local(r), fill))),
             None => out.push((local(rect), fill)),
         }
     }
@@ -420,17 +300,16 @@ pub fn plan_chrome(
 // ---------------------------------------------------------------------------
 
 /// Builds the chrome render elements (class-aware focus ring, app-inset fill, stack badges and the
-/// overlay ring) for the current frame.
+/// overlay ring) for the current frame, in the frame of the output whose global origin is
+/// `output_origin`.
 ///
 /// Reads the focused identity and every visible tile from the applied [`Projection`] (tile rects)
 /// and plans each tile with [`plan_tile`] by its class ([`LayoutState::window_class`]). Then
 /// iterates every output's active workspace's panes; for panes with `> 1` window, builds pip
 /// indicators via [`stack_pips_with_margin`].
 ///
-/// Returns an empty vec when [`ENABLE_CHROME`] is `false`.
-///
-/// Caller note: the returned elements should be prepended to (or chained before) the cursor
-/// elements so the stacking order from front to back is: cursor → chrome → windows.
+/// Returns an empty vec when [`ENABLE_CHROME`] is `false`. The elements sit above the windows and
+/// below the header and cursor ([`crate::render::frame_elements`] owns that order).
 pub fn build_chrome_elements(
     layout: &LayoutState,
     projection: &Projection,
@@ -489,17 +368,12 @@ pub fn build_chrome_elements(
                 WindowClass::App => tiling.app.gap,
             };
             let margin = pip_margin(i32::try_from(strip).unwrap_or(i32::MAX));
-            for (rect, is_focused) in
-                stack_pips_with_margin(pane_rect, pane.focused_index(), len, margin)
-            {
-                let global = Rect {
-                    x: rect.loc.x,
-                    y: rect.loc.y,
-                    width: rect.size.w,
-                    height: rect.size.h,
-                };
-                pips.push((global, is_focused));
-            }
+            pips.extend(stack_pips_with_margin(
+                pane_rect,
+                pane.focused_index(),
+                len,
+                margin,
+            ));
         }
     }
 
@@ -512,21 +386,9 @@ pub fn build_chrome_elements(
         output_origin,
     )
     .into_iter()
-    .map(|(rect, color)| {
-        SolidColorRenderElement::new(
-            Id::new(),
-            rect,
-            CommitCounter::default(),
-            color,
-            Kind::Unspecified,
-        )
-    })
+    .map(|(rect, color)| solid(rect, color))
     .collect()
 }
-
-// ---------------------------------------------------------------------------
-// Compositor entry point on CrucibleState.
-// ---------------------------------------------------------------------------
 
 impl<B: Backend + 'static> CrucibleState<B> {
     /// The mapped overlay's global rect and border settings; `None` while no overlay is mapped.
@@ -537,45 +399,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             style: self.config.overlay.style,
         })
     }
-
-    /// Returns the chrome render elements for the current frame.
-    ///
-    /// Reads live model state (`self.layout.world`) and `self.projection` (the projection last
-    /// applied to the `Space`, in global-Space tile rects) to produce, per [`build_chrome_elements`]:
-    /// - A class-aware focus ring around the focused window (inside a terminal's tile, outside an
-    ///   app's window), or the terminal ring around the focused pane when it is empty.
-    /// - The opaque fill of every app's inset.
-    /// - Per-pane stack-position pips for any pane with `> 1` window.
-    ///
-    /// These elements must be placed **above the windows but below the cursor** in the front-to-back
-    /// element list.  The winit and udev render paths chain them in before calling `output_elements`.
-    ///
-    /// No renderer reference is needed: `SolidColorRenderElement` is renderer-agnostic.  The generic
-    /// `R` parameter exists only so the return type matches `CustomRenderElements<R>` at the call
-    /// site, allowing direct concatenation with the cursor elements without extra conversions.
-    pub fn chrome_elements<R>(&self) -> Vec<CustomRenderElements<R>>
-    where
-        R: smithay::backend::renderer::Renderer
-            + smithay::backend::renderer::ImportAll
-            + smithay::backend::renderer::ImportMem,
-    {
-        build_chrome_elements(
-            &self.layout,
-            &self.projection,
-            self.focused_empty_pane_rect(),
-            self.overlay_chrome(),
-            // The winit backend renders its single output at the Space origin.
-            (0, 0),
-            &self.config.tiling,
-        )
-        .into_iter()
-        .map(CustomRenderElements::SolidColor)
-        .collect()
-    }
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests for pure geometry helpers.
+// Unit tests for the pure planning helpers (the rect algebra is tested in crucible-layout).
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -583,96 +410,7 @@ mod tests {
     use super::*;
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
-        Rect {
-            x,
-            y,
-            width: w,
-            height: h,
-        }
-    }
-
-    // ---- border_rects tests ----
-
-    #[test]
-    fn output_local_translation_moves_second_output_chrome_on_screen() {
-        // Two 3840-wide outputs side by side: a ring on the right output (global x=3850) must land
-        // at local x=10 on it, and a ring on the left output must fall off the right one.
-        let right_ring = to_output_local(rect(3850, 20, 1900, 2100), (3840, 0));
-        assert_eq!(right_ring, rect(10, 20, 1900, 2100));
-        let left_ring_on_right = to_output_local(rect(10, 20, 1900, 2100), (3840, 0));
-        assert!(left_ring_on_right.x + left_ring_on_right.width <= 0);
-        // The origin output is unchanged.
-        assert_eq!(
-            to_output_local(rect(10, 20, 30, 40), (0, 0)),
-            rect(10, 20, 30, 40)
-        );
-    }
-
-    #[test]
-    fn border_frames_window_with_correct_thickness() {
-        let window = rect(10, 20, 400, 300);
-        let t = 4;
-        let [top, bottom, left, right] = border_rects(window, t);
-
-        // Top strip: full width, `t` tall, at window origin.
-        assert_eq!(top.loc.x, 10);
-        assert_eq!(top.loc.y, 20);
-        assert_eq!(top.size.w, 400);
-        assert_eq!(top.size.h, t);
-
-        // Bottom strip: full width, `t` tall, at the bottom edge.
-        assert_eq!(bottom.loc.x, 10);
-        assert_eq!(bottom.loc.y, 20 + 300 - t);
-        assert_eq!(bottom.size.w, 400);
-        assert_eq!(bottom.size.h, t);
-
-        // Left strip: `t` wide, fills the gap between top and bottom.
-        assert_eq!(left.loc.x, 10);
-        assert_eq!(left.loc.y, 20 + t);
-        assert_eq!(left.size.w, t);
-        assert_eq!(left.size.h, 300 - 2 * t);
-
-        // Right strip: mirrors left on the right edge.
-        assert_eq!(right.loc.x, 10 + 400 - t);
-        assert_eq!(right.loc.y, 20 + t);
-        assert_eq!(right.size.w, t);
-        assert_eq!(right.size.h, 300 - 2 * t);
-    }
-
-    #[test]
-    fn border_zero_thickness_produces_zero_area_strips() {
-        let window = rect(0, 0, 100, 100);
-        let strips = border_rects(window, 0);
-        for s in strips {
-            assert!(
-                s.size.w == 0 || s.size.h == 0,
-                "expected zero-area strip: {s:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn border_strips_are_within_window_bounds() {
-        let window = rect(50, 50, 200, 150);
-        let [top, bottom, left, right] = border_rects(window, 5);
-        for strip in [top, bottom, left, right] {
-            assert!(strip.loc.x >= 50);
-            assert!(strip.loc.y >= 50);
-            assert!(strip.loc.x + strip.size.w <= 50 + 200);
-            assert!(strip.loc.y + strip.size.h <= 50 + 150);
-        }
-    }
-
-    #[test]
-    fn border_thickness_clamped_to_half_rect_size() {
-        // Extremely thick border on a small rect must not produce negative inner sizes.
-        let window = rect(0, 0, 10, 6);
-        let [top, bottom, left, right] = border_rects(window, 99);
-        // Thickness is clamped to min(width/2, height/2) = 3; left/right inner height = 0.
-        for strip in [top, bottom, left, right] {
-            assert!(strip.size.w >= 0, "negative width: {strip:?}");
-            assert!(strip.size.h >= 0, "negative height: {strip:?}");
-        }
+        Rect::new(x, y, w, h)
     }
 
     // ---- stack_pips tests ----
@@ -718,14 +456,14 @@ mod tests {
         let pane = rect(100, 50, 400, 300);
         let pips = stack_pips(pane, 1, 3);
         for (r, _) in &pips {
-            assert!(r.loc.x >= pane.x, "pip left of pane: {r:?}");
-            assert!(r.loc.y >= pane.y, "pip above pane: {r:?}");
+            assert!(r.x >= pane.x, "pip left of pane: {r:?}");
+            assert!(r.y >= pane.y, "pip above pane: {r:?}");
             assert!(
-                r.loc.x + r.size.w <= pane.x + pane.width,
+                r.x + r.width <= pane.x + pane.width,
                 "pip right of pane: {r:?}"
             );
             assert!(
-                r.loc.y + r.size.h <= pane.y + pane.height,
+                r.y + r.height <= pane.y + pane.height,
                 "pip below pane: {r:?}"
             );
         }
@@ -753,7 +491,7 @@ mod tests {
     #[test]
     fn no_overlay_draws_pane_ring_and_all_pips() {
         let pips = [(rect(100, 100, 8, 8), true), (rect(900, 10, 8, 8), false)];
-        let ring = border_strips(rect(0, 0, 1000, 800), BORDER_THICKNESS);
+        let ring = rect(0, 0, 1000, 800).border_strips(BORDER_THICKNESS);
         let out = plan_chrome(&ring, &[], APP_FILL, &pips, None, (0, 0));
         // 2 pips (in front), then 4 ring strips.
         assert_eq!(out.len(), 6);
@@ -764,7 +502,7 @@ mod tests {
 
     #[test]
     fn overlay_suppresses_pane_ring() {
-        let ring = border_strips(rect(0, 0, 1000, 800), BORDER_THICKNESS);
+        let ring = rect(0, 0, 1000, 800).border_strips(BORDER_THICKNESS);
         let out = plan_chrome(
             &ring,
             &[],
@@ -788,7 +526,7 @@ mod tests {
             (0, 0),
         );
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0.loc.x, 900);
+        assert_eq!(out[0].0.x, 900);
     }
 
     #[test]
@@ -806,15 +544,14 @@ mod tests {
         let inner = rect(100, 100, 400, 300);
         for (strip, color) in &out {
             assert_eq!(*color, overlay_border_color(OverlayStyle::N1Med));
-            let as_rect = rect(strip.loc.x, strip.loc.y, strip.size.w, strip.size.h);
-            assert!(!rects_intersect(as_rect, inner), "strip inside: {strip:?}");
-            assert!(strip.loc.x >= 100 - t && strip.loc.y >= 100 - t);
-            assert!(strip.loc.x + strip.size.w <= 500 + t);
-            assert!(strip.loc.y + strip.size.h <= 400 + t);
+            assert!(!strip.intersects(inner), "strip inside: {strip:?}");
+            assert!(strip.x >= 100 - t && strip.y >= 100 - t);
+            assert!(strip.x + strip.width <= 500 + t);
+            assert!(strip.y + strip.height <= 400 + t);
         }
         // Top strip spans the expanded width and sits directly above the rect.
-        assert_eq!(out[0].0.loc.y, 100 - t);
-        assert_eq!(out[0].0.size.w, 400 + 2 * t);
+        assert_eq!(out[0].0.y, 100 - t);
+        assert_eq!(out[0].0.width, 400 + 2 * t);
     }
 
     #[test]
@@ -827,8 +564,8 @@ mod tests {
             overlay(true, OverlayStyle::Terminal),
             (50, 20),
         );
-        assert_eq!(out[0].0.loc.x, 100 - BORDER_THICKNESS - 50);
-        assert_eq!(out[0].0.loc.y, 100 - BORDER_THICKNESS - 20);
+        assert_eq!(out[0].0.x, 100 - BORDER_THICKNESS - 50);
+        assert_eq!(out[0].0.y, 100 - BORDER_THICKNESS - 20);
         assert_eq!(out[0].1, BORDER_COLOR);
     }
 
@@ -888,7 +625,7 @@ mod tests {
         let plan = plan_tile(tile, WindowClass::App, &t, true);
         for r in &plan.ring {
             assert!(inside(*r, tile), "ring leaves the tile: {r:?}");
-            assert!(!rects_intersect(*r, window), "ring over content: {r:?}");
+            assert!(!r.intersects(window), "ring over content: {r:?}");
         }
         // The ring hugs the window: the top strip starts ring-thickness above it.
         assert_eq!(plan.ring[0].y, 10 - 4);
@@ -906,9 +643,9 @@ mod tests {
             let all: Vec<Rect> = focused.ring.iter().chain(&focused.fill).copied().collect();
             assert_eq!(area_sum(&all), inset_area, "gap={gap} ring={ring}");
             for (i, a) in all.iter().enumerate() {
-                assert!(inside(*a, tile) && !rects_intersect(*a, window));
+                assert!(inside(*a, tile) && !a.intersects(window));
                 for b in &all[i + 1..] {
-                    assert!(!rects_intersect(*a, *b), "overlap {a:?} {b:?}");
+                    assert!(!a.intersects(*b), "overlap {a:?} {b:?}");
                 }
             }
             // Unfocused: the fill alone covers the whole inset.
@@ -936,30 +673,12 @@ mod tests {
     }
 
     #[test]
-    fn subtracting_an_overlay_leaves_only_the_uncovered_part() {
-        let r = rect(0, 0, 100, 10);
-        assert_eq!(subtract_rect(r, rect(200, 0, 5, 5)), vec![r]);
-        let rest = subtract_rect(r, rect(40, -5, 20, 30));
-        assert_eq!(area_sum(&rest), 100 * 10 - 20 * 10);
-        assert!(
-            rest.iter()
-                .all(|p| !rects_intersect(*p, rect(40, -5, 20, 30)))
-        );
-    }
-
-    #[test]
     fn pips_centre_in_a_strip_that_fits_them() {
         assert_eq!(pip_margin(6), PIP_MARGIN);
         assert_eq!(pip_margin(8), 0);
         assert_eq!(pip_margin(12), 2);
         let pips = stack_pips_with_margin(rect(0, 0, 400, 300), 0, 2, pip_margin(12));
-        assert_eq!(pips[1].0.loc.y, 2);
-        assert_eq!(pips[1].0.loc.x + PIP_SIZE, 400 - 2);
-    }
-
-    #[test]
-    fn rect_intersection_excludes_touching_edges() {
-        assert!(rects_intersect(rect(0, 0, 10, 10), rect(9, 9, 10, 10)));
-        assert!(!rects_intersect(rect(0, 0, 10, 10), rect(10, 0, 10, 10)));
+        assert_eq!(pips[1].0.y, 2);
+        assert_eq!(pips[1].0.x + PIP_SIZE, 400 - 2);
     }
 }
