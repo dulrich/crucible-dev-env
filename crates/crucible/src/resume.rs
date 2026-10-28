@@ -19,6 +19,7 @@ use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 use crate::tty::RawGuard;
+use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible resume --help`.
 pub const USAGE: &str = "usage: crucible resume [--now [--exit]] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). With --now, --exit exits with the command's exit code instead of starting a shell afterwards (--exit without --now is a usage error). Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
@@ -65,10 +66,26 @@ pub fn classify(byte: Option<u8>) -> Wait {
     }
 }
 
+/// Parses the arguments: `--help`/`-h` before `--` (and not as the `--cwd` value) is
+/// [`Parsed::Help`]; otherwise the shared wrapper grammar.
+///
+/// # Errors
+/// The wrapper's usage message.
+pub fn parse_args(args: &[String]) -> Result<Parsed<ResumeWrapper>, String> {
+    if help_requested(args, Some("--cwd"), true) {
+        return Ok(Parsed::Help);
+    }
+    ResumeWrapper::parse(args).map(Parsed::Run)
+}
+
 /// Runs the subcommand. Only returns (with an exit code) when an `exec` fails.
 pub fn run(args: &[String]) -> i32 {
-    let parsed = match ResumeWrapper::parse(args) {
-        Ok(p) => p,
+    let parsed = match parse_args(args) {
+        Ok(Parsed::Run(p)) => p,
+        Ok(Parsed::Help) => {
+            print!("{USAGE}");
+            return 0;
+        }
         Err(e) => {
             eprintln!("crucible resume: {e}\n\n{USAGE}");
             return 2;
@@ -185,6 +202,22 @@ mod tests {
 
     fn v(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn help_never_eats_payloads() {
+        assert_eq!(parse_args(&v(&["--help"])), Ok(Parsed::Help));
+        assert_eq!(parse_args(&v(&["--cwd", "/x", "-h"])), Ok(Parsed::Help));
+        // After `--` everything is the command payload.
+        assert!(matches!(
+            parse_args(&v(&["--cwd", "/x", "--", "--help"])),
+            Ok(Parsed::Run(w)) if w.command.as_deref() == Some("--help")
+        ));
+        // `--help` as the `--cwd` value is payload.
+        assert!(matches!(
+            parse_args(&v(&["--cwd", "--help"])),
+            Ok(Parsed::Run(w)) if w.cwd.as_os_str() == "--help"
+        ));
     }
 
     #[test]

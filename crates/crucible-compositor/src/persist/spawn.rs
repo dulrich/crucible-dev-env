@@ -9,7 +9,9 @@ use std::process::{Child, Command};
 use std::time::{Instant, SystemTime};
 
 use crucible_layout::WorkspaceId;
-use crucible_persist::{RelaunchWrapper, ResumeWrapper, WindowRecord, WorkspaceRecord};
+use crucible_persist::{
+    RelaunchWrapper, ResumeWrapper, WindowRecord, WorkspaceRecord, is_executable_file,
+};
 use tracing::{error, info, warn};
 
 use super::resolve_cwd;
@@ -205,11 +207,6 @@ pub(super) const SH_BUILTINS: &[&str] = &[
     "unset", "wait", "alias", "bg", "fg", "jobs", "kill", "printf", "echo", "test", "true",
     "false", "if", "case", "for", "while", "until",
 ];
-
-pub(super) fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
 
 /// Pre-flight for `run`/`run-in-terminal`: does the command's first shell word resolve? Passes
 /// when the word holds shell syntax the check cannot judge, is a sh builtin/keyword, is a path

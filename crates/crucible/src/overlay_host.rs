@@ -12,6 +12,8 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
+use crate::{Parsed, help_requested};
+
 /// Usage text for `crucible overlay-host --help`.
 pub const USAGE: &str = "usage: crucible overlay-host --socket <path>\n\nA pre-started overlay terminal's program (spawned by CDE; not for interactive use). Binds\n<path>, waits for one mode line `<epoch-ms>\\t<mode>[\\t<arg>...]` (mode: pick, launch, keys),\nremoves the socket, then runs that overlay in-process.\n";
 
@@ -99,9 +101,14 @@ pub fn parse_mode_line(raw: &str) -> Result<ModeLine, String> {
     })
 }
 
-fn parse_args(args: &[String]) -> Result<PathBuf, String> {
+fn parse_args(args: &[String]) -> Result<Parsed<PathBuf>, String> {
+    if help_requested(args, None, false) {
+        return Ok(Parsed::Help);
+    }
     match args {
-        [flag, path] if flag == "--socket" && !path.is_empty() => Ok(PathBuf::from(path)),
+        [flag, path] if flag == "--socket" && !path.is_empty() => {
+            Ok(Parsed::Run(PathBuf::from(path)))
+        }
         _ => Err("expected --socket <path>".into()),
     }
 }
@@ -109,7 +116,11 @@ fn parse_args(args: &[String]) -> Result<PathBuf, String> {
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
     let path = match parse_args(args) {
-        Ok(p) => p,
+        Ok(Parsed::Run(p)) => p,
+        Ok(Parsed::Help) => {
+            print!("{USAGE}");
+            return 0;
+        }
         Err(e) => {
             eprintln!("crucible overlay-host: {e}\n\n{USAGE}");
             return 2;
@@ -221,10 +232,18 @@ mod tests {
         let a = |l: &[&str]| l.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
         assert_eq!(
             parse_args(&a(&["--socket", "/x.sock"])),
-            Ok(PathBuf::from("/x.sock"))
+            Ok(Parsed::Run(PathBuf::from("/x.sock")))
         );
         assert!(parse_args(&a(&[])).is_err());
         assert!(parse_args(&a(&["--socket"])).is_err());
         assert!(parse_args(&a(&["/x.sock"])).is_err());
+    }
+
+    #[test]
+    fn help_is_recognised_anywhere() {
+        let a = |l: &[&str]| l.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_args(&a(&["--help"])), Ok(Parsed::Help));
+        assert_eq!(parse_args(&a(&["--socket", "/x", "-h"])), Ok(Parsed::Help));
+        assert!(parse_args(&a(&["--socket", "/x"])).is_ok_and(|p| p != Parsed::Help));
     }
 }

@@ -13,6 +13,7 @@ use crate::overlay::list::{Applied, Body, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
+use crate::{Parsed, help_requested};
 
 /// The command-key glyph (`⌘`) prefixing a pinned row's slot number; matches the header's.
 const SUPER_GLYPH: char = '\u{2318}';
@@ -196,15 +197,19 @@ impl Overlay for Picker {
     }
 }
 
-/// Parsed `pick` arguments: the decoded rename seed, if any.
+/// Parsed `pick` arguments: the decoded rename seed, if any (`--help`/`-h` outside the
+/// `--rename` value is [`Parsed::Help`]).
 ///
 /// # Errors
 /// A usage message for unknown flags, a missing value or a bad percent escape.
-pub fn parse_args(args: &[String]) -> Result<Option<String>, String> {
+pub fn parse_args(args: &[String]) -> Result<Parsed<Option<String>>, String> {
+    if help_requested(args, Some("--rename"), false) {
+        return Ok(Parsed::Help);
+    }
     match args {
-        [] => Ok(None),
+        [] => Ok(Parsed::Run(None)),
         [flag, value] if flag == "--rename" => decode_field(value)
-            .map(Some)
+            .map(|v| Parsed::Run(Some(v)))
             .ok_or_else(|| "malformed percent-encoding in --rename value".to_string()),
         [flag] if flag == "--rename" => Err("--rename needs a value".into()),
         [other, ..] => Err(format!("unexpected argument {other:?}")),
@@ -214,7 +219,11 @@ pub fn parse_args(args: &[String]) -> Result<Option<String>, String> {
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
     let rename = match parse_args(args) {
-        Ok(r) => r,
+        Ok(Parsed::Run(r)) => r,
+        Ok(Parsed::Help) => {
+            print!("{USAGE}");
+            return 0;
+        }
         Err(e) => {
             eprintln!("crucible pick: {e}\n\n{USAGE}");
             return 2;
@@ -467,13 +476,25 @@ mod tests {
     }
     #[test]
     fn args_parse_and_decode() {
-        assert_eq!(parse_args(&[]).unwrap(), None);
+        assert_eq!(parse_args(&[]).unwrap(), Parsed::Run(None));
         assert_eq!(
             parse_args(&["--rename".into(), "a%3Ab%25".into()]).unwrap(),
-            Some("a:b%".into())
+            Parsed::Run(Some("a:b%".into()))
         );
         assert!(parse_args(&["--rename".into(), "bad%zz".into()]).is_err());
         assert!(parse_args(&["--rename".into()]).is_err());
         assert!(parse_args(&["--nope".into()]).is_err());
+    }
+
+    #[test]
+    fn help_never_eats_the_rename_value() {
+        let a = |l: &[&str]| l.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_args(&a(&["--help"])), Ok(Parsed::Help));
+        assert_eq!(parse_args(&a(&["-h"])), Ok(Parsed::Help));
+        // `--help` as the rename value is payload (and an invalid escape-free name).
+        assert_eq!(
+            parse_args(&a(&["--rename", "--help"])),
+            Ok(Parsed::Run(Some("--help".into())))
+        );
     }
 }

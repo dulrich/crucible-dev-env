@@ -14,6 +14,7 @@ use crucible_persist::RelaunchWrapper;
 
 use crate::client::{Client, ClientError, socket_from_env};
 use crate::tty::RawGuard;
+use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible relaunch --help`.
 pub const USAGE: &str = "usage: crucible relaunch [--app-id <id>] -- <cmdline>\n\nRestored-app placeholder used by CDE: shows which app was in this slot and waits. Enter asks the\ncompositor (over $CDE_SOCKET) to relaunch the app in the same pane slot and close this placeholder;\nCtrl+C, Ctrl+D or EOF dismisses it. The command is one argument (a shell string) and is never run\nby this process.\n";
@@ -51,10 +52,26 @@ fn send_relaunch() -> Result<(), String> {
     }
 }
 
+/// Parses the arguments: `--help`/`-h` before `--` (and not as the `--app-id` value) is
+/// [`Parsed::Help`]; otherwise the shared wrapper grammar.
+///
+/// # Errors
+/// The wrapper's usage message.
+pub fn parse_args(args: &[String]) -> Result<Parsed<RelaunchWrapper>, String> {
+    if help_requested(args, Some("--app-id"), true) {
+        return Ok(Parsed::Help);
+    }
+    RelaunchWrapper::parse(args).map(Parsed::Run)
+}
+
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    let parsed = match RelaunchWrapper::parse(args) {
-        Ok(p) => p,
+    let parsed = match parse_args(args) {
+        Ok(Parsed::Run(p)) => p,
+        Ok(Parsed::Help) => {
+            print!("{USAGE}");
+            return 0;
+        }
         Err(e) => {
             eprintln!("crucible relaunch: {e}\n\n{USAGE}");
             return 2;
@@ -111,6 +128,28 @@ mod tests {
                 app_id: None,
                 cmdline: "--help".into()
             })
+        );
+    }
+
+    #[test]
+    fn help_never_eats_payloads() {
+        assert_eq!(parse_args(&a(&["--help"])), Ok(Parsed::Help));
+        assert_eq!(parse_args(&a(&["--app-id", "x", "-h"])), Ok(Parsed::Help));
+        // `--help` as the `--app-id` value is payload.
+        assert_eq!(
+            parse_args(&a(&["--app-id", "--help", "--", "x"])),
+            Ok(Parsed::Run(RelaunchWrapper {
+                app_id: Some("--help".into()),
+                cmdline: "x".into()
+            }))
+        );
+        // Anything after `--` is payload.
+        assert_eq!(
+            parse_args(&a(&["--", "--help"])),
+            Ok(Parsed::Run(RelaunchWrapper {
+                app_id: None,
+                cmdline: "--help".into()
+            }))
         );
     }
 

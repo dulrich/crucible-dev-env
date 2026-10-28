@@ -2,6 +2,7 @@
 
 use crucible_compositor::ipc::{Request, SOCKET_ENV, encode_field};
 
+use crate::Parsed;
 use crate::client::{Client, socket_from_env};
 
 /// Usage text for `crucible msg --help`.
@@ -45,10 +46,26 @@ pub fn exit_code(response: &str) -> i32 {
     }
 }
 
+/// Parses the arguments: only a **first** argument of `--help`/`-h` is [`Parsed::Help`] (the rest
+/// is the request line, so `msg open --help` sends a request); otherwise the request line.
+///
+/// # Errors
+/// The request-line builder's message.
+pub fn parse_args(args: &[String]) -> Result<Parsed<String>, String> {
+    if args.first().is_some_and(|a| a == "--help" || a == "-h") {
+        return Ok(Parsed::Help);
+    }
+    build_line(args).map(Parsed::Run)
+}
+
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    let line = match build_line(args) {
-        Ok(l) => l,
+    let line = match parse_args(args) {
+        Ok(Parsed::Run(l)) => l,
+        Ok(Parsed::Help) => {
+            print!("{USAGE}");
+            return 0;
+        }
         Err(e) => {
             eprintln!("crucible msg: {e}");
             return 2;
@@ -145,6 +162,17 @@ mod tests {
         assert!(build_line(&v(&["open"])).is_err());
         assert!(build_line(&v(&["open", "bad%zz"])).is_err());
         assert!(build_line(&v(&["save", "extra"])).is_err());
+    }
+
+    #[test]
+    fn help_only_as_the_first_argument() {
+        assert_eq!(parse_args(&v(&["--help"])), Ok(Parsed::Help));
+        assert_eq!(parse_args(&v(&["-h"])), Ok(Parsed::Help));
+        // `msg open --help` is a request, not help.
+        assert_eq!(
+            parse_args(&v(&["open", "--help"])),
+            Ok(Parsed::Run("open --help".into()))
+        );
     }
 
     #[test]

@@ -27,27 +27,24 @@ fn wants_help(args: &[String]) -> bool {
     args.iter().skip(1).any(|a| a == "--help" || a == "-h")
 }
 
-/// True when a subcommand's own `--help`/`-h` is requested. Payload positions never count: for
-/// `resume` only arguments before `--` (and not the `--cwd` value), for `pick` not the
-/// `--rename` value, and for `msg` only the first argument (the rest is the request line).
-fn sub_wants_help(sub: &str, rest: &[String]) -> bool {
-    let is_help = |a: &String| a == "--help" || a == "-h";
-    if sub == "launch" || sub == "keys" || sub == "overlay-host" {
-        return rest.iter().any(is_help);
-    }
-    if sub == "msg" {
-        return rest.first().is_some_and(is_help);
-    }
-    let value_flag = match sub {
-        "resume" => "--cwd",
-        "relaunch" => "--app-id",
-        _ => "--rename",
-    };
+/// What a subcommand's parser found: a request for its usage, or the parsed arguments.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Parsed<T> {
+    /// `--help`/`-h` in a non-payload position: print the usage, exit 0, no side effect.
+    Help,
+    /// The parsed arguments to run with.
+    Run(T),
+}
+
+/// True when `--help`/`-h` appears in a non-payload position of a subcommand's arguments. Payload
+/// positions never count: the value of `value_flag` (for example `--rename`), and, when
+/// `stop_at_dashdash`, everything from `--` on.
+pub fn help_requested(args: &[String], value_flag: Option<&str>, stop_at_dashdash: bool) -> bool {
     let mut i = 0;
-    while i < rest.len() {
-        match rest[i].as_str() {
-            "--" if sub == "resume" || sub == "relaunch" => return false,
-            f if f == value_flag => i += 1,
+    while i < args.len() {
+        match args[i].as_str() {
+            "--" if stop_at_dashdash => return false,
+            f if Some(f) == value_flag => i += 1,
             "--help" | "-h" => return true,
             _ => {}
         }
@@ -56,26 +53,26 @@ fn sub_wants_help(sub: &str, rest: &[String]) -> bool {
     false
 }
 
+/// A subcommand: its name, its `--help` text and its entry point. The entry point's parser
+/// recognises `--help`/`-h` itself, printing the usage and returning 0 before any side effect.
+type Subcommand = (&'static str, &'static str, fn(&[String]) -> i32);
+
+const SUBCOMMANDS: &[Subcommand] = &[
+    ("pick", pick::USAGE, pick::run),
+    ("launch", launch::USAGE, launch::run),
+    ("keys", keys::USAGE, keys::run),
+    ("resume", resume::USAGE, resume::run),
+    ("relaunch", relaunch::USAGE, relaunch::run),
+    ("msg", msg::USAGE, msg::run),
+    ("overlay-host", overlay_host::USAGE, overlay_host::run),
+];
+
 /// Runs a subcommand if `args[1]` names one; returns its exit code. Subcommands never touch the
 /// tracing subscriber (stdout belongs to the TUI).
 fn run_subcommand(args: &[String]) -> Option<i32> {
     let sub = args.get(1)?.as_str();
-    let (usage, run): (&str, fn(&[String]) -> i32) = match sub {
-        "pick" => (pick::USAGE, pick::run),
-        "launch" => (launch::USAGE, launch::run),
-        "keys" => (keys::USAGE, keys::run),
-        "resume" => (resume::USAGE, resume::run),
-        "relaunch" => (relaunch::USAGE, relaunch::run),
-        "msg" => (msg::USAGE, msg::run),
-        "overlay-host" => (overlay_host::USAGE, overlay_host::run),
-        _ => return None,
-    };
-    let rest = &args[2..];
-    if sub_wants_help(sub, rest) {
-        print!("{usage}");
-        return Some(0);
-    }
-    Some(run(rest))
+    let (_, _, run) = SUBCOMMANDS.iter().find(|(name, _, _)| *name == sub)?;
+    Some(run(&args[2..]))
 }
 
 fn main() {
@@ -129,38 +126,32 @@ mod tests {
     }
 
     #[test]
-    fn subcommand_help_never_eats_payloads() {
-        assert!(sub_wants_help("pick", &args(&["--help"])));
-        assert!(sub_wants_help("pick", &args(&["-h"])));
-        assert!(!sub_wants_help("pick", &args(&["--rename", "--help"])));
-        assert!(sub_wants_help("resume", &args(&["--help"])));
-        assert!(sub_wants_help("resume", &args(&["--cwd", "/x", "-h"])));
-        assert!(!sub_wants_help(
-            "resume",
-            &args(&["--cwd", "/x", "--", "--help"])
+    fn help_requested_skips_the_value_flag_and_stops_at_dashdash() {
+        assert!(help_requested(&args(&["--help"]), None, false));
+        assert!(help_requested(&args(&["x", "-h"]), None, false));
+        assert!(!help_requested(&args(&[]), None, false));
+        assert!(!help_requested(
+            &args(&["--rename", "--help"]),
+            Some("--rename"),
+            false
         ));
-        assert!(!sub_wants_help("resume", &args(&["--cwd", "--help"])));
-        assert!(sub_wants_help("relaunch", &args(&["--help"])));
-        assert!(sub_wants_help("relaunch", &args(&["--app-id", "x", "-h"])));
-        assert!(!sub_wants_help(
-            "relaunch",
-            &args(&["--app-id", "--help", "--", "x"])
+        assert!(help_requested(
+            &args(&["--rename", "x", "-h"]),
+            Some("--rename"),
+            false
         ));
-        assert!(!sub_wants_help("relaunch", &args(&["--", "--help"])));
-        assert!(sub_wants_help("launch", &args(&["--help"])));
-        assert!(sub_wants_help("launch", &args(&["x", "-h"])));
-        assert!(!sub_wants_help("launch", &args(&[])));
-        assert!(sub_wants_help("keys", &args(&["--help"])));
-        assert!(sub_wants_help("keys", &args(&["x", "-h"])));
-        assert!(!sub_wants_help("keys", &args(&[])));
-        assert!(sub_wants_help("overlay-host", &args(&["--help"])));
-        assert!(sub_wants_help(
-            "overlay-host",
-            &args(&["--socket", "/x", "-h"])
-        ));
-        assert!(!sub_wants_help("overlay-host", &args(&["--socket", "/x"])));
-        assert!(sub_wants_help("msg", &args(&["--help"])));
-        assert!(!sub_wants_help("msg", &args(&["open", "--help"])));
+        assert!(!help_requested(&args(&["--", "-h"]), None, true));
+        assert!(help_requested(&args(&["--", "-h"]), None, false));
+    }
+
+    #[test]
+    fn every_subcommand_usage_names_the_subcommand() {
+        for (name, usage, _) in SUBCOMMANDS {
+            assert!(
+                usage.starts_with(&format!("usage: crucible {name}")),
+                "{name}"
+            );
+        }
     }
 
     #[test]

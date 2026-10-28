@@ -22,6 +22,7 @@
 
 pub mod capture;
 mod error;
+mod executable;
 mod format;
 mod policy;
 mod record;
@@ -32,6 +33,7 @@ pub mod wrapper;
 
 pub use capture::{TerminalCapture, ancestors, capture_terminal, children_of, window_record};
 pub use error::PersistError;
+pub use executable::is_executable_file;
 pub use format::FORMAT_VERSION;
 pub use policy::should_save;
 pub use record::{PaneRecord, RecordNode, WindowRecord, WorkspaceRecord};

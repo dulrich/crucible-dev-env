@@ -11,6 +11,7 @@ use crate::overlay::list::{Applied, Body, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
+use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible keys --help`.
 pub const USAGE: &str = "usage: crucible keys\n\nThe CDE settings overlay (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Comma).\nLists the effective keybindings. Type to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter runs the\nselected binding; Esc or Ctrl+C closes. Edit binds in config.kdl (docs/config.md).\n";
@@ -115,16 +116,46 @@ impl Overlay for Keys {
 
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    if let Some(extra) = args.first() {
-        eprintln!("crucible keys: unexpected argument {extra:?}\n\n{USAGE}");
-        return 2;
+    match parse_args(args) {
+        Ok(Parsed::Help) => {
+            print!("{USAGE}");
+            0
+        }
+        Ok(Parsed::Run(())) => run_overlay("keys", |client| fetch_bindings(client).map(Keys::new)),
+        Err(e) => {
+            eprintln!("crucible keys: {e}\n\n{USAGE}");
+            2
+        }
     }
-    run_overlay("keys", |client| fetch_bindings(client).map(Keys::new))
+}
+
+/// Parses the arguments: `--help`/`-h` anywhere is [`Parsed::Help`]; any other argument is an
+/// error.
+///
+/// # Errors
+/// A usage message naming the unexpected argument.
+pub fn parse_args(args: &[String]) -> Result<Parsed<()>, String> {
+    if help_requested(args, None, false) {
+        return Ok(Parsed::Help);
+    }
+    match args.first() {
+        Some(extra) => Err(format!("unexpected argument {extra:?}")),
+        None => Ok(Parsed::Run(())),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_args_owns_help_and_rejects_everything_else() {
+        let a = |l: &[&str]| l.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert_eq!(parse_args(&a(&[])), Ok(Parsed::Run(())));
+        assert_eq!(parse_args(&a(&["--help"])), Ok(Parsed::Help));
+        assert_eq!(parse_args(&a(&["x", "-h"])), Ok(Parsed::Help));
+        assert!(parse_args(&a(&["x"])).is_err());
+    }
 
     fn rows() -> Vec<(String, String)> {
         [
