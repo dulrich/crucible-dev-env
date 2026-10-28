@@ -12,7 +12,7 @@ use std::path::Path;
 use crucible_compositor::ipc::{Request, Response};
 use crucible_persist::RelaunchWrapper;
 
-use crate::client::{Client, socket_from_env};
+use crate::client::{Client, ClientError, socket_from_env};
 use crate::tty::RawGuard;
 
 /// Usage text for `crucible relaunch --help`.
@@ -43,13 +43,11 @@ pub fn banner(args: &RelaunchWrapper) -> String {
 fn send_relaunch() -> Result<(), String> {
     let path = socket_from_env(std::env::var_os(crucible_compositor::ipc::SOCKET_ENV))?;
     let mut client = Client::connect(&path).map_err(|e| e.to_string())?;
-    let line = client
-        .request(&Request::Relaunch.to_line())
-        .map_err(|e| e.to_string())?;
-    match Response::parse(&line) {
-        Some(Response::Ok(_)) => Ok(()),
-        Some(Response::Err(reason)) => Err(reason),
-        None => Err(format!("malformed response {line:?}")),
+    match client.send(&Request::Relaunch) {
+        Ok(Response::Ok(_)) => Ok(()),
+        Ok(Response::Err(reason)) => Err(reason),
+        Err(ClientError::BadResponse(line)) => Err(format!("malformed response {line:?}")),
+        Err(e) => Err(e.to_string()),
     }
 }
 

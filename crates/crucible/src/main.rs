@@ -11,6 +11,7 @@ mod keys;
 mod latency;
 mod launch;
 mod msg;
+mod overlay;
 mod overlay_host;
 mod pick;
 mod relaunch;

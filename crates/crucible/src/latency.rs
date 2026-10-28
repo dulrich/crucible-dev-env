@@ -1,4 +1,4 @@
-//! Overlay first-usable-frame latency: the compositor exports `CDE_SPAWN_EPOCH_MS` to overlay
+//! Overlay first-usable-frame latency: the compositor exports `SPAWN_EPOCH_ENV` to overlay
 //! children; after its first populated frame is flushed, an overlay appends one line to
 //! [`LOG_PATH`]. Without the variable (CLI use outside CDE) nothing is written, and every IO
 //! error is ignored so the TUI is never disturbed.
@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Environment variable the compositor sets on overlay spawns (wall-clock ms since the epoch).
-const SPAWN_EPOCH_ENV: &str = "CDE_SPAWN_EPOCH_MS";
+use crucible_compositor::ipc::SPAWN_EPOCH_ENV;
+
 /// Directory the latency log lives in.
 const LOG_DIR: &str = "/tmp/cde";
 /// File the latency lines are appended to.
@@ -30,7 +30,7 @@ fn format_line(overlay: &str, spawn_epoch_ms: u128, now_ms: u128) -> String {
 }
 
 /// The request epoch a pre-warmed overlay host was handed (see `overlay_host`); when set it wins
-/// over `CDE_SPAWN_EPOCH_MS`, so the logged number is request→usable rather than host-spawn→usable.
+/// over `SPAWN_EPOCH_ENV`, so the logged number is request→usable rather than host-spawn→usable.
 static REQUEST_EPOCH: OnceLock<u128> = OnceLock::new();
 
 /// Sets the request epoch (ms since the UNIX epoch) for [`first_frame`]; the first call wins.
@@ -39,7 +39,7 @@ pub fn set_request_epoch(epoch_ms: u128) {
 }
 
 /// Call right after the overlay's frame is flushed; logs only the first call per process, and
-/// only when `CDE_SPAWN_EPOCH_MS` parses. Callers reach it after candidate discovery, so the
+/// only when `SPAWN_EPOCH_ENV` parses. Callers reach it after candidate discovery, so the
 /// first frame already shows usable content.
 pub fn first_frame(overlay: &str) {
     static DONE: AtomicBool = AtomicBool::new(false);

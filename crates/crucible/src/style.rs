@@ -1,14 +1,14 @@
 //! Overlay styling shared by the `pick`, `launch` and `keys` TUIs.
 //!
-//! The compositor sets `CDE_OVERLAY_STYLE` to `terminal`, `n1-dark`, `n1-med` or `n1-light` on
+//! The compositor sets `OVERLAY_STYLE_ENV` to `terminal`, `n1-dark`, `n1-med` or `n1-light` on
 //! overlay children. `Terminal` (also the fallback for unset, empty or unknown values) makes every
 //! helper return the empty string (or today's unstyled sequence), so output stays byte-identical
 //! to the unstyled TUIs. The N1 styles paint truecolor base attributes before every clear and
 //! re-apply them after every in-frame reset, so no cell falls back to the terminal's default
 //! background.
 
-/// Environment variable carrying the overlay style name.
-pub const STYLE_ENV: &str = "CDE_OVERLAY_STYLE";
+use crucible_compositor::ipc::OVERLAY_STYLE_ENV;
+use crucible_config::OverlayStyle;
 
 /// An RGB triple.
 pub type Rgb = (u8, u8, u8);
@@ -48,6 +48,17 @@ pub enum Style {
     N1(Palette),
 }
 
+impl From<OverlayStyle> for Style {
+    fn from(style: OverlayStyle) -> Style {
+        match style {
+            OverlayStyle::Terminal => Style::Terminal,
+            OverlayStyle::N1Dark => Style::N1(N1_DARK),
+            OverlayStyle::N1Med => Style::N1(N1_MED),
+            OverlayStyle::N1Light => Style::N1(N1_LIGHT),
+        }
+    }
+}
+
 fn fg((r, g, b): Rgb) -> String {
     format!("\x1b[38;2;{r};{g};{b}m")
 }
@@ -57,21 +68,19 @@ fn bg((r, g, b): Rgb) -> String {
 }
 
 impl Style {
-    /// Parses a style name; unset, empty or unknown values give `Terminal`.
+    /// Parses a style name through the config's [`OverlayStyle::from_name`]; unset, empty or
+    /// unknown values explicitly give `Terminal`.
     #[must_use]
     pub fn parse(value: Option<&str>) -> Style {
-        match value {
-            Some("n1-dark") => Style::N1(N1_DARK),
-            Some("n1-med") => Style::N1(N1_MED),
-            Some("n1-light") => Style::N1(N1_LIGHT),
-            _ => Style::Terminal,
-        }
+        value
+            .and_then(OverlayStyle::from_name)
+            .map_or(Style::Terminal, Style::from)
     }
 
-    /// The style from `CDE_OVERLAY_STYLE`.
+    /// The style from `OVERLAY_STYLE_ENV`.
     #[must_use]
     pub fn from_env() -> Style {
-        Style::parse(std::env::var(STYLE_ENV).ok().as_deref())
+        Style::parse(std::env::var(OVERLAY_STYLE_ENV).ok().as_deref())
     }
 
     /// Base attributes: truecolor foreground and background (empty for `Terminal`).
@@ -123,6 +132,23 @@ mod tests {
         assert_eq!(Style::parse(Some("bogus")), Style::Terminal);
         assert_eq!(Style::parse(Some("")), Style::Terminal);
         assert_eq!(Style::parse(None), Style::Terminal);
+    }
+
+    #[test]
+    fn from_overlay_style_covers_every_variant() {
+        assert_eq!(Style::from(OverlayStyle::Terminal), Style::Terminal);
+        assert_eq!(Style::from(OverlayStyle::N1Dark), Style::N1(N1_DARK));
+        assert_eq!(Style::from(OverlayStyle::N1Med), Style::N1(N1_MED));
+        assert_eq!(Style::from(OverlayStyle::N1Light), Style::N1(N1_LIGHT));
+        // The names the compositor exports round-trip through the config's spelling.
+        for s in [
+            OverlayStyle::Terminal,
+            OverlayStyle::N1Dark,
+            OverlayStyle::N1Med,
+            OverlayStyle::N1Light,
+        ] {
+            assert_eq!(Style::parse(Some(s.as_str())), Style::from(s));
+        }
     }
 
     #[test]

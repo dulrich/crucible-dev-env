@@ -1,16 +1,16 @@
 //! `crucible keys` — the settings overlay: lists the compositor's effective keybindings
-//! (fetched over the `bindings` IPC request); Enter runs the selected one (`exec`). The state machine and rendering are pure; only
-//! [`run`] touches the terminal, the environment and the socket.
+//! (fetched over the `bindings` IPC request); Enter runs the selected one (`exec`). Only the
+//! binding rows and Enter live here; the runner and shared state are in [`crate::overlay`]. The
+//! state machine and rendering are pure.
 
-use std::io::{Read, Write};
+use crucible_compositor::ipc::{Request, Response, parse_bindings};
 
-use crucible_compositor::ipc::{Request, Response, SOCKET_ENV, parse_bindings};
-
-use crate::client::{Client, socket_from_env};
+use crate::client::{Client, ClientError};
 use crate::fuzzy;
-use crate::pick::{Key, Outcome, decode_keys, fit, sanitize, window};
+use crate::overlay::list::{Applied, Body, ListState};
+use crate::overlay::term::{Key, sanitize};
+use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
-use crate::tty::{RawGuard, window_size};
 
 /// Usage text for `crucible keys --help`.
 pub const USAGE: &str = "usage: crucible keys\n\nThe CDE settings overlay (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Comma).\nLists the effective keybindings. Type to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter runs the\nselected binding; Esc or Ctrl+C closes. Edit binds in config.kdl (docs/config.md).\n";
@@ -22,13 +22,20 @@ const STATUS: &str = "Enter runs the selected binding — edit binds in config.k
 ///
 /// # Errors
 /// The compositor's `err` reason, or a description of a malformed reply.
-pub fn parse_reply(line: &str) -> Result<Vec<(String, String)>, String> {
-    match Response::parse(line) {
-        Some(Response::Ok(payload)) => {
-            parse_bindings(&payload).ok_or_else(|| format!("malformed bindings reply {line:?}"))
-        }
-        Some(Response::Err(reason)) => Err(reason),
-        None => Err(format!("bad response {line:?}")),
+pub fn parse_reply(resp: &Response) -> Result<Vec<(String, String)>, String> {
+    match resp {
+        Response::Ok(payload) => parse_bindings(payload)
+            .ok_or_else(|| format!("malformed bindings reply {:?}", resp.to_line())),
+        Response::Err(reason) => Err(reason.clone()),
+    }
+}
+
+/// Fetches the effective bindings over the typed `bindings` request.
+fn fetch_bindings(client: &mut Client) -> Result<Vec<(String, String)>, String> {
+    match client.send(&Request::Bindings) {
+        Ok(resp) => parse_reply(&resp),
+        Err(ClientError::BadResponse(line)) => Err(format!("bad response {line:?}")),
+        Err(e) => Err(format!("compositor error: {e}")),
     }
 }
 
@@ -36,9 +43,7 @@ pub fn parse_reply(line: &str) -> Result<Vec<(String, String)>, String> {
 #[derive(Debug)]
 pub struct Keys {
     rows: Vec<(String, String)>,
-    query: String,
-    selected: usize,
-    status: Option<String>,
+    list: ListState,
 }
 
 impl Keys {
@@ -47,9 +52,7 @@ impl Keys {
     pub fn new(rows: Vec<(String, String)>) -> Keys {
         Keys {
             rows,
-            query: String::new(),
-            selected: 0,
-            status: None,
+            list: ListState::new(),
         }
     }
 
@@ -58,47 +61,7 @@ impl Keys {
     pub fn matches(&self) -> Vec<usize> {
         let texts: Vec<String> = self.rows.iter().map(|(c, a)| format!("{c}  {a}")).collect();
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-        fuzzy::filter(&self.query, &refs)
-    }
-
-    /// Applies one key. Enter sends the selected row's action for execution.
-    pub fn step(&mut self, key: Key) -> Outcome {
-        match key {
-            Key::Enter | Key::AltEnter => {
-                if let Some(&idx) = self.matches().get(self.selected) {
-                    self.status = None;
-                    return Outcome::Send(Request::Exec(self.rows[idx].1.clone()));
-                }
-            }
-            Key::Esc | Key::CtrlC => return Outcome::Exit,
-            Key::CtrlD if self.query.is_empty() => return Outcome::Exit,
-            Key::CtrlD => {}
-            Key::Up | Key::CtrlP => self.selected = self.selected.saturating_sub(1),
-            Key::Down | Key::CtrlN => {
-                let last = self.matches().len().saturating_sub(1);
-                self.selected = (self.selected + 1).min(last);
-            }
-            Key::Char(c) => {
-                self.query.push(c);
-                self.selected = 0;
-            }
-            Key::Backspace => {
-                self.query.pop();
-                self.selected = 0;
-            }
-        }
-        Outcome::Continue
-    }
-
-    /// Applies the compositor's answer to the last [`Outcome::Send`].
-    pub fn on_response(&mut self, resp: &Response) -> Outcome {
-        match resp {
-            Response::Ok(_) => Outcome::Exit,
-            Response::Err(reason) => {
-                self.status = Some(reason.clone());
-                Outcome::Continue
-            }
-        }
+        fuzzy::filter(&self.list.query, &refs)
     }
 
     /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings).
@@ -107,40 +70,46 @@ impl Keys {
     pub fn render(&self, cols: u16, rows: u16) -> String {
         self.render_styled(cols, rows, &Style::Terminal)
     }
+}
 
-    /// Like [`Self::render`], painted with the overlay `style`.
-    #[must_use]
-    pub fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
-        let width = usize::from(cols).max(10);
-        let height = usize::from(rows).max(4);
-        let mut lines: Vec<String> = vec![fit(&format!("keys> {}_", sanitize(&self.query)), width)];
+impl Overlay for Keys {
+    /// Enter sends the selected row's action for execution.
+    fn step(&mut self, key: Key) -> Outcome {
+        let count = self.matches().len();
+        match self.list.apply(key, count) {
+            Applied::Exit => Outcome::Exit,
+            Applied::Enter(_) => {
+                if let Some(&idx) = self.matches().get(self.list.selected) {
+                    self.list.status = None;
+                    return Outcome::Send(Request::Exec(self.rows[idx].1.clone()));
+                }
+                Outcome::Continue
+            }
+            Applied::Moved | Applied::Edited | Applied::Ignored => Outcome::Continue,
+        }
+    }
+
+    fn list_mut(&mut self) -> &mut ListState {
+        &mut self.list
+    }
+
+    fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
         let pad = self
             .rows
             .iter()
             .map(|(c, _)| sanitize(c).chars().count())
             .max()
             .unwrap_or(0);
-        let all = self.matches();
-        let (start, end) = window(self.selected, all.len(), height - 2);
-        for (i, &idx) in all.iter().enumerate().take(end).skip(start) {
-            let (chord, action) = &self.rows[idx];
-            let text = fit(
-                &format!("  {:<pad$}  {}", sanitize(chord), sanitize(action)),
-                width,
-            );
-            lines.push(if i == self.selected {
-                style.highlight(&text)
-            } else {
-                text
-            });
-        }
-        while lines.len() < height - 1 {
-            lines.push(String::new());
-        }
-        lines.push(fit(self.status.as_deref().unwrap_or(STATUS), width));
-        let mut out = style.frame_start();
-        out.push_str(&lines.join("\r\n"));
-        out
+        let texts: Vec<String> = self
+            .matches()
+            .iter()
+            .map(|&idx| {
+                let (chord, action) = &self.rows[idx];
+                format!("{:<pad$}  {}", sanitize(chord), sanitize(action))
+            })
+            .collect();
+        self.list
+            .render("keys> ", Body::Rows(&texts), STATUS, cols, rows, style)
     }
 }
 
@@ -150,75 +119,7 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("crucible keys: unexpected argument {extra:?}\n\n{USAGE}");
         return 2;
     }
-    let path = match socket_from_env(std::env::var_os(SOCKET_ENV)) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("crucible keys: {e}");
-            return 2;
-        }
-    };
-    let mut client = match Client::connect(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("crucible keys: cannot connect to {}: {e}", path.display());
-            return 1;
-        }
-    };
-    let rows = match client
-        .request("bindings")
-        .map_err(|e| format!("compositor error: {e}"))
-        .and_then(|line| parse_reply(&line))
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            eprintln!("crucible keys: {e}");
-            return 1;
-        }
-    };
-    let mut keys = Keys::new(rows);
-    let Some(guard) = RawGuard::enter(true) else {
-        eprintln!("crucible keys: stdin is not a terminal");
-        return 1;
-    };
-    let code = event_loop(&mut keys, &mut client);
-    drop(guard);
-    code
-}
-
-fn event_loop(keys: &mut Keys, client: &mut Client) -> i32 {
-    let style = Style::from_env();
-    let mut pending: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 256];
-    let mut stdin = std::io::stdin();
-    loop {
-        let (cols, rows) = window_size();
-        let mut out = std::io::stdout();
-        let _ = out.write_all(keys.render_styled(cols, rows, &style).as_bytes());
-        let _ = out.flush();
-        crate::latency::first_frame("keys");
-        let n = match stdin.read(&mut chunk) {
-            Ok(0) => return 0,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return 1,
-        };
-        pending.extend_from_slice(&chunk[..n]);
-        for key in decode_keys(&mut pending) {
-            let mut outcome = keys.step(key);
-            if let Outcome::Send(req) = &outcome {
-                outcome = match client.request(&req.to_line()) {
-                    Ok(line) => match Response::parse(&line) {
-                        Some(resp) => keys.on_response(&resp),
-                        None => keys.on_response(&Response::Err(format!("bad response {line:?}"))),
-                    },
-                    Err(e) => keys.on_response(&Response::Err(format!("compositor error: {e}"))),
-                };
-            }
-            if outcome == Outcome::Exit {
-                return 0;
-            }
-        }
-    }
+    run_overlay("keys", |client| fetch_bindings(client).map(Keys::new))
 }
 
 #[cfg(test)]
@@ -254,13 +155,13 @@ mod tests {
     fn selection_moves_and_clamps() {
         let mut k = Keys::new(rows());
         k.step(Key::Up);
-        assert_eq!(k.selected, 0);
+        assert_eq!(k.list.selected, 0);
         k.step(Key::Down);
         k.step(Key::CtrlN);
         k.step(Key::Down);
-        assert_eq!(k.selected, 2);
+        assert_eq!(k.list.selected, 2);
         k.step(Key::CtrlP);
-        assert_eq!(k.selected, 1);
+        assert_eq!(k.list.selected, 1);
     }
 
     #[test]
@@ -275,7 +176,7 @@ mod tests {
             k.step(Key::AltEnter),
             Outcome::Send(Request::Exec("quit".into()))
         );
-        assert_eq!(k.selected, 1);
+        assert_eq!(k.list.selected, 1);
         assert_eq!(k.step(Key::Esc), Outcome::Exit);
         assert_eq!(k.step(Key::CtrlC), Outcome::Exit);
         assert_eq!(k.step(Key::CtrlD), Outcome::Exit);
@@ -327,16 +228,22 @@ mod tests {
 
     #[test]
     fn reply_parsing() {
+        let reply = |line: &str| parse_reply(&Response::parse(line).unwrap());
         assert_eq!(
-            parse_reply("ok Super+W:close-pane\tSuper+F2:run x%3Ay"),
+            reply("ok Super+W:close-pane\tSuper+F2:run x%3Ay"),
             Ok(vec![
                 ("Super+W".into(), "close-pane".into()),
                 ("Super+F2".into(), "run x:y".into())
             ])
         );
-        assert_eq!(parse_reply("ok"), Ok(vec![]));
-        assert_eq!(parse_reply("err nope"), Err("nope".into()));
-        assert!(parse_reply("ok garbage").is_err());
-        assert!(parse_reply("???").is_err());
+        assert_eq!(reply("ok"), Ok(vec![]));
+        assert_eq!(reply("err nope"), Err("nope".into()));
+        assert_eq!(
+            reply("ok garbage"),
+            Err("malformed bindings reply \"ok garbage\"".into())
+        );
+        // An unparseable line never reaches `parse_reply`: `Client::send` reports it as
+        // `ClientError::BadResponse` (see the client tests).
+        assert_eq!(Response::parse("???"), None);
     }
 }

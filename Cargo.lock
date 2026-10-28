@@ -289,6 +289,7 @@ name = "crucible"
 version = "0.0.0"
 dependencies = [
  "crucible-compositor",
+ "crucible-config",
  "crucible-persist",
  "libc",
  "rustix 1.1.4",

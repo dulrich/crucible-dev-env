@@ -3,21 +3,18 @@
 //! (or take explicit paths); only [`run`] touches the terminal, the environment and the socket.
 
 use std::collections::HashSet;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use crucible_compositor::ipc::{
-    LAUNCHER_TUI_ENV, Request, Response, SOCKET_ENV, TERMINAL_ENV, TERMINAL_EXEC_FLAG_ENV,
-};
+use crucible_compositor::ipc::{LAUNCHER_TUI_ENV, Request, TERMINAL_ENV};
 
-use crate::client::{Client, socket_from_env};
 use crate::fuzzy;
-use crate::pick::{Key, Outcome, decode_keys, fit, sanitize, window};
+use crate::overlay::list::{Applied, Body, ListState};
+use crate::overlay::term::{Key, sanitize};
+use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
-use crate::tty::{RawGuard, window_size};
 
 /// Usage text for `crucible launch --help`.
-pub const USAGE: &str = "usage: crucible launch\n\nThe CDE program launcher (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Return).\nLists installed desktop applications (XDG .desktop entries), each labelled GUI or TUI\n(Terminal=true), plus TUI programs from a built-in list (htop, vim, lazygit, …) and the config's\nlauncher { tui } entries when they are found on PATH. Type to filter by name; Up/Down or\nCtrl+P/Ctrl+N move; Enter launches the selection into the focused pane; Esc or Ctrl+C closes. TUI entries run in the configured terminal\n($CDE_TERMINAL, $CDE_TERMINAL_EXEC_FLAG, exported by CDE), which closes when the program exits, and are hidden when it is unknown.\n\nShell-line mode: start the query with ! to type a shell command instead. Enter runs it in a\nterminal; Alt+Enter runs it detached without a terminal. An empty command does nothing.\n";
+pub const USAGE: &str = "usage: crucible launch\n\nThe CDE program launcher (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Return).\nLists installed desktop applications (XDG .desktop entries), each labelled GUI or TUI\n(Terminal=true), plus TUI programs from a built-in list (htop, vim, lazygit, …) and the config's\nlauncher { tui } entries when they are found on PATH. Type to filter by name; Up/Down or\nCtrl+P/Ctrl+N move; Enter launches the selection into the focused pane; Esc or Ctrl+C closes. TUI entries run in the configured terminal\n($CDE_TERMINAL, exported by CDE), which closes when the program exits, and are hidden when it is unknown.\n\nShell-line mode: start the query with ! to type a shell command instead. Enter runs it in a\nterminal; Alt+Enter runs it detached without a terminal. An empty command does nothing.\n";
 
 /// A launchable desktop entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -374,9 +371,7 @@ pub fn tui_items(
 #[derive(Debug)]
 pub struct Launcher {
     items: Vec<Item>,
-    query: String,
-    selected: usize,
-    status: Option<String>,
+    list: ListState,
 }
 
 impl Launcher {
@@ -385,9 +380,7 @@ impl Launcher {
     pub fn new(items: Vec<Item>) -> Launcher {
         Launcher {
             items,
-            query: String::new(),
-            selected: 0,
-            status: None,
+            list: ListState::new(),
         }
     }
 
@@ -395,74 +388,43 @@ impl Launcher {
     #[must_use]
     pub fn rows(&self) -> Vec<usize> {
         let names: Vec<&str> = self.items.iter().map(|i| i.filter.as_str()).collect();
-        fuzzy::filter(&self.query, &names)
+        fuzzy::filter(&self.list.query, &names)
     }
 
     /// The shell command typed in `!` mode: `None` outside the mode, `Some("")` while empty.
     #[must_use]
     pub fn shell_line(&self) -> Option<&str> {
-        self.query.strip_prefix('!').map(str::trim_start)
+        self.list.query.strip_prefix('!').map(str::trim_start)
     }
 
-    /// Applies one key.
-    pub fn step(&mut self, key: Key) -> Outcome {
-        match key {
-            Key::Esc | Key::CtrlC => return Outcome::Exit,
-            Key::CtrlD if self.query.is_empty() => return Outcome::Exit,
-            Key::CtrlD => {}
-            Key::Up | Key::CtrlP => self.selected = self.selected.saturating_sub(1),
-            Key::Down | Key::CtrlN => {
-                let last = self.rows().len().saturating_sub(1);
-                self.selected = (self.selected + 1).min(last);
-            }
-            Key::Char(c) => {
-                self.query.push(c);
-                self.selected = 0;
-                self.status = None;
-            }
-            Key::Backspace => {
-                self.query.pop();
-                self.selected = 0;
-                self.status = None;
-            }
-            Key::Enter | Key::AltEnter if self.shell_line().is_some() => {
-                let cmd = self.shell_line().unwrap_or("").trim_end();
-                if cmd.is_empty() {
-                    return Outcome::Continue;
-                }
-                let cmd = cmd.to_string();
-                return Outcome::Send(if key == Key::Enter {
-                    Request::run_in_terminal(cmd)
+    /// Enter (run in a terminal) / Alt+Enter (run detached) in `!` mode; an empty command does
+    /// nothing.
+    fn enter_shell(&self, cmd: &str, key: Key) -> Outcome {
+        let cmd = cmd.trim_end();
+        if cmd.is_empty() {
+            return Outcome::Continue;
+        }
+        let cmd = cmd.to_string();
+        Outcome::Send(if key == Key::Enter {
+            Request::run_in_terminal(cmd)
+        } else {
+            Request::run(cmd)
+        })
+    }
+
+    /// Enter / Alt+Enter outside `!` mode: launch the selected item.
+    fn enter_row(&self) -> Outcome {
+        match self.rows().get(self.list.selected) {
+            Some(&i) => {
+                let item = &self.items[i];
+                let cmd = item.cmd.clone();
+                Outcome::Send(if item.tui {
+                    Request::RunTui(cmd)
                 } else {
                     Request::run(cmd)
-                });
+                })
             }
-            Key::Enter | Key::AltEnter => {
-                return match self.rows().get(self.selected) {
-                    Some(&i) => {
-                        let item = &self.items[i];
-                        let cmd = item.cmd.clone();
-                        Outcome::Send(if item.tui {
-                            Request::RunTui(cmd)
-                        } else {
-                            Request::run(cmd)
-                        })
-                    }
-                    None => Outcome::Continue,
-                };
-            }
-        }
-        Outcome::Continue
-    }
-
-    /// Applies the compositor's answer to the last [`Outcome::Send`].
-    pub fn on_response(&mut self, resp: &Response) -> Outcome {
-        match resp {
-            Response::Ok(_) => Outcome::Exit,
-            Response::Err(reason) => {
-                self.status = Some(reason.clone());
-                Outcome::Continue
-            }
+            None => Outcome::Continue,
         }
     }
 
@@ -472,87 +434,65 @@ impl Launcher {
     pub fn render(&self, cols: u16, rows: u16) -> String {
         self.render_styled(cols, rows, &Style::Terminal)
     }
+}
 
-    /// Like [`Self::render`], painted with the overlay `style`.
-    #[must_use]
-    pub fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
-        let width = usize::from(cols).max(10);
-        let height = usize::from(rows).max(4);
-        let mut lines: Vec<String> = vec![fit(&format!("run> {}_", sanitize(&self.query)), width)];
-        if let Some(cmd) = self.shell_line() {
-            let text = fit(
-                &format!(
-                    "  SH  {}  [Enter: run in terminal, Alt+Enter: run detached]",
-                    sanitize(cmd)
-                ),
-                width,
-            );
-            lines.push(style.highlight(&text));
-        } else {
-            let all = self.rows();
-            let (start, end) = window(self.selected, all.len(), height - 2);
-            for (i, &idx) in all.iter().enumerate().take(end).skip(start) {
-                let item = &self.items[idx];
-                let text = fit(
-                    &format!("  {}  {}", item.kind(), sanitize(&item.label)),
-                    width,
-                );
-                lines.push(if i == self.selected {
-                    style.highlight(&text)
-                } else {
-                    text
-                });
+impl Overlay for Launcher {
+    fn step(&mut self, key: Key) -> Outcome {
+        let count = self.rows().len();
+        match self.list.apply(key, count) {
+            Applied::Exit => Outcome::Exit,
+            Applied::Edited => {
+                self.list.status = None;
+                Outcome::Continue
             }
+            Applied::Moved | Applied::Ignored => Outcome::Continue,
+            Applied::Enter(key) => match self.shell_line() {
+                Some(cmd) => self.enter_shell(cmd, key),
+                None => self.enter_row(),
+            },
         }
-        while lines.len() < height - 1 {
-            lines.push(String::new());
+    }
+
+    fn list_mut(&mut self) -> &mut ListState {
+        &mut self.list
+    }
+
+    fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
+        if let Some(cmd) = self.shell_line() {
+            let text = format!(
+                "SH  {}  [Enter: run in terminal, Alt+Enter: run detached]",
+                sanitize(cmd)
+            );
+            return self
+                .list
+                .render("run> ", Body::Highlighted(&text), "", cols, rows, style);
         }
-        lines.push(fit(self.status.as_deref().unwrap_or(""), width));
-        let mut out = style.frame_start();
-        out.push_str(&lines.join("\r\n"));
-        out
+        let texts: Vec<String> = self
+            .rows()
+            .iter()
+            .map(|&idx| {
+                let item = &self.items[idx];
+                format!("{}  {}", item.kind(), sanitize(&item.label))
+            })
+            .collect();
+        self.list
+            .render("run> ", Body::Rows(&texts), "", cols, rows, style)
     }
 }
 
-/// The `(program, exec-flag)` pair from the two env values; `None` unless both are non-empty.
+/// Whether `$CDE_TERMINAL` names a terminal program: set, valid UTF-8 and non-empty.
 #[must_use]
-pub fn terminal_from_env(
-    program: Option<std::ffi::OsString>,
-    flag: Option<std::ffi::OsString>,
-) -> Option<(String, String)> {
-    let program = program?.into_string().ok().filter(|p| !p.is_empty())?;
-    let flag = flag?.into_string().ok().filter(|f| !f.is_empty())?;
-    Some((program, flag))
+pub fn terminal_known(program: Option<std::ffi::OsString>) -> bool {
+    program
+        .and_then(|p| p.into_string().ok())
+        .is_some_and(|p| !p.is_empty())
 }
 
-/// Runs the subcommand; returns the exit code.
-pub fn run(args: &[String]) -> i32 {
-    if let Some(extra) = args.first() {
-        eprintln!("crucible launch: unexpected argument {extra:?}\n\n{USAGE}");
-        return 2;
-    }
-    let path = match socket_from_env(std::env::var_os(SOCKET_ENV)) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("crucible launch: {e}");
-            return 2;
-        }
-    };
-    let mut client = match Client::connect(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("crucible launch: cannot connect to {}: {e}", path.display());
-            return 1;
-        }
-    };
-    let terminal = terminal_from_env(
-        std::env::var_os(TERMINAL_ENV),
-        std::env::var_os(TERMINAL_EXEC_FLAG_ENV),
-    );
+/// The launcher's rows: desktop entries first, then PATH-derived TUI programs (name-sorted).
+fn discover_items() -> Vec<Item> {
+    let terminal_known = terminal_known(std::env::var_os(TERMINAL_ENV));
     let entries = desktop_entries(&data_dirs_from_env());
-    let terminal_known = terminal.is_some();
     let mut items = build_items(&entries, terminal_known);
-    // PATH-derived TUI rows are appended after the desktop entries (name-sorted).
     let dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
@@ -562,59 +502,23 @@ pub fn run(args: &[String]) -> i32 {
         &entries,
         terminal_known,
     ));
-    let mut launcher = Launcher::new(items);
-    let Some(guard) = RawGuard::enter(true) else {
-        eprintln!("crucible launch: stdin is not a terminal");
-        return 1;
-    };
-    let code = event_loop(&mut launcher, &mut client);
-    drop(guard);
-    code
+    items
 }
 
-fn event_loop(launcher: &mut Launcher, client: &mut Client) -> i32 {
-    let style = Style::from_env();
-    let mut pending: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 256];
-    let mut stdin = std::io::stdin();
-    loop {
-        let (cols, rows) = window_size();
-        let mut out = std::io::stdout();
-        let _ = out.write_all(launcher.render_styled(cols, rows, &style).as_bytes());
-        let _ = out.flush();
-        crate::latency::first_frame("launch");
-        let n = match stdin.read(&mut chunk) {
-            Ok(0) => return 0,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return 1,
-        };
-        pending.extend_from_slice(&chunk[..n]);
-        for key in decode_keys(&mut pending) {
-            let mut outcome = launcher.step(key);
-            if let Outcome::Send(req) = &outcome {
-                outcome = match client.request(&req.to_line()) {
-                    Ok(line) => match Response::parse(&line) {
-                        Some(resp) => launcher.on_response(&resp),
-                        None => {
-                            launcher.on_response(&Response::Err(format!("bad response {line:?}")))
-                        }
-                    },
-                    Err(e) => {
-                        launcher.on_response(&Response::Err(format!("compositor error: {e}")))
-                    }
-                };
-            }
-            if outcome == Outcome::Exit {
-                return 0;
-            }
-        }
+/// Runs the subcommand; returns the exit code.
+pub fn run(args: &[String]) -> i32 {
+    if let Some(extra) = args.first() {
+        eprintln!("crucible launch: unexpected argument {extra:?}\n\n{USAGE}");
+        return 2;
     }
+    run_overlay("launch", |_client| Ok(Launcher::new(discover_items())))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crucible_compositor::ipc::Response;
+
     fn tmp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "crucible-launch-test-{}-{name}",
@@ -709,12 +613,14 @@ mod tests {
         let items = build_items(&entries, false);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].filter, "Browser");
-        assert_eq!(terminal_from_env(Some("k".into()), Some("".into())), None);
-        assert_eq!(terminal_from_env(None, Some("-e".into())), None);
-        assert_eq!(
-            terminal_from_env(Some("k".into()), Some("-e".into())),
-            Some(("k".into(), "-e".into()))
-        );
+    }
+
+    #[test]
+    fn terminal_known_needs_only_cde_terminal() {
+        // `CDE_TERMINAL` alone decides; the exec flag is never consulted.
+        assert!(terminal_known(Some("kitty".into())));
+        assert!(!terminal_known(Some("".into())));
+        assert!(!terminal_known(None));
     }
 
     #[test]

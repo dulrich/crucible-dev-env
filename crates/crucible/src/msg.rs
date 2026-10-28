@@ -68,7 +68,7 @@ pub fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
-    match client.request(&line) {
+    match client.request_raw(&line) {
         Ok(resp) => {
             println!("{resp}");
             exit_code(&resp)

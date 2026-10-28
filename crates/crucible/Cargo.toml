@@ -16,6 +16,7 @@ workspace = true
 
 [dependencies]
 crucible-compositor = { path = "../crucible-compositor" }
+crucible-config = { path = "../crucible-config" }
 crucible-persist = { path = "../crucible-persist" }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 rustix.workspace = true

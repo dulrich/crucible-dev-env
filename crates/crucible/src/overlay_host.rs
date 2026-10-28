@@ -15,13 +15,48 @@ use std::path::PathBuf;
 /// Usage text for `crucible overlay-host --help`.
 pub const USAGE: &str = "usage: crucible overlay-host --socket <path>\n\nA pre-started overlay terminal's program (spawned by CDE; not for interactive use). Binds\n<path>, waits for one mode line `<epoch-ms>\\t<mode>[\\t<arg>...]` (mode: pick, launch, keys),\nremoves the socket, then runs that overlay in-process.\n";
 
+/// Which overlay a mode line asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayMode {
+    /// `pick`.
+    Pick,
+    /// `launch`.
+    Launch,
+    /// `keys`.
+    Keys,
+}
+
+impl OverlayMode {
+    /// The wire spelling (the compositor writes it; the host only parses it).
+    #[cfg(test)]
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OverlayMode::Pick => "pick",
+            OverlayMode::Launch => "launch",
+            OverlayMode::Keys => "keys",
+        }
+    }
+
+    /// Parses the exact wire spelling; anything else is `None`.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<OverlayMode> {
+        match name {
+            "pick" => Some(OverlayMode::Pick),
+            "launch" => Some(OverlayMode::Launch),
+            "keys" => Some(OverlayMode::Keys),
+            _ => None,
+        }
+    }
+}
+
 /// A parsed mode line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModeLine {
     /// The request's wall-clock time, ms since the UNIX epoch.
     pub epoch_ms: u128,
-    /// `pick`, `launch` or `keys`.
-    pub mode: String,
+    /// The requested overlay.
+    pub mode: OverlayMode,
     /// The subcommand arguments (`--rename <encoded>` for pick).
     pub args: Vec<String>,
 }
@@ -29,7 +64,7 @@ pub struct ModeLine {
 /// Formats a mode line (without the trailing newline); `None` if a field holds a tab or newline.
 #[cfg(test)]
 pub fn format_mode_line(line: &ModeLine) -> Option<String> {
-    let mut out = format!("{}\t{}", line.epoch_ms, line.mode);
+    let mut out = format!("{}\t{}", line.epoch_ms, line.mode.as_str());
     for a in &line.args {
         if a.contains(['\t', '\n', '\r']) {
             return None;
@@ -49,14 +84,13 @@ pub fn parse_mode_line(raw: &str) -> Result<ModeLine, String> {
     let epoch_ms: u128 = epoch
         .parse()
         .map_err(|_| format!("bad request epoch {epoch:?}"))?;
-    let mode = fields.next().ok_or("missing mode")?.to_string();
+    let name = fields.next().ok_or("missing mode")?;
+    let mode = OverlayMode::from_name(name).ok_or_else(|| format!("unknown mode {name:?}"))?;
     let args: Vec<String> = fields.map(str::to_string).collect();
-    match (mode.as_str(), args.len()) {
-        ("launch" | "keys", 0) => {}
-        ("pick", 0) => {}
-        ("pick", 2) if args[0] == "--rename" => {}
-        ("pick" | "launch" | "keys", _) => return Err(format!("bad arguments for {mode}")),
-        _ => return Err(format!("unknown mode {mode:?}")),
+    match (mode, args.len()) {
+        (OverlayMode::Launch | OverlayMode::Keys | OverlayMode::Pick, 0) => {}
+        (OverlayMode::Pick, 2) if args[0] == "--rename" => {}
+        _ => return Err(format!("bad arguments for {name}")),
     }
     Ok(ModeLine {
         epoch_ms,
@@ -113,10 +147,10 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
     crate::latency::set_request_epoch(mode.epoch_ms);
-    match mode.mode.as_str() {
-        "pick" => crate::pick::run(&mode.args),
-        "launch" => crate::launch::run(&mode.args),
-        _ => crate::keys::run(&mode.args),
+    match mode.mode {
+        OverlayMode::Pick => crate::pick::run(&mode.args),
+        OverlayMode::Launch => crate::launch::run(&mode.args),
+        OverlayMode::Keys => crate::keys::run(&mode.args),
     }
 }
 
@@ -127,9 +161,23 @@ mod tests {
     fn line(epoch: u128, mode: &str, args: &[&str]) -> ModeLine {
         ModeLine {
             epoch_ms: epoch,
-            mode: mode.into(),
+            mode: OverlayMode::from_name(mode).unwrap(),
             args: args.iter().map(|s| (*s).to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn mode_names_round_trip_and_unknown_names_are_rejected() {
+        for m in [OverlayMode::Pick, OverlayMode::Launch, OverlayMode::Keys] {
+            assert_eq!(OverlayMode::from_name(m.as_str()), Some(m));
+        }
+        for bad in ["", "Pick", "bogus", "pick ", "settings"] {
+            assert_eq!(OverlayMode::from_name(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            parse_mode_line("12\tbogus"),
+            Err("unknown mode \"bogus\"".to_string())
+        );
     }
 
     #[test]

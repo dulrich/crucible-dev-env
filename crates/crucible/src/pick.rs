@@ -1,148 +1,24 @@
 //! `crucible pick [--rename <encoded>]` — the workspace picker TUI (run inside the compositor's
-//! terminal overlay). Key decoding, the state machine and rendering are pure; only [`run`] touches
-//! the terminal and the socket.
-
-use std::io::{Read, Write};
+//! terminal overlay). Only the picker's domain hooks live here (rename mode, candidate rows, what
+//! Enter sends); the runner, key decoding, shared state and frame scaffolding are in
+//! [`crate::overlay`]. The state machine and rendering are pure.
 
 use crucible_compositor::ipc::{
-    Candidate, CandidateKind, Request, Response, SOCKET_ENV, decode_field, parse_candidates,
+    Candidate, CandidateKind, Request, Response, decode_field, parse_candidates,
 };
 
-use crate::client::{Client, socket_from_env};
+use crate::client::{Client, ClientError};
 use crate::fuzzy;
+use crate::overlay::list::{Applied, Body, ListState};
+use crate::overlay::term::{Key, sanitize};
+use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
-use crate::tty::{RawGuard, window_size};
 
 /// The command-key glyph (`⌘`) prefixing a pinned row's slot number; matches the header's.
 const SUPER_GLYPH: char = '\u{2318}';
 
 /// Usage text for `crucible pick --help`.
 pub const USAGE: &str = "usage: crucible pick [--rename <encoded-name>]\n\nThe CDE workspace picker (needs $CDE_SOCKET; CDE runs it in an overlay on Super+P).\nType to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter opens the selection (or creates a new\nworkspace from the typed name); Esc or Ctrl+C closes.\n\n  --rename <name>   single-line rename prompt prefilled with <name> (percent-encoded: %25 %3A %09 %0A %0D)\n";
-
-/// A decoded key press.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Key {
-    /// A printable character.
-    Char(char),
-    /// Enter / Return.
-    Enter,
-    /// Alt+Enter (ESC then CR or LF).
-    AltEnter,
-    /// A lone Escape.
-    Esc,
-    /// Backspace.
-    Backspace,
-    /// Arrow up.
-    Up,
-    /// Arrow down.
-    Down,
-    /// Ctrl+C.
-    CtrlC,
-    /// Ctrl+D.
-    CtrlD,
-    /// Ctrl+N.
-    CtrlN,
-    /// Ctrl+P.
-    CtrlP,
-}
-
-/// Decodes as many keys as possible from the front of `buf`, draining what it consumes. An
-/// incomplete trailing escape sequence or UTF-8 character stays in the buffer for the next read.
-pub fn decode_keys(buf: &mut Vec<u8>) -> Vec<Key> {
-    let mut keys = Vec::new();
-    while let Some(&b) = buf.first() {
-        let consumed = match b {
-            0x1b => match buf.get(1) {
-                None => {
-                    keys.push(Key::Esc);
-                    1
-                }
-                Some(b'[') => {
-                    // CSI: parameters, then a final byte 0x40..=0x7e.
-                    let Some(end) = buf[2..].iter().position(|c| (0x40..=0x7e).contains(c)) else {
-                        break;
-                    };
-                    let end = end + 2;
-                    match (end, buf[end]) {
-                        (2, b'A') => keys.push(Key::Up),
-                        (2, b'B') => keys.push(Key::Down),
-                        _ => {}
-                    }
-                    end + 1
-                }
-                Some(b'\r' | b'\n') => {
-                    keys.push(Key::AltEnter);
-                    2
-                }
-                Some(b'O') => {
-                    let Some(&f) = buf.get(2) else { break };
-                    match f {
-                        b'A' => keys.push(Key::Up),
-                        b'B' => keys.push(Key::Down),
-                        _ => {}
-                    }
-                    3
-                }
-                Some(_) => {
-                    keys.push(Key::Esc);
-                    1
-                }
-            },
-            b'\r' | b'\n' => {
-                keys.push(Key::Enter);
-                1
-            }
-            0x03 => {
-                keys.push(Key::CtrlC);
-                1
-            }
-            0x04 => {
-                keys.push(Key::CtrlD);
-                1
-            }
-            0x0e => {
-                keys.push(Key::CtrlN);
-                1
-            }
-            0x10 => {
-                keys.push(Key::CtrlP);
-                1
-            }
-            0x08 | 0x7f => {
-                keys.push(Key::Backspace);
-                1
-            }
-            0x00..=0x1f => 1,
-            _ => {
-                let need = match b {
-                    0x20..=0x7f => 1,
-                    0xc0..=0xdf => 2,
-                    0xe0..=0xef => 3,
-                    0xf0..=0xf7 => 4,
-                    _ => {
-                        buf.remove(0);
-                        continue;
-                    }
-                };
-                if buf.len() < need {
-                    break;
-                }
-                match std::str::from_utf8(&buf[..need])
-                    .ok()
-                    .and_then(|s| s.chars().next())
-                {
-                    Some(c) => {
-                        keys.push(Key::Char(c));
-                        need
-                    }
-                    None => 1,
-                }
-            }
-        };
-        buf.drain(..consumed);
-    }
-    keys
-}
 
 /// Picker or rename-prompt behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,25 +38,12 @@ pub enum Row {
     New(String),
 }
 
-/// What the driver must do after a key or response.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Outcome {
-    /// Redraw and keep reading.
-    Continue,
-    /// Leave the picker with exit code 0.
-    Exit,
-    /// Send this request, then feed the response to [`Picker::on_response`].
-    Send(Request),
-}
-
 /// Picker state.
 #[derive(Debug)]
 pub struct Picker {
     mode: Mode,
     candidates: Vec<Candidate>,
-    query: String,
-    selected: usize,
-    status: Option<String>,
+    list: ListState,
 }
 
 impl Picker {
@@ -190,9 +53,7 @@ impl Picker {
         Picker {
             mode: Mode::Pick,
             candidates,
-            query: String::new(),
-            selected: 0,
-            status: None,
+            list: ListState::new(),
         }
     }
 
@@ -202,9 +63,7 @@ impl Picker {
         Picker {
             mode: Mode::Rename,
             candidates: Vec::new(),
-            query: current,
-            selected: 0,
-            status: None,
+            list: ListState::with_query(current),
         }
     }
 
@@ -212,14 +71,14 @@ impl Picker {
     #[cfg(test)]
     #[must_use]
     pub fn query(&self) -> &str {
-        &self.query
+        &self.list.query
     }
 
     /// The status line, if any.
     #[cfg(test)]
     #[must_use]
     pub fn status(&self) -> Option<&str> {
-        self.status.as_deref()
+        self.list.status.as_deref()
     }
 
     /// Visible rows: fuzzy matches best first, then a "new workspace" row whenever the query is
@@ -229,56 +88,32 @@ impl Picker {
         if self.mode == Mode::Rename {
             return Vec::new();
         }
+        let query = &self.list.query;
         let names: Vec<&str> = self.candidates.iter().map(|c| c.name.as_str()).collect();
-        let mut rows: Vec<Row> = fuzzy::filter(&self.query, &names)
+        let mut rows: Vec<Row> = fuzzy::filter(query, &names)
             .into_iter()
             .map(Row::Candidate)
             .collect();
         let exact = self
             .candidates
             .iter()
-            .any(|c| c.kind != CandidateKind::Folder && c.name == self.query);
-        if !self.query.is_empty() && !exact {
-            rows.push(Row::New(self.query.clone()));
+            .any(|c| c.kind != CandidateKind::Folder && c.name == *query);
+        if !query.is_empty() && !exact {
+            rows.push(Row::New(query.clone()));
         }
         rows
     }
 
-    /// Applies one key.
-    pub fn step(&mut self, key: Key) -> Outcome {
-        match key {
-            Key::Esc | Key::CtrlC => return Outcome::Exit,
-            Key::CtrlD if self.query.is_empty() => return Outcome::Exit,
-            Key::CtrlD => {}
-            Key::Up | Key::CtrlP => self.selected = self.selected.saturating_sub(1),
-            Key::Down | Key::CtrlN => {
-                let last = self.rows().len().saturating_sub(1);
-                self.selected = (self.selected + 1).min(last);
-            }
-            Key::Char(c) => {
-                self.query.push(c);
-                self.selected = 0;
-                self.status = None;
-            }
-            Key::Backspace => {
-                self.query.pop();
-                self.selected = 0;
-                self.status = None;
-            }
-            Key::Enter | Key::AltEnter => return self.enter(),
-        }
-        Outcome::Continue
-    }
-
+    /// Enter / Alt+Enter: rename the workspace, or open / create the selected row.
     fn enter(&mut self) -> Outcome {
         if self.mode == Mode::Rename {
-            if self.query.is_empty() {
-                self.status = Some("name required".into());
+            if self.list.query.is_empty() {
+                self.list.status = Some("name required".into());
                 return Outcome::Continue;
             }
-            return Outcome::Send(Request::Rename(self.query.clone()));
+            return Outcome::Send(Request::Rename(self.list.query.clone()));
         }
-        match self.rows().get(self.selected) {
+        match self.rows().get(self.list.selected) {
             Some(Row::Candidate(i)) => {
                 let c = &self.candidates[*i];
                 match (c.kind, &c.path) {
@@ -286,7 +121,7 @@ impl Picker {
                         Outcome::Send(Request::OpenFolder(p.clone()))
                     }
                     (CandidateKind::Folder, None) => {
-                        self.status = Some("folder has no path".into());
+                        self.list.status = Some("folder has no path".into());
                         Outcome::Continue
                     }
                     _ => Outcome::Send(Request::Open(c.name.clone())),
@@ -297,53 +132,11 @@ impl Picker {
         }
     }
 
-    /// Applies the compositor's answer to the last [`Outcome::Send`].
-    pub fn on_response(&mut self, resp: &Response) -> Outcome {
-        match resp {
-            Response::Ok(_) => Outcome::Exit,
-            Response::Err(reason) => {
-                self.status = Some(reason.clone());
-                Outcome::Continue
-            }
-        }
-    }
-
     /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings).
     #[cfg(test)]
     #[must_use]
     pub fn render(&self, cols: u16, rows: u16) -> String {
         self.render_styled(cols, rows, &Style::Terminal)
-    }
-
-    /// Like [`Self::render`], painted with the overlay `style`.
-    #[must_use]
-    pub fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
-        let width = usize::from(cols).max(10);
-        let height = usize::from(rows).max(4);
-        let prompt = match self.mode {
-            Mode::Pick => "workspace> ",
-            Mode::Rename => "rename> ",
-        };
-        let mut lines: Vec<String> =
-            vec![fit(&format!("{prompt}{}_", sanitize(&self.query)), width)];
-        let all = self.rows();
-        let list_height = height - 2;
-        let (start, end) = window(self.selected, all.len(), list_height);
-        for (i, row) in all.iter().enumerate().take(end).skip(start) {
-            let text = fit(&format!("  {}", self.row_text(row)), width);
-            lines.push(if i == self.selected {
-                style.highlight(&text)
-            } else {
-                text
-            });
-        }
-        while lines.len() < height - 1 {
-            lines.push(String::new());
-        }
-        lines.push(fit(self.status.as_deref().map_or("", |s| s), width));
-        let mut out = style.frame_start();
-        out.push_str(&lines.join("\r\n"));
-        out
     }
 
     fn row_text(&self, row: &Row) -> String {
@@ -374,26 +167,33 @@ impl Picker {
     }
 }
 
-/// Replaces control characters so a name can never inject terminal escapes.
-pub(crate) fn sanitize(s: &str) -> String {
-    s.chars()
-        .map(|c| if c.is_control() { '?' } else { c })
-        .collect()
-}
-
-/// Truncates to `width` characters.
-pub(crate) fn fit(s: &str, width: usize) -> String {
-    s.chars().take(width).collect()
-}
-
-/// The `[start, end)` slice of `total` rows to show in `height` lines, keeping `selected` visible.
-#[must_use]
-pub fn window(selected: usize, total: usize, height: usize) -> (usize, usize) {
-    if height == 0 || total <= height {
-        return (0, total);
+impl Overlay for Picker {
+    fn step(&mut self, key: Key) -> Outcome {
+        let count = self.rows().len();
+        match self.list.apply(key, count) {
+            Applied::Exit => Outcome::Exit,
+            Applied::Edited => {
+                self.list.status = None;
+                Outcome::Continue
+            }
+            Applied::Moved | Applied::Ignored => Outcome::Continue,
+            Applied::Enter(_) => self.enter(),
+        }
     }
-    let start = selected.saturating_sub(height - 1).min(total - height);
-    (start, start + height)
+
+    fn list_mut(&mut self) -> &mut ListState {
+        &mut self.list
+    }
+
+    fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
+        let prompt = match self.mode {
+            Mode::Pick => "workspace> ",
+            Mode::Rename => "rename> ",
+        };
+        let texts: Vec<String> = self.rows().iter().map(|r| self.row_text(r)).collect();
+        self.list
+            .render(prompt, Body::Rows(&texts), "", cols, rows, style)
+    }
 }
 
 /// Parsed `pick` arguments: the decoded rename seed, if any.
@@ -420,87 +220,20 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let path = match socket_from_env(std::env::var_os(SOCKET_ENV)) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("crucible pick: {e}");
-            return 2;
-        }
-    };
-    let mut client = match Client::connect(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("crucible pick: cannot connect to {}: {e}", path.display());
-            return 1;
-        }
-    };
-    let mut picker = match rename {
-        Some(current) => Picker::rename(current),
-        None => match fetch_candidates(&mut client) {
-            Ok(c) => Picker::new(c),
-            Err(e) => {
-                eprintln!("crucible pick: {e}");
-                return 1;
-            }
-        },
-    };
-    let Some(guard) = RawGuard::enter(true) else {
-        eprintln!("crucible pick: stdin is not a terminal");
-        return 1;
-    };
-    let code = event_loop(&mut picker, &mut client);
-    drop(guard);
-    code
+    run_overlay("pick", |client| match rename {
+        Some(current) => Ok(Picker::rename(current)),
+        None => fetch_candidates(client).map(Picker::new),
+    })
 }
 
 fn fetch_candidates(client: &mut Client) -> Result<Vec<Candidate>, String> {
-    let line = client
-        .request(&Request::Candidates.to_line())
-        .map_err(|e| format!("candidates request failed: {e}"))?;
-    match Response::parse(&line) {
-        Some(Response::Ok(payload)) => {
+    match client.send(&Request::Candidates) {
+        Ok(Response::Ok(payload)) => {
             parse_candidates(&payload).ok_or_else(|| "malformed candidates response".to_string())
         }
-        Some(Response::Err(r)) => Err(format!("compositor refused: {r}")),
-        None => Err(format!("unrecognised response {line:?}")),
-    }
-}
-
-fn event_loop(picker: &mut Picker, client: &mut Client) -> i32 {
-    let style = Style::from_env();
-    let mut pending: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 256];
-    let mut stdin = std::io::stdin();
-    loop {
-        let (cols, rows) = window_size();
-        let mut out = std::io::stdout();
-        let _ = out.write_all(picker.render_styled(cols, rows, &style).as_bytes());
-        let _ = out.flush();
-        crate::latency::first_frame("pick");
-        let n = match stdin.read(&mut chunk) {
-            Ok(0) => return 0,
-            Ok(n) => n,
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return 1,
-        };
-        pending.extend_from_slice(&chunk[..n]);
-        for key in decode_keys(&mut pending) {
-            let mut outcome = picker.step(key);
-            if let Outcome::Send(req) = &outcome {
-                outcome = match client.request(&req.to_line()) {
-                    Ok(line) => match Response::parse(&line) {
-                        Some(resp) => picker.on_response(&resp),
-                        None => {
-                            picker.on_response(&Response::Err(format!("bad response {line:?}")))
-                        }
-                    },
-                    Err(e) => picker.on_response(&Response::Err(format!("compositor error: {e}"))),
-                };
-            }
-            if outcome == Outcome::Exit {
-                return 0;
-            }
-        }
+        Ok(Response::Err(r)) => Err(format!("compositor refused: {r}")),
+        Err(e @ ClientError::BadResponse(_)) => Err(e.to_string()),
+        Err(e) => Err(format!("candidates request failed: {e}")),
     }
 }
 
@@ -543,63 +276,6 @@ mod tests {
         for c in s.chars() {
             p.step(Key::Char(c));
         }
-    }
-
-    fn keys(bytes: &[u8]) -> Vec<Key> {
-        decode_keys(&mut bytes.to_vec())
-    }
-
-    #[test]
-    fn decodes_basic_keys() {
-        assert_eq!(
-            keys(b"a\x7f\r\x03\x04\x0e\x10"),
-            vec![
-                Key::Char('a'),
-                Key::Backspace,
-                Key::Enter,
-                Key::CtrlC,
-                Key::CtrlD,
-                Key::CtrlN,
-                Key::CtrlP
-            ]
-        );
-    }
-
-    #[test]
-    fn decodes_alt_enter_and_keeps_lone_esc() {
-        assert_eq!(keys(b"\x1b\r"), vec![Key::AltEnter]);
-        assert_eq!(keys(b"\x1b\n"), vec![Key::AltEnter]);
-        assert_eq!(keys(b"\x1b"), vec![Key::Esc]);
-        assert_eq!(keys(b"\x1bx"), vec![Key::Esc, Key::Char('x')]);
-    }
-
-    #[test]
-    fn decodes_arrows_and_esc() {
-        assert_eq!(keys(b"\x1b[A\x1b[B"), vec![Key::Up, Key::Down]);
-        assert_eq!(keys(b"\x1bOA\x1bOB"), vec![Key::Up, Key::Down]);
-        assert_eq!(keys(b"\x1b"), vec![Key::Esc]);
-        assert_eq!(keys(b"\x1b[1;5C"), vec![]);
-    }
-
-    #[test]
-    fn decodes_utf8_and_keeps_partial_input() {
-        assert_eq!(keys("é".as_bytes()), vec![Key::Char('é')]);
-        let mut buf = vec![0xc3];
-        assert!(decode_keys(&mut buf).is_empty());
-        assert_eq!(buf, vec![0xc3]);
-        buf.push(0xa9);
-        assert_eq!(decode_keys(&mut buf), vec![Key::Char('é')]);
-        assert!(buf.is_empty());
-        let mut csi = b"\x1b[".to_vec();
-        assert!(decode_keys(&mut csi).is_empty());
-        assert_eq!(csi.len(), 2);
-    }
-
-    #[test]
-    fn invalid_utf8_does_not_wedge() {
-        let mut buf = vec![0xff, b'a'];
-        assert_eq!(decode_keys(&mut buf), vec![Key::Char('a')]);
-        assert!(buf.is_empty());
     }
 
     #[test]
@@ -789,16 +465,6 @@ mod tests {
         let long = Picker::new(vec![cand(CandidateKind::Live, &"x".repeat(200), None)]);
         assert!(long.render(20, 8).lines().all(|l| l.chars().count() < 40));
     }
-
-    #[test]
-    fn window_keeps_selection_visible() {
-        assert_eq!(window(0, 3, 10), (0, 3));
-        assert_eq!(window(0, 20, 5), (0, 5));
-        assert_eq!(window(4, 20, 5), (0, 5));
-        assert_eq!(window(5, 20, 5), (1, 6));
-        assert_eq!(window(19, 20, 5), (15, 20));
-    }
-
     #[test]
     fn args_parse_and_decode() {
         assert_eq!(parse_args(&[]).unwrap(), None);
