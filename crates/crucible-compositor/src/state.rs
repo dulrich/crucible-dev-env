@@ -215,6 +215,9 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// The last hover target seen by focus-follows-mouse; focus moves only when this changes
     /// (pointer *enter*), so keyboard-driven focus is not undone by a pointer twitch.
     pub hover_target: Option<HoverTarget>,
+    /// A focus-follows-mouse enter that a mapped overlay held back (overlays are modal). The next
+    /// overlay open applies it first, so the overlay follows the pointer to its output.
+    pub hover_deferred: bool,
     /// Workspace persistence, IPC and picker state; see [`crate::persist`].
     pub persist: crate::persist::PersistState,
     /// Workspace header strip toggle and consumed-button record.
@@ -432,6 +435,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             config: Config::default(),
             bindings: Bindings::default(),
             hover_target: None,
+            hover_deferred: false,
             persist: crate::persist::PersistState::new(store_dir),
             header: crate::header::HeaderState::default(),
             header_text: crate::text::TextRenderer::from_font(None),

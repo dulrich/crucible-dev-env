@@ -384,6 +384,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.session_lock.reset_surfaces();
         self.force_keyboard_focus(None);
         self.hover_target = None;
+        self.hover_deferred = false;
         self.reconcile_keyboard_focus();
         self.lock_redraw_all();
     }

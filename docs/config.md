@@ -39,7 +39,7 @@ The old `gaps` node was removed; a config that still has one is rejected with an
 focus-follows-mouse #false
 ```
 
-`#true` (default) or `#false`. When on, moving the pointer into a window or pane focuses it; when off, only clicking does. This replaces the old `--no-focus-follows-mouse` flag and `CDE_FOCUS_FOLLOWS_MOUSE` variable, which are gone.
+`#true` (default) or `#false`. When on, moving the pointer into a window or pane focuses it; when off, only clicking does. While an overlay is open, hovering does not move focus off it; when the pointer has moved into another pane or output meanwhile, the next overlay you open (or re-open) first moves focus there, so it opens on the monitor under the pointer. This replaces the old `--no-focus-follows-mouse` flag and `CDE_FOCUS_FOLLOWS_MOUSE` variable, which are gone.
 
 ### `restore-session`
 

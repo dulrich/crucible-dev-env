@@ -196,6 +196,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         keeps_pin: bool,
         args: impl FnOnce(&Path) -> Vec<OsString>,
     ) {
+        // A hover enter held back by the previous overlay moves focus first, so this one opens on
+        // the pointer's output.
+        self.apply_deferred_hover();
         self.pin_event(PinEvent::OpenOverlay { keeps_pin });
         let what = match kind {
             OverlayKind::Picker => "picker",
@@ -212,13 +215,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
             (OpenDecision::Ignore, _) => return,
             (
                 OpenDecision::Refocus,
-                Some(Overlay {
-                    element: Some(element),
-                    ..
-                }),
+                Some(
+                    overlay @ Overlay {
+                        element: Some(_), ..
+                    },
+                ),
             ) => {
-                self.space.raise_element(&element, true);
-                self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element)));
+                // Re-place on the focused output (it may have moved), raise and refocus.
+                if let Some(element) = overlay.element.clone() {
+                    self.map_overlay(overlay, element);
+                }
                 return;
             }
             (OpenDecision::Refocus, _) => return,

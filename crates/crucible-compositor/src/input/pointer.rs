@@ -16,7 +16,7 @@ use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 
 use tracing::{info, warn};
 
-use super::modal::{InputMode, hover_moves_focus, hover_tracks, press_route};
+use super::modal::{InputMode, hover_defers, hover_moves_focus, hover_tracks, press_route};
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
 use crate::state::{Backend, CrucibleState, HoverTarget, hover_entered, hover_pane_key};
@@ -362,9 +362,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let mut stored = self.hover_target.take();
         let entered = hover_entered(&mut stored, current);
         self.hover_target = stored;
-        if !hover_moves_focus(mode, entered, self.pointer.is_grabbed()) {
+        let grabbed = self.pointer.is_grabbed();
+        if hover_defers(mode, entered, grabbed) {
+            self.hover_deferred = true;
+        }
+        if !hover_moves_focus(mode, entered, grabbed) {
             return;
         }
+        self.hover_deferred = false;
         let managed = element_under.and_then(|w| w.window_id());
         match (self.hover_target.clone(), managed) {
             (Some(HoverTarget::Pane(_)), Some(id)) => {
@@ -379,6 +384,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
             (Some(HoverTarget::Output(output)), _) => self.focus_output(&output),
             _ => {}
         }
+    }
+
+    /// Applies a hover enter that a mapped overlay held back ([`hover_defers`]): with
+    /// focus-follows-mouse on, focus moves to what is under the pointer now, as if the pointer had
+    /// just entered it. Called before an overlay opens, so it opens on the pointer's output rather
+    /// than where the previous overlay was. Nothing moves when no enter was deferred, so
+    /// keyboard-driven focus is kept.
+    pub(crate) fn apply_deferred_hover(&mut self) {
+        if !std::mem::take(&mut self.hover_deferred) || !self.focus_follows_mouse {
+            return;
+        }
+        self.hover_target = None;
+        self.focus_follows_pointer(&InputMode::Normal);
     }
 
     /// Raises `window` in the [`Space`](smithay::desktop::Space) and gives it keyboard focus.

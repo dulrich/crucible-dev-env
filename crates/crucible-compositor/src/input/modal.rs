@@ -98,6 +98,13 @@ pub(super) fn hover_moves_focus<O>(mode: &InputMode<O>, entered: bool, grabbed: 
     entered && !grabbed && matches!(mode, InputMode::Normal)
 }
 
+/// Whether a hover enter is held back by a mapped overlay (rather than by a grab): it is deferred
+/// to the next overlay open, which applies it so the overlay opens on the pointer's output.
+#[must_use]
+pub(super) fn hover_defers<O>(mode: &InputMode<O>, entered: bool, grabbed: bool) -> bool {
+    entered && !grabbed && mode.has_overlay()
+}
+
 /// Whether a chord closes the mapped overlay before it runs: the keyboard twin of the click rule
 /// ([`press_route`]), so a workspace verb never leaves an overlay stranded over another
 /// workspace. Overlay-opening chords are exempt (they replace or toggle the overlay themselves),
@@ -182,6 +189,18 @@ mod tests {
     fn overlay_hover_moves_no_focus_but_still_tracks() {
         assert!(!hover_moves_focus(&overlay(), true, false));
         assert!(hover_tracks(&overlay()));
+    }
+
+    #[test]
+    fn only_an_overlay_defers_a_hover_enter() {
+        assert!(hover_defers(&overlay(), true, false));
+        assert!(!hover_defers(&overlay(), false, false), "no enter");
+        assert!(!hover_defers(&overlay(), true, true), "grabbed");
+        assert!(
+            !hover_defers(&normal(), true, false),
+            "normal mode moves focus instead"
+        );
+        assert!(!hover_defers(&locked(), true, false));
     }
 
     #[test]
