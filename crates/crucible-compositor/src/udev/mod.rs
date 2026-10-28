@@ -20,8 +20,9 @@
 //! 5. **VT switching** — [`SessionEvent::PauseSession`]/[`SessionEvent::ActivateSession`] suspend and
 //!    resume libinput and the DRM devices so `Ctrl+Alt+F<n>` VT switches work.
 //!
-//! Selected at runtime via `--tty-udev`. Compared to anvil this backend omits DMA-BUF
-//! feedback, `drm_syncobj`, DRM leasing, the on-screen FPS overlay, DnD-icon
+//! Selected at runtime via `--tty-udev`. `zwp_linux_dmabuf_v1` is advertised with default feedback
+//! from the primary GPU plus per-output render/scanout feedback (see [`output`] and [`render`]).
+//! Compared to anvil this backend omits `drm_syncobj`, DRM leasing, the on-screen FPS overlay, DnD-icon
 //! rendering, and the multi-GPU pointer-texture cache; CDE draws its self-contained default cursor
 //! via [`PointerElement`](crate::drawing::PointerElement) just like the winit path.
 //!
@@ -49,11 +50,12 @@ use std::time::Duration;
 
 use smithay::{
     backend::{
+        allocator::dmabuf::Dmabuf,
         drm::{DrmDeviceFd, DrmNode, NodeType},
         input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
-            ImportMemWl,
+            ImportDma, ImportMemWl,
             element::AsRenderElements,
             gles::GlesRenderer,
             multigpu::{GpuManager, MultiRenderer, gbm::GbmGlesBackend},
@@ -67,6 +69,9 @@ use smithay::{
         calloop::EventLoop,
         input::{DeviceCapability, Libinput},
         wayland_server::{Display, protocol::wl_surface::WlSurface},
+    },
+    wayland::dmabuf::{
+        DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
     },
 };
 use tracing::{error, info, warn};
@@ -119,6 +124,46 @@ pub struct UdevData {
     pointer_element: PointerElement,
     /// Keyboards currently present, tracked so LED state can be pushed to them.
     keyboards: Vec<smithay::reexports::input::Device>,
+    /// The `zwp_linux_dmabuf_v1` state and global; `None` until the primary renderer exists (or
+    /// when it could not be created).
+    dmabuf_state: Option<(DmabufState, DmabufGlobal)>,
+}
+
+impl DmabufHandler for CrucibleState<UdevData> {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        // The global only exists once `dmabuf_state` is `Some`, so no client can reach this handler
+        // before it is filled in.
+        &mut self
+            .backend_data
+            .dmabuf_state
+            .as_mut()
+            .expect("dmabuf requests only arrive after the global is created")
+            .0
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        let primary_gpu = self.backend_data.primary_gpu;
+        // Import directly through the primary GPU's own GLES renderer (not the `MultiRenderer`
+        // import path, which may succeed on another GPU and record that node on the dmabuf), so
+        // `set_node(primary_gpu)` below is always true.
+        let imported = match self.backend_data.gpus.single_renderer(&primary_gpu) {
+            Ok(mut renderer) => AsMut::<GlesRenderer>::as_mut(&mut renderer)
+                .import_dmabuf(&dmabuf, None)
+                .is_ok(),
+            Err(_) => false,
+        };
+        if imported {
+            dmabuf.set_node(primary_gpu);
+            let _ = notifier.successful::<CrucibleState<UdevData>>();
+        } else {
+            notifier.failed();
+        }
+    }
 }
 
 impl Backend for UdevData {
@@ -213,6 +258,7 @@ pub fn run_udev() {
         backends: HashMap::new(),
         pointer_element: PointerElement::default(),
         keyboards: Vec::new(),
+        dmabuf_state: None,
     };
     let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
     state.apply_config(crate::config::load_startup_config());
@@ -320,6 +366,30 @@ pub fn run_udev() {
         {
             error!("Skipping device {device_id}: {err}");
         }
+    }
+
+    // Advertise linux-dmabuf with the primary GPU's formats. This must exist before any client can
+    // connect (`start_session` may spawn restored apps; `start_xwayland` follows). Per-output
+    // feedback is computed independently at connect time.
+    match state.backend_data.gpus.single_renderer(&primary_gpu) {
+        Ok(renderer) => {
+            let formats = renderer.dmabuf_formats();
+            match DmabufFeedbackBuilder::new(primary_gpu.dev_id(), formats).build() {
+                Ok(default_feedback) => {
+                    let mut dmabuf_state = DmabufState::new();
+                    let global = dmabuf_state
+                        .create_global_with_default_feedback::<CrucibleState<UdevData>>(
+                            &display_handle,
+                            &default_feedback,
+                        );
+                    state.backend_data.dmabuf_state = Some((dmabuf_state, global));
+                }
+                Err(err) => {
+                    warn!(%err, "Failed to build dmabuf default feedback; running without linux-dmabuf")
+                }
+            }
+        }
+        Err(err) => warn!(%err, "No primary renderer; running without linux-dmabuf"),
     }
 
     // The initial connectors registered their outputs synchronously above (`device_added` ->

@@ -18,9 +18,11 @@ use std::time::{Duration, Instant};
 
 use smithay::{
     backend::{
+        allocator::dmabuf::Dmabuf,
+        egl::EGLDevice,
         renderer::{
-            ImportMemWl, damage::Error as OutputDamageTrackerError, damage::OutputDamageTracker,
-            gles::GlesRenderer,
+            ImportDma, ImportMemWl, damage::Error as OutputDamageTrackerError,
+            damage::OutputDamageTracker, gles::GlesRenderer,
         },
         winit::{self, WinitEvent},
     },
@@ -29,6 +31,9 @@ use smithay::{
         calloop::EventLoop, wayland_server::Display, winit::event_loop::pump_events::PumpStatus,
     },
     utils::{Scale, Transform},
+    wayland::dmabuf::{
+        DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
+    },
 };
 use tracing::{error, info, warn};
 
@@ -53,6 +58,33 @@ pub struct WinitData {
     backend: winit::WinitGraphicsBackend<GlesRenderer>,
     /// Damage tracker for the single winit output.
     damage_tracker: OutputDamageTracker,
+    /// The `zwp_linux_dmabuf_v1` state and global (created before the first client can connect).
+    dmabuf_state: (DmabufState, DmabufGlobal),
+}
+
+impl DmabufHandler for CrucibleState<WinitData> {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.backend_data.dmabuf_state.0
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        if self
+            .backend_data
+            .backend
+            .renderer()
+            .import_dmabuf(&dmabuf, None)
+            .is_ok()
+        {
+            let _ = notifier.successful::<CrucibleState<WinitData>>();
+        } else {
+            notifier.failed();
+        }
+    }
 }
 
 impl Backend for WinitData {
@@ -91,7 +123,7 @@ pub fn run_winit() {
     let display: Display<CrucibleState<WinitData>> = Display::new().unwrap();
     let mut display_handle = display.handle();
 
-    let (backend, mut winit) = match winit::init::<GlesRenderer>() {
+    let (mut backend, mut winit) = match winit::init::<GlesRenderer>() {
         Ok(ret) => ret,
         Err(err) => {
             error!("Failed to initialize winit backend: {}", err);
@@ -124,9 +156,51 @@ pub fn run_winit() {
     output.set_preferred(mode);
 
     let damage_tracker = OutputDamageTracker::from_output(&output);
+
+    // linux-dmabuf: v5 with default feedback when EGL device discovery yields a render node,
+    // otherwise a plain v3 format list. Created here, before `start_session`, so it exists before
+    // any client can connect; nested startup never fails because of it.
+    let dmabuf_formats = backend.renderer().dmabuf_formats();
+    let render_node = EGLDevice::device_for_display(backend.renderer().egl_context().display())
+        .and_then(|device| device.try_get_render_node());
+    let default_feedback = match render_node {
+        Ok(Some(node)) => {
+            match DmabufFeedbackBuilder::new(node.dev_id(), dmabuf_formats.clone()).build() {
+                Ok(feedback) => Some(feedback),
+                Err(err) => {
+                    warn!(%err, "failed to build dmabuf feedback, dmabuf will use v3");
+                    None
+                }
+            }
+        }
+        Ok(None) => {
+            warn!("failed to query render node, dmabuf will use v3");
+            None
+        }
+        Err(err) => {
+            warn!(
+                ?err,
+                "failed to get egl device for display, dmabuf will use v3"
+            );
+            None
+        }
+    };
+    let mut dmabuf_state = DmabufState::new();
+    let dmabuf_global = match default_feedback {
+        Some(feedback) => dmabuf_state
+            .create_global_with_default_feedback::<CrucibleState<WinitData>>(
+                &display_handle,
+                &feedback,
+            ),
+        None => {
+            dmabuf_state.create_global::<CrucibleState<WinitData>>(&display_handle, dmabuf_formats)
+        }
+    };
+
     let data = WinitData {
         backend,
         damage_tracker,
+        dmabuf_state: (dmabuf_state, dmabuf_global),
     };
 
     let mut state = CrucibleState::init(display, event_loop.handle(), data, true);

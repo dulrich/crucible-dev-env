@@ -11,19 +11,26 @@
 
 use smithay::{
     backend::{
-        allocator::gbm::GbmAllocator,
+        allocator::{format::FormatSet, gbm::GbmAllocator},
         drm::{
-            DrmDeviceFd, DrmNode,
+            DrmDeviceFd, DrmNode, DrmSurface,
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputRenderElements},
+        },
+        renderer::{
+            ImportDma,
+            gles::GlesRenderer,
+            multigpu::{GpuManager, gbm::GbmGlesBackend},
         },
     },
     desktop::{Space, utils::OutputPresentationFeedback},
     output::{Mode as WlMode, Output, PhysicalProperties},
     reexports::{
         drm::control::{ModeTypeFlags, connector, crtc},
+        wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags,
         wayland_server::{DisplayHandle, backend::GlobalId},
     },
+    wayland::dmabuf::{DmabufFeedback, DmabufFeedbackBuilder},
 };
 use smithay_drm_extras::display_info;
 use tracing::{debug, info, warn};
@@ -47,6 +54,83 @@ pub(super) struct UdevOutputId {
     pub crtc: crtc::Handle,
 }
 
+/// The dmabuf feedback a surface on one output is sent, depending on whether it was scanned out.
+#[derive(Debug, Clone)]
+pub(super) struct SurfaceDmabufFeedback {
+    /// Sent while the surface is composited: render-node tranche only.
+    pub render_feedback: DmabufFeedback,
+    /// Sent while the surface is (or nearly) scanned out: leads with the plane-format tranche.
+    pub scanout_feedback: DmabufFeedback,
+}
+
+/// The formats of the scanout tranche: the plane formats that can also be rendered.
+///
+/// Limiting the tranche to renderable formats guarantees a composition fallback when a client
+/// buffer cannot be scanned out directly.
+fn scanout_tranche_formats(plane_formats: &FormatSet, render_formats: &FormatSet) -> FormatSet {
+    plane_formats
+        .intersection(render_formats)
+        .copied()
+        .collect()
+}
+
+/// Computes the render and scanout dmabuf feedback for a surface on `scanout_node`.
+///
+/// Mirrors anvil's `get_surface_dmabuf_feedback`; `None` when a renderer is unavailable or a
+/// feedback cannot be built (the surface then keeps the global's default feedback).
+fn get_surface_dmabuf_feedback(
+    primary_gpu: DrmNode,
+    render_node: Option<DrmNode>,
+    scanout_node: DrmNode,
+    gpus: &mut GpuManager<GbmGlesBackend<GlesRenderer, DrmDeviceFd>>,
+    surface: &DrmSurface,
+) -> Option<SurfaceDmabufFeedback> {
+    let primary_formats = gpus.single_renderer(&primary_gpu).ok()?.dmabuf_formats();
+    let render_formats = match render_node {
+        Some(render_node) => gpus.single_renderer(&render_node).ok()?.dmabuf_formats(),
+        None => FormatSet::default(),
+    };
+    let all_render_formats: FormatSet = primary_formats
+        .iter()
+        .chain(render_formats.iter())
+        .copied()
+        .collect();
+
+    let planes = surface.planes().clone();
+    let plane_formats: FormatSet = surface
+        .plane_info()
+        .formats
+        .iter()
+        .copied()
+        .chain(planes.overlay.into_iter().flat_map(|plane| plane.formats))
+        .collect();
+    let scanout_formats = scanout_tranche_formats(&plane_formats, &all_render_formats);
+
+    let builder = DmabufFeedbackBuilder::new(primary_gpu.dev_id(), primary_formats);
+    let render_feedback = match render_node {
+        Some(render_node) => builder
+            .clone()
+            .add_preference_tranche(render_node.dev_id(), None, render_formats.clone())
+            .build()
+            .ok()?,
+        None => builder.clone().build().ok()?,
+    };
+    let scanout_feedback = builder
+        .add_preference_tranche(
+            surface.device_fd().dev_id().ok()?,
+            Some(TrancheFlags::Scanout),
+            scanout_formats,
+        )
+        .add_preference_tranche(scanout_node.dev_id(), None, render_formats)
+        .build()
+        .ok()?;
+
+    Some(SurfaceDmabufFeedback {
+        render_feedback,
+        scanout_feedback,
+    })
+}
+
 /// One mapped output (connector/CRTC) on a DRM device.
 ///
 /// Holds the Smithay [`Output`], its `wl_output` global, and the [`DrmOutput`] that owns the
@@ -65,6 +149,8 @@ pub(super) struct SurfaceData {
         Option<OutputPresentationFeedback>,
         DrmDeviceFd,
     >,
+    /// Per-output dmabuf feedback sent after each frame; `None` keeps the default feedback.
+    pub dmabuf_feedback: Option<SurfaceDmabufFeedback>,
 }
 
 impl Drop for SurfaceData {
@@ -287,11 +373,22 @@ impl CrucibleState<UdevData> {
             }
         };
 
+        let dmabuf_feedback = drm_output.with_compositor(|compositor| {
+            get_surface_dmabuf_feedback(
+                self.backend_data.primary_gpu,
+                device.render_node,
+                node,
+                &mut self.backend_data.gpus,
+                compositor.surface(),
+            )
+        });
+
         let surface = SurfaceData {
             dh: self.display_handle.clone(),
             output,
             global: Some(global),
             drm_output,
+            dmabuf_feedback,
         };
         device.surfaces.insert(crtc, surface);
 
@@ -323,5 +420,40 @@ impl CrucibleState<UdevData> {
         for key in &plan.remove {
             drop_mapped_output(self, *key);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::backend::allocator::{Format, Fourcc, Modifier};
+
+    fn fmt(code: Fourcc) -> Format {
+        Format {
+            code,
+            modifier: Modifier::Linear,
+        }
+    }
+
+    #[test]
+    fn scanout_tranche_keeps_only_renderable_plane_formats() {
+        let planes: FormatSet = [fmt(Fourcc::Argb8888), fmt(Fourcc::Nv12)]
+            .into_iter()
+            .collect();
+        let render: FormatSet = [fmt(Fourcc::Argb8888), fmt(Fourcc::Abgr8888)]
+            .into_iter()
+            .collect();
+        let tranche = scanout_tranche_formats(&planes, &render);
+        assert_eq!(
+            tranche.iter().copied().collect::<Vec<_>>(),
+            vec![fmt(Fourcc::Argb8888)]
+        );
+    }
+
+    #[test]
+    fn scanout_tranche_is_empty_when_nothing_overlaps() {
+        let planes: FormatSet = [fmt(Fourcc::Nv12)].into_iter().collect();
+        let render: FormatSet = [fmt(Fourcc::Argb8888)].into_iter().collect();
+        assert_eq!(scanout_tranche_formats(&planes, &render).iter().count(), 0);
     }
 }

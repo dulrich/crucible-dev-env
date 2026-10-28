@@ -613,11 +613,14 @@ impl<B: Backend + 'static> smithay::wayland::shell::xdg::decoration::XdgDecorati
 delegate_dispatch2!(@<B: Backend + 'static> CrucibleState<B>);
 
 use smithay::{
-    backend::renderer::element::{RenderElementStates, default_primary_scanout_output_compare},
+    backend::renderer::element::{
+        RenderElementStates, default_primary_scanout_output_compare, utils::select_dmabuf_feedback,
+    },
     desktop::utils::{
         OutputPresentationFeedback, surface_presentation_feedback_flags_from_states,
         surface_primary_scanout_output, update_surface_primary_scanout_output,
     },
+    wayland::dmabuf::DmabufFeedback,
 };
 
 /// Records, for every surface on `output`, which output actually scanned it out this frame.
@@ -654,6 +657,44 @@ pub fn update_primary_scanout_output(
                 render_element_states,
                 default_primary_scanout_output_compare,
             );
+        });
+    }
+}
+
+/// Sends each surface on `output` (windows overlapping it, and its layer surfaces) the dmabuf
+/// feedback matching how it was just presented, so clients can allocate scanout-capable buffers.
+///
+/// Walks the same set as [`update_primary_scanout_output`]; mirrors anvil's `post_repaint`.
+pub fn send_dmabuf_feedback(
+    space: &Space<WindowElement>,
+    output: &Output,
+    render_element_states: &RenderElementStates,
+    render_feedback: &DmabufFeedback,
+    scanout_feedback: &DmabufFeedback,
+) {
+    space.elements().for_each(|window| {
+        if space.outputs_for_element(window).contains(output) {
+            window
+                .0
+                .send_dmabuf_feedback(output, surface_primary_scanout_output, |surface, _| {
+                    select_dmabuf_feedback(
+                        surface,
+                        render_element_states,
+                        render_feedback,
+                        scanout_feedback,
+                    )
+                });
+        }
+    });
+    let map = smithay::desktop::layer_map_for_output(output);
+    for layer_surface in map.layers() {
+        layer_surface.send_dmabuf_feedback(output, surface_primary_scanout_output, |surface, _| {
+            select_dmabuf_feedback(
+                surface,
+                render_element_states,
+                render_feedback,
+                scanout_feedback,
+            )
         });
     }
 }

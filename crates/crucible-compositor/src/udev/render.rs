@@ -32,7 +32,10 @@ use tracing::{debug, error, warn};
 
 use crate::{
     render::{FrameView, frame_elements},
-    state::{CrucibleState, take_presentation_feedback, update_primary_scanout_output},
+    state::{
+        CrucibleState, send_dmabuf_feedback, take_presentation_feedback,
+        update_primary_scanout_output,
+    },
 };
 
 use super::UdevData;
@@ -280,6 +283,15 @@ impl CrucibleState<UdevData> {
             self.space.elements().for_each(|window| {
                 window.send_frame(&output, now, throttle, |_, _| Some(output.clone()));
             });
+            if let Some(fb) = surface.dmabuf_feedback.as_ref() {
+                send_dmabuf_feedback(
+                    &self.space,
+                    &output,
+                    &states,
+                    &fb.render_feedback,
+                    &fb.scanout_feedback,
+                );
+            }
             Ok(rendered)
         });
 
