@@ -26,6 +26,8 @@ use crucible_keys::Bindings;
 
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::delegate_dispatch2;
+use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
+use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::{
     desktop::{PopupManager, Space},
     input::{
@@ -176,6 +178,9 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub primary_selection_state: PrimarySelectionState,
     /// `xwayland_shell_v1` global state (lets XWayland associate `wl_surface`s with X11 windows).
     pub xwayland_shell_state: XWaylandShellState,
+    /// `zxdg_decoration_manager_v1` global state: CDE answers server-side for every toplevel (and
+    /// draws no frame), so toolkits such as winit never draw their own title bar.
+    pub xdg_decoration_state: smithay::wayland::shell::xdg::decoration::XdgDecorationState,
     /// `wl_seat` state managing seats and their capabilities.
     pub seat_state: SeatState<CrucibleState<B>>,
 
@@ -382,6 +387,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
+        let xdg_decoration_state =
+            smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<Self>(&dh);
         let session_lock = crate::lock::SessionLock::new(
             smithay::wayland::session_lock::SessionLockManagerState::new::<Self, _>(&dh, |_| true),
         );
@@ -423,6 +430,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             data_device_state,
             primary_selection_state,
             xwayland_shell_state,
+            xdg_decoration_state,
             seat_state,
             seat,
             pointer,
@@ -565,6 +573,38 @@ impl<B: Backend + 'static> XWaylandShellHandler for CrucibleState<B> {
     }
 }
 
+/// The decoration mode CDE answers for every toplevel, whatever the client asked for: server-side.
+/// CDE tiles every window and draws its own focus ring, and draws no title bar, so a client must
+/// never draw one either.
+fn decoration_mode(_requested: Option<DecorationMode>) -> DecorationMode {
+    DecorationMode::ServerSide
+}
+
+/// Sets [`decoration_mode`] as `toplevel`'s pending mode, and re-configures it when its initial
+/// configure already went out (before that, the initial configure carries it).
+fn apply_decoration_mode(toplevel: &ToplevelSurface, requested: Option<DecorationMode>) {
+    toplevel.with_pending_state(|state| state.decoration_mode = Some(decoration_mode(requested)));
+    if toplevel.is_initial_configure_sent() {
+        toplevel.send_pending_configure();
+    }
+}
+
+impl<B: Backend + 'static> smithay::wayland::shell::xdg::decoration::XdgDecorationHandler
+    for CrucibleState<B>
+{
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        apply_decoration_mode(&toplevel, None);
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
+        apply_decoration_mode(&toplevel, Some(mode));
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        apply_decoration_mode(&toplevel, None);
+    }
+}
+
 // This Smithay rev replaces the per-protocol `delegate_*!` macros with a single
 // `delegate_dispatch2!` that provides `Dispatch`/`GlobalDispatch` for *every* protocol whose
 // per-resource user data implements `Dispatch2`/`GlobalDispatch2` (i.e. every global initialized
@@ -661,4 +701,20 @@ pub fn take_presentation_feedback(
     }
 
     output_presentation_feedback
+}
+
+#[cfg(test)]
+mod decoration_tests {
+    use super::{DecorationMode, decoration_mode};
+
+    #[test]
+    fn every_request_is_answered_server_side() {
+        for requested in [
+            None,
+            Some(DecorationMode::ClientSide),
+            Some(DecorationMode::ServerSide),
+        ] {
+            assert_eq!(decoration_mode(requested), DecorationMode::ServerSide);
+        }
+    }
 }
