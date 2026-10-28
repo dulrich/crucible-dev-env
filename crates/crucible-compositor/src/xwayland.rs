@@ -26,6 +26,7 @@
 //! from the client.
 
 use std::os::unix::io::OwnedFd;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use smithay::{
@@ -71,6 +72,47 @@ fn xwayland_scale(env_value: Option<&str>) -> f64 {
         .and_then(|s| s.trim().parse::<f64>().ok())
         .filter(|scale| *scale > 0.0)
         .unwrap_or(1.0)
+}
+
+/// The X resources file loaded into XWayland: `$HOME/.Xresources` when it exists. **Pure** (takes
+/// `home` and an existence check) so it is unit-testable.
+fn xresources_file(home: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let file = home?.join(".Xresources");
+    exists(&file).then_some(file)
+}
+
+/// Loads `~/.Xresources` into the new X server, as an X session's startup would (`xrdb -merge`),
+/// so X11 apps such as urxvt see their resources. Runs only when the file exists; a missing `xrdb`
+/// is logged at debug and a failed merge as a warning. Never blocks the event loop: the child is
+/// reaped on a thread.
+fn merge_xresources(display_number: u32) {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let Some(file) = xresources_file(home.as_deref(), Path::is_file) else {
+        return;
+    };
+    let child = std::process::Command::new("xrdb")
+        .arg("-merge")
+        .arg(&file)
+        .env("DISPLAY", format!(":{display_number}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match child {
+        Ok(mut child) => {
+            std::thread::spawn(move || match child.wait() {
+                Ok(status) if status.success() => {
+                    info!(file = %file.display(), "merged X resources into XWayland");
+                }
+                Ok(status) => warn!(file = %file.display(), %status, "xrdb -merge failed"),
+                Err(err) => warn!(%err, "xrdb -merge could not be waited on"),
+            });
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            debug!("xrdb not installed; X resources not loaded");
+        }
+        Err(err) => warn!(%err, "xrdb -merge could not be started"),
+    }
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
@@ -129,6 +171,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                                 display = display_number,
                                 "XWayland ready (DISPLAY=:{display_number})"
                             );
+                            merge_xresources(display_number);
                         }
                         Err(err) => error!(%err, "Failed to attach X11 window manager"),
                     }
@@ -319,7 +362,19 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::xwayland_scale;
+    use super::{xresources_file, xwayland_scale};
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn xresources_file_is_home_xresources_when_present() {
+        let home = Path::new("/home/u");
+        assert_eq!(
+            xresources_file(Some(home), |_| true),
+            Some(PathBuf::from("/home/u/.Xresources"))
+        );
+        assert_eq!(xresources_file(Some(home), |_| false), None);
+        assert_eq!(xresources_file(None, |_| true), None);
+    }
 
     #[test]
     fn scale_defaults_to_one_when_unset() {

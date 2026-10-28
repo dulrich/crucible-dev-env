@@ -191,6 +191,10 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 
 See the table in the README.
 
+### X11 apps (XWayland)
+
+Not a config key. When XWayland starts, CDE loads `$HOME/.Xresources` into it with `xrdb -merge` (when the file exists and `xrdb` is installed), as an X session's startup would, so X11 apps such as urxvt get their resources. Edits take effect on the next CDE start, or run `xrdb -merge ~/.Xresources` yourself from a CDE terminal.
+
 ## Complete example
 
 ```kdl
