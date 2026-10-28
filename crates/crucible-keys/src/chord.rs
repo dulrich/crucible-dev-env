@@ -32,8 +32,8 @@
 //! | `Super+Ctrl+[`        | `MoveWorkspaceToOutput(-1)`    | `World::move_workspace_to_output` |
 //! | `Super+<0-9>`         | `Slot(n)`                      | open the workspace pinned to slot n |
 //! | `Super+Shift+<0-9>`   | `PinSlot(n)`                   | pin the active workspace to slot n |
-//! | `Super+P`             | `OpenPicker`                   | fuzzy workspace picker (WP-5)     |
-//! | `Super+Shift+R`       | `RenameWorkspace`              | rename the active workspace (WP-5)|
+//! | `Super+P`             | `OpenPicker`                   | fuzzy workspace picker           |
+//! | `Super+Shift+R`       | `RenameWorkspace`              | rename the active workspace     |
 //! | `Super+Escape`        | `Lock`                         | spawn `lock-command` (screen lock) |
 //! | `Ctrl+Alt+F<n>`       | `VtSwitch(n)`                  | backend VT switch (hard-wired, independent of `Super`) |
 //!

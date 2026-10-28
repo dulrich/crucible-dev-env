@@ -19,10 +19,9 @@
 //! translates every rect by it ([`Rect::translate`]); without that, a second output mirrors the
 //! first output's chrome and never shows its own.
 //!
-//! ## Phase 3 seam
-//! The constants below (`ENABLE_CHROME`, `BORDER_THICKNESS`, `BORDER_COLOR`, …) are hard-coded for
-//! Phase 2.  Phase 3 should source them from `crucible-config` (KDL) and pass them in; the helpers
-//! already accept all geometry parameters explicitly so they need no changes.
+//! ## Constants
+//! The tile ring and gap come from `TilingConfig`; the constants below (`BORDER_THICKNESS`,
+//! `BORDER_COLOR`, the pip sizes and colours) are the fixed overlay border and pip styling.
 
 use smithay::backend::renderer::{
     element::{Id, Kind, solid::SolidColorRenderElement},
@@ -38,7 +37,7 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
-// Hardcoded chrome constants — Phase 3 replaces these with crucible-config values.
+// Fixed chrome styling constants.
 // ---------------------------------------------------------------------------
 
 /// Set to `false` to disable all compositor chrome (focus border + stack badges).

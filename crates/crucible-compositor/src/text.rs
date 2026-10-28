@@ -1,5 +1,5 @@
 //! Compositor-drawn text: font resolution, `fontdue` rasterization, and a cached Smithay
-//! [`MemoryRenderBuffer`] render element (plan 06 WP-5; consumed by the WP-6 header row).
+//! [`MemoryRenderBuffer`] render element (consumed by the [`crate::header`] row).
 //!
 //! ## Font resolution
 //! [`resolve_font_path`]: an explicit override path → else `fc-match -f '%{file}' <family>` (the
@@ -211,7 +211,7 @@ impl TextRenderer {
     }
 
     /// Width in pixels `text` lays out to at `px` (no rasterization); `None` when text is
-    /// disabled. Used by the WP-6 header to size segments and hit-test clicks.
+    /// disabled. Used by the header to size segments and hit-test clicks.
     pub fn measure(&self, text: &str, px: u32) -> Option<i32> {
         use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
         let font = self.font.as_ref()?;

@@ -2,7 +2,7 @@
 //!
 //! Every entity in the model (`Window`, `Pane`, `Workspace`, `Output`) is referred to by a `Copy`
 //! newtype id over `u64` rather than by reference (decision #5 in `plans/02-tiling-model.md`). This
-//! keeps the model `Clone` and serde-friendly (Phase 3) and lets the compositor hold a stable
+//! keeps the model `Clone` and serde-friendly and lets the compositor hold a stable
 //! `WindowId ↔ WindowElement` map.
 //!
 //! Ids are handed out by a monotonically increasing [`IdGen`] held inside the `World`, so an id is
@@ -46,7 +46,7 @@ macro_rules! define_id {
         pub struct $name(u64);
 
         impl $name {
-            /// Wraps a raw `u64` as this id. Primarily for tests and (Phase 3) deserialization.
+            /// Wraps a raw `u64` as this id. Primarily for tests and deserialization.
             #[must_use]
             pub const fn from_raw(raw: u64) -> Self {
                 Self(raw)

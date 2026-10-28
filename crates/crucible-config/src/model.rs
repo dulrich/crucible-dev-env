@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 pub struct TerminalConfig {
     /// The command to spawn. `None` keeps the built-in resolution (`$TERMINAL`, else `foot`).
     pub command: Option<String>,
-    /// The flag a terminal takes to run a program (`-e` for most); used by WP-5/WP-6 launchers.
+    /// The flag a terminal takes to run a program (`-e` for most); used by the overlay and wrapper launches.
     pub exec_flag: String,
 }
 

@@ -2,8 +2,8 @@
 //!
 //! [`load_startup_config`] reads the config file once at startup (a parse error is logged with its
 //! line/column and falls back to defaults). [`CrucibleState::apply_config`] swaps bindings, tiling,
-//! terminal and focus-follows-mouse on a live state; it is the single entry point WP-5's reload
-//! timer calls. The decision logic is in the pure [`plan_bindings`]/[`pick_terminal`] so it is
+//! terminal and focus-follows-mouse on a live state; it is the single entry point the persist tick
+//! calls on a config reload. The decision logic is in the pure [`plan_bindings`]/[`pick_terminal`] so it is
 //! unit-tested without a compositor.
 
 use crucible_config::{Config, ConfigError};
@@ -75,7 +75,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// the old table and logs), swaps the tiling and re-applies the layout, and stores the terminal
     /// command/exec flag and focus-follows-mouse.
     ///
-    /// Public so WP-5's reload timer can call it; safe to call before any output exists.
+    /// Public so the persist tick's config reload can call it; safe to call before any output exists.
     pub fn apply_config(&mut self, config: Config) {
         let old_overlay_terminal = warm_key(&self.config, self.terminal_program());
         let (bindings, bind_error) = plan_bindings(&self.bindings, &config);

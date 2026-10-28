@@ -5,7 +5,7 @@
 //! dependency** so the layout logic can be exhaustively unit-tested without a running compositor —
 //! this is the near-TDD core of the project. See `AGENTS.md` for the canonical vocabulary.
 //!
-//! The model is `Clone` and free of `Rc`/`RefCell` so it can be cheaply snapshotted and (Phase 3)
+//! The model is `Clone` and free of `Rc`/`RefCell` so it can be cheaply snapshotted and
 //! serialized. The public surface is:
 //!
 //! - typed ids: [`WindowId`], [`PaneId`], [`WorkspaceId`], [`OutputId`];

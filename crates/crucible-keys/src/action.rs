@@ -81,7 +81,7 @@ pub enum Action {
     /// Create a new workspace on the focused output with an auto-generated name and switch to it.
     /// `Super+N`.
     ///
-    /// The fuzzy picker / interactive naming is **Phase 3**.
+    /// The name is auto-generated; renaming is [`Action::RenameWorkspace`].
     NewWorkspace,
     /// Move the focused window `delta` workspaces from the active one on the focused output
     /// (wraparound). `Super+Shift+]` (`1`) / `Super+Shift+[` (`-1`).
@@ -104,8 +104,7 @@ pub enum Action {
     /// (wraparound). `Super+Ctrl+]` (`1`) / `Super+Ctrl+[` (`-1`). No-op with one output.
     MoveWorkspaceToOutput(i64),
 
-    /// Open the fuzzy workspace picker. `Super+P`. Implemented by WP-5; until then the compositor
-    /// only logs that it is not available.
+    /// Open the fuzzy workspace picker. `Super+P`.
     OpenPicker,
     /// Open the program launcher (`crucible launch`). `Super+Return`.
     OpenLauncher,
@@ -114,7 +113,7 @@ pub enum Action {
     /// Show/hide the workspace header strip (`header { mode "toggle" }` only; a no-op otherwise).
     /// `Super+B`.
     ToggleHeader,
-    /// Rename the active workspace (interactive prompt). `Super+Shift+R`. Implemented by WP-5.
+    /// Rename the active workspace (interactive prompt). `Super+Shift+R`.
     RenameWorkspace,
     /// Spawn the configured `lock-command` (a screen locker, e.g. `swaylock`) detached. The lock
     /// itself starts only when the locker makes its `ext-session-lock-v1` request. `Super+Escape`.

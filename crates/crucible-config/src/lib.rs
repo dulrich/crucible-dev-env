@@ -8,7 +8,7 @@
 //!
 //! [`parse`] is pure; [`load`] adds exactly one file read. The crate knows nothing about chords or
 //! actions: `binds` entries are carried as raw `(chord, action)` strings and validated by
-//! `crucible-keys` (`Bindings::with_overrides`). Hot reload (WP-5) is the compositor's concern.
+//! `crucible-keys` (`Bindings::with_overrides`). Hot reload is the compositor's concern.
 //! The full schema is documented in `docs/config.md`.
 //!
 //! Layout: `error` (typed errors), `model` (the parsed data), `reader` (a located view of one

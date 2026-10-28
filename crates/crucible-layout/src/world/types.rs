@@ -90,7 +90,7 @@ pub struct Output {
     pub(super) stack: Stack<WorkspaceId>,
     /// The output's pixel geometry (position + size in the global/Space coordinate space).
     ///
-    /// `World::new()` and `add_output` seed this; the compositor keeps it in sync via
+    /// `add_output` seeds this (`World::new()` starts it as an empty `0x0` placeholder); the compositor keeps it in sync via
     /// [`World::set_output_rect`] with the live pixel size of the corresponding physical monitor.
     pub rect: Rect,
 }

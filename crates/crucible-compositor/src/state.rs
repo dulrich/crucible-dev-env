@@ -217,7 +217,7 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub hover_target: Option<HoverTarget>,
     /// Workspace persistence, IPC and picker state; see [`crate::persist`].
     pub persist: crate::persist::PersistState,
-    /// Workspace header strip toggle, Alt-tap detector and consumed-button record.
+    /// Workspace header strip toggle and consumed-button record.
     pub header: crate::header::HeaderState,
     /// Font + glyph cache for the header labels; disabled until the config selects a font.
     pub header_text: crate::text::TextRenderer,
