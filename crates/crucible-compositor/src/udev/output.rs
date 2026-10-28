@@ -334,17 +334,19 @@ impl CrucibleState<UdevData> {
             .first()
             .map_or((0, 0), |placement| placement.position);
 
+        // The configured scale (by connector name, e.g. `DP-1`) is set before mapping, so the Space
+        // geometry, the strip and the model rect are all logical from the start.
+        let scale = crate::config::configured_scale(&self.config, &output.name());
         output.set_preferred(wl_mode);
-        output.change_current_state(Some(wl_mode), None, None, Some(position.into()));
+        output.change_current_state(Some(wl_mode), None, Some(scale), Some(position.into()));
         self.space.map_output(&output, position);
         output.user_data().insert_if_missing(|| id);
 
         // Snapshot the data needed to register this connector with the model once the `device`
         // borrow is released (the registration must touch `self`, but `device` borrows `self`).
-        let mode_size = wl_mode.size;
         let register_output = output.clone();
         let register_rect =
-            crucible_layout::Rect::new(position.0, position.1, mode_size.w, mode_size.h);
+            crate::state::logical_output_rect(position, wl_mode.size, scale.fractional_scale());
 
         let planes = match drm_device.planes(&crtc) {
             Ok(planes) => planes,

@@ -301,6 +301,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Maps `element` as `overlay` and stores it in the slot.
     pub(super) fn map_overlay(&mut self, overlay: Overlay, element: WindowElement) {
+        let loc = self.size_overlay(&element);
+        self.map_unmanaged_element(element.clone(), loc);
+        self.space.raise_element(&element, true);
+        self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element.clone())));
+        self.persist.overlay.overlay = Some(Overlay {
+            element: Some(element),
+            ..overlay
+        });
+    }
+
+    /// Sizes `element` to the overlay rect of the focused output (pending toplevel size, or an X11
+    /// configure) and returns the location to map it at. Shared by [`Self::map_overlay`] and
+    /// [`Self::replace_mapped_overlay`].
+    fn size_overlay(&self, element: &WindowElement) -> Point<i32, smithay::utils::Logical> {
         let rect = overlay_rect(self.focused_output_rect());
         let size = Size::from((rect.width, rect.height));
         let loc = Point::from((rect.x, rect.y));
@@ -315,13 +329,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some(x11) = element.x11_surface() {
             let _ = x11.configure(Rectangle::new(loc, size));
         }
-        self.map_unmanaged_element(element.clone(), loc);
-        self.space.raise_element(&element, true);
-        self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(element.clone())));
-        self.persist.overlay.overlay = Some(Overlay {
-            element: Some(element),
-            ..overlay
-        });
+        loc
+    }
+
+    /// Re-places a mapped overlay after an output geometry change (a scale applied or changed).
+    /// Overlays are unmanaged, so `apply_layout` never moves them; no-op without a mapped overlay.
+    pub(crate) fn replace_mapped_overlay(&mut self) {
+        let Some(element) = self.mapped_overlay().cloned() else {
+            return;
+        };
+        let loc = self.size_overlay(&element);
+        self.space.map_element(element, loc, false);
     }
 
     /// The overlay's element, only once it is mapped.

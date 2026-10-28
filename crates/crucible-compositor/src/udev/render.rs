@@ -294,6 +294,11 @@ impl CrucibleState<UdevData> {
             }
             Ok(rendered)
         });
+        // Preferred fractional scale per surface, tracking its primary scan-out output (recorded
+        // above by `update_primary_scanout_output`).
+        if result.is_ok() {
+            self.update_fractional_scales(&output);
+        }
 
         let reschedule = match result {
             Ok(rendered) => !rendered,

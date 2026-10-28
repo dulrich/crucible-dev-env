@@ -105,28 +105,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.focus_follows_pointer(&mode);
     }
 
-    /// Clamps a pointer location to the bounding box of all mapped outputs.
+    /// Confines a pointer location to the union of all mapped outputs; see [`confine_to_outputs`].
     ///
-    /// With outputs laid out left-to-right (see the udev backend), the union is a single horizontal
-    /// strip, so this keeps the cursor on-screen while letting it move between adjacent outputs.
     /// Returns `pos` unchanged when no output is mapped.
     fn clamp_coords(&self, pos: Point<f64, Logical>) -> Point<f64, Logical> {
-        let mut bbox: Option<Rectangle<i32, Logical>> = None;
-        for output in self.space.outputs() {
-            if let Some(geo) = self.space.output_geometry(output) {
-                bbox = Some(match bbox {
-                    Some(acc) => acc.merge(geo),
-                    None => geo,
-                });
-            }
-        }
-        let Some(bbox) = bbox else {
-            return pos;
-        };
-        let bbox = bbox.to_f64();
-        let x = pos.x.clamp(bbox.loc.x, bbox.loc.x + bbox.size.w - 1.0);
-        let y = pos.y.clamp(bbox.loc.y, bbox.loc.y + bbox.size.h - 1.0);
-        (x, y).into()
+        let rects: Vec<Rectangle<i32, Logical>> = self
+            .space
+            .outputs()
+            .filter_map(|output| self.space.output_geometry(output))
+            .collect();
+        confine_to_outputs(pos, &rects)
     }
 
     /// Delivers a pointer button to the seat, moving keyboard focus on press.
@@ -412,5 +400,93 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
         }
         self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(window)));
+    }
+}
+
+/// Clamps `pos` into one output rect (inclusive of `loc`, last pixel at `loc + size - 1`).
+fn clamp_into(pos: Point<f64, Logical>, rect: Rectangle<i32, Logical>) -> Point<f64, Logical> {
+    let r = rect.to_f64();
+    let x = pos
+        .x
+        .clamp(r.loc.x, (r.loc.x + r.size.w - 1.0).max(r.loc.x));
+    let y = pos
+        .y
+        .clamp(r.loc.y, (r.loc.y + r.size.h - 1.0).max(r.loc.y));
+    (x, y).into()
+}
+
+/// Confines `pos` to the union of `outputs` (logical rects), not their bounding box.
+///
+/// A point inside some output is kept; otherwise it moves to the nearest point of the nearest
+/// output. With mixed scales the outputs have unequal logical heights, so the bounding box has a
+/// void below the shorter one; a point there lands on that output's bottom edge instead. Returns
+/// `pos` unchanged when `outputs` is empty.
+#[must_use]
+pub fn confine_to_outputs(
+    pos: Point<f64, Logical>,
+    outputs: &[Rectangle<i32, Logical>],
+) -> Point<f64, Logical> {
+    // Inside means `loc <= p < loc + size`, so sub-pixel motion across a shared edge never sticks.
+    let inside = outputs.iter().any(|r| {
+        let r = r.to_f64();
+        pos.x >= r.loc.x
+            && pos.x < r.loc.x + r.size.w
+            && pos.y >= r.loc.y
+            && pos.y < r.loc.y + r.size.h
+    });
+    if inside {
+        return pos;
+    }
+    let mut best: Option<(f64, Point<f64, Logical>)> = None;
+    for rect in outputs {
+        let clamped = clamp_into(pos, *rect);
+        let (dx, dy) = (clamped.x - pos.x, clamped.y - pos.y);
+        let dist = dx * dx + dy * dy;
+        if best.is_none_or(|(d, _)| dist < d) {
+            best = Some((dist, clamped));
+        }
+    }
+    best.map_or(pos, |(_, p)| p)
+}
+
+#[cfg(test)]
+mod confine_tests {
+    use super::*;
+
+    fn strip() -> [Rectangle<i32, Logical>; 2] {
+        [
+            Rectangle::new((0, 0).into(), (3840, 2160).into()),
+            Rectangle::new((3840, 0).into(), (1920, 1080).into()),
+        ]
+    }
+
+    #[test]
+    fn a_point_inside_an_output_is_kept() {
+        let p: Point<f64, Logical> = (4000.5, 900.25).into();
+        assert_eq!(confine_to_outputs(p, &strip()), p);
+        let p: Point<f64, Logical> = (100.0, 2000.0).into();
+        assert_eq!(confine_to_outputs(p, &strip()), p);
+    }
+
+    #[test]
+    fn below_the_shorter_output_lands_on_its_bottom_edge() {
+        let p = confine_to_outputs((5000.0, 1500.0).into(), &strip());
+        assert_eq!(p, (5000.0, 1079.0).into());
+    }
+
+    #[test]
+    fn beyond_the_strip_clamps_to_the_nearest_output() {
+        assert_eq!(
+            confine_to_outputs((-50.0, 3000.0).into(), &strip()),
+            (0.0, 2159.0).into()
+        );
+        assert_eq!(
+            confine_to_outputs((9000.0, -5.0).into(), &strip()),
+            (5759.0, 0.0).into()
+        );
+        assert_eq!(
+            confine_to_outputs((1.0, 2.0).into(), &[]),
+            (1.0, 2.0).into()
+        );
     }
 }

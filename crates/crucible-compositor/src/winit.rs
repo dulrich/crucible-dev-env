@@ -153,6 +153,10 @@ pub fn run_winit() {
         None,
         Some((0, 0).into()),
     );
+    let startup_config = crate::config::load_startup_config();
+    // The configured scale is set before mapping so the Space geometry and model rect are logical.
+    let scale = crate::config::configured_scale(&startup_config, OUTPUT_NAME);
+    output.change_current_state(None, None, Some(scale), None);
     output.set_preferred(mode);
 
     let damage_tracker = OutputDamageTracker::from_output(&output);
@@ -204,15 +208,19 @@ pub fn run_winit() {
     };
 
     let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
-    state.apply_config(crate::config::load_startup_config());
+    state.apply_config(startup_config);
     // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
     state.start_persistence();
     state
         .shm_state
         .update_formats(state.backend_data.backend.renderer().shm_formats());
     state.space.map_output(&output, (0, 0));
-    // Adopt the model's initial output for this single winit output and size it to the real pixels.
-    state.register_output(&output, crucible_layout::Rect::new(0, 0, size.w, size.h));
+    // Adopt the model's initial output for this single winit output and size it to its logical
+    // size (the window's pixels divided by the configured scale).
+    state.register_output(
+        &output,
+        crate::state::logical_output_rect((0, 0), size, scale.fractional_scale()),
+    );
     // The output exists now: restore the last session or open the cold-start picker.
     state.start_session();
 
@@ -321,6 +329,12 @@ pub fn run_winit() {
             let mut presented_locked = false;
             match render_res {
                 Ok(render_output_result) => {
+                    // Track primary scan-out so the fractional-scale walk below has an output.
+                    crate::state::update_primary_scanout_output(
+                        &state.space,
+                        &output,
+                        &render_output_result.states,
+                    );
                     if let Some(damage) = render_output_result.damage {
                         if let Err(err) = backend.submit(Some(damage)) {
                             warn!("Failed to submit buffer: {}", err);
@@ -359,6 +373,7 @@ pub fn run_winit() {
                 Some(output.clone())
             });
         });
+        state.update_fractional_scales(&output);
 
         let result = event_loop.dispatch(Some(Duration::from_millis(16)), &mut state);
         if result.is_err() {

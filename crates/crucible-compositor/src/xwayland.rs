@@ -64,14 +64,28 @@ const XWAYLAND_SCALE_ENV: &str = "CDE_XWAYLAND_SCALE";
 /// Resolves the scale applied to XWayland clients.
 ///
 /// X11 clients do not understand `wl_output` fractional scale, so CDE applies a per-client buffer
-/// scale instead. Reads [`XWAYLAND_SCALE_ENV`] (parsed as a positive `f64`), falling back to `1.0`
-/// when unset, unparseable, or non-positive. **Pure** (takes the raw env value) so it is
-/// unit-testable without a running compositor.
-fn xwayland_scale(env_value: Option<&str>) -> f64 {
+/// scale instead. Reads [`XWAYLAND_SCALE_ENV`] (parsed as a positive `f64`), falling back to
+/// `default` when unset, unparseable, or non-positive. The caller passes
+/// [`crucible_config::Config::max_output_scale`] as `default`: the largest configured `output`
+/// scale, mapped or not, and 1 with no `output` blocks. **Pure** (takes the raw env value and the
+/// default) so it is unit-testable without a running compositor.
+fn xwayland_scale(env_value: Option<&str>, default: f64) -> f64 {
     env_value
         .and_then(|s| s.trim().parse::<f64>().ok())
         .filter(|scale| *scale > 0.0)
-        .unwrap_or(1.0)
+        .unwrap_or(default)
+}
+
+/// Logs when a config reload changes the XWayland default scale: XWayland's client scale is fixed
+/// when it starts, so X11 apps pick the new value up only after a CDE restart.
+pub(crate) fn note_xwayland_scale_change(old_default: f64, new_default: f64) {
+    if old_default != new_default && std::env::var_os(XWAYLAND_SCALE_ENV).is_none() {
+        info!(
+            old = old_default,
+            new = new_default,
+            "largest output scale changed; X11 apps pick it up after a CDE restart"
+        );
+    }
 }
 
 /// The X resources file loaded into XWayland: `$HOME/.Xresources` when it exists. **Pure** (takes
@@ -147,7 +161,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     display_number,
                 } => {
                     // X11 clients can't interpret fractional wl_output scale; apply it per-client.
-                    let scale = xwayland_scale(std::env::var(XWAYLAND_SCALE_ENV).ok().as_deref());
+                    let scale = xwayland_scale(
+                        std::env::var(XWAYLAND_SCALE_ENV).ok().as_deref(),
+                        data.config.max_output_scale(),
+                    );
                     data.client_compositor_state(&client)
                         .set_client_scale(scale);
 
@@ -378,21 +395,40 @@ mod tests {
 
     #[test]
     fn scale_defaults_to_one_when_unset() {
-        assert_eq!(xwayland_scale(None), 1.0);
+        assert_eq!(xwayland_scale(None, 1.0), 1.0);
     }
 
     #[test]
     fn scale_parses_a_positive_value() {
-        assert_eq!(xwayland_scale(Some("2")), 2.0);
-        assert_eq!(xwayland_scale(Some(" 1.5 ")), 1.5);
+        assert_eq!(xwayland_scale(Some("2"), 1.0), 2.0);
+        assert_eq!(xwayland_scale(Some(" 1.5 "), 1.0), 1.5);
     }
 
     #[test]
     fn scale_rejects_garbage_and_non_positive() {
-        assert_eq!(xwayland_scale(Some("not-a-number")), 1.0);
-        assert_eq!(xwayland_scale(Some("0")), 1.0);
-        assert_eq!(xwayland_scale(Some("-3")), 1.0);
-        assert_eq!(xwayland_scale(Some("")), 1.0);
+        assert_eq!(xwayland_scale(Some("not-a-number"), 1.0), 1.0);
+        assert_eq!(xwayland_scale(Some("0"), 1.0), 1.0);
+        assert_eq!(xwayland_scale(Some("-3"), 1.0), 1.0);
+        assert_eq!(xwayland_scale(Some(""), 1.0), 1.0);
+    }
+
+    fn config_with(text: &str) -> crucible_config::Config {
+        crucible_config::parse(text).unwrap()
+    }
+
+    #[test]
+    fn default_follows_the_largest_configured_output_and_env_wins() {
+        // DP-9 need not be connected: the rule reads the config, not the mapped outputs.
+        let config =
+            config_with("output \"DP-1\" { scale 1.4167; }\noutput \"DP-9\" { scale 2; }\n");
+        assert_eq!(xwayland_scale(None, config.max_output_scale()), 2.0);
+        assert_eq!(
+            xwayland_scale(Some("1.25"), config.max_output_scale()),
+            1.25
+        );
+        assert_eq!(xwayland_scale(Some("junk"), config.max_output_scale()), 2.0);
+        let none = config_with("");
+        assert_eq!(xwayland_scale(None, none.max_output_scale()), 1.0);
     }
 }
 

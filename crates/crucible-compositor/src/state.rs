@@ -66,6 +66,8 @@ use smithay::{
         shell::{wlr_layer::WlrLayerShellState, xdg::XdgShellState},
         shm::{ShmHandler, ShmState},
         socket::ListeningSocketSource,
+        fractional_scale::{FractionalScaleHandler, FractionalScaleManagerState},
+        viewporter::ViewporterState,
         xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
     },
     xwayland::{X11Wm, XWaylandClientData},
@@ -122,6 +124,22 @@ pub trait Backend {
     /// `Ctrl+Alt+F<n>` chords.
     fn change_vt(&mut self, _vt: i32) -> bool {
         false
+    }
+    /// Re-lays the outputs after their geometry changed (an output scale was applied or changed).
+    ///
+    /// The default re-arranges each output's layer map in place, re-syncs its model rect and
+    /// re-applies the layout (the single-output `winit` backend). The udev backend overrides it to
+    /// reflow the whole output strip, since a narrower or wider output moves its right neighbours.
+    fn outputs_changed(state: &mut CrucibleState<Self>)
+    where
+        Self: Sized + 'static,
+    {
+        let outputs: Vec<Output> = state.space.outputs().cloned().collect();
+        for output in &outputs {
+            smithay::desktop::layer_map_for_output(output).arrange();
+            state.sync_output_rect(output);
+        }
+        state.apply_layout();
     }
 }
 
@@ -181,6 +199,12 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// `zxdg_decoration_manager_v1` global state: CDE answers server-side for every toplevel (and
     /// draws no frame), so toolkits such as winit never draw their own title bar.
     pub xdg_decoration_state: smithay::wayland::shell::xdg::decoration::XdgDecorationState,
+    /// `wp_fractional_scale_manager_v1` global state: tells each surface its output's fractional
+    /// scale (see [`Self::update_fractional_scales`]).
+    pub fractional_scale_state: FractionalScaleManagerState,
+    /// `wp_viewporter` global state: lets fractional-scale clients map a native-resolution buffer
+    /// onto their logical size.
+    pub viewporter_state: ViewporterState,
     /// `wl_seat` state managing seats and their capabilities.
     pub seat_state: SeatState<CrucibleState<B>>,
 
@@ -389,6 +413,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
         let xdg_decoration_state =
             smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<Self>(&dh);
+        let fractional_scale_state = FractionalScaleManagerState::new::<Self>(&dh);
+        let viewporter_state = ViewporterState::new::<Self>(&dh);
         let session_lock = crate::lock::SessionLock::new(
             smithay::wayland::session_lock::SessionLockManagerState::new::<Self, _>(&dh, |_| true),
         );
@@ -431,6 +457,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             primary_selection_state,
             xwayland_shell_state,
             xdg_decoration_state,
+            fractional_scale_state,
+            viewporter_state,
             seat_state,
             seat,
             pointer,
@@ -612,6 +640,105 @@ impl<B: Backend + 'static> smithay::wayland::shell::xdg::decoration::XdgDecorati
 // seat + data-device + primary-selection (and any future globals) at once.
 delegate_dispatch2!(@<B: Backend + 'static> CrucibleState<B>);
 
+/// Sets the preferred fractional scale of every surface in the tree rooted at `root` to `output`'s.
+///
+/// `set_preferred_scale` only sends an event when the value changes, so this is cheap per frame.
+fn set_tree_preferred_scale(root: &WlSurface, output: &Output) {
+    let scale = output.current_scale().fractional_scale();
+    with_surfaces_surface_tree(root, |_, states| {
+        with_fractional_scale(states, |fs| fs.set_preferred_scale(scale));
+    });
+}
+
+impl<B: Backend + 'static> CrucibleState<B> {
+    /// The Smithay output backing the model's focused output, if bound.
+    pub(crate) fn focused_smithay_output(&self) -> Option<Output> {
+        let focused = self.layout.world.focused_output();
+        self.space
+            .outputs()
+            .find(|o| crate::layout::model_output_id(o) == Some(focused))
+            .cloned()
+    }
+
+    /// The output a root surface lives on by role: a mapped window's first output, a layer
+    /// surface's output, or a lock surface's output.
+    fn output_for_root(&self, root: &WlSurface) -> Option<Output> {
+        if let Some(window) = self.window_for_surface(root) {
+            if let Some(output) = self.space.outputs_for_element(&window).first() {
+                return Some(output.clone());
+            }
+        }
+        self.space
+            .outputs()
+            .find(|output| {
+                smithay::desktop::layer_map_for_output(output)
+                    .layer_for_surface(root, smithay::desktop::WindowSurfaceType::ALL)
+                    .is_some()
+                    || self
+                        .session_lock
+                        .surface_for(output)
+                        .is_some_and(|lock| lock.wl_surface() == root)
+            })
+            .cloned()
+    }
+
+    /// Per-frame fractional-scale update for everything on `output` (E1): each window and layer
+    /// surface tracks its primary scan-out output, the lock surface takes the output's scale, and a
+    /// client cursor surface takes the scale of the output under the pointer.
+    ///
+    /// Shared by both backends; call after a frame for `output` was rendered. A scale change
+    /// reaches clients on the next frame through this walk.
+    pub fn update_fractional_scales(&self, output: &Output) {
+        let set_primary =
+            |surface: &WlSurface, states: &smithay::wayland::compositor::SurfaceData| {
+                if let Some(primary) = surface_primary_scanout_output(surface, states) {
+                    let scale = primary.current_scale().fractional_scale();
+                    with_fractional_scale(states, |fs| fs.set_preferred_scale(scale));
+                }
+            };
+        self.space.elements().for_each(|window| {
+            if self.space.outputs_for_element(window).contains(output) {
+                window.0.with_surfaces(set_primary);
+            }
+        });
+        for layer_surface in smithay::desktop::layer_map_for_output(output).layers() {
+            layer_surface.with_surfaces(set_primary);
+        }
+        if let Some(lock) = self.session_lock.surface_for(output) {
+            set_tree_preferred_scale(lock.wl_surface(), output);
+        }
+        if let CursorImageStatus::Surface(ref surface) = self.cursor_status {
+            let location = self.pointer.current_location();
+            if let Some(under) = self.space.output_under(location).next() {
+                set_tree_preferred_scale(surface, under);
+            }
+        }
+    }
+}
+
+impl<B: Backend + 'static> FractionalScaleHandler for CrucibleState<B> {
+    /// Initial preferred scale (E1): the surface's (or its root's) primary scan-out output, else
+    /// the output its root's role places it on, else the model's focused output.
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        let scanout =
+            |s: &WlSurface| with_states(s, |states| surface_primary_scanout_output(s, states));
+        let output = scanout(&surface)
+            .or_else(|| (root != surface).then(|| scanout(&root)).flatten())
+            .or_else(|| self.output_for_root(&root))
+            .or_else(|| self.focused_smithay_output());
+        if let Some(output) = output {
+            let scale = output.current_scale().fractional_scale();
+            with_states(&surface, |states| {
+                with_fractional_scale(states, |fs| fs.set_preferred_scale(scale));
+            });
+        }
+    }
+}
+
 use smithay::{
     backend::renderer::element::{
         RenderElementStates, default_primary_scanout_output_compare, utils::select_dmabuf_feedback,
@@ -619,8 +746,11 @@ use smithay::{
     desktop::utils::{
         OutputPresentationFeedback, surface_presentation_feedback_flags_from_states,
         surface_primary_scanout_output, update_surface_primary_scanout_output,
+        with_surfaces_surface_tree,
     },
-    wayland::dmabuf::DmabufFeedback,
+    wayland::{
+        compositor::with_states, dmabuf::DmabufFeedback, fractional_scale::with_fractional_scale,
+    },
 };
 
 /// Records, for every surface on `output`, which output actually scanned it out this frame.
@@ -757,5 +887,47 @@ mod decoration_tests {
         ] {
             assert_eq!(decoration_mode(requested), DecorationMode::ServerSide);
         }
+    }
+}
+
+/// The model rect of an output at `position` whose mode is `mode` physical pixels at `scale`.
+///
+/// The model is logical: the size is the mode divided by the scale, rounded **up** exactly as
+/// Smithay's `Space::output_geometry` rounds, so the registered rect matches the geometry that
+/// `CrucibleState::sync_output_rect` later reads back.
+#[must_use]
+pub fn logical_output_rect(
+    position: (i32, i32),
+    mode: smithay::utils::Size<i32, smithay::utils::Physical>,
+    scale: f64,
+) -> crucible_layout::Rect {
+    let size = mode.to_f64().to_logical(scale).to_i32_ceil();
+    crucible_layout::Rect::new(position.0, position.1, size.w, size.h)
+}
+
+#[cfg(test)]
+mod logical_rect_tests {
+    use super::logical_output_rect;
+    use crucible_layout::Rect;
+
+    #[test]
+    fn logical_rect_is_the_mode_at_scale_one() {
+        assert_eq!(
+            logical_output_rect((10, 0), (3840, 2160).into(), 1.0),
+            Rect::new(10, 0, 3840, 2160)
+        );
+    }
+
+    #[test]
+    fn logical_rect_divides_by_a_fractional_scale_and_rounds_up() {
+        // 3840 / (170/120) = 2710.59 and 2160 / (170/120) = 1524.71, both ceil like the Space.
+        assert_eq!(
+            logical_output_rect((0, 0), (3840, 2160).into(), 170.0 / 120.0),
+            Rect::new(0, 0, 2711, 1525)
+        );
+        assert_eq!(
+            logical_output_rect((2711, 0), (3840, 2160).into(), 2.0),
+            Rect::new(2711, 0, 1920, 1080)
+        );
     }
 }

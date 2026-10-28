@@ -197,6 +197,12 @@ impl Backend for UdevData {
         }
     }
 
+    /// A rescaled output changes width, so the whole strip reflows (`apply_positions` re-arranges
+    /// the layer maps, re-syncs the model rects and re-applies the layout).
+    fn outputs_changed(state: &mut CrucibleState<Self>) {
+        output::reflow_outputs(state);
+    }
+
     fn change_vt(&mut self, vt: i32) -> bool {
         match self.session.change_vt(vt) {
             Ok(()) => true,

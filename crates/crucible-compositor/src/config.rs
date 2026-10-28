@@ -104,7 +104,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.header.font_loaded = Some(config.header.font.clone());
         }
         self.focus_follows_mouse = config.focus_follows_mouse;
+        crate::xwayland::note_xwayland_scale_change(
+            self.config.max_output_scale(),
+            config.max_output_scale(),
+        );
         self.config = config;
+        self.apply_output_scales();
         if old_overlay_terminal != warm_key(&self.config, self.terminal_program()) {
             self.warm_config_changed();
         }
@@ -113,6 +118,45 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.set_header_visible(false);
         }
         self.apply_layout();
+    }
+
+    /// Re-applies the configured scale to every mapped output; when any output's scale changed,
+    /// reflows the outputs through the backend ([`Backend::outputs_changed`]) and re-places an open
+    /// overlay. A scale change is a geometry change (plan 12 invariant).
+    pub fn apply_output_scales(&mut self) {
+        let mut changed = false;
+        for output in self.space.outputs() {
+            let wanted = configured_scale(&self.config, &output.name());
+            if output.current_scale().fractional_scale() != wanted.fractional_scale() {
+                info!(output = %output.name(), scale = wanted.fractional_scale(), "output scale");
+                output.change_current_state(None, None, Some(wanted), None);
+                changed = true;
+            }
+        }
+        if changed {
+            self.invalidate_projection();
+            B::outputs_changed(self);
+            self.replace_mapped_overlay();
+            // Repaint every output so the next frame's walk sends the new preferred scales.
+            let outputs: Vec<_> = self.space.outputs().cloned().collect();
+            for output in &outputs {
+                self.backend_data.reset_buffers(output);
+            }
+        }
+    }
+}
+
+/// The scale `connector` gets from `config`: `Scale::Fractional` of its `output` block, 1 when
+/// unlisted. Smithay derives the `wl_output` integer scale (ceil) and the xdg-output logical size
+/// from it.
+#[must_use]
+pub fn configured_scale(config: &Config, connector: &str) -> smithay::output::Scale {
+    let scale = config.output_scale(connector);
+    if scale == 1.0 {
+        // Exactly today's default output state when no `output` block applies.
+        smithay::output::Scale::Integer(1)
+    } else {
+        smithay::output::Scale::Fractional(scale)
     }
 }
 
@@ -162,6 +206,23 @@ mod tests {
         let (b, err) = plan_bindings(&current, &config);
         assert!(matches!(err, Some(BindError::BadAction { .. })));
         assert_eq!(b, current);
+    }
+
+    #[test]
+    fn output_scale_resolves_by_connector_name() {
+        let config = crucible_config::parse("output \"DP-1\" { scale 1.4167; }\n").unwrap();
+        let dp1 = configured_scale(&config, "DP-1");
+        assert!(matches!(dp1, smithay::output::Scale::Fractional(_)));
+        assert_eq!(dp1.fractional_scale(), 170.0 / 120.0);
+        assert_eq!(dp1.integer_scale(), 2);
+        assert!(matches!(
+            configured_scale(&config, "DP-3"),
+            smithay::output::Scale::Integer(1)
+        ));
+        assert!(matches!(
+            configured_scale(&Config::default(), "winit"),
+            smithay::output::Scale::Integer(1)
+        ));
     }
 
     #[test]
