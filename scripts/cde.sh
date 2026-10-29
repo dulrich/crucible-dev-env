@@ -31,6 +31,10 @@ USAGE
 	esac
 done
 
+# shellcheck source=lib/build-id.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/build-id.sh"
+build_flags "${BASH_SOURCE[0]}" "$@"
+
 repo=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
 logdir=/tmp/cde
 mkdir -p "$logdir"

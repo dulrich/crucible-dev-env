@@ -35,6 +35,11 @@ Cron example (host-b):
 USAGE
 }
 
+# shellcheck source=lib/build-id.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/build-id.sh"
+case " $* " in *" --help "* | *" -h "*) usage; exit 0 ;; esac
+build_flags "${BASH_SOURCE[0]}" "$@"
+
 dir="${WALLPAPER_DIR:-<photos-root>/bgs_4k/bgset}"
 mode=fill
 dry_run=0

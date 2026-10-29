@@ -75,6 +75,14 @@ fn run_subcommand(args: &[String]) -> Option<i32> {
     Some(run(&args[2..]))
 }
 
+/// True when `--build` or `--version` appears in the top-level arguments (after the program name);
+/// help is checked first, so `--help` wins.
+fn wants_build(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .any(|a| a == "--build" || a == "--version")
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(code) = run_subcommand(&args) {
@@ -82,6 +90,10 @@ fn main() {
     }
     if wants_help(&args) {
         print!("{USAGE}");
+        return;
+    }
+    if wants_build(&args) {
+        println!("{}", env!("FLEET_BUILD_ID"));
         return;
     }
     tracing_subscriber::fmt()
@@ -115,6 +127,14 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn build_and_version_flags_are_detected_after_the_program_name() {
+        assert!(wants_build(&args(&["crucible", "--build"])));
+        assert!(wants_build(&args(&["crucible", "--version"])));
+        assert!(!wants_build(&args(&["crucible", "--winit"])));
+        assert!(!wants_build(&args(&["--build"])));
     }
 
     #[test]
