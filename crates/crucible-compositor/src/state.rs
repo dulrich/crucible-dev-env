@@ -434,8 +434,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let seed = crate::persist::startup_seed_name(&saved);
         let mut seat = seat_state.new_wl_seat(&dh, seat_name.clone());
         let pointer = seat.add_pointer();
-        seat.add_keyboard(XkbConfig::default(), 200, 25)
+        let keyboard = seat
+            .add_keyboard(XkbConfig::default(), 200, 25)
             .expect("Failed to initialize the keyboard");
+        // Num Lock starts on (user, 2026-10-29). No client is focused yet, so there is nothing to
+        // advertise; keyboards added later pick up the LED from `led_state()` (udev backend).
+        let mut mods = keyboard.modifier_state();
+        mods.num_lock = true;
+        keyboard.set_modifier_state(mods);
 
         CrucibleState {
             backend_data,
