@@ -150,7 +150,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 ```
 
 The compositor crates link native libraries (libinput, libgbm, libdrm, …); see
-[`plans/01-compositor-up.md`](plans/01-compositor-up.md) for the system dependencies.
+[`plans/01-compositor-up.md`](plans/01-compositor-up.md) for the system dependencies. The packages each fleet node needs are tracked as the `cde-build` and `cde-runtime` groups in the private host baseline (`the private config repo/util/host-baseline/baseline.conf`; check with `util host-baseline check <node>`).
 
 ## Contributing
 
