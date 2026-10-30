@@ -1,5 +1,4 @@
 {
-  "build-flags": "enforce",
   "entrypoints": [
     { "path": "scripts/cde.sh" },
     { "path": "scripts/wallpaper-rotate.sh" },
