@@ -49,9 +49,10 @@ pub fn plan_bindings(current: &Bindings, config: &Config) -> (Bindings, Option<B
 }
 
 /// What a pre-warmed overlay host bakes in at spawn time: resolved terminal program, exec flag,
-/// overlay terminal args, and the launcher's TUI entries. A change in any of them invalidates
-/// the warm host.
-pub type WarmKey = (String, String, Vec<String>, Vec<String>);
+/// overlay terminal args, the launcher's TUI entries, and the configured output scales (the
+/// hidden host is on no output, so it never sees a rescale and would open sized for the old
+/// scale). A change in any of them invalidates the warm host.
+pub type WarmKey = (String, String, Vec<String>, Vec<String>, Vec<(String, u32)>);
 
 /// The [`WarmKey`] of `config` given the resolved `terminal` program.
 #[must_use]
@@ -61,6 +62,11 @@ pub fn warm_key(config: &Config, terminal: String) -> WarmKey {
         config.terminal.exec_flag.clone(),
         config.overlay.terminal_args.clone(),
         config.launcher.tui.clone(),
+        config
+            .outputs
+            .iter()
+            .map(|(name, output)| (name.clone(), output.scale_120))
+            .collect(),
     )
 }
 
@@ -183,6 +189,16 @@ mod tests {
         };
         assert_eq!(warm_key(&a, "t".into()), warm_key(&a.clone(), "t".into()));
         assert_ne!(warm_key(&a, "t".into()), warm_key(&b, "t".into()));
+    }
+
+    #[test]
+    fn warm_key_tracks_output_scales() {
+        let one = crucible_config::parse("output \"DP-1\" { scale 1; }\n").unwrap();
+        let scaled = crucible_config::parse("output \"DP-1\" { scale 1.4167; }\n").unwrap();
+        let again = crucible_config::parse("output \"DP-1\" { scale 1.4167; }\n").unwrap();
+        // A rescale restarts the hidden overlay host; an unchanged scale keeps it warm.
+        assert_ne!(warm_key(&one, "t".into()), warm_key(&scaled, "t".into()));
+        assert_eq!(warm_key(&scaled, "t".into()), warm_key(&again, "t".into()));
     }
 
     #[test]
