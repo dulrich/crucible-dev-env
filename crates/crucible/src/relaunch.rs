@@ -58,7 +58,7 @@ fn send_relaunch() -> Result<(), String> {
 /// # Errors
 /// The wrapper's usage message.
 pub fn parse_args(args: &[String]) -> Result<Parsed<RelaunchWrapper>, String> {
-    if help_requested(args, Some("--app-id"), true) {
+    if help_requested(args, &["--app-id"], true) {
         return Ok(Parsed::Help);
     }
     RelaunchWrapper::parse(args).map(Parsed::Run)

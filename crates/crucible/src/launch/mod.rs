@@ -254,7 +254,7 @@ fn discover_items() -> Vec<Item> {
 /// # Errors
 /// A usage message naming the unexpected argument.
 pub fn parse_args(args: &[String]) -> Result<Parsed<()>, String> {
-    if help_requested(args, None, false) {
+    if help_requested(args, &[], false) {
         return Ok(Parsed::Help);
     }
     match args.first() {

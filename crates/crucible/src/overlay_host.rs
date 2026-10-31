@@ -5,8 +5,9 @@
 //! nothing before the mode arrives.
 //!
 //! Mode line (one line, tab-separated, no escaping): `<request-epoch-ms>\t<mode>[\t<arg>…]\n`.
-//! The compositor never sends a tab or newline inside a field (the picker's rename value is
-//! already field-encoded).
+//! The compositor never sends a tab or newline inside a field (the picker's rename and root values
+//! are already field-encoded). An empty `--root` value is a trailing empty field
+//! (`…\tpick\t--root\t\n`); a missing value (`…\tpick\t--root`) is rejected.
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
@@ -59,7 +60,7 @@ pub struct ModeLine {
     pub epoch_ms: u128,
     /// The requested overlay.
     pub mode: OverlayMode,
-    /// The subcommand arguments (`--rename <encoded>` for pick).
+    /// The subcommand arguments (`--rename <encoded>` or `--root <encoded-or-empty>` for pick).
     pub args: Vec<String>,
 }
 
@@ -78,7 +79,7 @@ pub fn format_mode_line(line: &ModeLine) -> Option<String> {
 }
 
 /// Parses one mode line (a trailing `\n` is allowed). Rejects a non-integer epoch, an unknown
-/// mode, and arguments on `launch`/`keys`; `pick` accepts nothing or `--rename <value>`.
+/// mode, and arguments on `launch`/`keys`; `pick` accepts nothing, `--rename <value>` or `--root <value>` (the value may be empty).
 pub fn parse_mode_line(raw: &str) -> Result<ModeLine, String> {
     let raw = raw.strip_suffix('\n').unwrap_or(raw);
     let mut fields = raw.split('\t');
@@ -91,7 +92,7 @@ pub fn parse_mode_line(raw: &str) -> Result<ModeLine, String> {
     let args: Vec<String> = fields.map(str::to_string).collect();
     match (mode, args.len()) {
         (OverlayMode::Launch | OverlayMode::Keys | OverlayMode::Pick, 0) => {}
-        (OverlayMode::Pick, 2) if args[0] == "--rename" => {}
+        (OverlayMode::Pick, 2) if args[0] == "--rename" || args[0] == "--root" => {}
         _ => return Err(format!("bad arguments for {name}")),
     }
     Ok(ModeLine {
@@ -102,7 +103,7 @@ pub fn parse_mode_line(raw: &str) -> Result<ModeLine, String> {
 }
 
 fn parse_args(args: &[String]) -> Result<Parsed<PathBuf>, String> {
-    if help_requested(args, None, false) {
+    if help_requested(args, &[], false) {
         return Ok(Parsed::Help);
     }
     match args {
@@ -196,6 +197,8 @@ mod tests {
         for l in [
             line(1_700_000_000_123, "pick", &[]),
             line(5, "pick", &["--rename", "my ws%3A1"]),
+            line(6, "pick", &["--root", "/home/u"]),
+            line(6, "pick", &["--root", ""]),
             line(7, "launch", &[]),
             line(9, "keys", &[]),
         ] {
@@ -221,6 +224,8 @@ mod tests {
             "12\tlaunch\tx",
             "12\tkeys\t--rename\tx",
             "12\tpick\t--rename",
+            "12\tpick\t--root",
+            "12\tkeys\t--root\tx",
             "12\tpick\t--other\tx",
         ] {
             assert!(parse_mode_line(bad).is_err(), "{bad:?}");

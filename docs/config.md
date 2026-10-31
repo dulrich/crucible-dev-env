@@ -84,6 +84,10 @@ Directories whose immediate subdirectories become workspace-picker candidates. Z
 
 `slots` takes one boolean (`#true` or `#false`, at most once; default `#false`). When `#true`, picker rows for workspaces pinned to a slot (via `Super+Shift+<n>` or the `pin-slot` action) show a `⌘<n>` badge before the name, e.g. `live   ⌘3 work`; folder rows never carry one, and the badge is not part of the fuzzy-filtered text.
 
+Live and saved rows also show their **workspace root** (set with `capture-workspace-root` or the root prompt; not the `root` config folders above) after the name, with `$HOME` shown as `~`, e.g. `live   work  ~/code/work`; a workspace without a root shows only its name. A saved workspace shows the root from its saved file even if it was never opened this session.
+
+The **workspace-root prompt** (`set-workspace-root`, default `Super+Ctrl+Shift+D`; `crucible pick --root <path>`) opens the picker with the prompt `root> ` prefilled with the current root (`$HOME` as `~`; empty when none) and lists only the `root` config folders' subdirectories. Enter, in this order: an empty line clears the root; a line starting with `/` or `~` sets that path (a leading `~` is expanded) even if a row is selected, so the prefilled value sends itself unchanged; otherwise the selected folder row sets its path; otherwise `type a path or pick a folder` is shown. The compositor refuses a path that is not an existing absolute directory and the error appears in the prompt.
+
 ### `launcher`
 
 ```kdl

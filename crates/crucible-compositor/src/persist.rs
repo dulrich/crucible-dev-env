@@ -192,7 +192,7 @@ pub fn folder_entries(roots: &[PathBuf]) -> Vec<(String, PathBuf)> {
 #[must_use]
 pub fn build_candidates(
     live: Vec<(String, Option<PathBuf>)>,
-    saved: Vec<String>,
+    saved: Vec<(String, Option<PathBuf>)>,
     folders: Vec<(String, PathBuf)>,
 ) -> Vec<Candidate> {
     let live_names: HashSet<String> = live.iter().map(|(n, _)| n.clone()).collect();
@@ -208,11 +208,11 @@ pub fn build_candidates(
     out.extend(
         saved
             .into_iter()
-            .filter(|n| !live_names.contains(n))
-            .map(|name| Candidate {
+            .filter(|(n, _)| !live_names.contains(n))
+            .map(|(name, root)| Candidate {
                 kind: CandidateKind::Saved,
                 name,
-                path: None,
+                path: root,
                 slot: None,
             }),
     );
@@ -223,6 +223,23 @@ pub fn build_candidates(
         slot: None,
     }));
     out
+}
+
+/// Saved workspaces with their roots: the `cached` record's root when `cached` knows the name
+/// (`Some(root)`), else the root of the saved file itself; an unreadable file just has no root.
+#[must_use]
+pub fn saved_with_roots(
+    listed: Vec<(String, PathBuf)>,
+    cached: impl Fn(&str) -> Option<Option<PathBuf>>,
+) -> Vec<(String, Option<PathBuf>)> {
+    listed
+        .into_iter()
+        .map(|(name, file)| {
+            let root =
+                cached(&name).unwrap_or_else(|| store::load(&file).ok().and_then(|r| r.root));
+            (name, root)
+        })
+        .collect()
 }
 
 /// Fills `slot` on live and saved candidates from `slot_of` (folders never carry one).
@@ -601,10 +618,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 Some((name, self.persist.workspace.roots.get(&ws).cloned()))
             })
             .collect();
-        let saved = store::list_saved(&self.persist.store_dir)
-            .into_iter()
-            .map(|(n, _)| n)
-            .collect();
+        let saved = saved_with_roots(store::list_saved(&self.persist.store_dir), |n| {
+            self.persist.saved.get(n).map(|(r, _)| r.root.clone())
+        });
         let mut out = build_candidates(live, saved, folder_entries(&self.config.picker.roots));
         if self.config.picker.slots {
             apply_slots(&mut out, |n| self.persist.slots.slot_of(n));
@@ -790,7 +806,7 @@ mod tests {
     fn candidates_order_live_saved_folder_and_dedupe_live() {
         let c = build_candidates(
             vec![("b".into(), None), ("a".into(), Some("/r".into()))],
-            vec!["a".into(), "z".into()],
+            vec![("a".into(), None), ("z".into(), Some("/zroot".into()))],
             vec![("proj".into(), "/code/proj".into())],
         );
         let got: Vec<(CandidateKind, &str)> = c.iter().map(|c| (c.kind, c.name.as_str())).collect();
@@ -803,13 +819,37 @@ mod tests {
                 (CandidateKind::Folder, "proj"),
             ]
         );
+        assert_eq!(c[2].path, Some(PathBuf::from("/zroot")));
+    }
+
+    #[test]
+    fn saved_roots_prefer_the_cache_and_fall_back_to_the_file() {
+        let dir = std::env::temp_dir().join(format!("cde-savedroots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut rec = record(Some("/on/disk"), pane(vec![]));
+        rec.name = "disk".into();
+        let file = store::save(&dir, &rec).unwrap();
+        let listed = vec![
+            ("disk".to_string(), file),
+            ("cached".to_string(), dir.join("missing.kdl")),
+            ("broken".to_string(), dir.join("missing2.kdl")),
+        ];
+        let got = saved_with_roots(listed, |n| match n {
+            "cached" => Some(Some(PathBuf::from("/cached"))),
+            _ => None,
+        });
+        assert_eq!(got[0].1, Some(PathBuf::from("/on/disk")));
+        assert_eq!(got[1].1, Some(PathBuf::from("/cached")));
+        assert_eq!(got[2].1, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn apply_slots_fills_live_and_saved_but_never_folders() {
         let mut c = build_candidates(
             vec![("a".into(), None)],
-            vec!["z".into()],
+            vec![("z".into(), None)],
             vec![("a".into(), "/code/a".into())],
         );
         assert!(c.iter().all(|c| c.slot.is_none()));

@@ -72,7 +72,7 @@ pub fn classify(byte: Option<u8>) -> Wait {
 /// # Errors
 /// The wrapper's usage message.
 pub fn parse_args(args: &[String]) -> Result<Parsed<ResumeWrapper>, String> {
-    if help_requested(args, Some("--cwd"), true) {
+    if help_requested(args, &["--cwd"], true) {
         return Ok(Parsed::Help);
     }
     ResumeWrapper::parse(args).map(Parsed::Run)

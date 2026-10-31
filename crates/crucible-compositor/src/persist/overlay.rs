@@ -703,6 +703,11 @@ mod tests {
             warm_mode_line(42, &pick).as_deref(),
             Some("42\tpick\t--rename\ta%3Ab\n")
         );
+        let root = picker_args("-e", Path::new("/c"), None, Some(""));
+        assert_eq!(
+            warm_mode_line(3, &root).as_deref(),
+            Some("3\tpick\t--root\t\n")
+        );
         assert_eq!(
             warm_mode_line(1, &launcher_args("-e", Path::new("/c"))).as_deref(),
             Some("1\tlaunch\n")

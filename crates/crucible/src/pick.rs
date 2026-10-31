@@ -1,7 +1,10 @@
-//! `crucible pick [--rename <encoded>]` — the workspace picker TUI (run inside the compositor's
-//! terminal overlay). Only the picker's domain hooks live here (rename mode, candidate rows, what
+//! `crucible pick [--rename <encoded> | --root <encoded>]` — the workspace picker TUI (run inside the
+//! compositor's terminal overlay). Only the picker's domain hooks live here (rename and workspace-root
+//! modes, candidate rows, what
 //! Enter sends); the runner, key decoding, shared state and frame scaffolding are in
 //! [`crate::overlay`]. The state machine and rendering are pure.
+
+use std::path::PathBuf;
 
 use crucible_compositor::ipc::{
     Candidate, CandidateKind, Request, Response, decode_field, parse_candidates,
@@ -19,7 +22,7 @@ use crate::{Parsed, help_requested};
 const SUPER_GLYPH: char = '\u{2318}';
 
 /// Usage text for `crucible pick --help`.
-pub const USAGE: &str = "usage: crucible pick [--rename <encoded-name>]\n\nThe CDE workspace picker (needs $CDE_SOCKET; CDE runs it in an overlay on Super+P).\nType to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter opens the selection (or creates a new\nworkspace from the typed name); Esc or Ctrl+C closes.\n\n  --rename <name>   single-line rename prompt prefilled with <name> (percent-encoded: %25 %3A %09 %0A %0D)\n";
+pub const USAGE: &str = "usage: crucible pick [--rename <encoded-name> | --root <encoded-path>]\n\nThe CDE workspace picker (needs $CDE_SOCKET; CDE runs it in an overlay on Super+P).\nType to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter opens the selection (or creates a new\nworkspace from the typed name); Esc or Ctrl+C closes.\n\n  --rename <name>   single-line rename prompt prefilled with <name> (percent-encoded: %25 %3A %09 %0A %0D)\n  --root <path>     workspace-root prompt prefilled with <path> (percent-encoded; empty = none); Enter on empty clears\n";
 
 /// Picker or rename-prompt behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +31,43 @@ pub enum Mode {
     Pick,
     /// Single-line rename prompt.
     Rename,
+    /// Workspace-root prompt: a path line over the configured folders.
+    Root,
+}
+
+/// What `crucible pick` was asked to do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickArgs {
+    /// The fuzzy picker.
+    Pick,
+    /// The rename prompt prefilled with the decoded name.
+    Rename(String),
+    /// The workspace-root prompt prefilled with the decoded current root (empty = none).
+    Root(String),
+}
+
+/// `path` with a leading `home` replaced by `~`, only on a path-component boundary.
+fn tilde(path: &str, home: Option<&str>) -> String {
+    match home.filter(|h| !h.is_empty() && *h != "/") {
+        Some(h) => match path.strip_prefix(h) {
+            Some("") => "~".to_string(),
+            Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+            _ => path.to_string(),
+        },
+        None => path.to_string(),
+    }
+}
+
+/// `typed` with a leading `~` (alone or before `/`) expanded to `home`; `None` when `~` needs a
+/// `$HOME` that is unset. Anything else is returned as typed.
+fn expand_tilde(typed: &str, home: Option<&str>) -> Option<String> {
+    match typed.strip_prefix('~') {
+        Some("") => home.map(str::to_string),
+        Some(rest) if rest.starts_with('/') => {
+            home.map(|h| format!("{}{rest}", h.trim_end_matches('/')))
+        }
+        _ => Some(typed.to_string()),
+    }
 }
 
 /// One selectable row.
@@ -45,6 +85,8 @@ pub struct Picker {
     mode: Mode,
     candidates: Vec<Candidate>,
     list: ListState,
+    /// `$HOME`, for `~` display and expansion.
+    home: Option<String>,
 }
 
 impl Picker {
@@ -55,6 +97,7 @@ impl Picker {
             mode: Mode::Pick,
             candidates,
             list: ListState::new(),
+            home: home_dir(),
         }
     }
 
@@ -65,6 +108,23 @@ impl Picker {
             mode: Mode::Rename,
             candidates: Vec::new(),
             list: ListState::with_query(current),
+            home: None,
+        }
+    }
+
+    /// The workspace-root prompt over the folder candidates, prefilled with `current` (`$HOME`
+    /// shown as `~`; empty = no root).
+    #[must_use]
+    pub fn root(current: &str, candidates: Vec<Candidate>, home: Option<String>) -> Picker {
+        let candidates = candidates
+            .into_iter()
+            .filter(|c| c.kind == CandidateKind::Folder)
+            .collect();
+        Picker {
+            mode: Mode::Root,
+            candidates,
+            list: ListState::with_query(tilde(current, home.as_deref())),
+            home,
         }
     }
 
@@ -90,6 +150,7 @@ impl Picker {
             return Vec::new();
         }
         let query = &self.list.query;
+        let root = self.mode == Mode::Root;
         let names: Vec<&str> = self.candidates.iter().map(|c| c.name.as_str()).collect();
         let mut rows: Vec<Row> = fuzzy::filter(query, &names)
             .into_iter()
@@ -99,7 +160,7 @@ impl Picker {
             .candidates
             .iter()
             .any(|c| c.kind != CandidateKind::Folder && c.name == *query);
-        if !query.is_empty() && !exact {
+        if !root && !query.is_empty() && !exact {
             rows.push(Row::New(query.clone()));
         }
         rows
@@ -113,6 +174,9 @@ impl Picker {
                 return Outcome::Continue;
             }
             return Outcome::Send(Request::Rename(self.list.query.clone()));
+        }
+        if self.mode == Mode::Root {
+            return self.enter_root();
         }
         match self.rows().get(self.list.selected) {
             Some(Row::Candidate(i)) => {
@@ -131,6 +195,33 @@ impl Picker {
             Some(Row::New(n)) => Outcome::Send(Request::New(n.clone())),
             None => Outcome::Continue,
         }
+    }
+
+    /// Root-mode Enter, in precedence order: an empty query clears the root; a typed path (starting
+    /// with `/` or `~`) wins over the selected row; else the selected folder row; else a hint.
+    fn enter_root(&mut self) -> Outcome {
+        let query = self.list.query.clone();
+        if query.is_empty() {
+            return Outcome::Send(Request::SetRoot(None));
+        }
+        if query.starts_with(['/', '~']) {
+            return match expand_tilde(&query, self.home.as_deref()) {
+                Some(p) => Outcome::Send(Request::SetRoot(Some(PathBuf::from(p)))),
+                None => {
+                    self.list.status = Some("$HOME is not set".into());
+                    Outcome::Continue
+                }
+            };
+        }
+        let path = match self.rows().get(self.list.selected) {
+            Some(Row::Candidate(i)) => self.candidates[*i].path.clone(),
+            _ => None,
+        };
+        if let Some(p) = path {
+            return Outcome::Send(Request::SetRoot(Some(p)));
+        }
+        self.list.status = Some("type a path or pick a folder".into());
+        Outcome::Continue
     }
 
     /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings).
@@ -153,15 +244,17 @@ impl Picker {
                 let badge = c
                     .slot
                     .map_or(String::new(), |n| format!("{SUPER_GLYPH}{n} "));
-                match (c.kind, &c.path) {
-                    (CandidateKind::Folder, Some(p)) => {
-                        format!(
-                            "{kind} {badge}{}  {}",
-                            sanitize(&c.name),
-                            sanitize(&p.to_string_lossy())
-                        )
+                match &c.path {
+                    // Folder rows show their path; live and saved rows show their workspace root.
+                    Some(p) => {
+                        let shown = if c.kind == CandidateKind::Folder {
+                            p.to_string_lossy().into_owned()
+                        } else {
+                            tilde(&p.to_string_lossy(), self.home.as_deref())
+                        };
+                        format!("{kind} {badge}{}  {}", sanitize(&c.name), sanitize(&shown))
                     }
-                    _ => format!("{kind} {badge}{}", sanitize(&c.name)),
+                    None => format!("{kind} {badge}{}", sanitize(&c.name)),
                 }
             }
         }
@@ -190,6 +283,7 @@ impl Overlay for Picker {
         let prompt = match self.mode {
             Mode::Pick => "workspace> ",
             Mode::Rename => "rename> ",
+            Mode::Root => "root> ",
         };
         let texts: Vec<String> = self.rows().iter().map(|r| self.row_text(r)).collect();
         self.list
@@ -197,28 +291,45 @@ impl Overlay for Picker {
     }
 }
 
-/// Parsed `pick` arguments: the decoded rename seed, if any (`--help`/`-h` outside the
-/// `--rename` value is [`Parsed::Help`]).
+/// Parsed `pick` arguments (`--help`/`-h` outside a `--rename`/`--root` value is
+/// [`Parsed::Help`]).
 ///
 /// # Errors
-/// A usage message for unknown flags, a missing value or a bad percent escape.
-pub fn parse_args(args: &[String]) -> Result<Parsed<Option<String>>, String> {
-    if help_requested(args, Some("--rename"), false) {
+/// A usage message for unknown flags, a missing value, a bad percent escape, or `--rename`
+/// together with `--root`.
+pub fn parse_args(args: &[String]) -> Result<Parsed<PickArgs>, String> {
+    if help_requested(args, &["--rename", "--root"], false) {
         return Ok(Parsed::Help);
     }
+    let decode = |flag: &str, value: &str| {
+        decode_field(value).ok_or_else(|| format!("malformed percent-encoding in {flag} value"))
+    };
     match args {
-        [] => Ok(Parsed::Run(None)),
-        [flag, value] if flag == "--rename" => decode_field(value)
-            .map(|v| Parsed::Run(Some(v)))
-            .ok_or_else(|| "malformed percent-encoding in --rename value".to_string()),
-        [flag] if flag == "--rename" => Err("--rename needs a value".into()),
+        [] => Ok(Parsed::Run(PickArgs::Pick)),
+        [flag, value] if flag == "--rename" => {
+            decode(flag, value).map(|v| Parsed::Run(PickArgs::Rename(v)))
+        }
+        [flag, value] if flag == "--root" => {
+            decode(flag, value).map(|v| Parsed::Run(PickArgs::Root(v)))
+        }
+        [flag] if flag == "--rename" || flag == "--root" => Err(format!("{flag} needs a value")),
+        [a, _, b, ..]
+            if (a == "--rename" && b == "--root") || (a == "--root" && b == "--rename") =>
+        {
+            Err("--rename and --root cannot be combined".into())
+        }
         [other, ..] => Err(format!("unexpected argument {other:?}")),
     }
 }
 
+/// `$HOME`, if set and non-empty.
+fn home_dir() -> Option<String> {
+    std::env::var("HOME").ok().filter(|h| !h.is_empty())
+}
+
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    let rename = match parse_args(args) {
+    let parsed = match parse_args(args) {
         Ok(Parsed::Run(r)) => r,
         Ok(Parsed::Help) => {
             print!("{USAGE}");
@@ -229,9 +340,11 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
-    run_overlay("pick", |client| match rename {
-        Some(current) => Ok(Picker::rename(current)),
-        None => fetch_candidates(client).map(Picker::new),
+    run_overlay("pick", |client| match parsed {
+        PickArgs::Rename(current) => Ok(Picker::rename(current)),
+        PickArgs::Root(current) => fetch_candidates(client)
+            .map(|candidates| Picker::root(&current, candidates, home_dir())),
+        PickArgs::Pick => fetch_candidates(client).map(Picker::new),
     })
 }
 
@@ -249,7 +362,6 @@ fn fetch_candidates(client: &mut Client) -> Result<Vec<Candidate>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     fn cand(kind: CandidateKind, name: &str, path: Option<&str>) -> Candidate {
         Candidate {
@@ -476,10 +588,25 @@ mod tests {
     }
     #[test]
     fn args_parse_and_decode() {
-        assert_eq!(parse_args(&[]).unwrap(), Parsed::Run(None));
+        assert_eq!(parse_args(&[]).unwrap(), Parsed::Run(PickArgs::Pick));
         assert_eq!(
             parse_args(&["--rename".into(), "a%3Ab%25".into()]).unwrap(),
-            Parsed::Run(Some("a:b%".into()))
+            Parsed::Run(PickArgs::Rename("a:b%".into()))
+        );
+        assert_eq!(
+            parse_args(&["--root".into(), "/a%3Ab".into()]).unwrap(),
+            Parsed::Run(PickArgs::Root("/a:b".into()))
+        );
+        assert_eq!(
+            parse_args(&["--root".into(), String::new()]).unwrap(),
+            Parsed::Run(PickArgs::Root(String::new()))
+        );
+        assert!(parse_args(&["--root".into()]).is_err());
+        let both: Vec<String> = ["--rename", "a", "--root", "b"].map(String::from).to_vec();
+        assert!(
+            parse_args(&both)
+                .unwrap_err()
+                .contains("cannot be combined")
         );
         assert!(parse_args(&["--rename".into(), "bad%zz".into()]).is_err());
         assert!(parse_args(&["--rename".into()]).is_err());
@@ -494,7 +621,87 @@ mod tests {
         // `--help` as the rename value is payload (and an invalid escape-free name).
         assert_eq!(
             parse_args(&a(&["--rename", "--help"])),
-            Ok(Parsed::Run(Some("--help".into())))
+            Ok(Parsed::Run(PickArgs::Rename("--help".into())))
         );
+        assert_eq!(
+            parse_args(&a(&["--root", "--help"])),
+            Ok(Parsed::Run(PickArgs::Root("--help".into())))
+        );
+    }
+
+    fn root_picker(current: &str) -> Picker {
+        Picker::root(
+            current,
+            vec![
+                cand(CandidateKind::Live, "alpha", Some("/live")),
+                cand(CandidateKind::Folder, "proj", Some("/home/u/proj")),
+                cand(CandidateKind::Folder, "other", Some("/srv/other")),
+            ],
+            Some("/home/u".into()),
+        )
+    }
+
+    #[test]
+    fn root_prompt_prefills_with_tilde_and_lists_only_folders() {
+        let p = root_picker("/home/u/code");
+        assert_eq!(p.query(), "~/code");
+        assert_eq!(root_picker("/home/user").query(), "/home/user");
+        assert_eq!(root_picker("/home/u").query(), "~");
+        assert_eq!(root_picker("").query(), "");
+        assert_eq!(
+            root_picker("").rows(),
+            vec![Row::Candidate(0), Row::Candidate(1)]
+        );
+        assert!(root_picker("").render(60, 8).contains("root> _"));
+        assert_eq!(
+            expand_tilde("~/x", Some("/home/u/")).as_deref(),
+            Some("/home/u/x")
+        );
+        assert_eq!(expand_tilde("~", None), None);
+    }
+
+    #[test]
+    fn root_enter_precedence_empty_typed_row_hint() {
+        // (a) empty query clears, even with a folder row selected.
+        let mut p = root_picker("");
+        assert_eq!(p.step(Key::Enter), Outcome::Send(Request::SetRoot(None)));
+        // (b) the prefilled `~/x` sends itself, expanded, over the selected row.
+        let mut p = root_picker("/home/u/x");
+        assert_eq!(
+            p.step(Key::Enter),
+            Outcome::Send(Request::SetRoot(Some("/home/u/x".into())))
+        );
+        type_str(&mut p, "/y");
+        assert_eq!(
+            p.step(Key::Enter),
+            Outcome::Send(Request::SetRoot(Some("/home/u/x/y".into())))
+        );
+        // (c) a non-path query selects the filtered folder row.
+        let mut p = root_picker("");
+        type_str(&mut p, "oth");
+        assert_eq!(
+            p.step(Key::Enter),
+            Outcome::Send(Request::SetRoot(Some("/srv/other".into())))
+        );
+        // (d) nothing matches: hint, stay open.
+        let mut p = root_picker("");
+        type_str(&mut p, "zzz");
+        assert_eq!(p.step(Key::Enter), Outcome::Continue);
+        assert_eq!(p.status(), Some("type a path or pick a folder"));
+    }
+
+    #[test]
+    fn live_and_saved_rows_show_their_root_with_tilde() {
+        let mut p = Picker::new(vec![
+            cand(CandidateKind::Live, "alpha", Some("/home/u/code")),
+            cand(CandidateKind::Saved, "beta", Some("/srv/b")),
+            cand(CandidateKind::Saved, "gamma", None),
+        ]);
+        p.home = Some("/home/u".into());
+        let s = p.render(60, 8);
+        assert!(s.contains("live   alpha  ~/code"));
+        assert!(s.contains("saved  beta  /srv/b"));
+        assert!(s.contains("saved  gamma"));
+        assert!(!s.contains("gamma  "));
     }
 }

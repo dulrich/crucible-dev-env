@@ -19,7 +19,7 @@ mod resume;
 mod style;
 mod tty;
 
-const USAGE: &str = "usage: crucible [--winit | --tty-udev]\n       crucible pick [--rename <name>]\n       crucible launch\n       crucible keys\n       crucible resume [--now [--exit]] --cwd <dir> [-- <command>]\n       crucible relaunch [--app-id <id>] -- <cmdline>\n       crucible msg <request...>\n       crucible overlay-host --socket <path>\n\n  --winit                  run the nested development compositor\n  --tty-udev               run the DRM/KMS backend on a real TTY (multi-output)\n  pick                     the workspace picker (needs $CDE_SOCKET)\n  launch                   the program launcher (needs $CDE_SOCKET)\n  keys                     the read-only settings overlay: effective keybindings (needs $CDE_SOCKET)\n  resume                   restored-terminal banner: Enter runs the old command (--now: run it immediately; --exit: then exit)\n  relaunch                 restored-app placeholder: Enter relaunches the app in its slot\n  msg                      send one request line to the compositor and print the reply\n  overlay-host             a pre-started overlay terminal's program (spawned by CDE)\n  -h, --help               print this usage and exit 0 (`crucible <subcommand> --help` for details)\n\nWith no backend flag, a one-line banner is printed and nothing is started.\n";
+const USAGE: &str = "usage: crucible [--winit | --tty-udev]\n       crucible pick [--rename <name> | --root <path>]\n       crucible launch\n       crucible keys\n       crucible resume [--now [--exit]] --cwd <dir> [-- <command>]\n       crucible relaunch [--app-id <id>] -- <cmdline>\n       crucible msg <request...>\n       crucible overlay-host --socket <path>\n\n  --winit                  run the nested development compositor\n  --tty-udev               run the DRM/KMS backend on a real TTY (multi-output)\n  pick                     the workspace picker (needs $CDE_SOCKET)\n  launch                   the program launcher (needs $CDE_SOCKET)\n  keys                     the read-only settings overlay: effective keybindings (needs $CDE_SOCKET)\n  resume                   restored-terminal banner: Enter runs the old command (--now: run it immediately; --exit: then exit)\n  relaunch                 restored-app placeholder: Enter relaunches the app in its slot\n  msg                      send one request line to the compositor and print the reply\n  overlay-host             a pre-started overlay terminal's program (spawned by CDE)\n  -h, --help               print this usage and exit 0 (`crucible <subcommand> --help` for details)\n\nWith no backend flag, a one-line banner is printed and nothing is started.\n";
 
 /// True when `--help`/`-h` appears anywhere in the arguments (after the program name).
 /// Help wins over the backend flags, so `--tty-udev --help` never takes the DRM/KMS device.
@@ -37,14 +37,14 @@ pub enum Parsed<T> {
 }
 
 /// True when `--help`/`-h` appears in a non-payload position of a subcommand's arguments. Payload
-/// positions never count: the value of `value_flag` (for example `--rename`), and, when
+/// positions never count: the value of any of `value_flags` (for example `--rename`), and, when
 /// `stop_at_dashdash`, everything from `--` on.
-pub fn help_requested(args: &[String], value_flag: Option<&str>, stop_at_dashdash: bool) -> bool {
+pub fn help_requested(args: &[String], value_flags: &[&str], stop_at_dashdash: bool) -> bool {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--" if stop_at_dashdash => return false,
-            f if Some(f) == value_flag => i += 1,
+            f if value_flags.contains(&f) => i += 1,
             "--help" | "-h" => return true,
             _ => {}
         }
@@ -147,21 +147,31 @@ mod tests {
 
     #[test]
     fn help_requested_skips_the_value_flag_and_stops_at_dashdash() {
-        assert!(help_requested(&args(&["--help"]), None, false));
-        assert!(help_requested(&args(&["x", "-h"]), None, false));
-        assert!(!help_requested(&args(&[]), None, false));
+        assert!(help_requested(&args(&["--help"]), &[], false));
+        assert!(help_requested(&args(&["x", "-h"]), &[], false));
+        assert!(!help_requested(&args(&[]), &[], false));
         assert!(!help_requested(
             &args(&["--rename", "--help"]),
-            Some("--rename"),
+            &["--rename", "--root"],
             false
         ));
         assert!(help_requested(
             &args(&["--rename", "x", "-h"]),
-            Some("--rename"),
+            &["--rename", "--root"],
             false
         ));
-        assert!(!help_requested(&args(&["--", "-h"]), None, true));
-        assert!(help_requested(&args(&["--", "-h"]), None, false));
+        assert!(!help_requested(
+            &args(&["--root", "--help"]),
+            &["--rename", "--root"],
+            false
+        ));
+        assert!(help_requested(
+            &args(&["--root", "", "--help"]),
+            &["--rename", "--root"],
+            false
+        ));
+        assert!(!help_requested(&args(&["--", "-h"]), &[], true));
+        assert!(help_requested(&args(&["--", "-h"]), &[], false));
     }
 
     #[test]
