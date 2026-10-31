@@ -172,6 +172,127 @@ pub fn ancestors(proc_root: &Path, pid: u32, max_depth: usize) -> Vec<u32> {
     out
 }
 
+/// Whether `argv0` names the `claude` CLI (basename).
+fn is_claude_program(argv0: &str) -> bool {
+    Path::new(argv0).file_name().and_then(|n| n.to_str()) == Some("claude")
+}
+
+/// Rewrites a `claude` argv into `claude --resume <session_id>` plus the remaining arguments.
+/// `argv[0]` is kept as given. Dropped: `-r`/`--resume` (with its optional value, the next
+/// argument unless it starts with `-`, or `--resume=<v>`), `-c`/`--continue`, `--session-id <v>`
+/// / `--session-id=<v>` and `--fork-session`. Everything else (e.g. `-n <name>`) keeps its order.
+#[must_use]
+pub fn claude_resume_argv(argv: &[String], session_id: &str) -> Vec<String> {
+    let mut out = vec![
+        argv.first()
+            .cloned()
+            .unwrap_or_else(|| "claude".to_string()),
+        "--resume".to_string(),
+        session_id.to_string(),
+    ];
+    let mut rest = argv.iter().skip(1).peekable();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "-r" | "--resume" => {
+                if rest.peek().is_some_and(|n| !n.starts_with('-')) {
+                    rest.next();
+                }
+            }
+            "--session-id" => {
+                rest.next();
+            }
+            "-c" | "--continue" | "--fork-session" => {}
+            a if a.starts_with("--resume=") || a.starts_with("--session-id=") => {}
+            _ => out.push(arg.clone()),
+        }
+    }
+    out
+}
+
+/// Extracts the `"sessionId"` string value from a claude session record. A minimal tokenizer (no
+/// JSON dependency): a string followed by `:` is a key, so a `sessionId` inside another value is
+/// never mistaken for the key. Escaped or empty ids yield `None`.
+fn extract_session_id(text: &str) -> Option<String> {
+    fn string(it: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+        let mut s = String::new();
+        loop {
+            match it.next()? {
+                '"' => return Some(s),
+                '\\' => {
+                    s.push('\\');
+                    s.push(it.next()?);
+                }
+                c => s.push(c),
+            }
+        }
+    }
+    let mut it = text.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '"' {
+            continue;
+        }
+        let key = string(&mut it)?;
+        while it.next_if(|c| c.is_whitespace()).is_some() {}
+        if it.next_if_eq(&':').is_none() {
+            continue;
+        }
+        while it.next_if(|c| c.is_whitespace()).is_some() {}
+        if key == "sessionId" {
+            it.next_if_eq(&'"')?;
+            let id = string(&mut it)?;
+            let ok = !id.is_empty()
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            return ok.then_some(id);
+        }
+    }
+    None
+}
+
+/// The session id in `<sessions_dir>/<pid>.json`. Missing, unreadable, malformed or empty → `None`.
+#[must_use]
+pub fn claude_session_id(sessions_dir: &Path, pid: u32) -> Option<String> {
+    extract_session_id(&fs::read_to_string(sessions_dir.join(format!("{pid}.json"))).ok()?)
+}
+
+/// The resume command for `pid` when its `argv` is `claude` and it has a session record.
+fn claude_command(sessions_dir: Option<&Path>, pid: u32, argv: &[String]) -> Option<String> {
+    if !is_claude_program(argv.first()?) {
+        return None;
+    }
+    let id = claude_session_id(sessions_dir?, pid)?;
+    Some(join_command(&claude_resume_argv(argv, &id)))
+}
+
+/// Max depth searched below a resume wrapper for its `claude` process.
+const CLAUDE_SEARCH_DEPTH: usize = 4;
+
+/// Breadth-first search below `wrapper_pid` for a `claude` process with a session record: its cwd
+/// and resume command.
+fn claude_descendant(
+    proc_root: &Path,
+    sessions_dir: &Path,
+    wrapper_pid: u32,
+) -> Option<(PathBuf, String)> {
+    let mut level = vec![wrapper_pid];
+    for _ in 0..CLAUDE_SEARCH_DEPTH {
+        level = level
+            .into_iter()
+            .flat_map(|p| children_of(proc_root, p))
+            .collect();
+        for pid in &level {
+            let argv = read_cmdline(proc_root, *pid);
+            if let Some(command) = claude_command(Some(sessions_dir), *pid, &argv)
+                && let Some(cwd) = read_cwd(proc_root, *pid)
+            {
+                return Some((cwd, command));
+            }
+        }
+    }
+    None
+}
+
 /// Captures the terminal client `terminal_pid`: the working directory and foreground command of
 /// whatever runs in it. `None` when the pid has no readable children/cwd.
 ///
@@ -183,7 +304,11 @@ pub fn ancestors(proc_root: &Path, pid: u32, max_depth: usize) -> Vec<u32> {
 /// the real interactive shell: the terminal is idle, with that shell's cwd. CDE's own wrappers
 /// are not special here; [`window_record`] handles them first.
 #[must_use]
-pub fn capture_terminal(proc_root: &Path, terminal_pid: u32) -> Option<TerminalCapture> {
+pub fn capture_terminal(
+    proc_root: &Path,
+    sessions_dir: Option<&Path>,
+    terminal_pid: u32,
+) -> Option<TerminalCapture> {
     let children = children_of(proc_root, terminal_pid);
     let shell = if children.len() == 1 {
         children[0]
@@ -212,7 +337,9 @@ pub fn capture_terminal(proc_root: &Path, terminal_pid: u32) -> Option<TerminalC
         (Some(cwd), false) if fg_is_wrapped_shell => Some(TerminalCapture { cwd, command: None }),
         (Some(cwd), false) => Some(TerminalCapture {
             cwd,
-            command: Some(join_command(&args)),
+            command: Some(
+                claude_command(sessions_dir, tpgid, &args).unwrap_or_else(|| join_command(&args)),
+            ),
         }),
         _ => Some(idle),
     }
@@ -258,6 +385,7 @@ fn wrapper_process(proc_root: &Path, pid: u32) -> Option<CdeWrapper> {
 #[must_use]
 pub fn window_record(
     proc_root: &Path,
+    sessions_dir: Option<&Path>,
     pid: Option<u32>,
     terminal: bool,
     origin: Option<&WindowRecord>,
@@ -271,13 +399,21 @@ pub fn window_record(
                 command: None,
             });
         };
-        if let Some(wrapper) = children_of(proc_root, pid)
+        if let Some((wrapper_pid, wrapper)) = children_of(proc_root, pid)
             .into_iter()
-            .find_map(|c| wrapper_process(proc_root, c))
+            .find_map(|c| wrapper_process(proc_root, c).map(|w| (c, w)))
         {
+            if let (Some(dir), CdeWrapper::Terminal(_)) = (sessions_dir, &wrapper)
+                && let Some((cwd, command)) = claude_descendant(proc_root, dir, wrapper_pid)
+            {
+                return WindowRecord::Terminal {
+                    cwd,
+                    command: Some(command),
+                };
+            }
             return origin.cloned().unwrap_or_else(|| wrapper_record(wrapper));
         }
-        if let Some(cap) = capture_terminal(proc_root, pid) {
+        if let Some(cap) = capture_terminal(proc_root, sessions_dir, pid) {
             return WindowRecord::Terminal {
                 cwd: cap.cwd,
                 command: cap.command,
@@ -411,7 +547,7 @@ mod tests {
         let p = Proc::new("idle");
         p.add((100, "ghostty", 1), 0, "/", &["ghostty"], &[200]);
         p.add((200, "bash", 100), 200, "/home/u/proj", &["bash"], &[]);
-        let c = capture_terminal(&p.0, 100).unwrap();
+        let c = capture_terminal(&p.0, None, 100).unwrap();
         assert_eq!(
             c,
             TerminalCapture {
@@ -441,7 +577,7 @@ mod tests {
             &["/bin/bash", "--posix"],
             &[],
         );
-        let c = capture_terminal(&p.0, 100).unwrap();
+        let c = capture_terminal(&p.0, None, 100).unwrap();
         assert_eq!(
             c,
             TerminalCapture {
@@ -470,7 +606,7 @@ mod tests {
             &[400],
         );
         p.add((400, "htop", 300), 400, "/proj", &["htop"], &[]);
-        let c = capture_terminal(&p.0, 100).unwrap();
+        let c = capture_terminal(&p.0, None, 100).unwrap();
         assert_eq!(c.cwd, PathBuf::from("/proj"));
         assert_eq!(c.command.as_deref(), Some("htop"));
     }
@@ -504,7 +640,7 @@ mod tests {
             &["htop", "-p", "1,2", "a b", "it's"],
             &[],
         );
-        let c = capture_terminal(&p.0, 100).unwrap();
+        let c = capture_terminal(&p.0, None, 100).unwrap();
         assert_eq!(c.cwd, PathBuf::from("/var/log"));
         assert_eq!(c.command.as_deref(), Some("htop -p 1,2 'a b' 'it'\\''s'"));
     }
@@ -515,7 +651,7 @@ mod tests {
         p.add((100, "my term)", 1), 0, "/", &["t"], &[200]);
         p.add((200, "ba sh) x", 100), 300, "/h", &["bash"], &[300]);
         p.add((300, "we (ird) p", 200), 300, "/w", &["weird"], &[]);
-        let c = capture_terminal(&p.0, 100).unwrap();
+        let c = capture_terminal(&p.0, None, 100).unwrap();
         assert_eq!(c.cwd, PathBuf::from("/w"));
         assert_eq!(c.command.as_deref(), Some("weird"));
         assert_eq!(ancestors(&p.0, 300, 10), vec![200, 100, 1]);
@@ -527,7 +663,7 @@ mod tests {
         p.add((100, "term", 1), 0, "/", &["term"], &[150, 200]);
         p.add((150, "helper", 100), -1, "/helper", &["helper"], &[]);
         p.add((200, "bash", 100), 200, "/sh", &["bash"], &[]);
-        let c = capture_terminal(&p.0, 100).unwrap();
+        let c = capture_terminal(&p.0, None, 100).unwrap();
         assert_eq!(c.cwd, PathBuf::from("/sh"));
         assert_eq!(c.command, None);
     }
@@ -537,7 +673,7 @@ mod tests {
         let p = Proc::new("gone");
         p.add((100, "term", 1), 0, "/", &["term"], &[200]);
         p.add((200, "bash", 100), 999, "/sh", &["bash"], &[]);
-        let c = capture_terminal(&p.0, 100).unwrap();
+        let c = capture_terminal(&p.0, None, 100).unwrap();
         assert_eq!(c.cwd, PathBuf::from("/sh"));
         assert_eq!(c.command, None);
     }
@@ -545,9 +681,9 @@ mod tests {
     #[test]
     fn missing_pid_and_childless_terminal_are_none() {
         let p = Proc::new("none");
-        assert_eq!(capture_terminal(&p.0, 4242), None);
+        assert_eq!(capture_terminal(&p.0, None, 4242), None);
         p.add((100, "term", 1), 0, "/", &["term"], &[]);
-        assert_eq!(capture_terminal(&p.0, 100), None);
+        assert_eq!(capture_terminal(&p.0, None, 100), None);
         assert!(children_of(&p.0, 4242).is_empty());
     }
 
@@ -579,7 +715,7 @@ mod tests {
 
     /// Classifies terminal `pid` (exec flag `-e`, no element app id).
     fn terminal_record(p: &Proc, pid: u32, origin: Option<&WindowRecord>) -> WindowRecord {
-        window_record(&p.0, Some(pid), true, origin, None, "-e")
+        window_record(&p.0, None, Some(pid), true, origin, None, "-e")
     }
 
     /// A terminal process with no readable argv or cwd and no children.
@@ -641,7 +777,7 @@ mod tests {
         assert_eq!(terminal_record(&p, 103, None), app(None, Some("firefox")));
         // A terminal class with no pid at all is an empty idle terminal.
         assert_eq!(
-            window_record(&p.0, None, true, None, None, "-e"),
+            window_record(&p.0, None, None, true, None, None, "-e"),
             WindowRecord::Terminal {
                 cwd: PathBuf::new(),
                 command: None
@@ -654,7 +790,7 @@ mod tests {
     fn app_decodes_wrappers_before_joining() {
         let p = Proc::new("app");
         let id = || Some("elem".to_string());
-        let rec = |pid: u32| window_record(&p.0, Some(pid), false, None, id(), "-e");
+        let rec = |pid: u32| window_record(&p.0, None, Some(pid), false, None, id(), "-e");
         p.add(
             (100, "ghostty", 1),
             0,
@@ -692,7 +828,7 @@ mod tests {
         p.add((102, "firefox", 1), 0, "/", &["firefox", "--new"], &[]);
         assert_eq!(rec(102), app(Some("elem"), Some("firefox --new")));
         assert_eq!(
-            window_record(&p.0, None, false, None, None, "-e"),
+            window_record(&p.0, None, None, false, None, None, "-e"),
             app(None, None)
         );
     }
@@ -832,7 +968,15 @@ mod tests {
         add_bare(&p, 100);
         let origin = app(Some("gimp"), Some("gimp a.png"));
         let rec = |pid, origin: Option<&WindowRecord>, id: Option<&str>| {
-            window_record(&p.0, Some(pid), false, origin, id.map(str::to_string), "-e")
+            window_record(
+                &p.0,
+                None,
+                Some(pid),
+                false,
+                origin,
+                id.map(str::to_string),
+                "-e",
+            )
         };
         assert_eq!(rec(100, Some(&origin), Some("elem")), origin);
         let unnamed = app(None, Some("gimp a.png"));
@@ -848,5 +992,253 @@ mod tests {
             rec(101, Some(&origin), Some("elem")),
             app(Some("elem"), Some("gimp b.png"))
         );
+    }
+}
+
+#[cfg(test)]
+mod claude_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    const ID: &str = "d6e856ed-0000-0000-0000-000000000000";
+
+    struct Dirs {
+        proc: PathBuf,
+        sessions: PathBuf,
+    }
+
+    impl Dirs {
+        fn new(tag: &str) -> Self {
+            let base =
+                std::env::temp_dir().join(format!("cde-claude-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&base);
+            let (proc, sessions) = (base.join("proc"), base.join("sessions"));
+            fs::create_dir_all(&proc).unwrap();
+            fs::create_dir_all(&sessions).unwrap();
+            Dirs { proc, sessions }
+        }
+        fn add(&self, pid: u32, ppid: u32, tpgid: i64, cwd: &str, argv: &[&str], kids: &[u32]) {
+            let d = self.proc.join(pid.to_string());
+            let task = d.join("task").join(pid.to_string());
+            fs::create_dir_all(&task).unwrap();
+            fs::write(
+                d.join("stat"),
+                format!("{pid} (x) S {ppid} {pid} {pid} 34816 {tpgid} 4194304 100 0 0 0\n"),
+            )
+            .unwrap();
+            symlink(cwd, d.join("cwd")).unwrap();
+            let cmd: Vec<u8> = argv
+                .iter()
+                .flat_map(|a| [a.as_bytes(), &[0]].concat())
+                .collect();
+            fs::write(d.join("cmdline"), cmd).unwrap();
+            let list: Vec<String> = kids.iter().map(|k| format!("{k} ")).collect();
+            fs::write(task.join("children"), list.concat()).unwrap();
+        }
+        fn record(&self, pid: u32, body: &str) {
+            fs::write(self.sessions.join(format!("{pid}.json")), body).unwrap();
+        }
+        fn capture(&self) -> Option<TerminalCapture> {
+            capture_terminal(&self.proc, Some(&self.sessions), 100)
+        }
+    }
+
+    impl Drop for Dirs {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(self.proc.parent().unwrap());
+        }
+    }
+
+    fn argv(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn record_json(pid: u32) -> String {
+        format!(r#"{{"pid":{pid},"sessionId":"{ID}","cwd":"/w","name":"Lush Egret"}}"#)
+    }
+
+    /// A terminal 100 -> shell 200 -> foreground `fg` (pid 300).
+    fn live(d: &Dirs, fg: &[&str]) {
+        d.add(100, 1, 0, "/", &["ghostty"], &[200]);
+        d.add(200, 100, 300, "/sh", &["bash"], &[300]);
+        d.add(300, 200, 300, "/proj", fg, &[]);
+    }
+
+    #[test]
+    fn rewrite_keeps_name_and_replaces_resume_flags() {
+        let want = argv(&["claude", "--resume", "ID", "-n", "Lush Egret"]);
+        assert_eq!(
+            claude_resume_argv(&argv(&["claude", "-n", "Lush Egret"]), "ID"),
+            want
+        );
+        for old in [
+            &["claude", "--resume", "old", "-n", "Lush Egret"][..],
+            &["claude", "-r", "-n", "Lush Egret"],
+            &["claude", "--resume=old", "-n", "Lush Egret"],
+            &["claude", "-c", "-n", "Lush Egret"],
+            &["claude", "--continue", "-n", "Lush Egret"],
+            &["claude", "--session-id", "old", "-n", "Lush Egret"],
+            &[
+                "claude",
+                "--session-id=old",
+                "--fork-session",
+                "-n",
+                "Lush Egret",
+            ],
+        ] {
+            assert_eq!(claude_resume_argv(&argv(old), "ID"), want, "{old:?}");
+        }
+        assert_eq!(
+            claude_resume_argv(&argv(&["/opt/claude", "--model", "x", "hi"]), "ID"),
+            argv(&["/opt/claude", "--resume", "ID", "--model", "x", "hi"])
+        );
+    }
+
+    #[test]
+    fn session_reader_is_silent_on_bad_records() {
+        let d = Dirs::new("reader");
+        d.record(1, &record_json(1));
+        assert_eq!(claude_session_id(&d.sessions, 1).as_deref(), Some(ID));
+        assert_eq!(claude_session_id(&d.sessions, 2), None);
+        for (pid, body) in [
+            (3, "not json"),
+            (4, r#"{"sessionId":""}"#),
+            (5, r#"{"sessionId":42}"#),
+            (6, r#"{"sessionId":"abc"#),
+            (7, r#"{"name":"sessionId","pid":1}"#),
+            (8, ""),
+        ] {
+            d.record(pid, body);
+            assert_eq!(claude_session_id(&d.sessions, pid), None, "{body}");
+        }
+        d.record(9, r#"{ "name" : "sessionId", "sessionId" : "ab-1" }"#);
+        assert_eq!(claude_session_id(&d.sessions, 9).as_deref(), Some("ab-1"));
+    }
+
+    #[test]
+    fn live_claude_foreground_is_captured_as_resume() {
+        let d = Dirs::new("live");
+        live(&d, &["claude", "--continue", "-n", "Lush Egret"]);
+        d.record(300, &record_json(300));
+        let c = d.capture().unwrap();
+        assert_eq!(c.cwd, PathBuf::from("/proj"));
+        assert_eq!(
+            c.command.as_deref(),
+            Some(format!("claude --resume {ID} -n 'Lush Egret'").as_str())
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_record_falls_back_to_plain_capture() {
+        let d = Dirs::new("fallback");
+        live(&d, &["claude", "-n", "Lush Egret"]);
+        let plain = Some("claude -n 'Lush Egret'");
+        assert_eq!(d.capture().unwrap().command.as_deref(), plain);
+        d.record(300, "{garbage");
+        assert_eq!(d.capture().unwrap().command.as_deref(), plain);
+        // No sessions dir at all is also today's output.
+        assert_eq!(
+            capture_terminal(&d.proc, None, 100)
+                .unwrap()
+                .command
+                .as_deref(),
+            plain
+        );
+    }
+
+    #[test]
+    fn non_claude_program_is_untouched() {
+        let d = Dirs::new("other");
+        live(&d, &["htop", "-p", "1"]);
+        d.record(300, &record_json(300));
+        assert_eq!(d.capture().unwrap().command.as_deref(), Some("htop -p 1"));
+    }
+
+    /// Measured on host-a 2026-10-31: `ghostty -> crucible resume ... -- claude -n 'Lush Egret'
+    /// -> claude -n Lush Egret`, the last two sharing pgrp 118161.
+    fn measured_tree(d: &Dirs) {
+        d.add(117_833, 1, 0, "/", &["ghostty"], &[118_161]);
+        d.add(
+            118_161,
+            117_833,
+            118_161,
+            "/elsewhere",
+            &[
+                "crucible",
+                "resume",
+                "--cwd",
+                "/w",
+                "--",
+                "claude -n 'Lush Egret'",
+            ],
+            &[118_191],
+        );
+        d.add(
+            118_191,
+            118_161,
+            118_161,
+            "/work/tree",
+            &["claude", "-n", "Lush Egret"],
+            &[],
+        );
+    }
+
+    fn origin() -> WindowRecord {
+        WindowRecord::Terminal {
+            cwd: "/w".into(),
+            command: Some("claude -n 'Lush Egret'".into()),
+        }
+    }
+
+    fn classify(d: &Dirs, origin: Option<&WindowRecord>) -> WindowRecord {
+        window_record(
+            &d.proc,
+            Some(&d.sessions),
+            Some(117_833),
+            true,
+            origin,
+            None,
+            "-e",
+        )
+    }
+
+    #[test]
+    fn accepted_resume_wrapper_yields_the_claude_resume_command() {
+        let d = Dirs::new("measured");
+        measured_tree(&d);
+        d.record(118_191, &record_json(118_191));
+        let want = WindowRecord::Terminal {
+            cwd: "/work/tree".into(),
+            command: Some(format!("claude --resume {ID} -n 'Lush Egret'")),
+        };
+        assert_eq!(classify(&d, Some(&origin())), want);
+        assert_eq!(classify(&d, None), want);
+    }
+
+    #[test]
+    fn unaccepted_banner_keeps_the_origin() {
+        let d = Dirs::new("banner");
+        d.add(117_833, 1, 0, "/", &["ghostty"], &[118_161]);
+        d.add(
+            118_161,
+            117_833,
+            118_161,
+            "/e",
+            &[
+                "crucible",
+                "resume",
+                "--cwd",
+                "/w",
+                "--",
+                "claude -n 'Lush Egret'",
+            ],
+            &[],
+        );
+        d.record(118_191, &record_json(118_191));
+        assert_eq!(classify(&d, Some(&origin())), origin());
+        // An accepted tree without a session record also keeps the origin.
+        let d = Dirs::new("banner-norec");
+        measured_tree(&d);
+        assert_eq!(classify(&d, Some(&origin())), origin());
     }
 }

@@ -238,6 +238,18 @@ fn proc_root() -> &'static Path {
     Path::new("/proc")
 }
 
+/// `<claude-home>/sessions`, where claude keeps its per-pid session records. `<claude-home>` is
+/// `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`. Read per capture (cheap); a missing home yields a
+/// relative path that simply reads nothing.
+fn claude_sessions_dir() -> PathBuf {
+    let home = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))
+        .unwrap_or_default();
+    home.join("sessions")
+}
+
 fn element_app_id(element: &WindowElement) -> Option<String> {
     if let Some(toplevel) = element.toplevel() {
         return with_states(toplevel.wl_surface(), |states| {
@@ -569,6 +581,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let meta = self.layout.meta(id);
         crucible_persist::window_record(
             proc_root(),
+            Some(&claude_sessions_dir()),
             meta.and_then(|m| m.pid),
             meta.is_some_and(|m| m.class == crate::layout::WindowClass::Terminal),
             meta.and_then(|m| m.origin.as_ref()),
