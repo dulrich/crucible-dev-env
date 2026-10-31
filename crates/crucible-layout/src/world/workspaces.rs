@@ -218,6 +218,9 @@ impl World {
             if let Some(pane) = self.panes.remove(&pane_id) {
                 for w in pane.stack.into_vec() {
                     self.windows.remove(&w);
+                    if self.marked == Some(w) {
+                        self.marked = None;
+                    }
                     windows.push(w);
                 }
             }

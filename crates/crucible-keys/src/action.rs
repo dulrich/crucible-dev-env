@@ -13,6 +13,7 @@
 //! action grammar and `FromStr` parses it back. Verbs: `quit`, `close-pane`, `run-terminal`,
 //! `run <command…>`, `run-in-terminal <command…>`, `focus|move|split|resize <left|right|up|down>`,
 //! `cycle-stack <±n>`, `cycle-workspace <±n>`, `new-workspace`, `move-window-to-workspace <±n>`,
+//! `mark-window`,
 //! `close-workspace`, `close-all-workspaces`, `slot <0-9>`, `pin-slot <0-9>`,
 //! `move-workspace-to-output <±n>`, `open-picker`, `open-launcher`, `open-settings`,
 //! `toggle-header`, `rename-workspace` and `lock`. `vt-switch <n>` is printed but deliberately
@@ -88,6 +89,12 @@ pub enum Action {
     ///
     /// No-op when there is no focused window or only one workspace exists.
     MoveWindowToWorkspace(i64),
+    /// Mark the focused window; pressed again elsewhere, move the marked window into the focused
+    /// pane (any workspace or output); pressed again in the marked window's own pane, clear the
+    /// mark. `Super+M`.
+    ///
+    /// No-op when there is no mark and no focused window.
+    MarkWindow,
     /// Close the focused output's active workspace: its record is saved first, then its windows
     /// are ended. Refused on the output's last workspace or while a restore is pending.
     /// `Super+Shift+W`.
@@ -150,6 +157,7 @@ impl std::fmt::Display for Action {
             Self::CycleWorkspace(n) => write!(f, "cycle-workspace {n}"),
             Self::NewWorkspace => f.write_str("new-workspace"),
             Self::MoveWindowToWorkspace(n) => write!(f, "move-window-to-workspace {n}"),
+            Self::MarkWindow => f.write_str("mark-window"),
             Self::CloseWorkspace => f.write_str("close-workspace"),
             Self::CloseAllWorkspaces => f.write_str("close-all-workspaces"),
             Self::Slot(n) => write!(f, "slot {n}"),
@@ -184,6 +192,8 @@ pub enum LayoutVerb {
     CycleWorkspace(i64),
     /// [`Action::MoveWindowToWorkspace`].
     MoveWindowToWorkspace(i64),
+    /// [`Action::MarkWindow`].
+    MarkWindow,
     /// [`Action::ClosePane`].
     ClosePane,
 }
@@ -201,6 +211,7 @@ impl Action {
             Self::CycleStack(n) => Some(LayoutVerb::CycleStack(*n)),
             Self::CycleWorkspace(n) => Some(LayoutVerb::CycleWorkspace(*n)),
             Self::MoveWindowToWorkspace(n) => Some(LayoutVerb::MoveWindowToWorkspace(*n)),
+            Self::MarkWindow => Some(LayoutVerb::MarkWindow),
             Self::ClosePane => Some(LayoutVerb::ClosePane),
             Self::Quit
             | Self::RunTerminal
@@ -314,6 +325,7 @@ impl FromStr for Action {
             "cycle-stack" => unary(Self::CycleStack(delta(words.get(1))?)),
             "cycle-workspace" => unary(Self::CycleWorkspace(delta(words.get(1))?)),
             "move-window-to-workspace" => unary(Self::MoveWindowToWorkspace(delta(words.get(1))?)),
+            "mark-window" => nullary(Self::MarkWindow),
             "close-workspace" => nullary(Self::CloseWorkspace),
             "close-all-workspaces" => nullary(Self::CloseAllWorkspaces),
             "lock" => nullary(Self::Lock),
@@ -362,6 +374,7 @@ mod tests {
             Action::CycleWorkspace(1),
             Action::NewWorkspace,
             Action::MoveWindowToWorkspace(2),
+            Action::MarkWindow,
             Action::CloseWorkspace,
             Action::CloseAllWorkspaces,
             Action::Slot(3),
@@ -406,10 +419,14 @@ mod tests {
             .into_iter()
             .filter(|a| a.layout_verb().is_some())
             .count();
-        assert_eq!(model, 8);
+        assert_eq!(model, 9);
         assert_eq!(
             Action::MoveWindowToWorkspace(2).layout_verb(),
             Some(LayoutVerb::MoveWindowToWorkspace(2))
+        );
+        assert_eq!(
+            Action::MarkWindow.layout_verb(),
+            Some(LayoutVerb::MarkWindow)
         );
         assert_eq!(Action::ClosePane.layout_verb(), Some(LayoutVerb::ClosePane));
         assert_eq!(Action::CloseWorkspace.layout_verb(), None);

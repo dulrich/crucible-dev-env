@@ -38,6 +38,9 @@ pub enum LayoutError {
     /// The requested move/switch target is the same workspace the window already lives on.
     #[error("window already on target workspace")]
     SameWorkspace,
+    /// The requested target pane is the pane the window already lives in.
+    #[error("window already in target pane")]
+    SamePane,
     /// Attempted to remove the only/last output; at least one output must always exist.
     #[error("cannot remove the last output")]
     LastOutput,
@@ -79,6 +82,8 @@ pub struct World {
     panes: BTreeMap<PaneId, Pane>,
     windows: BTreeMap<WindowId, Window>,
     focused_output: OutputId,
+    /// The window marked by `mark-window`, waiting to be placed. Never serialized.
+    marked: Option<WindowId>,
 
     output_ids: IdGen,
     workspace_ids: IdGen,
@@ -102,6 +107,7 @@ impl World {
             panes: BTreeMap::new(),
             windows: BTreeMap::new(),
             focused_output: output_id,
+            marked: None,
             output_ids,
             workspace_ids: IdGen::new(),
             pane_ids: IdGen::new(),
@@ -195,6 +201,9 @@ impl World {
                 "workspace name {:?} is unique",
                 w.name
             );
+        }
+        if let Some(m) = self.marked {
+            assert!(self.windows.contains_key(&m), "mark names a live window");
         }
         // Every window lives in exactly one pane.
         let mut counts: BTreeMap<WindowId, usize> = BTreeMap::new();

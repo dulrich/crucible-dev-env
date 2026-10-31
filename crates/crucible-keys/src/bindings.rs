@@ -223,6 +223,7 @@ impl Default for Bindings {
         bind(sup, &[Keysym::bracketright], Action::CycleWorkspace(1));
         bind(sup, &[Keysym::bracketleft], Action::CycleWorkspace(-1));
         bind(sup, &[Keysym::n, Keysym::N], Action::NewWorkspace);
+        bind(sup, &[Keysym::m, Keysym::M], Action::MarkWindow);
         bind(sup, &[Keysym::p, Keysym::P], Action::OpenPicker);
         bind(sup, &[Keysym::Escape], Action::Lock);
 
@@ -649,6 +650,7 @@ mod tests {
                 "run-in-terminal htop -d 5",
                 Action::RunInTerminal("htop -d 5".into()),
             ),
+            ("mark-window", Action::MarkWindow),
             ("new-workspace", Action::NewWorkspace),
             ("close-workspace", Action::CloseWorkspace),
             ("close-all-workspaces", Action::CloseAllWorkspaces),

@@ -48,6 +48,14 @@ pub const ENABLE_CHROME: bool = true;
 /// Width of the focus-ring border, in logical pixels (applied at scale 1.0).
 pub const BORDER_THICKNESS: i32 = 3;
 
+/// Thickness of the mark ring, in logical pixels. Independent of the configured tile rings (app
+/// tiles default to `ring=0`), so a marked window is always visible.
+pub const MARK_THICKNESS: i32 = BORDER_THICKNESS;
+
+/// Colour of the mark ring and of the stack pip of a marked, non-visible window. Amber, distinct
+/// from the teal [`BORDER_COLOR`].
+pub const MARK_COLOR: [f32; 4] = [0.95, 0.65, 0.15, 1.0];
+
 /// Focus-ring colour as `[R, G, B, A]` premultiplied floats.  Bright teal accent.
 pub const BORDER_COLOR: [f32; 4] = [0.20, 0.80, 0.80, 1.0];
 
@@ -317,6 +325,61 @@ pub fn plan_tile(tile: Rect, class: WindowClass, tiling: &TilingConfig, focused:
     }
 }
 
+/// Plans the mark ring of the marked window of `class` in `tile`. **Pure.**
+///
+/// Always [`MARK_THICKNESS`] thick, whatever the configured ring: a terminal's ring sits inside the
+/// tile; an app's sits outside the window, in the inset (clamped to it). With no inset (gap 0) it
+/// falls back to the inside of the tile.
+#[must_use]
+pub fn plan_mark_ring(tile: Rect, class: WindowClass, tiling: &TilingConfig) -> Vec<Rect> {
+    if class == WindowClass::App {
+        let window = window_rect(tile, class, tiling);
+        let t = MARK_THICKNESS.min(window.x - tile.x);
+        if t > 0 {
+            return ring_strips(window.outset(t), t);
+        }
+    }
+    ring_strips(tile, MARK_THICKNESS)
+}
+
+/// The pip of the marked window at stack `index` of a pane of `len` windows, or `None` when the
+/// pane shows no pips (`len <= 1`) or `index` is out of range. **Pure.**
+#[must_use]
+pub fn mark_pip(
+    pane_rect: Rect,
+    focused: usize,
+    len: usize,
+    index: usize,
+    margin: i32,
+) -> Option<Rect> {
+    stack_pips_with_margin(pane_rect, focused, len, margin)
+        .get(index)
+        .map(|&(r, _)| r)
+}
+
+/// Pure plan of the mark indicator (output-local, drawn in front of everything else): the ring
+/// strips of a visible marked window and/or the marked window's pip, both in [`MARK_COLOR`]. The
+/// ring is suppressed, and a pip intersecting the overlay dropped, while an overlay is mapped.
+#[must_use]
+pub fn plan_mark_chrome(
+    ring: &[Rect],
+    pip: Option<Rect>,
+    overlay: Option<OverlayChrome>,
+    output_origin: (i32, i32),
+) -> Vec<(Rect, [f32; 4])> {
+    let local = |r: Rect| r.translate(-output_origin.0, -output_origin.1);
+    let mut out = Vec::new();
+    if let Some(p) = pip
+        && !overlay.is_some_and(|o| p.intersects(o.rect))
+    {
+        out.push((local(p), MARK_COLOR));
+    }
+    if overlay.is_none() {
+        out.extend(ring.iter().map(|&r| (local(r), MARK_COLOR)));
+    }
+    out
+}
+
 /// The opaque colour for a configured fill, as `[R, G, B, A]`.
 #[must_use]
 pub fn fill_color(fill: Rgb) -> [f32; 4] {
@@ -414,7 +477,13 @@ pub fn build_chrome_elements(
     let focus = projection.focus();
     let mut ring: Vec<Rect> = Vec::new();
     let mut fills: Vec<Rect> = Vec::new();
+    let marked = world.marked();
+    let mut mark_ring: Vec<Rect> = Vec::new();
+    let mut mark_pip_rect: Option<Rect> = None;
     for &(id, tile) in projection.windows() {
+        if marked == Some(id) {
+            mark_ring = plan_mark_ring(tile, layout.window_class(id), tiling);
+        }
         let plan = plan_tile(tile, layout.window_class(id), tiling, focus == Some(id));
         ring.extend(plan.ring);
         fills.extend(plan.fill);
@@ -455,12 +524,17 @@ pub fn build_chrome_elements(
                 WindowClass::App => tiling.app.gap,
             };
             let margin = pip_margin(i32::try_from(strip).unwrap_or(i32::MAX));
-            pips.extend(stack_pips_with_margin(
-                pane_rect,
-                pane.focused_index(),
-                len,
-                margin,
-            ));
+            let mut pane_pips =
+                stack_pips_with_margin(pane_rect, pane.focused_index(), len, margin);
+            // The marked window's pip is drawn by the mark plan, in the mark colour.
+            if let Some(index) = marked.and_then(|m| pane.windows().iter().position(|w| *w == m))
+                && index != pane.focused_index()
+                && let Some(pip) = pane_pips.get(index).map(|&(r, _)| r)
+            {
+                mark_pip_rect = Some(pip);
+                pane_pips.remove(index);
+            }
+            pips.extend(pane_pips);
         }
     }
 
@@ -476,17 +550,18 @@ pub fn build_chrome_elements(
     windows.extend(overlay.map(|o| o.rect.translate(-output_origin.0, -output_origin.1)));
     let map = PhysicalMap::new(scale, windows);
 
-    plan_chrome(
+    let mut plan = plan_mark_chrome(&mark_ring, mark_pip_rect, overlay, output_origin);
+    plan.extend(plan_chrome(
         &ring,
         &fills,
         fill_color(tiling.app.fill),
         &pips,
         overlay,
         output_origin,
-    )
-    .into_iter()
-    .map(|(rect, color)| solid(map.rect(rect), color))
-    .collect()
+    ));
+    plan.into_iter()
+        .map(|(rect, color)| solid(map.rect(rect), color))
+        .collect()
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
@@ -595,6 +670,81 @@ mod tests {
         // 2 pips (in front), then 4 ring strips.
         assert_eq!(out.len(), 6);
         assert!(out[2..].iter().all(|(_, c)| *c == BORDER_COLOR));
+    }
+
+    // ---- mark indicator ----
+
+    #[test]
+    fn mark_ring_is_amber_and_at_least_mark_thickness_even_with_ring_zero() {
+        let tile = rect(0, 0, 400, 300);
+        let t = tiling(10, 0); // app gap 10, app ring 0 (the default)
+        assert!(plan_tile(tile, WindowClass::App, &t, true).ring.is_empty());
+        let strips = plan_mark_ring(tile, WindowClass::App, &t);
+        assert_eq!(strips.len(), 4);
+        let window = window_rect(tile, WindowClass::App, &t);
+        for r in &strips {
+            assert!(!r.intersects(window), "mark ring over content: {r:?}");
+            assert!(inside(*r, tile));
+        }
+        let out = plan_mark_chrome(&strips, None, None, (0, 0));
+        assert_eq!(out.len(), 4);
+        assert!(out.iter().all(|(_, c)| *c == MARK_COLOR));
+        assert_ne!(MARK_COLOR, BORDER_COLOR);
+        assert_eq!(
+            area_sum(&strips),
+            i64::from((400 - 20 + 6) * (300 - 20 + 6) - (400 - 20) * (300 - 20))
+        );
+    }
+
+    #[test]
+    fn mark_ring_falls_back_inside_the_tile_without_an_inset_and_for_terminals() {
+        let tile = rect(0, 0, 400, 300);
+        let flush = plan_mark_ring(tile, WindowClass::App, &tiling(0, 0));
+        assert_eq!(area_sum(&flush), 400 * 300 - 394 * 294);
+        let term = plan_mark_ring(tile, WindowClass::Terminal, &tiling(10, 0));
+        assert_eq!(area_sum(&term), 400 * 300 - 394 * 294);
+        assert!(term.iter().all(|r| inside(*r, tile)));
+    }
+
+    #[test]
+    fn mark_ring_clamps_to_a_thin_inset() {
+        let tile = rect(0, 0, 400, 300);
+        let strips = plan_mark_ring(tile, WindowClass::App, &tiling(1, 0));
+        assert_eq!(strips[0].y, 0, "ring clamped to the 1px inset");
+        assert!(strips.iter().all(|r| inside(*r, tile)));
+    }
+
+    #[test]
+    fn mark_pip_is_the_marked_stack_index() {
+        let pane = rect(0, 0, 800, 600);
+        let all = stack_pips_with_margin(pane, 0, 3, PIP_MARGIN);
+        for (i, (want, _)) in all.iter().enumerate() {
+            assert_eq!(
+                mark_pip(pane, 0, 3, i, PIP_MARGIN),
+                Some(*want),
+                "index {i}"
+            );
+        }
+        assert_eq!(mark_pip(pane, 0, 3, 3, PIP_MARGIN), None);
+        assert_eq!(mark_pip(pane, 0, 1, 0, PIP_MARGIN), None);
+        let out = plan_mark_chrome(&[], Some(all[2].0), None, (0, 0));
+        assert_eq!(out, vec![(all[2].0, MARK_COLOR)]);
+    }
+
+    #[test]
+    fn mark_chrome_respects_overlay_and_output_origin() {
+        let ring = rect(100, 100, 50, 50).border_strips(3);
+        let pip = rect(120, 105, 8, 8);
+        let over = overlay(true, OverlayStyle::Terminal).map(|mut o| {
+            o.rect = rect(110, 100, 100, 100);
+            o
+        });
+        // Overlay drops the ring and the intersecting pip.
+        assert!(plan_mark_chrome(&ring, Some(pip), over, (0, 0)).is_empty());
+        // Without an overlay everything is translated into the output frame.
+        let out = plan_mark_chrome(&ring, Some(pip), None, (100, 100));
+        assert_eq!(out.len(), 5);
+        assert_eq!(out[0].0, rect(20, 5, 8, 8));
     }
 
     const APP_FILL: [f32; 4] = [0.1, 0.2, 0.3, 1.0];

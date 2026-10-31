@@ -140,6 +140,14 @@ pub fn skip_record(record: &WorkspaceRecord) -> bool {
     record.root.is_none() && panes.len() == 1 && panes[0].windows.is_empty()
 }
 
+/// Whether `save_dirty` may write `record`: a skippable (empty) record is still written when an
+/// earlier save of that workspace exists, so a workspace emptied by a move does not keep a stale
+/// file that restores its moved windows a second time. Never-saved empty seeds stay unsaved.
+#[must_use]
+pub fn should_write(record: &WorkspaceRecord, previously_saved: bool) -> bool {
+    !skip_record(record) || previously_saved
+}
+
 /// A restored terminal's working directory: the saved cwd, else the workspace root, else `$HOME`,
 /// else `/`.
 #[must_use]
@@ -485,7 +493,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             let Some(record) = self.capture_record(ws) else {
                 continue;
             };
-            if skip_record(&record) {
+            if !should_write(&record, self.persist.saved.contains_key(&record.name)) {
                 continue;
             }
             let last = self.persist.saved.get(&record.name);
@@ -722,6 +730,22 @@ mod tests {
             second: Box::new(pane(vec![])),
         };
         assert!(!skip_record(&record(None, split)));
+    }
+
+    #[test]
+    fn emptied_saved_workspace_is_still_written_but_never_saved_seed_is_not() {
+        let term = WindowRecord::Terminal {
+            cwd: "/".into(),
+            command: None,
+        };
+        let with_window = record(None, pane(vec![term]));
+        let emptied = record(None, pane(vec![]));
+        assert!(should_write(&with_window, false));
+        assert!(should_write(&with_window, true));
+        // Saved once, then its last window moved away: the empty record must overwrite the file.
+        assert!(should_write(&emptied, true));
+        // A fresh empty seed that was never saved stays unsaved.
+        assert!(!should_write(&emptied, false));
     }
 
     #[test]

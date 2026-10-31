@@ -27,6 +27,7 @@
 //! | `Super+N`             | `NewWorkspace`                 | `World::new_workspace(auto_name)` |
 //! | `Super+Shift+]`       | `MoveWindowToWorkspace(1)`     | `World::move_window_to_workspace` |
 //! | `Super+Shift+[`       | `MoveWindowToWorkspace(-1)`    | `World::move_window_to_workspace` |
+//! | `Super+M`             | `MarkWindow`                   | `World::mark_window`              |
 //! | `Super+Shift+W`       | `CloseWorkspace`               | save, then `World::remove_workspace` |
 //! | `Super+Ctrl+]`        | `MoveWorkspaceToOutput(1)`     | `World::move_workspace_to_output` |
 //! | `Super+Ctrl+[`        | `MoveWorkspaceToOutput(-1)`    | `World::move_workspace_to_output` |
@@ -161,6 +162,8 @@ mod tests {
             (Keysym::bracketleft, Action::CycleWorkspace(-1)),
             (Keysym::n, Action::NewWorkspace),
             (Keysym::N, Action::NewWorkspace),
+            (Keysym::m, Action::MarkWindow),
+            (Keysym::M, Action::MarkWindow),
             (Keysym::_0, Action::Slot(0)),
             (Keysym::_1, Action::Slot(1)),
             (Keysym::_2, Action::Slot(2)),
@@ -366,6 +369,7 @@ mod tests {
             (false, false, Keysym::bracketright) => Some(Action::CycleWorkspace(1)),
             (false, false, Keysym::bracketleft) => Some(Action::CycleWorkspace(-1)),
             (false, false, Keysym::n | Keysym::N) => Some(Action::NewWorkspace),
+            (false, false, Keysym::m | Keysym::M) => Some(Action::MarkWindow),
             (false, false, k) if (0x30..=0x39).contains(&k.raw()) => {
                 Some(Action::Slot(u8::try_from(k.raw() - 0x30).unwrap()))
             }

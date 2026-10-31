@@ -69,6 +69,9 @@ impl World {
             .locate_window(window)
             .ok_or(LayoutError::UnknownWindow(window))?;
         self.windows.remove(&window);
+        if self.marked == Some(window) {
+            self.marked = None;
+        }
 
         let pane = self.panes.get_mut(&location.pane).expect("located pane");
         let removed = pane.stack.remove_item(&window);
@@ -192,6 +195,70 @@ impl World {
         let focused_pane = self.focused_pane_id();
         let ws = self.workspaces.get_mut(&workspace_id).expect("workspace");
         ws.tree.resize(focused_pane, dir, delta);
+    }
+
+    /// The window currently marked by [`mark_window`](World::mark_window), if any.
+    #[must_use]
+    pub fn marked(&self) -> Option<WindowId> {
+        self.marked
+    }
+
+    /// Moves `window` into `pane`'s stack, wherever either lives.
+    ///
+    /// The window leaves its source stack (the source pane persists, possibly empty) and is pushed
+    /// onto the target stack as its focused window. The target pane, its workspace (made active on
+    /// its output) and that output become focused. Errors with [`LayoutError::UnknownWindow`],
+    /// [`LayoutError::UnknownPane`] or [`LayoutError::SamePane`], mutating nothing.
+    pub fn move_window_to_pane(
+        &mut self,
+        window: WindowId,
+        pane: PaneId,
+    ) -> Result<(), LayoutError> {
+        let location = self
+            .locate_window(window)
+            .ok_or(LayoutError::UnknownWindow(window))?;
+        if !self.panes.contains_key(&pane) {
+            return Err(LayoutError::UnknownPane(pane));
+        }
+        if location.pane == pane {
+            return Err(LayoutError::SamePane);
+        }
+        // A pane in the arena but in no workspace tree cannot be focused; check before mutating.
+        let target_pane_known = self
+            .workspaces
+            .values()
+            .any(|ws| ws.tree.leaves().contains(&pane));
+        if !target_pane_known {
+            return Err(LayoutError::UnknownPane(pane));
+        }
+
+        let source = self.panes.get_mut(&location.pane).expect("source pane");
+        let removed = source.stack.remove_item(&window);
+        debug_assert!(removed, "window in its pane");
+        self.panes
+            .get_mut(&pane)
+            .expect("target pane")
+            .stack
+            .push(window);
+        self.focus_pane(pane)
+            .expect("target pane is in a workspace tree");
+        Ok(())
+    }
+
+    /// The `mark-window` toggle.
+    ///
+    /// With no mark, marks the focused window (a no-op when there is none). With a mark whose
+    /// window lives in the focused pane, clears it. With a mark elsewhere, moves the marked window
+    /// into the focused pane and clears the mark.
+    pub fn mark_window(&mut self) {
+        let Some(marked) = self.marked else {
+            self.marked = self.focused_window();
+            return;
+        };
+        let target = self.focused_pane_id();
+        // A same-pane press (or a stale mark) just clears; otherwise place the window.
+        let _ = self.move_window_to_pane(marked, target);
+        self.marked = None;
     }
 
     /// Finds which workspace + pane currently holds `window`.

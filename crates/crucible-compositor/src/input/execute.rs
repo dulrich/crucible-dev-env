@@ -170,6 +170,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             | Action::CycleStack(_)
             | Action::CycleWorkspace(_)
             | Action::MoveWindowToWorkspace(_)
+            | Action::MarkWindow
             | Action::ClosePane => unreachable!("layout verbs are routed by layout_verb above"),
         }
         Ok(())
@@ -240,6 +241,9 @@ fn apply_model_action(world: &mut World, verb: LayoutVerb) -> Result<(), LayoutE
         }
         LayoutVerb::MoveWindowToWorkspace(delta) => {
             return move_window_to_adjacent_workspace(world, delta);
+        }
+        LayoutVerb::MarkWindow => {
+            world.mark_window();
         }
         LayoutVerb::ClosePane => return world.close_pane(),
     }
@@ -439,6 +443,34 @@ mod tests {
             let target = w.output(w.focused_output()).unwrap().workspaces()[1];
             w.move_window_to_workspace(window, target).unwrap();
         });
+    }
+
+    #[test]
+    fn mark_window_marks_then_places_in_the_focused_pane() {
+        let mut world = World::new("1");
+        let a = world.open_window();
+        world.split(Direction::Right);
+        let b = world.open_window();
+        world.focus(Direction::Left);
+        let source = world.focused_pane_id();
+        apply_model_action(&mut world, LayoutVerb::MarkWindow).unwrap();
+        assert_eq!(world.marked(), Some(a));
+        world.focus(Direction::Right);
+        let target = world.focused_pane_id();
+        apply_model_action(&mut world, LayoutVerb::MarkWindow).unwrap();
+        world.check_invariants();
+        assert_eq!(world.marked(), None);
+        assert_eq!(world.pane_of_window(a), Some(target));
+        assert_eq!(world.pane_of_window(b), Some(target));
+        assert_ne!(source, target);
+        assert_eq!(world.focused_window(), Some(a));
+    }
+
+    #[test]
+    fn mark_window_dispatches_to_world_mark_window() {
+        let mut world = World::new("1");
+        world.open_window();
+        assert_dispatches(world, Action::MarkWindow, |w| w.mark_window());
     }
 
     #[test]
