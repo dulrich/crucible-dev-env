@@ -9,7 +9,7 @@ use crate::model::{
     ClassTiling, Config, HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX,
     HEADER_SIZE_MIN, HeaderConfig, HeaderMode, LauncherConfig, OUTPUT_SCALE_MAX, OUTPUT_SCALE_MIN,
     OUTPUT_SCALE_STEPS, OutputConfig, OverlayConfig, OverlayStyle, PickerConfig, Rgb,
-    TerminalConfig, TilingConfig, clamp_ring,
+    TerminalConfig, TilingConfig, clamp_ring, clamp_ring_inset,
 };
 use crate::reader::{Children, NodeReader, locate};
 
@@ -105,7 +105,7 @@ fn parse_class_tiling(
     node.allow_properties(if allow_fill {
         &["gap", "ring", "fill"]
     } else {
-        &["gap", "ring"]
+        &["gap", "ring", "ring-inset", "frame"]
     })?;
     node.no_args()?;
     if let Some(gap) = node.u32_prop("gap")? {
@@ -114,16 +114,33 @@ fn parse_class_tiling(
     if let Some(ring) = node.u32_prop("ring")? {
         out.ring = ring;
     }
-    if let Some((s, at)) = node.string_prop("fill", "a \"#rrggbb\" string")? {
-        out.fill = Rgb::from_hex(s).ok_or_else(|| {
-            node.invalid_at(
-                at,
-                "property `fill`",
-                format!("`{s}` is not a #rrggbb colour"),
-            )
-        })?;
+    if allow_fill {
+        if let Some(c) = hex_prop(&node, "fill")? {
+            out.fill = c;
+        }
+    } else {
+        if let Some(inset) = node.u32_prop("ring-inset")? {
+            out.ring_inset = inset;
+        }
+        if let Some(c) = hex_prop(&node, "frame")? {
+            out.frame = Some(c);
+        }
     }
     Ok(())
+}
+
+/// A `"#rrggbb"` string property, validated.
+fn hex_prop(node: &NodeReader<'_>, name: &str) -> Result<Option<Rgb>, ConfigError> {
+    let Some((s, at)) = node.string_prop(name, "a \"#rrggbb\" string")? else {
+        return Ok(None);
+    };
+    Rgb::from_hex(s).map(Some).ok_or_else(|| {
+        node.invalid_at(
+            at,
+            &format!("property `{name}`"),
+            format!("`{s}` is not a #rrggbb colour"),
+        )
+    })
 }
 
 fn parse_tiling(node: NodeReader<'_>) -> Result<TilingConfig, ConfigError> {
@@ -150,6 +167,17 @@ fn parse_tiling(node: NodeReader<'_>) -> Result<TilingConfig, ConfigError> {
                 "tiling ring is larger than gap; clamping ring to gap"
             );
             tiling.ring = ring;
+        }
+        let (inset, clamped) = clamp_ring_inset(tiling.gap, tiling.ring, tiling.ring_inset);
+        if clamped {
+            tracing::warn!(
+                class,
+                gap = tiling.gap,
+                ring = tiling.ring,
+                ring_inset = tiling.ring_inset,
+                "tiling ring-inset plus ring is larger than gap; clamping ring-inset to gap - ring"
+            );
+            tiling.ring_inset = inset;
         }
     }
     Ok(out)
@@ -664,6 +692,28 @@ binds {
         let c = parse("tiling {\n    terminal gap=2 ring=9\n    app gap=1 ring=5\n}\n").unwrap();
         assert_eq!(c.tiling.terminal.ring, 2);
         assert_eq!(c.tiling.app.ring, 1);
+    }
+
+    #[test]
+    fn terminal_ring_inset_and_frame_parse_clamp_and_reject() {
+        let c = parse("tiling {\n    terminal gap=9 ring=1 ring-inset=4 frame=\"#3a3a3a\"\n}\n")
+            .unwrap();
+        let t = c.tiling.terminal;
+        assert_eq!((t.ring, t.ring_inset), (1, 4));
+        assert_eq!(t.frame, Some(Rgb(0x3a, 0x3a, 0x3a)));
+        let d = TilingConfig::default().terminal;
+        assert_eq!((d.ring_inset, d.frame), (0, None));
+        let c = parse("tiling {\n    terminal gap=6 ring=3 ring-inset=5\n}\n").unwrap();
+        assert_eq!(c.tiling.terminal.ring_inset, 3);
+        let (err, _) = err_at("tiling {\n    terminal frame=\"red\"\n}\n");
+        assert!(matches!(err, ConfigError::InvalidValue { .. }), "{err:?}");
+        for bad in ["app ring-inset=1", "app frame=\"#000000\""] {
+            let (err, _) = err_at(&format!("tiling {{\n    {bad}\n}}\n"));
+            assert!(
+                matches!(err, ConfigError::UnknownProperty { .. }),
+                "{err:?}"
+            );
+        }
     }
 
     #[test]

@@ -275,6 +275,9 @@ pub struct TilePlan {
     pub ring: Vec<Rect>,
     /// Opaque fill rects (apps only): the part of the app inset the ring does not cover.
     pub fill: Vec<Rect>,
+    /// Frame strips (terminals only): the ring geometry of an **unfocused** terminal tile whose
+    /// `frame` colour is configured; empty otherwise.
+    pub frame: Vec<Rect>,
 }
 
 /// Plans the ring and fill of the window of `class` in `tile`. **Pure.**
@@ -287,17 +290,18 @@ pub struct TilePlan {
 #[must_use]
 pub fn plan_tile(tile: Rect, class: WindowClass, tiling: &TilingConfig, focused: bool) -> TilePlan {
     match class {
-        WindowClass::Terminal => TilePlan {
-            ring: if focused {
-                ring_strips(
-                    tile,
-                    i32::try_from(tiling.terminal.ring).unwrap_or(i32::MAX),
-                )
-            } else {
-                Vec::new()
-            },
-            fill: Vec::new(),
-        },
+        WindowClass::Terminal => {
+            let strips = ring_strips(
+                terminal_ring_rect(tile, tiling),
+                i32::try_from(tiling.terminal.ring).unwrap_or(i32::MAX),
+            );
+            let framed = !focused && tiling.terminal.frame.is_some();
+            TilePlan {
+                ring: if focused { strips.clone() } else { Vec::new() },
+                fill: Vec::new(),
+                frame: if framed { strips } else { Vec::new() },
+            }
+        }
         WindowClass::App => {
             let window = window_rect(tile, class, tiling);
             let inset = window.x - tile.x;
@@ -320,15 +324,21 @@ pub fn plan_tile(tile: Rect, class: WindowClass, tiling: &TilingConfig, focused:
                     .into_iter()
                     .filter(|r| r.has_area())
                     .collect(),
+                frame: Vec::new(),
             }
         }
     }
 }
 
+/// The rect a terminal's ring (and frame) is drawn on: the tile inset by `ring_inset`.
+fn terminal_ring_rect(tile: Rect, tiling: &TilingConfig) -> Rect {
+    tile.inset(i32::try_from(tiling.terminal.ring_inset).unwrap_or(i32::MAX))
+}
+
 /// Plans the mark ring of the marked window of `class` in `tile`. **Pure.**
 ///
 /// Always [`MARK_THICKNESS`] thick, whatever the configured ring: a terminal's ring sits inside the
-/// tile; an app's sits outside the window, in the inset (clamped to it). With no inset (gap 0) it
+/// tile (at the terminal ring's `ring_inset`, so it stays clear of the text); an app's sits outside the window, in the inset (clamped to it). With no inset (gap 0) it
 /// falls back to the inside of the tile.
 #[must_use]
 pub fn plan_mark_ring(tile: Rect, class: WindowClass, tiling: &TilingConfig) -> Vec<Rect> {
@@ -339,7 +349,12 @@ pub fn plan_mark_ring(tile: Rect, class: WindowClass, tiling: &TilingConfig) -> 
             return ring_strips(window.outset(t), t);
         }
     }
-    ring_strips(tile, MARK_THICKNESS)
+    let base = if class == WindowClass::Terminal {
+        terminal_ring_rect(tile, tiling)
+    } else {
+        tile
+    };
+    ring_strips(base, MARK_THICKNESS)
 }
 
 /// The pip of the marked window at stack `index` of a pane of `len` windows, or `None` when the
@@ -442,6 +457,26 @@ pub fn plan_chrome(
     out
 }
 
+/// The frame strips (output-local) in `color`, clipped around a mapped `overlay` like the fills.
+/// Drawn behind every other chrome. Pure.
+#[must_use]
+pub fn plan_frames(
+    frames: &[Rect],
+    color: [f32; 4],
+    overlay: Option<OverlayChrome>,
+    output_origin: (i32, i32),
+) -> Vec<(Rect, [f32; 4])> {
+    let local = |r: Rect| r.translate(-output_origin.0, -output_origin.1);
+    let mut out = Vec::new();
+    for &rect in frames {
+        match overlay {
+            Some(o) => out.extend(rect.subtract(o.rect).into_iter().map(|r| (local(r), color))),
+            None => out.push((local(rect), color)),
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Compositor entry point — reads model state, produces SolidColorRenderElements.
 // ---------------------------------------------------------------------------
@@ -477,6 +512,7 @@ pub fn build_chrome_elements(
     let focus = projection.focus();
     let mut ring: Vec<Rect> = Vec::new();
     let mut fills: Vec<Rect> = Vec::new();
+    let mut frames: Vec<Rect> = Vec::new();
     let marked = world.marked();
     let mut mark_ring: Vec<Rect> = Vec::new();
     let mut mark_pip_rect: Option<Rect> = None;
@@ -487,6 +523,7 @@ pub fn build_chrome_elements(
         let plan = plan_tile(tile, layout.window_class(id), tiling, focus == Some(id));
         ring.extend(plan.ring);
         fills.extend(plan.fill);
+        frames.extend(plan.frame);
     }
     // The focused empty pane (no window) gets the terminal ring on its tile.
     if focus.is_none()
@@ -559,6 +596,14 @@ pub fn build_chrome_elements(
         overlay,
         output_origin,
     ));
+    if let Some(frame) = tiling.terminal.frame {
+        plan.extend(plan_frames(
+            &frames,
+            fill_color(frame),
+            overlay,
+            output_origin,
+        ));
+    }
     plan.into_iter()
         .map(|(rect, color)| solid(map.rect(rect), color))
         .collect()
@@ -863,6 +908,51 @@ mod tests {
         // An unfocused terminal draws nothing.
         let idle = plan_tile(tile, WindowClass::Terminal, &TilingConfig::default(), false);
         assert_eq!(idle, TilePlan::default());
+    }
+
+    #[test]
+    fn terminal_ring_inset_and_unfocused_frame() {
+        let tile = rect(100, 50, 400, 300);
+        let mut t = TilingConfig::default();
+        t.terminal.gap = 9;
+        t.terminal.ring = 1;
+        t.terminal.ring_inset = 4;
+        // No frame colour: unfocused draws nothing, focused ring sits 4px inside the tile.
+        assert_eq!(
+            plan_tile(tile, WindowClass::Terminal, &t, false),
+            TilePlan::default()
+        );
+        let focused = plan_tile(tile, WindowClass::Terminal, &t, true);
+        assert!(focused.frame.is_empty());
+        assert_eq!(area_sum(&focused.ring), 392 * 292 - 390 * 290);
+        assert!(focused.ring.iter().all(|r| inside(*r, tile.inset(4))));
+        // With a frame colour the unfocused tile carries the same strips as a frame.
+        t.terminal.frame = Some(Rgb(0x3a, 0x3a, 0x3a));
+        let idle = plan_tile(tile, WindowClass::Terminal, &t, false);
+        assert!(idle.ring.is_empty());
+        assert_eq!(idle.frame, focused.ring);
+        assert!(
+            plan_tile(tile, WindowClass::Terminal, &t, true)
+                .frame
+                .is_empty()
+        );
+        // The mark ring follows the same inset.
+        let mark = plan_mark_ring(tile, WindowClass::Terminal, &t);
+        assert!(mark.iter().all(|r| inside(*r, tile.inset(4))));
+        // App tiles never carry a frame.
+        assert!(
+            plan_tile(tile, WindowClass::App, &t, false)
+                .frame
+                .is_empty()
+        );
+        // Frames clip around an overlay.
+        let overlay = OverlayChrome {
+            rect: rect(0, 0, 100000, 100000),
+            border: false,
+            style: OverlayStyle::N1Med,
+        };
+        assert!(plan_frames(&idle.frame, [0.0; 4], Some(overlay), (0, 0)).is_empty());
+        assert_eq!(plan_frames(&idle.frame, [0.0; 4], None, (100, 50)).len(), 4);
     }
 
     #[test]

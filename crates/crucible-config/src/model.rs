@@ -48,6 +48,12 @@ pub struct ClassTiling {
     pub ring: u32,
     /// Colour painted over the part of an app's inset the ring does not cover. Unused for terminals.
     pub fill: Rgb,
+    /// Terminal only: distance the focus ring and `frame` are drawn inside the tile edge; with
+    /// `ring` never more than `gap` (clamped at parse time). Always 0 for apps.
+    pub ring_inset: u32,
+    /// Terminal only: colour of the frame drawn at the ring position on unfocused tiles.
+    /// `None` (default) draws no frame. Always `None` for apps.
+    pub frame: Option<Rgb>,
 }
 
 /// Per-class tiling: terminals fill their tile, apps are inset by their gap.
@@ -72,11 +78,15 @@ impl Default for TilingConfig {
                 gap: 6,
                 ring: 3,
                 fill,
+                ring_inset: 0,
+                frame: None,
             },
             app: ClassTiling {
                 gap: 0,
                 ring: 0,
                 fill,
+                ring_inset: 0,
+                frame: None,
             },
             terminal_args: Vec::new(),
         }
@@ -105,6 +115,18 @@ pub fn clamp_ring(gap: u32, ring: u32) -> (u32, bool) {
         (gap, true)
     } else {
         (ring, false)
+    }
+}
+
+/// `(ring_inset, clamped)`: `ring_inset` limited to `gap - ring` (callers clamp `ring` to `gap`
+/// first); `clamped` is whether it was reduced. Pure.
+#[must_use]
+pub fn clamp_ring_inset(gap: u32, ring: u32, ring_inset: u32) -> (u32, bool) {
+    let max = gap.saturating_sub(ring);
+    if ring_inset > max {
+        (max, true)
+    } else {
+        (ring_inset, false)
     }
 }
 
@@ -430,6 +452,9 @@ mod tests {
     fn ring_clamps_to_gap_and_gap_substitutes() {
         assert_eq!(clamp_ring(6, 3), (3, false));
         assert_eq!(clamp_ring(2, 9), (2, true));
+        assert_eq!(clamp_ring_inset(9, 1, 4), (4, false));
+        assert_eq!(clamp_ring_inset(6, 3, 5), (3, true));
+        assert_eq!(clamp_ring_inset(2, 2, 1), (0, true));
         assert_eq!(
             substitute_gap(&["a={gap}-{gap}".to_string(), "b".to_string()], 7),
             vec!["a=7-7".to_string(), "b".to_string()]
