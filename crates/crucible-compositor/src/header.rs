@@ -95,25 +95,41 @@ pub struct Segment {
 }
 
 /// Lays out one segment per label width, left to right from the strip's left edge, each
-/// `width + 2 * PAD_X` wide. Segments are clipped to the strip: one that starts past the right
-/// edge is dropped, the last visible one is truncated.
+/// `width + 2 * PAD_X` wide, with no divider. See [`segment_layout`].
 #[must_use]
 pub fn segment_rects(widths: &[i32], strip: Rect) -> Vec<Segment> {
-    let mut out = Vec::new();
+    segment_layout(widths, strip, 0).0
+}
+
+/// Like [`segment_rects`], with a `divider`-wide gap between adjacent segments (logical px).
+/// Returns the segments and the divider rects (full strip height), one per adjacent pair of
+/// laid-out segments: none before the first or after the last. Segment `i + 1` starts `divider`
+/// px after segment `i` ends. Clipping is at the strip's right edge: a segment (and the divider
+/// before it) that would start at or beyond it is dropped, the last visible segment is
+/// truncated. With `divider == 0` the segments equal [`segment_rects`] and no dividers return.
+#[must_use]
+pub fn segment_layout(widths: &[i32], strip: Rect, divider: i32) -> (Vec<Segment>, Vec<Rect>) {
+    let divider = divider.max(0);
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut dividers = Vec::new();
     let mut x = strip.x;
     let right = strip.x + strip.width;
     for (index, w) in widths.iter().enumerate() {
-        if x >= right {
+        let start = if segments.is_empty() { x } else { x + divider };
+        if start >= right {
             break;
         }
-        let width = (w.max(&0) + 2 * PAD_X).min(right - x);
-        out.push(Segment {
+        if divider > 0 && !segments.is_empty() {
+            dividers.push(Rect::new(x, strip.y, divider, strip.height));
+        }
+        let width = (w.max(&0) + 2 * PAD_X).min(right - start);
+        segments.push(Segment {
             index,
-            rect: Rect::new(x, strip.y, width, strip.height),
+            rect: Rect::new(start, strip.y, width, strip.height),
         });
-        x += width;
+        x = start + width;
     }
-    out
+    (segments, dividers)
 }
 
 /// The segment index under `(x, y)`, if any.
@@ -182,6 +198,8 @@ pub struct HeaderLayout {
     pub active: usize,
     /// Segment rects for `names`.
     pub segments: Vec<Segment>,
+    /// Divider rects between adjacent segments (empty when the divider is 0).
+    pub dividers: Vec<Rect>,
 }
 
 /// Super-key glyph (place of interest sign) used in slot badges.
@@ -211,6 +229,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         let size = self.config.header.size;
         let height = strip_height(size);
+        let divider = i32::try_from(self.config.header.divider).unwrap_or(0);
         let badges = self.config.header.slots;
         let glyph = badges && self.header_text.has_glyph(SUPER_GLYPH);
         self.raw_output_rects()
@@ -237,7 +256,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                             .unwrap_or_else(|| fallback_width(n, size))
                     })
                     .collect();
-                let segments = segment_rects(&widths, strip);
+                let (segments, dividers) = segment_layout(&widths, strip, divider);
                 Some(HeaderLayout {
                     output: id,
                     output_rect: rect,
@@ -246,6 +265,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     workspaces,
                     active: output.active_index(),
                     segments,
+                    dividers,
                 })
             })
             .collect()
@@ -348,6 +368,10 @@ where
                 labels.push(CustomRenderElements::Text(el));
             }
         }
+        for div in &l.dividers {
+            let [r, g, b, a] = LABEL_RGBA.map(|c| f32::from(c) / 255.0);
+            solids.push(solid(map.rect(to_origin(*div)), [r, g, b, a]));
+        }
         solids.push(solid(strip, STRIP_BG));
     }
     labels.extend(solids.into_iter().map(CustomRenderElements::SolidColor));
@@ -390,6 +414,53 @@ mod tests {
         assert_eq!(hit_test(&segs, 140, 5), Some(1));
         assert_eq!(hit_test(&segs, 190, 5), None); // past the last label
         assert_eq!(hit_test(&segs, 120, 24), None); // below the strip
+    }
+
+    #[test]
+    fn divider_gaps_sit_between_segments_only() {
+        let (segs, divs) = segment_layout(&[20, 30, 10], strip(), 2);
+        assert_eq!(segs[0].rect, Rect::new(100, 0, 40, 24));
+        assert_eq!(segs[1].rect, Rect::new(142, 0, 50, 24));
+        assert_eq!(segs[2].rect, Rect::new(194, 0, 30, 24));
+        // One per adjacent pair; none before the first or after the last.
+        assert_eq!(divs, [Rect::new(140, 0, 2, 24), Rect::new(192, 0, 2, 24)]);
+        let (one, none) = segment_layout(&[20], strip(), 2);
+        assert_eq!(one.len(), 1);
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn divider_clips_at_right_edge() {
+        // Strip is x 100..400. Segment 0 = 100..320; the divider at 320..322 fits, segment 1 is
+        // truncated to 322..400.
+        let (segs, divs) = segment_layout(&[200, 200, 200], strip(), 2);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[1].rect, Rect::new(322, 0, 78, 24));
+        assert_eq!(divs, [Rect::new(320, 0, 2, 24)]);
+        // A divider starting at the right edge is dropped with the segment after it.
+        let (segs, divs) = segment_layout(&[280], strip(), 2);
+        assert_eq!((segs.len(), divs.len()), (1, 0));
+        let (segs, divs) = segment_layout(&[280, 10], strip(), 2);
+        assert_eq!((segs.len(), divs.len()), (1, 0));
+        assert_eq!(segs[0].rect.width, 300);
+    }
+
+    #[test]
+    fn hit_test_on_a_divider_hits_no_segment() {
+        let (segs, divs) = segment_layout(&[20, 30], strip(), 2);
+        assert_eq!(hit_test(&segs, divs[0].x, 5), None);
+        assert_eq!(hit_test(&segs, divs[0].x + 1, 5), None);
+        assert_eq!(hit_test(&segs, divs[0].x - 1, 5), Some(0));
+        assert_eq!(hit_test(&segs, divs[0].x + 2, 5), Some(1));
+    }
+
+    #[test]
+    fn zero_divider_is_unchanged() {
+        let w = [20, 30, 200, 200];
+        let (segs, divs) = segment_layout(&w, strip(), 0);
+        assert_eq!(segs, segment_rects(&w, strip()));
+        assert!(divs.is_empty());
+        assert_eq!(segs[1].rect, Rect::new(140, 0, 50, 24));
     }
 
     #[test]
@@ -473,5 +544,22 @@ mod scale_tests {
         // At scale 1 the strip is unchanged.
         let one = PhysicalMap::plain(Scale::from(1.0)).rect(strip);
         assert_eq!((one.loc.x, one.size.w, one.size.h), (100, 300, 24));
+    }
+
+    #[test]
+    fn half_scale_divider_never_overlaps_segments() {
+        let map = PhysicalMap::plain(Scale::from(0.5));
+        // Odd divider origin: segment 0 = 101..141, divider 141..142, segment 1 = 142..192.
+        let strip = Rect::new(101, 0, 300, 24);
+        let (segs, divs) = segment_layout(&[20, 30], strip, 1);
+        let (p0, pd, p1) = (
+            map.rect(segs[0].rect),
+            map.rect(divs[0]),
+            map.rect(segs[1].rect),
+        );
+        let end = |r: smithay::utils::Rectangle<i32, Physical>| r.loc.x + r.size.w;
+        assert!(end(p0) <= pd.loc.x);
+        assert!(end(pd) <= p1.loc.x);
+        assert!(pd.size.w >= 0);
     }
 }

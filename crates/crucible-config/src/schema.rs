@@ -6,9 +6,10 @@ use kdl::KdlDocument;
 
 use crate::error::{ConfigError, Location};
 use crate::model::{
-    ClassTiling, Config, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderConfig, HeaderMode,
-    LauncherConfig, OUTPUT_SCALE_MAX, OUTPUT_SCALE_MIN, OUTPUT_SCALE_STEPS, OutputConfig,
-    OverlayConfig, OverlayStyle, PickerConfig, Rgb, TerminalConfig, TilingConfig, clamp_ring,
+    ClassTiling, Config, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderConfig,
+    HeaderMode, LauncherConfig, OUTPUT_SCALE_MAX, OUTPUT_SCALE_MIN, OUTPUT_SCALE_STEPS,
+    OutputConfig, OverlayConfig, OverlayStyle, PickerConfig, Rgb, TerminalConfig, TilingConfig,
+    clamp_ring,
 };
 use crate::reader::{Children, NodeReader, locate};
 
@@ -257,6 +258,18 @@ fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigError> {
                         child.invalid(
                             "argument",
                             format!("{n} is outside {HEADER_SIZE_MIN}..={HEADER_SIZE_MAX}"),
+                        )
+                    })?;
+            }
+            "divider" => {
+                let n = child.int_arg()?;
+                out.divider = u32::try_from(n)
+                    .ok()
+                    .filter(|n| *n <= HEADER_DIVIDER_MAX)
+                    .ok_or_else(|| {
+                        child.invalid(
+                            "argument",
+                            format!("{n} is outside 0..={HEADER_DIVIDER_MAX}"),
                         )
                     })?;
             }
@@ -798,6 +811,37 @@ binds {
         }
         let err = parse("header {\n size 1.5\n}\n").unwrap_err();
         assert!(matches!(err, ConfigError::WrongType { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn header_divider_default_and_bounds() {
+        assert_eq!(parse("").unwrap().header.divider, 0);
+        assert_eq!(
+            parse("header {\n divider 2\n}\n").unwrap().header.divider,
+            2
+        );
+        assert_eq!(
+            parse("header {\n divider 0\n}\n").unwrap().header.divider,
+            0
+        );
+        assert_eq!(
+            parse("header {\n divider 16\n}\n").unwrap().header.divider,
+            16
+        );
+        for bad in ["-1", "17"] {
+            let err = parse(&format!("header {{\n divider {bad}\n}}\n")).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidValue { .. }),
+                "{bad}: {err:?}"
+            );
+        }
+        for bad in ["1.5", "\"2\""] {
+            let err = parse(&format!("header {{\n divider {bad}\n}}\n")).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::WrongType { .. }),
+                "{bad}: {err:?}"
+            );
+        }
     }
 
     #[test]

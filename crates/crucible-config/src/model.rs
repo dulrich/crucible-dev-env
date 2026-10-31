@@ -238,6 +238,8 @@ impl HeaderMode {
 pub const HEADER_SIZE_MIN: u32 = 6;
 /// Largest accepted header font size, in logical pixels.
 pub const HEADER_SIZE_MAX: u32 = 96;
+/// Largest accepted header divider width, in logical pixels (`0` = no divider).
+pub const HEADER_DIVIDER_MAX: u32 = 16;
 /// Default header font family (resolved through `fc-match`).
 pub const DEFAULT_HEADER_FONT: &str = "DejaVu Sans";
 
@@ -250,6 +252,9 @@ pub struct HeaderConfig {
     pub font: String,
     /// Font size in logical pixels, within [`HEADER_SIZE_MIN`]..=[`HEADER_SIZE_MAX`].
     pub size: u32,
+    /// Width in logical pixels of the divider drawn between workspace labels, within
+    /// `0..=`[`HEADER_DIVIDER_MAX`]; `0` draws none.
+    pub divider: u32,
     /// Whether labels of slot-pinned workspaces carry a slot badge (`slots`).
     pub slots: bool,
 }
@@ -260,6 +265,7 @@ impl Default for HeaderConfig {
             mode: HeaderMode::Toggle,
             font: DEFAULT_HEADER_FONT.to_string(),
             size: 14,
+            divider: 0,
             slots: false,
         }
     }
