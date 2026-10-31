@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use crucible_compositor::ipc::{LAUNCHER_TUI_ENV, Request, TERMINAL_ENV};
 
 use crate::fuzzy;
-use crate::overlay::list::{Applied, Body, ListState};
+use crate::overlay::list::{self, Applied, Body, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
@@ -216,16 +216,24 @@ impl Overlay for Launcher {
                 .list
                 .render("run> ", Body::Highlighted(&text), "", cols, rows, style);
         }
-        let texts: Vec<String> = self
+        let cells: Vec<Vec<String>> = self
             .rows()
             .iter()
             .map(|&idx| {
                 let item = &self.items[idx];
-                format!("{}  {}", item.class.label(), sanitize(&item.label))
+                vec![item.class.label().to_string(), sanitize(&item.label)]
             })
             .collect();
-        self.list
-            .render("run> ", Body::Rows(&texts), "", cols, rows, style)
+        let (header, texts) = list::columns(&["class", "name"], &cells);
+        self.list.render_with_header(
+            "run> ",
+            (!cells.is_empty()).then_some(header.as_str()),
+            Body::Rows(&texts),
+            "",
+            cols,
+            rows,
+            style,
+        )
     }
 }
 
@@ -404,7 +412,7 @@ mod tests {
         assert_eq!(items[0].class, LaunchClass::Term);
         assert_eq!(items[0].cmd, "ghostty");
         let mut l = Launcher::new(items);
-        assert!(l.render(60, 8).contains("TERM  Ghostty"));
+        assert!(l.render(60, 8).contains("TERM   Ghostty"));
         assert_eq!(
             l.step(Key::Enter),
             Outcome::Send(Request::RunTerm("ghostty".into()))
@@ -508,7 +516,7 @@ mod tests {
         assert!(l.render(80, 8).contains("SH"));
         l.step(Key::Backspace);
         assert_eq!(l.shell_line(), None);
-        assert!(l.render(80, 8).contains("GUI  A"));
+        assert!(l.render(80, 8).contains("GUI    A"));
         assert_eq!(shell_launcher("a!").shell_line(), None);
     }
 
@@ -545,7 +553,11 @@ mod tests {
         let entries = [entry("Browser", "ff", false), entry("Editor", "vim", true)];
         let mut l = Launcher::new(build_items(&entries, &[], true));
         let out = l.render(60, 8);
-        assert!(out.contains("GUI  Browser") && out.contains("TUI  Editor"));
+        assert!(
+            out.contains("class  name")
+                && out.contains("GUI    Browser")
+                && out.contains("TUI    Editor")
+        );
         for c in "tui".chars() {
             l.step(Key::Char(c));
         }

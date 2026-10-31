@@ -12,7 +12,7 @@ use crucible_compositor::ipc::{
 
 use crate::client::{Client, ClientError};
 use crate::fuzzy;
-use crate::overlay::list::{Applied, Body, ListState};
+use crate::overlay::list::{self, Applied, Body, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
@@ -231,33 +231,58 @@ impl Picker {
         self.render_styled(cols, rows, &Style::Terminal)
     }
 
-    fn row_text(&self, row: &Row) -> String {
-        match row {
-            Row::New(n) => format!("new workspace {}", sanitize(n)),
-            Row::Candidate(i) => {
-                let c = &self.candidates[*i];
-                let kind = match c.kind {
-                    CandidateKind::Live => "live  ",
-                    CandidateKind::Saved => "saved ",
-                    CandidateKind::Folder => "folder",
-                };
-                let badge = c
-                    .slot
-                    .map_or(String::new(), |n| format!("{SUPER_GLYPH}{n} "));
-                match &c.path {
-                    // Folder rows show their path; live and saved rows show their workspace root.
-                    Some(p) => {
-                        let shown = if c.kind == CandidateKind::Folder {
-                            p.to_string_lossy().into_owned()
-                        } else {
-                            tilde(&p.to_string_lossy(), self.home.as_deref())
-                        };
-                        format!("{kind} {badge}{}  {}", sanitize(&c.name), sanitize(&shown))
-                    }
-                    None => format!("{kind} {badge}{}", sanitize(&c.name)),
-                }
+    /// The table cells of a candidate row: kind, slot badge (or empty), name, root/path (or
+    /// empty), all sanitised.
+    fn cells(&self, c: &Candidate) -> Vec<String> {
+        let kind = match c.kind {
+            CandidateKind::Live => "live",
+            CandidateKind::Saved => "saved",
+            CandidateKind::Folder => "folder",
+        };
+        let badge = c
+            .slot
+            .map_or(String::new(), |n| format!("{SUPER_GLYPH}{n}"));
+        // Folder rows show their path; live and saved rows show their workspace root.
+        let shown = c.path.as_ref().map_or(String::new(), |p| {
+            if c.kind == CandidateKind::Folder {
+                p.to_string_lossy().into_owned()
+            } else {
+                tilde(&p.to_string_lossy(), self.home.as_deref())
+            }
+        });
+        vec![kind.to_string(), badge, sanitize(&c.name), sanitize(&shown)]
+    }
+
+    /// The table header (`None` when there are no candidate rows) and one display string per
+    /// row of [`Self::rows`]. The `new workspace` row is not a table row and stays unpadded; the
+    /// slot column is dropped when no row has a slot. Widths cover every row of the current
+    /// filter, so columns do not jitter while scrolling.
+    fn table(&self) -> (Option<String>, Vec<String>) {
+        let rows = self.rows();
+        let mut cells: Vec<Vec<String>> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Candidate(i) => Some(self.cells(&self.candidates[*i])),
+                Row::New(_) => None,
+            })
+            .collect();
+        let mut headers = vec!["kind", "slot", "name", "root"];
+        if cells.iter().all(|c| c[1].is_empty()) {
+            headers.remove(1);
+            for c in &mut cells {
+                c.remove(1);
             }
         }
+        let (header, mut lines) = list::columns(&headers, &cells);
+        lines.reverse();
+        let texts = rows
+            .iter()
+            .map(|r| match r {
+                Row::New(n) => format!("new workspace {}", sanitize(n)),
+                Row::Candidate(_) => lines.pop().unwrap_or_default(),
+            })
+            .collect();
+        (if cells.is_empty() { None } else { Some(header) }, texts)
     }
 }
 
@@ -285,9 +310,20 @@ impl Overlay for Picker {
             Mode::Rename => "rename> ",
             Mode::Root => "root> ",
         };
-        let texts: Vec<String> = self.rows().iter().map(|r| self.row_text(r)).collect();
-        self.list
-            .render(prompt, Body::Rows(&texts), "", cols, rows, style)
+        let (header, texts) = if self.mode == Mode::Rename {
+            (None, Vec::new())
+        } else {
+            self.table()
+        };
+        self.list.render_with_header(
+            prompt,
+            header.as_deref(),
+            Body::Rows(&texts),
+            "",
+            cols,
+            rows,
+            style,
+        )
     }
 }
 
@@ -373,16 +409,30 @@ mod tests {
     }
 
     #[test]
-    fn row_text_shows_slot_badge_only_when_present() {
+    fn table_has_a_header_and_the_slot_column_only_when_a_row_has_a_slot() {
         let mut p = sample();
-        let live = p
-            .rows()
-            .iter()
-            .position(|r| matches!(r, Row::Candidate(0)))
-            .unwrap();
-        assert_eq!(p.row_text(&p.rows()[live]), "live   alpha");
+        let (h, t) = p.table();
+        assert_eq!(h.as_deref(), Some("kind    name   root"));
+        assert_eq!(t[0], "live    alpha");
+        assert_eq!(t[2], "folder  proj   /home/u/proj");
         p.candidates[0].slot = Some(3);
-        assert_eq!(p.row_text(&p.rows()[live]), "live   \u{2318}3 alpha");
+        let (h, t) = p.table();
+        assert_eq!(h.as_deref(), Some("kind    slot  name   root"));
+        assert_eq!(t[0], "live    \u{2318}3    alpha");
+        assert_eq!(t[1], "saved         beta");
+        // The new-workspace row is unpadded and carries no header on its own.
+        type_str(&mut p, "zz");
+        let (h, t) = p.table();
+        assert_eq!((h, t), (None, vec!["new workspace zz".to_string()]));
+    }
+
+    #[test]
+    fn rename_mode_has_no_header() {
+        let p = Picker::rename("x".into());
+        assert_eq!(
+            p.render(40, 6),
+            "\x1b[H\x1b[2Jrename> x_\r\n\r\n\r\n\r\n\r\n"
+        );
     }
 
     fn sample() -> Picker {
@@ -568,10 +618,12 @@ mod tests {
         let p = sample();
         let s = p.render(60, 12);
         assert!(s.contains("workspace> _"));
-        assert!(s.contains("live   alpha"));
-        assert!(s.contains("saved  beta"));
-        assert!(s.contains("folder proj  /home/u/proj"));
-        assert!(s.contains("\x1b[7m  live   alpha"));
+        assert!(s.contains("  kind    name   root"));
+        assert!(s.contains("live    alpha"));
+        assert!(s.contains("saved   beta"));
+        assert!(s.contains("folder  proj   /home/u/proj"));
+        assert!(s.contains("\x1b[7m  live    alpha"));
+        assert!(!s.contains("\x1b[7m  kind"));
         let mut q = sample();
         type_str(&mut q, "zz");
         assert!(q.render(60, 12).contains("new workspace zz"));
@@ -700,8 +752,7 @@ mod tests {
         p.home = Some("/home/u".into());
         let s = p.render(60, 8);
         assert!(s.contains("live   alpha  ~/code"));
-        assert!(s.contains("saved  beta  /srv/b"));
-        assert!(s.contains("saved  gamma"));
-        assert!(!s.contains("gamma  "));
+        assert!(s.contains("saved  beta   /srv/b"));
+        assert!(s.contains("saved  gamma\r\n"));
     }
 }

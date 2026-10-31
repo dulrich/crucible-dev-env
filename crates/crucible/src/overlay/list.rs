@@ -116,16 +116,41 @@ impl ListState {
         rows: u16,
         style: &Style,
     ) -> String {
+        self.render_with_header(prompt, None, body, idle_status, cols, rows, style)
+    }
+
+    /// Like [`Self::render`], with an optional column `header` line (display text, sanitised,
+    /// without the indent) between the prompt line and the body. It is plain, never highlighted,
+    /// and costs the rows window one row; selection indices stay row indices.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_header(
+        &self,
+        prompt: &str,
+        header: Option<&str>,
+        body: Body<'_>,
+        idle_status: &str,
+        cols: u16,
+        rows: u16,
+        style: &Style,
+    ) -> String {
         let width = usize::from(cols).max(10);
         let height = usize::from(rows).max(4);
         let mut lines: Vec<String> =
             vec![fit(&format!("{prompt}{}_", sanitize(&self.query)), width)];
+        if let Some(h) = header {
+            lines.push(fit(&format!("  {h}"), width));
+        }
         match body {
             Body::Highlighted(text) => {
                 lines.push(style.highlight(&fit(&format!("  {text}"), width)));
             }
             Body::Rows(all) => {
-                let (start, end) = window(self.selected, all.len(), height - 2);
+                let (start, end) = window(
+                    self.selected,
+                    all.len(),
+                    height - 2 - usize::from(header.is_some()),
+                );
                 for (i, row) in all.iter().enumerate().take(end).skip(start) {
                     let text = fit(&format!("  {row}"), width);
                     lines.push(if i == self.selected {
@@ -144,6 +169,41 @@ impl ListState {
         out.push_str(&lines.join("\r\n"));
         out
     }
+}
+
+/// Lays out a table: `headers` and per-row `cells` (already sanitised) become a header line and
+/// one string per row, each column padded to its widest cell (header included, measured in
+/// chars like [`fit`]) with two spaces between columns. The last column is not padded and
+/// trailing blanks are trimmed; a row with fewer cells than headers has empty cells.
+#[must_use]
+pub fn columns(headers: &[&str], rows: &[Vec<String>]) -> (String, Vec<String>) {
+    let widths: Vec<usize> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            rows.iter()
+                .filter_map(|r| r.get(i))
+                .map(|c| c.chars().count())
+                .fold(h.chars().count(), usize::max)
+        })
+        .collect();
+    let line = |cells: &mut dyn Iterator<Item = &str>| -> String {
+        let mut out = String::new();
+        for (i, w) in widths.iter().enumerate() {
+            let cell = cells.next().unwrap_or("");
+            out.push_str(cell);
+            if i + 1 < widths.len() {
+                out.push_str(&" ".repeat(w - cell.chars().count() + 2));
+            }
+        }
+        out.trim_end().to_string()
+    };
+    let header = line(&mut headers.iter().copied());
+    let body = rows
+        .iter()
+        .map(|r| line(&mut r.iter().map(String::as_str)))
+        .collect();
+    (header, body)
 }
 
 #[cfg(test)]
@@ -243,6 +303,36 @@ mod tests {
         assert!(
             l.render("p> ", Body::Rows(&rows), "idle", 20, 6, &Style::Terminal)
                 .ends_with("shown")
+        );
+    }
+
+    #[test]
+    fn columns_pad_to_the_widest_cell_and_leave_the_last_unpadded() {
+        let rows = vec![
+            vec!["live".to_string(), "a".to_string(), "/x".to_string()],
+            vec!["saved".to_string(), "long name".to_string()],
+        ];
+        let (h, b) = columns(&["kind", "name", "root"], &rows);
+        assert_eq!(h, "kind   name       root");
+        assert_eq!(b, ["live   a          /x", "saved  long name"]);
+    }
+
+    #[test]
+    fn render_header_sits_under_the_prompt_and_shrinks_the_window() {
+        let l = ListState::new();
+        let rows: Vec<String> = (0..9).map(|i| format!("r{i}")).collect();
+        let out = l.render_with_header(
+            "p> ",
+            Some("H"),
+            Body::Rows(&rows),
+            "idle",
+            20,
+            6,
+            &Style::Terminal,
+        );
+        assert_eq!(
+            out,
+            "\x1b[H\x1b[2Jp> _\r\n  H\r\n\x1b[7m  r0\x1b[0m\r\n  r1\r\n  r2\r\nidle"
         );
     }
 
