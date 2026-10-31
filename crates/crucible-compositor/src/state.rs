@@ -629,10 +629,11 @@ impl<B: Backend + 'static> SelectionHandler for CrucibleState<B> {
             xwm = self.xwm.is_some(),
             "Wayland selection changed"
         );
-        if let Some(xwm) = self.xwm.as_mut()
-            && let Err(err) = xwm.new_selection(ty, mime_types)
-        {
-            warn!(?err, ?ty, "Failed to set XWayland selection");
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(err) = xwm.new_selection(ty, mime_types) {
+                warn!(?err, ?ty, "Failed to set XWayland selection");
+            }
+            crate::xwayland::flush_xwm(xwm);
         }
     }
 

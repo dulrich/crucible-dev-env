@@ -61,6 +61,20 @@ use crate::{
 /// Environment variable that overrides the scale applied to XWayland clients.
 const XWAYLAND_SCALE_ENV: &str = "CDE_XWAYLAND_SCALE";
 
+/// Flush queued X11 requests (notably `SetSelectionOwner`) to the X server.
+///
+/// Smithay's `X11Wm::new_selection` queues `SetSelectionOwner` on the x11rb connection without
+/// flushing, so the ownership change only reaches XWayland on the next X11 event and an X11
+/// client reading right after a Wayland copy sees the stale owner. `get_randr_primary_output`
+/// is a public round trip whose `.reply()` forces x11rb to flush everything queued before it.
+/// It blocks on the X server, which never waits on the compositor to answer a RandR query;
+/// that cost is accepted for a once-per-copy event.
+pub(crate) fn flush_xwm(wm: &X11Wm) {
+    if let Err(err) = wm.get_randr_primary_output() {
+        debug!(?err, "XWM flush round trip failed");
+    }
+}
+
 /// Resolves the scale applied to XWayland clients.
 ///
 /// X11 clients do not understand `wl_output` fractional scale, so CDE applies a per-client buffer
@@ -181,12 +195,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
                             // flushing, so an ownership change only reaches the X server on
                             // the next X11 event, and an `xclip` started after a Wayland copy
                             // loses that race. Owning early means a later Wayland copy only
-                            // updates the mime types, with no ownership change to wait for.
+                            // updates the mime types; `flush_xwm` below (and after every later
+                            // `new_selection`) pushes the queued ownership out immediately.
                             for ty in [SelectionTarget::Clipboard, SelectionTarget::Primary] {
                                 if let Err(err) = wm.new_selection(ty, Some(Vec::new())) {
                                     warn!(?err, ?ty, "Failed to claim XWayland selection");
                                 }
                             }
+                            flush_xwm(&wm);
                             data.xwm = Some(wm);
                             data.xdisplay = Some(display_number);
                             // Export DISPLAY so X11 children spawned by CDE reach this server.
