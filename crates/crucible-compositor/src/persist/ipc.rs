@@ -1,7 +1,7 @@
 //! The IPC request handlers: `handle_ipc` and its per-request helpers (open, new, rename,
 //! relaunch, open-folder).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::time::Instant;
 
@@ -10,7 +10,10 @@ use crucible_persist::slots::Slots;
 use crucible_persist::{WorkspaceRecord, store};
 use tracing::info;
 
-use super::placement::{ANCESTOR_DEPTH, Pending, Target, match_pending, slot_for};
+use super::placement::{
+    ANCESTOR_DEPTH, Pending, SlotEntry, Target, is_queued, match_pending, prune_queues,
+    select_siblings,
+};
 use super::workspace::folder_workspace_name;
 use super::{close_element, proc_root};
 use crate::input::{ActionError, Origin};
@@ -126,14 +129,29 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .map(|(id, _)| id)
             .collect();
         ids.sort();
+        // Expired spawns' queues must not keep their leftover placeholders "queued".
+        let placement = &mut self.persist.placement;
+        prune_queues(&mut placement.slot_queues, |pid| {
+            placement.pending.contains_key(&pid)
+        });
+        // A sibling still queued by a live spawn joins that spawn: no second process.
+        if let Some(id) = ids
+            .iter()
+            .copied()
+            .find(|id| is_queued(&self.persist.placement.slot_queues, *id))
+        {
+            info!(
+                ?id,
+                "placeholder is queued on a live relaunch; not respawning"
+            );
+            return Ok(());
+        }
         let world = &self.layout.world;
-        let (id, pane, index, focused) = ids
+        let (id, pane, index, focused, saved_index) = ids
             .into_iter()
             .find_map(|id| {
-                let pane_id = world.pane_of_window(id)?;
-                let pane = world.pane(pane_id)?;
-                let (index, focused) = slot_for(pane.windows(), pane.focused_index(), id)?;
-                Some((id, pane_id, index, focused))
+                let (pane, index, focused, saved_index) = self.placeholder_slot(id)?;
+                Some((id, pane, index, focused, saved_index))
             })
             .ok_or_else(|| "no placeholder window".to_string())?;
         let ws = self
@@ -146,12 +164,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     .is_some_and(|w| w.panes().contains(&pane))
             })
             .unwrap_or_else(|| world.active_workspace_id());
-        let saved_index = self
-            .persist
-            .placement
-            .placed
-            .get(&pane)
-            .and_then(|v| v.iter().find(|(w, _)| *w == id).map(|(_, i)| *i));
         let element = self.layout.element(id).cloned();
         // The app stands for the placeholder's saved record: carried as the spawn's origin.
         let origin = crucible_persist::WindowRecord::App {
@@ -161,15 +173,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let pid = self
             .spawn_command_with(&capture.cmdline, ws, Some(origin))
             .ok_or_else(|| "spawn failed".to_string())?;
+        let own = Target::Slot {
+            pane,
+            index,
+            focused,
+            saved_index,
+        };
+        let siblings = self.sibling_placeholders(id, &capture.cmdline);
+        let mut queue = VecDeque::from([SlotEntry::Resolved(own)]);
+        queue.extend(siblings.iter().map(|s| SlotEntry::Placeholder(*s)));
+        self.persist.placement.slot_queues.insert(pid, queue);
         self.persist.placement.pending.insert(
             pid,
             Pending {
-                target: Target::Slot {
-                    pane,
-                    index,
-                    focused,
-                    saved_index,
-                },
+                target: own,
                 since: Instant::now(),
             },
         );
@@ -179,9 +196,45 @@ impl<B: Backend + 'static> CrucibleState<B> {
         info!(
             pid,
             cmdline = capture.cmdline,
+            siblings = siblings.len(),
             "relaunching app into its placeholder slot"
         );
         Ok(())
+    }
+
+    /// The other live relaunch placeholders of `own` that stand for `cmdline`, in workspace, pane
+    /// and stack order, not already queued by another spawn.
+    fn sibling_placeholders(&mut self, own: WindowId, cmdline: &str) -> Vec<WindowId> {
+        let world = &self.layout.world;
+        let mut candidates = Vec::new();
+        for (_, ws) in self.live_workspaces() {
+            let Some(w) = world.workspace(ws) else {
+                continue;
+            };
+            for pane in w.panes() {
+                let Some(pane) = world.pane(pane) else {
+                    continue;
+                };
+                for id in pane.windows() {
+                    let wrapper_cmdline = self
+                        .layout
+                        .meta(*id)
+                        .and_then(|m| m.pid)
+                        .and_then(|pid| {
+                            std::fs::read(proc_root().join(pid.to_string()).join("cmdline")).ok()
+                        })
+                        .and_then(|b| {
+                            crucible_persist::RelaunchWrapper::from_argv(
+                                &crucible_persist::capture::parse_cmdline(&b),
+                            )
+                        })
+                        .map(|r| r.cmdline);
+                    candidates.push((*id, wrapper_cmdline));
+                }
+            }
+        }
+        let queues = &self.persist.placement.slot_queues;
+        select_siblings(candidates, own, cmdline, |id| is_queued(queues, id))
     }
 
     pub(super) fn switch_to_live(&mut self, ws: WorkspaceId) -> Result<(), String> {

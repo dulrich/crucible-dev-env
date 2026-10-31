@@ -1,7 +1,7 @@
 //! Window placement: pending placements keyed by spawned PID ([`Target`]), PID-ancestor matching,
 //! restore-order insertion, and the new-toplevel map paths.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use crucible_layout::{PaneId, WindowId, WorkspaceId};
@@ -16,6 +16,9 @@ use crate::state::{Backend, CrucibleState};
 #[derive(Debug, Default)]
 pub(super) struct PlacementState {
     pub(super) pending: HashMap<u32, Pending>,
+    /// Per relaunch spawn pid: the slots still to fill, in order (P's slot first, then each
+    /// sibling placeholder). The spawn's `pending` entry stays until its queue is empty.
+    pub(super) slot_queues: HashMap<u32, VecDeque<SlotEntry>>,
     pub(super) placed: HashMap<PaneId, Vec<(WindowId, usize)>>,
 }
 
@@ -53,6 +56,89 @@ pub enum Target {
     Overlay,
     /// A pre-warmed overlay host: stored hidden in the warm slot, never mapped until requested.
     WarmOverlay,
+}
+
+/// One slot a relaunch spawn will fill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotEntry {
+    /// A slot already resolved (the relaunched placeholder's, whose window is closed at relaunch).
+    Resolved(Target),
+    /// A sibling placeholder, still on screen: its slot is read from its live position when
+    /// filled, and the placeholder is closed then.
+    Placeholder(WindowId),
+}
+
+/// The outcome of offering a new toplevel to a spawn's slot queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Claim {
+    /// The slot taken, or `None` when the toplevel maps normally.
+    pub entry: Option<SlotEntry>,
+    /// Whether the queue is now exhausted (the spawn's pending entry should be dropped).
+    pub done: bool,
+}
+
+/// Offers a new toplevel to `queue`: a dialog (`has_parent`) takes nothing; otherwise the next
+/// entry whose placeholder is still `alive` is taken (dead sibling placeholders are skipped).
+pub fn claim_slot(
+    queue: &mut VecDeque<SlotEntry>,
+    has_parent: bool,
+    alive: impl Fn(WindowId) -> bool,
+) -> Claim {
+    if has_parent {
+        return Claim {
+            entry: None,
+            done: queue.is_empty(),
+        };
+    }
+    while let Some(entry) = queue.pop_front() {
+        let live = match entry {
+            SlotEntry::Resolved(_) => true,
+            SlotEntry::Placeholder(id) => alive(id),
+        };
+        if live {
+            return Claim {
+                entry: Some(entry),
+                done: queue.is_empty(),
+            };
+        }
+    }
+    Claim {
+        entry: None,
+        done: true,
+    }
+}
+
+/// The sibling placeholders of `own`: `candidates` (in live workspace/pane/stack order, each with
+/// its relaunch cmdline if it is a placeholder) other than `own`, whose cmdline equals `cmdline`
+/// and which no other spawn has `claimed`.
+#[must_use]
+pub fn select_siblings(
+    candidates: impl IntoIterator<Item = (WindowId, Option<String>)>,
+    own: WindowId,
+    cmdline: &str,
+    claimed: impl Fn(WindowId) -> bool,
+) -> Vec<WindowId> {
+    candidates
+        .into_iter()
+        .filter(|(id, c)| *id != own && c.as_deref() == Some(cmdline) && !claimed(*id))
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// Drops the queues of spawns whose pending entry is gone (expired or closed with its workspace).
+pub fn prune_queues(
+    queues: &mut HashMap<u32, VecDeque<SlotEntry>>,
+    has_pending: impl Fn(u32) -> bool,
+) {
+    queues.retain(|pid, _| has_pending(*pid));
+}
+
+/// Whether `id` is a sibling placeholder still queued by some live relaunch spawn.
+#[must_use]
+pub fn is_queued(queues: &HashMap<u32, VecDeque<SlotEntry>>, id: WindowId) -> bool {
+    queues
+        .values()
+        .any(|q| q.contains(&SlotEntry::Placeholder(id)))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,13 +216,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let ancestors = pid
             .map(|p| crucible_persist::ancestors(proc_root(), p, ANCESTOR_DEPTH))
             .unwrap_or_default();
-        let pending = pid
-            .and_then(|p| {
-                match_pending(p, &ancestors, |k| {
-                    self.persist.placement.pending.contains_key(&k)
-                })
+        let key = pid.and_then(|p| {
+            match_pending(p, &ancestors, |k| {
+                self.persist.placement.pending.contains_key(&k)
             })
-            .and_then(|k| self.persist.placement.pending.remove(&k));
+        });
+        let has_parent = element.toplevel().is_some_and(|t| t.parent().is_some())
+            || element
+                .x11_surface()
+                .is_some_and(|s| s.is_transient_for().is_some());
+        let target = key.and_then(|k| self.take_pending_target(k, has_parent));
         // The matched spawn (pid or an ancestor) feeds the latency line and carries the origin
         // record (what a restored window / relaunched app stands for) to capture time.
         let mut origin = None;
@@ -161,7 +250,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             WindowClass::App
         };
         let meta = WindowMeta { pid, class, origin };
-        match pending.map(|p| p.target) {
+        match target {
             Some(Target::Overlay) => self.overlay_arrived(element, pid),
             Some(Target::WarmOverlay) => self.store_warm(element, pid),
             Some(Target::Pane {
@@ -183,6 +272,81 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.map_managed_window(element, meta);
             }
         }
+    }
+
+    /// The target the new toplevel of spawn `key` takes. A relaunch spawn hands out its queued
+    /// slots one per toplevel (a dialog takes none) and keeps its pending entry until the queue is
+    /// empty; every other target is consumed whole, as before.
+    fn take_pending_target(&mut self, key: u32, has_parent: bool) -> Option<Target> {
+        let Target::Slot {
+            pane,
+            index,
+            focused,
+            saved_index,
+        } = self.persist.placement.pending.get(&key)?.target
+        else {
+            return self
+                .persist
+                .placement
+                .pending
+                .remove(&key)
+                .map(|p| p.target);
+        };
+        let mut queue = self
+            .persist
+            .placement
+            .slot_queues
+            .remove(&key)
+            .unwrap_or_else(|| {
+                VecDeque::from([SlotEntry::Resolved(Target::Slot {
+                    pane,
+                    index,
+                    focused,
+                    saved_index,
+                })])
+            });
+        let claim = claim_slot(&mut queue, has_parent, |id| {
+            self.layout.world.pane_of_window(id).is_some()
+        });
+        if claim.done {
+            self.persist.placement.pending.remove(&key);
+        } else {
+            self.persist.placement.slot_queues.insert(key, queue);
+        }
+        match claim.entry? {
+            SlotEntry::Resolved(target) => Some(target),
+            SlotEntry::Placeholder(id) => {
+                let (pane, index, focused, saved_index) = self.placeholder_slot(id)?;
+                // The app takes the placeholder's live slot: close the placeholder.
+                if let Some(element) = self.layout.element(id).cloned() {
+                    super::close_element(&element);
+                }
+                Some(Target::Slot {
+                    pane,
+                    index,
+                    focused,
+                    saved_index,
+                })
+            }
+        }
+    }
+
+    /// The live slot of placeholder window `id`: `(pane, index, focused, saved_index)`.
+    pub(super) fn placeholder_slot(
+        &self,
+        id: WindowId,
+    ) -> Option<(PaneId, usize, bool, Option<usize>)> {
+        let world = &self.layout.world;
+        let pane_id = world.pane_of_window(id)?;
+        let pane = world.pane(pane_id)?;
+        let (index, focused) = slot_for(pane.windows(), pane.focused_index(), id)?;
+        let saved_index = self
+            .persist
+            .placement
+            .placed
+            .get(&pane_id)
+            .and_then(|v| v.iter().find(|(w, _)| *w == id).map(|(_, i)| *i));
+        Some((pane_id, index, focused, saved_index))
     }
 
     pub(super) fn map_placed(
@@ -344,5 +508,102 @@ mod tests {
         let live_len = w.pane(pane).unwrap().windows().len();
         let app = w.open_window_at(pane, slot_index(index, live_len)).unwrap();
         assert_eq!(w.pane(pane).unwrap().windows(), vec![t1, l, app, t2]);
+    }
+
+    // ---- relaunch slot queue -------------------------------------------------------------------
+
+    fn own_slot() -> SlotEntry {
+        SlotEntry::Resolved(Target::Slot {
+            pane: World::new("x").focused_pane_id(),
+            index: 0,
+            focused: false,
+            saved_index: None,
+        })
+    }
+
+    fn ids(n: usize) -> Vec<WindowId> {
+        let mut w = World::new("1");
+        (0..n).map(|_| w.open_window()).collect()
+    }
+
+    #[test]
+    fn siblings_are_selected_by_cmdline_in_order_and_fill_in_saved_order() {
+        let w = ids(5);
+        let (p, s1, other, s2, claimed) = (w[0], w[1], w[2], w[3], w[4]);
+        let cands = vec![
+            (s1, Some("firefox".to_string())),
+            (p, Some("firefox".to_string())),
+            (other, Some("gimp".to_string())),
+            (s2, Some("firefox".to_string())),
+            (claimed, Some("firefox".to_string())),
+            (WindowId::from_raw(9999), None),
+        ];
+        let sibs = select_siblings(cands, p, "firefox", |id| id == claimed);
+        assert_eq!(sibs, vec![s1, s2]);
+        let mut q = VecDeque::from([own_slot()]);
+        q.extend(sibs.iter().map(|s| SlotEntry::Placeholder(*s)));
+        let order: Vec<_> = (0..3)
+            .map(|_| claim_slot(&mut q, false, |_| true))
+            .collect();
+        assert_eq!(order[0].entry, Some(own_slot()));
+        assert_eq!(order[1].entry, Some(SlotEntry::Placeholder(s1)));
+        assert_eq!(order[2].entry, Some(SlotEntry::Placeholder(s2)));
+        assert_eq!(
+            [order[0].done, order[1].done, order[2].done],
+            [false, false, true]
+        );
+    }
+
+    #[test]
+    fn extra_toplevels_beyond_the_slots_map_normally() {
+        let mut q = VecDeque::from([own_slot()]);
+        assert!(claim_slot(&mut q, false, |_| true).done);
+        // The pending entry is gone after `done`; an empty queue claims nothing anyway.
+        let extra = claim_slot(&mut q, false, |_| true);
+        assert_eq!(extra.entry, None);
+        assert!(extra.done);
+    }
+
+    #[test]
+    fn fewer_toplevels_than_slots_leave_the_rest_queued_then_expired() {
+        let w = ids(2);
+        let mut q = VecDeque::from([own_slot(), SlotEntry::Placeholder(w[1])]);
+        let first = claim_slot(&mut q, false, |_| true);
+        assert!(!first.done, "the sibling is still waiting");
+        let mut queues = HashMap::from([(7u32, q)]);
+        assert!(is_queued(&queues, w[1]));
+        // Expiry drops the spawn's queue: the leftover placeholder is an ordinary one again.
+        prune_queues(&mut queues, |_| false);
+        assert!(!is_queued(&queues, w[1]));
+        let mut live = HashMap::from([(7u32, VecDeque::from([SlotEntry::Placeholder(w[1])]))]);
+        prune_queues(&mut live, |pid| pid == 7);
+        assert!(is_queued(&live, w[1]));
+    }
+
+    #[test]
+    fn a_dialog_does_not_consume_a_slot() {
+        let w = ids(2);
+        let mut q = VecDeque::from([own_slot(), SlotEntry::Placeholder(w[1])]);
+        let dialog = claim_slot(&mut q, true, |_| true);
+        assert_eq!((dialog.entry, dialog.done), (None, false));
+        assert_eq!(q.len(), 2);
+        assert_eq!(claim_slot(&mut q, false, |_| true).entry, Some(own_slot()));
+    }
+
+    #[test]
+    fn a_queued_sibling_joins_the_live_spawn_and_dead_ones_are_skipped() {
+        let w = ids(3);
+        let q = VecDeque::from([own_slot(), SlotEntry::Placeholder(w[1])]);
+        let queues = HashMap::from([(7u32, q.clone())]);
+        // A hand relaunch checks `is_queued` and returns without spawning.
+        assert!(is_queued(&queues, w[1]));
+        assert!(!is_queued(&queues, w[2]));
+        // A sibling closed by hand before its turn is skipped, not consumed.
+        let mut q = q;
+        q.push_back(SlotEntry::Placeholder(w[2]));
+        let _ = claim_slot(&mut q, false, |_| true);
+        let c = claim_slot(&mut q, false, |id| id == w[2]);
+        assert_eq!(c.entry, Some(SlotEntry::Placeholder(w[2])));
+        assert!(c.done);
     }
 }
