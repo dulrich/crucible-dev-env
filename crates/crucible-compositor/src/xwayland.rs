@@ -175,7 +175,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
                         x11_socket,
                         client.clone(),
                     ) {
-                        Ok(wm) => {
+                        Ok(mut wm) => {
+                            // Own both X11 selections from the start (with no data yet).
+                            // `X11Wm::new_selection` queues `SetSelectionOwner` without
+                            // flushing, so an ownership change only reaches the X server on
+                            // the next X11 event, and an `xclip` started after a Wayland copy
+                            // loses that race. Owning early means a later Wayland copy only
+                            // updates the mime types, with no ownership change to wait for.
+                            for ty in [SelectionTarget::Clipboard, SelectionTarget::Primary] {
+                                if let Err(err) = wm.new_selection(ty, Some(Vec::new())) {
+                                    warn!(?err, ?ty, "Failed to claim XWayland selection");
+                                }
+                            }
                             data.xwm = Some(wm);
                             data.xdisplay = Some(display_number);
                             // Export DISPLAY so X11 children spawned by CDE reach this server.
@@ -328,6 +339,14 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
     fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {
         // CDE tiling owns geometry; interactive move grabs are deliberately not honoured.
         trace!("Ignoring X11 move_request (tiling owns geometry)");
+    }
+
+    /// Lets every XWayland client read the bridged Wayland selection. Smithay's default (`false`)
+    /// refuses all of them, and Anvil's "an X11 window has keyboard focus" policy would still
+    /// refuse a Wayland-native app that shells out to `xclip` (cvault-editor). XWayland clients
+    /// are the user's own apps, which X11 under i3 already lets read the clipboard.
+    fn allow_selection_access(&mut self, _xwm: XwmId, _selection: SelectionTarget) -> bool {
+        true
     }
 
     fn send_selection(

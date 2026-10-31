@@ -592,8 +592,15 @@ impl<B: Backend + 'static> SelectionHandler for CrucibleState<B> {
         source: Option<SelectionSource>,
         _seat: Seat<Self>,
     ) {
+        let mime_types = source.map(|source| source.mime_types());
+        tracing::debug!(
+            ?ty,
+            ?mime_types,
+            xwm = self.xwm.is_some(),
+            "Wayland selection changed"
+        );
         if let Some(xwm) = self.xwm.as_mut()
-            && let Err(err) = xwm.new_selection(ty, source.map(|source| source.mime_types()))
+            && let Err(err) = xwm.new_selection(ty, mime_types)
         {
             warn!(?err, ?ty, "Failed to set XWayland selection");
         }
