@@ -6,10 +6,10 @@ use kdl::KdlDocument;
 
 use crate::error::{ConfigError, Location};
 use crate::model::{
-    ClassTiling, Config, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderConfig,
-    HeaderMode, LauncherConfig, OUTPUT_SCALE_MAX, OUTPUT_SCALE_MIN, OUTPUT_SCALE_STEPS,
-    OutputConfig, OverlayConfig, OverlayStyle, PickerConfig, Rgb, TerminalConfig, TilingConfig,
-    clamp_ring,
+    ClassTiling, Config, HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX,
+    HEADER_SIZE_MIN, HeaderConfig, HeaderMode, LauncherConfig, OUTPUT_SCALE_MAX, OUTPUT_SCALE_MIN,
+    OUTPUT_SCALE_STEPS, OutputConfig, OverlayConfig, OverlayStyle, PickerConfig, Rgb,
+    TerminalConfig, TilingConfig, clamp_ring,
 };
 use crate::reader::{Children, NodeReader, locate};
 
@@ -233,7 +233,9 @@ fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigError> {
     let mut out = HeaderConfig::default();
     for child in node.children(&[])? {
         let child = child?;
-        child.no_properties()?;
+        if child.name() != "divider" {
+            child.no_properties()?;
+        }
         match child.name() {
             "mode" => {
                 let s = child.string_arg("a mode string")?;
@@ -262,6 +264,7 @@ fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigError> {
                     })?;
             }
             "divider" => {
+                child.allow_properties(&["inset", "color"])?;
                 let n = child.int_arg()?;
                 out.divider = u32::try_from(n)
                     .ok()
@@ -272,6 +275,24 @@ fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigError> {
                             format!("{n} is outside 0..={HEADER_DIVIDER_MAX}"),
                         )
                     })?;
+                if let Some(inset) = child.u32_prop("inset")? {
+                    if inset > HEADER_DIVIDER_INSET_MAX {
+                        return Err(child.invalid(
+                            "property `inset`",
+                            format!("{inset} is outside 0..={HEADER_DIVIDER_INSET_MAX}"),
+                        ));
+                    }
+                    out.divider_inset = inset;
+                }
+                if let Some((s, at)) = child.string_prop("color", "a \"#rrggbb\" string")? {
+                    out.divider_color = Rgb::from_hex(s).ok_or_else(|| {
+                        child.invalid_at(
+                            at,
+                            "property `color`",
+                            format!("`{s}` is not a #rrggbb colour"),
+                        )
+                    })?;
+                }
             }
             "slots" => out.slots = child.bool_arg()?,
             _ => return Err(child.unknown_node("header")),
@@ -811,6 +832,56 @@ binds {
         }
         let err = parse("header {\n size 1.5\n}\n").unwrap_err();
         assert!(matches!(err, ConfigError::WrongType { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn header_divider_inset_color_defaults_and_parse() {
+        let h = parse("").unwrap().header;
+        assert_eq!(h.divider_inset, 0);
+        assert_eq!(h.divider_color, Rgb(0xcd, 0xd0, 0xd6));
+        let h = parse("header {\n divider 1 inset=6 color=\"#5c6370\"\n}\n")
+            .unwrap()
+            .header;
+        assert_eq!((h.divider, h.divider_inset), (1, 6));
+        assert_eq!(h.divider_color, Rgb(0x5c, 0x63, 0x70));
+        // Properties are accepted (and inert) with a zero width.
+        assert_eq!(
+            parse("header {\n divider 0 inset=32\n}\n")
+                .unwrap()
+                .header
+                .divider_inset,
+            32
+        );
+    }
+
+    #[test]
+    fn header_divider_rejects_bad_properties() {
+        for bad in [
+            "divider 1 inset=33",
+            "divider 1 inset=-1",
+            "divider 1 color=\"red\"",
+            "divider 1 color=\"#12345\"",
+        ] {
+            let err = parse(&format!("header {{\n {bad}\n}}\n")).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidValue { .. }),
+                "{bad}: {err:?}"
+            );
+        }
+        for bad in [
+            "divider 1 inset=1.5",
+            "divider 1 inset=\"2\"",
+            "divider 1 color=3",
+        ] {
+            let err = parse(&format!("header {{\n {bad}\n}}\n")).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::WrongType { .. }),
+                "{bad}: {err:?}"
+            );
+        }
+        for bad in ["divider 1 foo=1", "size 14 x=1"] {
+            assert!(parse(&format!("header {{\n {bad}\n}}\n")).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -240,6 +240,10 @@ pub const HEADER_SIZE_MIN: u32 = 6;
 pub const HEADER_SIZE_MAX: u32 = 96;
 /// Largest accepted header divider width, in logical pixels (`0` = no divider).
 pub const HEADER_DIVIDER_MAX: u32 = 16;
+/// Largest accepted header divider inset (top and bottom), in logical pixels.
+pub const HEADER_DIVIDER_INSET_MAX: u32 = 32;
+/// Default header divider colour: the inactive label colour.
+pub const DEFAULT_DIVIDER_COLOR: Rgb = Rgb(0xcd, 0xd0, 0xd6);
 /// Default header font family (resolved through `fc-match`).
 pub const DEFAULT_HEADER_FONT: &str = "DejaVu Sans";
 
@@ -255,6 +259,11 @@ pub struct HeaderConfig {
     /// Width in logical pixels of the divider drawn between workspace labels, within
     /// `0..=`[`HEADER_DIVIDER_MAX`]; `0` draws none.
     pub divider: u32,
+    /// Logical pixels trimmed from the top and bottom of each divider, within
+    /// `0..=`[`HEADER_DIVIDER_INSET_MAX`]; no effect when `divider` is 0.
+    pub divider_inset: u32,
+    /// Divider colour (`divider ... color=`); defaults to [`DEFAULT_DIVIDER_COLOR`].
+    pub divider_color: Rgb,
     /// Whether labels of slot-pinned workspaces carry a slot badge (`slots`).
     pub slots: bool,
 }
@@ -266,6 +275,8 @@ impl Default for HeaderConfig {
             font: DEFAULT_HEADER_FONT.to_string(),
             size: 14,
             divider: 0,
+            divider_inset: 0,
+            divider_color: DEFAULT_DIVIDER_COLOR,
             slots: false,
         }
     }

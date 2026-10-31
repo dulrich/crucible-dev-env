@@ -22,7 +22,7 @@
 
 use std::collections::BTreeSet;
 
-use crucible_config::{HeaderConfig, HeaderMode};
+use crucible_config::{HeaderConfig, HeaderMode, Rgb};
 use crucible_layout::{OutputId, Rect, WorkspaceId};
 use smithay::{
     backend::renderer::{ImportAll, ImportMem, Renderer},
@@ -132,6 +132,15 @@ pub fn segment_layout(widths: &[i32], strip: Rect, divider: i32) -> (Vec<Segment
     (segments, dividers)
 }
 
+/// Trims `inset` logical px off the top and bottom of a divider rect; `None` when nothing is
+/// left (height <= 0). A negative `inset` is treated as 0.
+#[must_use]
+pub fn inset_divider(div: Rect, inset: i32) -> Option<Rect> {
+    let inset = inset.max(0);
+    let height = div.height - 2 * inset;
+    (height > 0).then(|| Rect::new(div.x, div.y + inset, div.width, height))
+}
+
 /// The segment index under `(x, y)`, if any.
 #[must_use]
 pub fn hit_test(segments: &[Segment], x: i32, y: i32) -> Option<usize> {
@@ -200,6 +209,8 @@ pub struct HeaderLayout {
     pub segments: Vec<Segment>,
     /// Divider rects between adjacent segments (empty when the divider is 0).
     pub dividers: Vec<Rect>,
+    /// Colour the dividers are drawn in (`header.divider_color`).
+    pub divider_color: Rgb,
 }
 
 /// Super-key glyph (place of interest sign) used in slot badges.
@@ -230,6 +241,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let size = self.config.header.size;
         let height = strip_height(size);
         let divider = i32::try_from(self.config.header.divider).unwrap_or(0);
+        let inset = i32::try_from(self.config.header.divider_inset).unwrap_or(0);
+        let divider_color = self.config.header.divider_color;
         let badges = self.config.header.slots;
         let glyph = badges && self.header_text.has_glyph(SUPER_GLYPH);
         self.raw_output_rects()
@@ -257,6 +270,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     })
                     .collect();
                 let (segments, dividers) = segment_layout(&widths, strip, divider);
+                let dividers = dividers
+                    .into_iter()
+                    .filter_map(|d| inset_divider(d, inset))
+                    .collect();
                 Some(HeaderLayout {
                     output: id,
                     output_rect: rect,
@@ -266,6 +283,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     active: output.active_index(),
                     segments,
                     dividers,
+                    divider_color,
                 })
             })
             .collect()
@@ -368,9 +386,10 @@ where
                 labels.push(CustomRenderElements::Text(el));
             }
         }
+        let Rgb(dr, dg, db) = l.divider_color;
         for div in &l.dividers {
-            let [r, g, b, a] = LABEL_RGBA.map(|c| f32::from(c) / 255.0);
-            solids.push(solid(map.rect(to_origin(*div)), [r, g, b, a]));
+            let [r, g, b] = [dr, dg, db].map(|c| f32::from(c) / 255.0);
+            solids.push(solid(map.rect(to_origin(*div)), [r, g, b, 1.0]));
         }
         solids.push(solid(strip, STRIP_BG));
     }
@@ -452,6 +471,32 @@ mod tests {
         assert_eq!(hit_test(&segs, divs[0].x + 1, 5), None);
         assert_eq!(hit_test(&segs, divs[0].x - 1, 5), Some(0));
         assert_eq!(hit_test(&segs, divs[0].x + 2, 5), Some(1));
+    }
+
+    #[test]
+    fn inset_trims_divider_rect_top_and_bottom() {
+        let (_, divs) = segment_layout(&[20, 30], strip(), 2);
+        assert_eq!(inset_divider(divs[0], 0), Some(divs[0]));
+        assert_eq!(inset_divider(divs[0], 6), Some(Rect::new(140, 6, 2, 12)));
+    }
+
+    #[test]
+    fn inset_of_half_the_strip_drops_the_divider() {
+        let (_, divs) = segment_layout(&[20, 30], strip(), 2);
+        assert_eq!(inset_divider(divs[0], 11), Some(Rect::new(140, 11, 2, 2)));
+        assert_eq!(inset_divider(divs[0], 12), None);
+        assert_eq!(inset_divider(divs[0], 32), None);
+    }
+
+    #[test]
+    fn inset_leaves_segment_rects_unchanged() {
+        // Segments come from segment_layout alone; the inset only post-trims dividers.
+        let w = [20, 30, 10];
+        let (segs, divs) = segment_layout(&w, strip(), 2);
+        let trimmed: Vec<_> = divs.iter().filter_map(|d| inset_divider(*d, 6)).collect();
+        assert_eq!(trimmed.len(), divs.len());
+        assert_eq!(segs, segment_layout(&w, strip(), 2).0);
+        assert_eq!(hit_test(&segs, 140, 5), None);
     }
 
     #[test]
