@@ -317,8 +317,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
             SlotEntry::Resolved(target) => Some(target),
             SlotEntry::Placeholder(id) => {
                 let (pane, index, focused, saved_index) = self.placeholder_slot(id)?;
-                // The app takes the placeholder's live slot: close the placeholder.
-                if let Some(element) = self.layout.element(id).cloned() {
+                // The app takes the placeholder's live slot: close the placeholder. Its
+                // `crucible relaunch` is still waiting for Enter, so asking the terminal window
+                // to close would make the terminal confirm killing a running process (ghostty's
+                // "Close window?" dialog). End the wrapper instead; its terminal then closes on
+                // its own. Only when no wrapper is found is the window asked to close.
+                let wrapper = self
+                    .layout
+                    .meta(id)
+                    .and_then(|m| m.pid)
+                    .and_then(|pid| crucible_persist::relaunch_wrapper_of(proc_root(), pid));
+                let ended = wrapper.is_some_and(|(pid, _)| terminate(pid));
+                if !ended && let Some(element) = self.layout.element(id).cloned() {
                     super::close_element(&element);
                 }
                 Some(Target::Slot {
@@ -438,11 +448,46 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 }
 
+/// Sends SIGTERM to `pid`; whether it was delivered.
+fn terminate(pid: u32) -> bool {
+    let Some(pid) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    match rustix::process::kill_process(pid, rustix::process::Signal::TERM) {
+        Ok(()) => true,
+        Err(err) => {
+            warn!(%err, pid = pid.as_raw_nonzero().get(), "cannot end a placeholder wrapper");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crucible_layout::World;
     use std::collections::HashSet;
+
+    /// A filled sibling placeholder's wrapper is ended with SIGTERM (never its window asked to
+    /// close, which makes ghostty confirm); an unknown pid reports failure so the caller falls
+    /// back to closing the window.
+    #[test]
+    fn terminate_ends_the_process_and_reports_failure() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        assert!(terminate(child.id()));
+        let status = child.wait().unwrap();
+        const SIGTERM: i32 = 15; // Linux
+        assert_eq!(status.signal(), Some(SIGTERM));
+        assert!(!terminate(0));
+        assert!(!terminate(u32::MAX));
+    }
 
     #[test]
     fn match_pending_prefers_the_pid_then_the_nearest_ancestor() {

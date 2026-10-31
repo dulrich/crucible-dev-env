@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 
 # Raw-mode terminal control (termios, window size, stdio handles) for `crucible pick` and
 # `crucible resume`. Already in `Cargo.lock` at 1.1.4 via calloop, so no new lock version.
-rustix = { version = "1", features = ["termios", "stdio", "net"] }
+rustix = { version = "1", features = ["termios", "stdio", "net", "process"] }
 
 # `sigaction` for `crucible resume`: a no-op SIGINT/SIGQUIT handler keeps it resident while a
 # restored command runs. Already in `Cargo.lock` at 0.2.186, so no new lock version.

@@ -367,14 +367,14 @@ fn wrapper_process(proc_root: &Path, pid: u32) -> Option<CdeWrapper> {
         .or_else(|| ResumeWrapper::from_argv(&argv).map(CdeWrapper::Terminal))
 }
 
-/// The `crucible relaunch` wrapper a placeholder window runs: `window_pid` is the window's own
-/// client (the terminal), so the wrapper is the pid itself or, normally, one of its direct
-/// children. `None` for any other window.
+/// The `crucible relaunch` wrapper a placeholder window runs, with the wrapper's pid:
+/// `window_pid` is the window's own client (the terminal), so the wrapper is the pid itself or,
+/// normally, one of its direct children. `None` for any other window.
 #[must_use]
-pub fn relaunch_wrapper_of(proc_root: &Path, window_pid: u32) -> Option<RelaunchWrapper> {
+pub fn relaunch_wrapper_of(proc_root: &Path, window_pid: u32) -> Option<(u32, RelaunchWrapper)> {
     std::iter::once(window_pid)
         .chain(children_of(proc_root, window_pid))
-        .find_map(|pid| RelaunchWrapper::from_argv(&read_cmdline(proc_root, pid)))
+        .find_map(|pid| RelaunchWrapper::from_argv(&read_cmdline(proc_root, pid)).map(|w| (pid, w)))
 }
 
 /// Classifies one managed window into the record to save. Pure over `proc_root` (normally
@@ -940,10 +940,11 @@ mod tests {
         );
         p.add((300, "ghostty", 1), 0, "/", &["ghostty"], &[301]);
         p.add((301, "bash", 300), 301, "/", &["bash"], &[]);
-        let got = relaunch_wrapper_of(&p.0, 100).unwrap();
+        let (pid, got) = relaunch_wrapper_of(&p.0, 100).unwrap();
+        assert_eq!(pid, 200);
         assert_eq!(got.cmdline, "firefox");
         assert_eq!(got.app_id.as_deref(), Some("firefox"));
-        assert_eq!(relaunch_wrapper_of(&p.0, 200).unwrap().cmdline, "firefox");
+        assert_eq!(relaunch_wrapper_of(&p.0, 200).unwrap().1.cmdline, "firefox");
         assert_eq!(relaunch_wrapper_of(&p.0, 300), None);
         assert_eq!(relaunch_wrapper_of(&p.0, 999), None);
     }

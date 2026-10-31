@@ -245,6 +245,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                         .and_then(|m| m.pid)
                         // The window pid is the placeholder's terminal; the wrapper is its child.
                         .and_then(|pid| crucible_persist::relaunch_wrapper_of(proc_root(), pid))
+                        .map(|(_, w)| w)
                         .map(|r| r.cmdline);
                     candidates.push((*id, wrapper_cmdline));
                 }
