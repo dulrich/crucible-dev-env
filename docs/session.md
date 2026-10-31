@@ -39,7 +39,7 @@ See [`config.md`](config.md#autostart) for the `autostart` semantics.
 
 ## Wallpaper
 
-`cde.sh` sets the first wallpaper at startup. To rotate it under CDE, use the cron line host-b already has (`cron-run wallpaper-rotate … scripts/wallpaper-rotate.sh`). host-a's current cron entry is the i3 `feh` line, so it needs the CDE line added.
+`cde.sh` sets the first wallpaper at startup. To rotate it under CDE, use the cron line host-b already has (`cron-run wallpaper-rotate … scripts/wallpaper-rotate.sh`). host-a's current cron entry is the i3 `feh` line, so it needs the CDE line added under its own job id (e.g. `cron-run wallpaper-rotate-cde …`), because `cron-run` keys its health file by job id and the two lines would otherwise overwrite each other's state.
 
 ## Reverting and falling back to i3
 
