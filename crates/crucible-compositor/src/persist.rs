@@ -55,6 +55,7 @@ use crate::element::WindowElement;
 use crate::ipc::{Candidate, CandidateKind};
 use crate::state::{Backend, CrucibleState};
 use overlay::Overlay;
+pub(crate) use overlay::PickerMode;
 use placement::{PENDING_TTL, Pending, Target};
 use spawn::prepare_restore;
 use workspace::restore_target;
@@ -305,7 +306,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let saved = self.persist.saved_names();
         let restored = self.config.restore_session && self.restore_session(&saved);
         if !restored && !saved.is_empty() {
-            self.open_picker(false);
+            self.open_picker(PickerMode::Pick);
         }
         self.start_warm_overlay();
         self.write_session();

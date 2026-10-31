@@ -148,15 +148,37 @@ pub fn overlay_rect(output: Rect) -> Rect {
     )
 }
 
+/// What the picker overlay is opened for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerMode {
+    /// The workspace picker.
+    Pick,
+    /// The rename prompt for the active workspace.
+    Rename,
+    /// The workspace-root prompt for the active workspace.
+    Root,
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     // ---- picker overlay ------------------------------------------------------------------------
 
-    /// Opens the picker (or, with `rename`, the rename prompt); see [`Self::open_overlay`].
-    pub fn open_picker(&mut self, rename: bool) {
-        let current = rename.then(|| self.layout.world.focus_path().workspace_name);
+    /// Opens the picker, the rename prompt or the workspace-root prompt per `mode`; see
+    /// [`Self::open_overlay`]. Rename and root prompts do not keep the pin, like each other.
+    pub fn open_picker(&mut self, mode: PickerMode) {
+        let rename =
+            (mode == PickerMode::Rename).then(|| self.layout.world.focus_path().workspace_name);
+        let root = (mode == PickerMode::Root).then(|| {
+            let ws = self.layout.world.active_workspace_id();
+            self.persist
+                .workspace
+                .roots
+                .get(&ws)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        });
         let exec_flag = self.config.terminal.exec_flag.clone();
-        self.open_overlay(OverlayKind::Picker, !rename, |crucible| {
-            picker_args(&exec_flag, crucible, current.as_deref())
+        self.open_overlay(OverlayKind::Picker, mode == PickerMode::Pick, |crucible| {
+            picker_args(&exec_flag, crucible, rename.as_deref(), root.as_deref())
         });
     }
 
@@ -676,7 +698,7 @@ mod tests {
 
     #[test]
     fn warm_mode_line_carries_the_cold_subcommand_argv() {
-        let pick = picker_args("-e", Path::new("/c"), Some("a:b"));
+        let pick = picker_args("-e", Path::new("/c"), Some("a:b"), None);
         assert_eq!(
             warm_mode_line(42, &pick).as_deref(),
             Some("42\tpick\t--rename\ta%3Ab\n")

@@ -9,6 +9,7 @@ use crucible_layout::{OutputId, WorkspaceId, World};
 use crucible_persist::slots::slots_path;
 use tracing::{debug, info, warn};
 
+use super::overlay::PickerMode;
 use super::placement::Target;
 use super::{close_element, skip_record};
 use crate::state::{Backend, CrucibleState};
@@ -362,7 +363,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     "slot is not pinned; opening the picker in pin mode"
                 );
                 self.pin_event(PinEvent::SlotOpen(n));
-                self.open_picker(false);
+                self.open_picker(PickerMode::Pick);
             }
             SlotTarget::Stale(name) => {
                 info!(
@@ -371,7 +372,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     "pinned workspace no longer exists; opening the picker in pin mode"
                 );
                 self.pin_event(PinEvent::SlotOpen(n));
-                self.open_picker(false);
+                self.open_picker(PickerMode::Pick);
             }
             SlotTarget::Pinned(name) => {
                 if let Err(reason) = self.ipc_open(&name) {

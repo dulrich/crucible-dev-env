@@ -15,7 +15,7 @@ use crucible_layout::{LayoutError, World};
 use tracing::{debug, info, warn};
 
 use super::modal::{InputMode, chord_closes_overlay};
-use crate::persist::new_workspace_name;
+use crate::persist::{PickerMode, new_workspace_name};
 use crate::state::{Backend, CrucibleState};
 
 /// Amount by which a single resize keystroke adjusts the split ratio.
@@ -137,13 +137,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     return Err(ActionError::Spawn(reason));
                 }
             }
-            Action::OpenPicker => self.open_picker(false),
+            Action::OpenPicker => self.open_picker(PickerMode::Pick),
             Action::CloseWorkspace => self.close_workspace(),
             Action::CloseAllWorkspaces => self.close_all_workspaces(),
             Action::Slot(n) => self.slot_open(n),
             Action::PinSlot(n) => self.pin_slot(n),
             Action::MoveWorkspaceToOutput(delta) => self.move_active_workspace_to_output(delta),
-            Action::RenameWorkspace => self.open_picker(true),
+            Action::RenameWorkspace => self.open_picker(PickerMode::Rename),
+            Action::SetWorkspaceRoot => self.open_picker(PickerMode::Root),
+            Action::CaptureWorkspaceRoot => {
+                if let Err(reason) = self.capture_workspace_root() {
+                    info!(reason, "capture-workspace-root: root unchanged");
+                    return Err(ActionError::Spawn(reason));
+                }
+            }
             Action::OpenLauncher => self.open_launcher(),
             Action::ToggleHeader => self.toggle_header(),
             Action::OpenSettings => self.open_settings(),

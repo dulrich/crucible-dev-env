@@ -18,6 +18,7 @@
 //! | `open-folder <path>`       | `ok` / `err <reason>`                                     |
 //! | `new <name>`               | `ok` / `err <reason>`                                     |
 //! | `rename <name>`            | `ok` / `err <reason>`                                     |
+//! | `root <path>` / `root -`   | `ok` / `err <reason>` (set / clear the active workspace's root) |
 //! | `bindings`                 | `ok ` + TAB-separated `chord:action` pairs (fields encoded) |
 //! | `save`                     | `ok`                                                      |
 //! | `run <command>`            | `ok` (spawned) / `err <reason>`                           |
@@ -122,6 +123,9 @@ pub enum Request {
     New(String),
     /// `rename <name>` — rename the active workspace (and its saved file).
     Rename(String),
+    /// `root <path>` / `root -` — set (`Some`) or clear (`None`) the active workspace's root, the
+    /// folder its new terminals and apps start in. Not a picker root (`picker { root … }`).
+    SetRoot(Option<PathBuf>),
     /// `save` — flush every dirty workspace now.
     Save,
     /// `exec <action>` — run an action text (the `crucible_keys::Action` grammar, e.g.
@@ -161,6 +165,7 @@ impl Request {
             | Request::OpenFolder(_)
             | Request::New(_)
             | Request::Rename(_)
+            | Request::SetRoot(_)
             | Request::Exec(_)
             | Request::RunTui(_)
             | Request::RunTerm(_)
@@ -197,6 +202,7 @@ impl Request {
             "open-folder" => need(arg).map(|p| Request::OpenFolder(PathBuf::from(p))),
             "new" => need(arg).map(Request::New),
             "rename" => need(arg).map(Request::Rename),
+            "root" => need(arg).map(|p| Request::SetRoot((p != "-").then(|| PathBuf::from(p)))),
             "exec" => need(arg).map(Request::Exec),
             "run-tui" => need(arg).map(Request::RunTui),
             "run-term" => need(arg).map(Request::RunTerm),
@@ -217,6 +223,8 @@ impl Request {
             Request::OpenFolder(p) => format!("open-folder {}", encode_field(&p.to_string_lossy())),
             Request::New(n) => format!("new {}", encode_field(n)),
             Request::Rename(n) => format!("rename {}", encode_field(n)),
+            Request::SetRoot(None) => "root -".into(),
+            Request::SetRoot(Some(p)) => format!("root {}", encode_field(&p.to_string_lossy())),
             Request::Exec(a) => format!("exec {}", encode_field(a)),
             Request::RunTui(c) => format!("run-tui {}", encode_field(c)),
             Request::RunTerm(c) => format!("run-term {}", encode_field(c)),
@@ -577,6 +585,8 @@ mod tests {
             Request::OpenFolder(PathBuf::from("/tmp/x:y/100%")),
             Request::New("n\nl".into()),
             Request::Rename("r\r".into()),
+            Request::SetRoot(Some(PathBuf::from("/tmp/x:y/100%"))),
+            Request::SetRoot(None),
             Request::Exec("run sh -c 'echo 100%: a\tb'".into()),
             Request::Exec("run-in-terminal htop -d 5: 100%".into()),
             Request::RunTui("'/usr/bin/vim' a:b 100%".into()),
@@ -606,6 +616,7 @@ mod tests {
             Request::OpenFolder(PathBuf::from("/tmp")),
             Request::New("n".into()),
             Request::Rename("r".into()),
+            Request::SetRoot(None),
             Request::RunTui("htop".into()),
             Request::RunTerm("ghostty".into()),
             Request::Relaunch,
@@ -628,6 +639,9 @@ mod tests {
             Err("relaunch takes no argument".to_string())
         );
         assert!(Request::parse("bogus x").is_err());
+        // A bare `root` is an error; `root -` clears.
+        assert!(Request::parse("root").is_err());
+        assert_eq!(Request::parse("root -"), Ok(Request::SetRoot(None)));
         assert!(Request::parse("open %ZZ").is_err());
         // The argument is the rest of the line after ONE space: spaces inside are kept.
         assert_eq!(

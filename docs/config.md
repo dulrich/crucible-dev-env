@@ -208,6 +208,8 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `open-settings` | Open the settings overlay (`crucible keys`): the effective keybindings; Enter runs the selected binding |
 | `toggle-header` | Show/hide the workspace header strip (`header { mode "toggle" }` only; a no-op in `always` and `off`) |
 | `rename-workspace` | Rename the active workspace (the picker in rename mode) |
+| `capture-workspace-root` | (default chord `Super+Shift+D`) Make the focused terminal's current directory the active **workspace root**, the folder new terminals and apps in this workspace start in (running windows are untouched). Fails and changes nothing if the focused window is not a terminal. Not the picker `root` config folders |
+| `set-workspace-root` | (default chord `Super+Ctrl+Shift+D`) Open the workspace-root prompt in the picker overlay, prefilled with the current root; an empty answer clears it. `crucible msg root <path>` / `root -` does the same over IPC |
 | `lock` | Lock the screen: spawn `lock-command` (default chord `Super+Escape`) |
 | `none` | Unbind the chord |
 

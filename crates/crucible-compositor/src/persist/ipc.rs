@@ -2,7 +2,7 @@
 //! relaunch, open-folder).
 
 use std::collections::{HashMap, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crucible_layout::{WindowId, WorkspaceId};
@@ -38,6 +38,28 @@ fn admit_request(locked: bool, request: &Request) -> Result<(), ActionError> {
     } else {
         Ok(())
     }
+}
+
+/// Validates a workspace root: it must be an absolute path to an existing directory.
+pub(super) fn check_root(path: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("{} is not an absolute path", path.display()));
+    }
+    if !path.is_dir() {
+        return Err(format!("{} is not a directory", path.display()));
+    }
+    Ok(())
+}
+
+/// The pid of a terminal window for the root capture; an app, an unbound window or a terminal
+/// without a known pid is refused.
+fn terminal_pid(meta: Option<&crate::layout::WindowMeta>) -> Result<u32, String> {
+    let meta = meta.ok_or_else(|| "the focused window is not a terminal".to_string())?;
+    if meta.class != crate::layout::WindowClass::Terminal {
+        return Err("the focused window is not a terminal".to_string());
+    }
+    meta.pid
+        .ok_or_else(|| "the focused terminal has no known pid".to_string())
 }
 
 /// Parses an `exec` action text; the error is the reply reason. `none` (bind-only) is refused.
@@ -101,6 +123,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.complete_pending_pin(r)
             }
             Request::Rename(name) => self.ipc_rename(&name),
+            Request::SetRoot(root) => self.ipc_set_root(root),
         };
         match result {
             Ok(()) => Response::Ok(String::new()),
@@ -296,6 +319,46 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.create_named(name, Some(path.to_path_buf()))
     }
 
+    /// Sets (`Some`, validated by [`check_root`]) or clears (`None`) the active workspace's root.
+    /// Only later spawns are affected; the next auto-save sees the changed record content.
+    pub(super) fn ipc_set_root(&mut self, root: Option<PathBuf>) -> Result<(), String> {
+        let ws = self.layout.world.active_workspace_id();
+        let name = self
+            .layout
+            .world
+            .workspace(ws)
+            .map(|w| w.name.clone())
+            .ok_or_else(|| "no active workspace".to_string())?;
+        match root {
+            Some(path) => {
+                check_root(&path)?;
+                info!(workspace = name, root = %path.display(), "workspace root set");
+                self.persist.workspace.roots.insert(ws, path);
+            }
+            None => {
+                self.persist.workspace.roots.remove(&ws);
+                info!(workspace = name, "workspace root cleared");
+            }
+        }
+        Ok(())
+    }
+
+    /// `capture-workspace-root`: the focused pane's active terminal's current directory becomes
+    /// the active workspace's root (through [`Self::ipc_set_root`], so it shares its validation).
+    /// A missing window, a non-terminal, an unknown pid or a failed capture changes nothing.
+    pub(crate) fn capture_workspace_root(&mut self) -> Result<(), String> {
+        let id = self
+            .layout
+            .world
+            .focused_window()
+            .ok_or_else(|| "no focused window".to_string())?;
+        let pid = terminal_pid(self.layout.meta(id))?;
+        let cwd = crucible_persist::capture_terminal(proc_root(), None, pid)
+            .ok_or_else(|| "cannot read the terminal's working directory".to_string())?
+            .cwd;
+        self.ipc_set_root(Some(cwd))
+    }
+
     pub(super) fn ipc_new(&mut self, name: &str) -> Result<(), String> {
         if self.name_taken(name, &self.persist.saved_names()) {
             return Err(format!("a workspace named {name} already exists"));
@@ -400,6 +463,8 @@ mod tests {
             Request::OpenFolder("/tmp".into()),
             Request::New("n".into()),
             Request::Rename("r".into()),
+            Request::SetRoot(Some("/tmp".into())),
+            Request::SetRoot(None),
             Request::RunTui("htop".into()),
             Request::RunTerm("ghostty".into()),
             Request::Relaunch,
@@ -411,6 +476,31 @@ mod tests {
             Response::Err(ActionError::Locked.to_string()),
             Response::Err("session locked".into())
         );
+    }
+
+    #[test]
+    fn check_root_wants_an_absolute_existing_directory() {
+        assert_eq!(check_root(Path::new("/tmp")), Ok(()));
+        assert!(check_root(Path::new("tmp")).is_err());
+        assert!(check_root(Path::new("/nonexistent-cde-root-xyz")).is_err());
+        assert!(check_root(Path::new("/etc/passwd")).is_err());
+    }
+
+    #[test]
+    fn terminal_pid_wants_a_terminal_with_a_pid() {
+        use crate::layout::{WindowClass, WindowMeta};
+        let meta = |class, pid| WindowMeta {
+            pid,
+            class,
+            origin: None,
+        };
+        assert_eq!(
+            terminal_pid(Some(&meta(WindowClass::Terminal, Some(7)))),
+            Ok(7)
+        );
+        assert!(terminal_pid(Some(&meta(WindowClass::Terminal, None))).is_err());
+        assert!(terminal_pid(Some(&meta(WindowClass::App, Some(7)))).is_err());
+        assert!(terminal_pid(None).is_err());
     }
 
     #[test]

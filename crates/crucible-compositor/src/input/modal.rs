@@ -116,6 +116,7 @@ pub(super) fn chord_closes_overlay<O>(mode: &InputMode<O>, action: &Action) -> b
             action,
             Action::OpenPicker
                 | Action::RenameWorkspace
+                | Action::SetWorkspaceRoot
                 | Action::OpenLauncher
                 | Action::OpenSettings
                 | Action::ToggleHeader
@@ -234,6 +235,7 @@ mod tests {
         for action in [
             Action::OpenPicker,
             Action::RenameWorkspace,
+            Action::SetWorkspaceRoot,
             Action::OpenLauncher,
             Action::OpenSettings,
             Action::ToggleHeader,

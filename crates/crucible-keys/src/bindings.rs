@@ -194,6 +194,11 @@ impl Default for Bindings {
         };
         let sup_shift = Modifiers { shift: true, ..sup };
         let sup_ctrl = Modifiers { ctrl: true, ..sup };
+        let sup_ctrl_shift = Modifiers {
+            ctrl: true,
+            shift: true,
+            ..sup
+        };
 
         let mut map = HashMap::new();
         let mut bind = |modifiers: Modifiers, keysyms: &[Keysym], action: Action| {
@@ -232,6 +237,18 @@ impl Default for Bindings {
         bind(sup_shift, &[Keysym::q, Keysym::Q], Action::Quit);
         bind(sup_shift, &[Keysym::r, Keysym::R], Action::RenameWorkspace);
         bind(sup_shift, &[Keysym::m, Keysym::M], Action::SwapMarkedWindow);
+        bind(
+            sup_shift,
+            &[Keysym::d, Keysym::D],
+            Action::CaptureWorkspaceRoot,
+        );
+
+        // ---- Super+Ctrl+Shift ----
+        bind(
+            sup_ctrl_shift,
+            &[Keysym::d, Keysym::D],
+            Action::SetWorkspaceRoot,
+        );
         bind(
             sup_shift,
             &[Keysym::h, Keysym::H],
@@ -653,6 +670,8 @@ mod tests {
             ),
             ("mark-window", Action::MarkWindow),
             ("swap-marked-window", Action::SwapMarkedWindow),
+            ("capture-workspace-root", Action::CaptureWorkspaceRoot),
+            ("set-workspace-root", Action::SetWorkspaceRoot),
             ("new-workspace", Action::NewWorkspace),
             ("close-workspace", Action::CloseWorkspace),
             ("close-all-workspaces", Action::CloseAllWorkspaces),

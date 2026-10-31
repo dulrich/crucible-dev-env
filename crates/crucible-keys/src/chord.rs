@@ -36,6 +36,8 @@
 //! | `Super+Shift+<0-9>`   | `PinSlot(n)`                   | pin the active workspace to slot n |
 //! | `Super+P`             | `OpenPicker`                   | fuzzy workspace picker           |
 //! | `Super+Shift+R`       | `RenameWorkspace`              | rename the active workspace     |
+//! | `Super+Shift+D`       | `CaptureWorkspaceRoot`         | focused terminal's cwd becomes the workspace root |
+//! | `Super+Ctrl+Shift+D`  | `SetWorkspaceRoot`             | workspace-root prompt in the picker overlay |
 //! | `Super+Escape`        | `Lock`                         | spawn `lock-command` (screen lock) |
 //! | `Ctrl+Alt+F<n>`       | `VtSwitch(n)`                  | backend VT switch (hard-wired, independent of `Super`) |
 //!
@@ -334,6 +336,23 @@ mod tests {
     }
 
     #[test]
+    fn workspace_root_verbs_have_default_chords_in_both_cases() {
+        let sup_ctrl_shift = Modifiers {
+            logo: true,
+            shift: true,
+            ctrl: true,
+        };
+        for k in [Keysym::d, Keysym::D] {
+            assert_eq!(
+                resolve(super_shift(), k),
+                Some(Action::CaptureWorkspaceRoot)
+            );
+            assert_eq!(resolve(sup_ctrl_shift, k), Some(Action::SetWorkspaceRoot));
+            assert_eq!(resolve(super_only(), k), None);
+        }
+    }
+
+    #[test]
     fn overrides_flow_through_resolve_and_vt_switch_stays_hardwired() {
         let b = Bindings::with_overrides(&[
             ("Super+Shift+Q".to_string(), "none".to_string()),
@@ -434,6 +453,8 @@ mod tests {
                             Some(
                                 Action::OpenPicker
                                     | Action::RenameWorkspace
+                                    | Action::CaptureWorkspaceRoot
+                                    | Action::SetWorkspaceRoot
                                     | Action::OpenSettings
                                     | Action::ToggleHeader
                                     | Action::Lock

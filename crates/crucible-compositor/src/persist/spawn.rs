@@ -329,12 +329,23 @@ pub fn relaunch_args(
     wrapper_args(exec_flag, crucible, "relaunch", wrapper.to_args())
 }
 
-/// The terminal arguments for the picker: `<exec-flag> <crucible> pick [--rename <encoded>]`.
+/// The terminal arguments for the picker:
+/// `<exec-flag> <crucible> pick [--rename <encoded> | --root <encoded>]`. `root` is the current
+/// workspace root (empty when none), encoded like the rename target.
 #[must_use]
-pub fn picker_args(exec_flag: &str, crucible: &Path, rename: Option<&str>) -> Vec<OsString> {
+pub fn picker_args(
+    exec_flag: &str,
+    crucible: &Path,
+    rename: Option<&str>,
+    root: Option<&str>,
+) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![exec_flag.into(), crucible.into(), "pick".into()];
     if let Some(current) = rename {
         args.push("--rename".into());
+        args.push(encode_field(current).into());
+    }
+    if let Some(current) = root {
+        args.push("--root".into());
         args.push(encode_field(current).into());
     }
     args
@@ -978,15 +989,25 @@ mod tests {
 
     #[test]
     fn picker_argv_encodes_the_rename_target() {
-        let args = picker_args("-e", Path::new("/c"), Some("a:b"));
+        let args = picker_args("-e", Path::new("/c"), Some("a:b"), None);
         let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(args, ["-e", "/c", "pick", "--rename", "a%3Ab"]);
-        assert_eq!(picker_args("-e", Path::new("/c"), None).len(), 3);
+        assert_eq!(picker_args("-e", Path::new("/c"), None, None).len(), 3);
+    }
+
+    #[test]
+    fn picker_argv_encodes_the_root_value_even_when_empty() {
+        let args = picker_args("-e", Path::new("/c"), None, Some("/h/a:b"));
+        let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, ["-e", "/c", "pick", "--root", "/h/a%3Ab"]);
+        let args = picker_args("-e", Path::new("/c"), None, Some(""));
+        let args: Vec<&str> = args.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(args, ["-e", "/c", "pick", "--root", ""]);
     }
 
     #[test]
     fn terminal_args_go_before_the_exec_flag() {
-        let base = picker_args("-e", Path::new("/c"), None);
+        let base = picker_args("-e", Path::new("/c"), None, None);
         let got = with_terminal_args(&["--a=1".to_string(), "--b".to_string()], base.clone());
         let got: Vec<&str> = got.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(got, ["--a=1", "--b", "-e", "/c", "pick"]);

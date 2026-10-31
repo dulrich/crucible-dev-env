@@ -16,7 +16,7 @@
 //! `mark-window`, `swap-marked-window`,
 //! `close-workspace`, `close-all-workspaces`, `slot <0-9>`, `pin-slot <0-9>`,
 //! `move-workspace-to-output <±n>`, `open-picker`, `open-launcher`, `open-settings`,
-//! `toggle-header`, `rename-workspace` and `lock`. `vt-switch <n>` is printed but deliberately
+//! `toggle-header`, `rename-workspace`, `capture-workspace-root`, `set-workspace-root` and `lock`. `vt-switch <n>` is printed but deliberately
 //! **not** parsed: VT switches come only from libinput's `Ctrl+Alt+F<n>` keysyms, never from a
 //! bind or an IPC `exec`. The bind-only `none` (unbind) is [`crate::bindings::BindTarget`].
 
@@ -99,6 +99,14 @@ pub enum Action {
     /// window's place and that window takes the marked one's. With no mark it marks; into an empty
     /// pane it moves; in the marked window's own pane it clears. `Super+Shift+M`.
     SwapMarkedWindow,
+    /// Capture the focused terminal's current directory as the active workspace's root (the folder
+    /// new terminals and apps start in). `Super+Shift+D`.
+    ///
+    /// Changes nothing and fails when the focused window is not a terminal with a known pid.
+    CaptureWorkspaceRoot,
+    /// Open the workspace-root prompt in the picker overlay (prefilled with the current root; an
+    /// empty answer clears it). `Super+Ctrl+Shift+D`. Not the picker's `root` config folders.
+    SetWorkspaceRoot,
     /// Close the focused output's active workspace: its record is saved first, then its windows
     /// are ended. Refused on the output's last workspace or while a restore is pending.
     /// `Super+Shift+W`.
@@ -163,6 +171,8 @@ impl std::fmt::Display for Action {
             Self::MoveWindowToWorkspace(n) => write!(f, "move-window-to-workspace {n}"),
             Self::MarkWindow => f.write_str("mark-window"),
             Self::SwapMarkedWindow => f.write_str("swap-marked-window"),
+            Self::CaptureWorkspaceRoot => f.write_str("capture-workspace-root"),
+            Self::SetWorkspaceRoot => f.write_str("set-workspace-root"),
             Self::CloseWorkspace => f.write_str("close-workspace"),
             Self::CloseAllWorkspaces => f.write_str("close-all-workspaces"),
             Self::Slot(n) => write!(f, "slot {n}"),
@@ -236,6 +246,8 @@ impl Action {
             | Self::OpenSettings
             | Self::ToggleHeader
             | Self::RenameWorkspace
+            | Self::CaptureWorkspaceRoot
+            | Self::SetWorkspaceRoot
             | Self::Lock
             | Self::VtSwitch(_) => None,
         }
@@ -335,6 +347,8 @@ impl FromStr for Action {
             "move-window-to-workspace" => unary(Self::MoveWindowToWorkspace(delta(words.get(1))?)),
             "mark-window" => nullary(Self::MarkWindow),
             "swap-marked-window" => nullary(Self::SwapMarkedWindow),
+            "capture-workspace-root" => nullary(Self::CaptureWorkspaceRoot),
+            "set-workspace-root" => nullary(Self::SetWorkspaceRoot),
             "close-workspace" => nullary(Self::CloseWorkspace),
             "close-all-workspaces" => nullary(Self::CloseAllWorkspaces),
             "lock" => nullary(Self::Lock),
@@ -385,6 +399,8 @@ mod tests {
             Action::MoveWindowToWorkspace(2),
             Action::MarkWindow,
             Action::SwapMarkedWindow,
+            Action::CaptureWorkspaceRoot,
+            Action::SetWorkspaceRoot,
             Action::CloseWorkspace,
             Action::CloseAllWorkspaces,
             Action::Slot(3),

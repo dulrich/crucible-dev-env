@@ -102,6 +102,8 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+P` | Open the workspace picker (live, saved and folder workspaces) |
 | `Super+B` | Show/hide the workspace header strip (`header { mode "toggle" }`) |
 | `Super+Shift+R` | Rename the active workspace (picker in rename mode) |
+| `Super+Shift+D` | Capture the focused terminal's current directory as the active workspace's root (where its new terminals start) |
+| `Super+Ctrl+Shift+D` | Set or clear the active workspace's root in a picker prompt |
 | `Super+Escape` | Lock the screen (spawns `lock-command`, default `swaylock`; see `docs/config.md`) |
 | `Super+Shift+]` / `Super+Shift+[` | Move the focused window to the next / previous workspace |
 | `Super+M` | Mark the focused window; press again in another pane (any workspace or monitor) to move it there; press again in its own pane to cancel |
