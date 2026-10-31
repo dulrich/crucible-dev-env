@@ -243,14 +243,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
                         .layout
                         .meta(*id)
                         .and_then(|m| m.pid)
-                        .and_then(|pid| {
-                            std::fs::read(proc_root().join(pid.to_string()).join("cmdline")).ok()
-                        })
-                        .and_then(|b| {
-                            crucible_persist::RelaunchWrapper::from_argv(
-                                &crucible_persist::capture::parse_cmdline(&b),
-                            )
-                        })
+                        // The window pid is the placeholder's terminal; the wrapper is its child.
+                        .and_then(|pid| crucible_persist::relaunch_wrapper_of(proc_root(), pid))
                         .map(|r| r.cmdline);
                     candidates.push((*id, wrapper_cmdline));
                 }

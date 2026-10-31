@@ -31,7 +31,9 @@ pub mod slots;
 pub mod store;
 pub mod wrapper;
 
-pub use capture::{TerminalCapture, ancestors, capture_terminal, children_of, window_record};
+pub use capture::{
+    TerminalCapture, ancestors, capture_terminal, children_of, relaunch_wrapper_of, window_record,
+};
 pub use error::PersistError;
 pub use executable::is_executable_file;
 pub use format::FORMAT_VERSION;

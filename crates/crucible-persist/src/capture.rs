@@ -367,6 +367,16 @@ fn wrapper_process(proc_root: &Path, pid: u32) -> Option<CdeWrapper> {
         .or_else(|| ResumeWrapper::from_argv(&argv).map(CdeWrapper::Terminal))
 }
 
+/// The `crucible relaunch` wrapper a placeholder window runs: `window_pid` is the window's own
+/// client (the terminal), so the wrapper is the pid itself or, normally, one of its direct
+/// children. `None` for any other window.
+#[must_use]
+pub fn relaunch_wrapper_of(proc_root: &Path, window_pid: u32) -> Option<RelaunchWrapper> {
+    std::iter::once(window_pid)
+        .chain(children_of(proc_root, window_pid))
+        .find_map(|pid| RelaunchWrapper::from_argv(&read_cmdline(proc_root, pid)))
+}
+
 /// Classifies one managed window into the record to save. Pure over `proc_root` (normally
 /// `/proc`). `pid` is the client PID, `terminal` whether it is a CDE-spawned terminal (exact
 /// pid), `origin` the saved record its spawn stands for (a restored window or a relaunched app),
@@ -895,6 +905,47 @@ mod tests {
         p.add((100, "term", 1), 0, "/", &["term"], &[200]);
         p.add((200, "bash", 100), 200, "/", &["bash"], &[]);
         assert_eq!(terminal_record(&p, 100, None), term("/", None));
+    }
+
+    /// The placeholder's window pid is the terminal (`ghostty …`), never the wrapper itself: the
+    /// wrapper is found among its direct children (the plan 18 sibling-lookup defect).
+    #[test]
+    fn relaunch_wrapper_of_reads_the_terminal_child() {
+        let p = Proc::new("relaunch-of");
+        p.add(
+            (100, "ghostty", 1),
+            0,
+            "/",
+            &[
+                "ghostty",
+                "--gtk-single-instance=false",
+                "-e",
+                "/x/crucible",
+            ],
+            &[200],
+        );
+        p.add(
+            (200, "crucible", 100),
+            200,
+            "/",
+            &[
+                "/x/crucible",
+                "relaunch",
+                "--app-id",
+                "firefox",
+                "--",
+                "firefox",
+            ],
+            &[],
+        );
+        p.add((300, "ghostty", 1), 0, "/", &["ghostty"], &[301]);
+        p.add((301, "bash", 300), 301, "/", &["bash"], &[]);
+        let got = relaunch_wrapper_of(&p.0, 100).unwrap();
+        assert_eq!(got.cmdline, "firefox");
+        assert_eq!(got.app_id.as_deref(), Some("firefox"));
+        assert_eq!(relaunch_wrapper_of(&p.0, 200).unwrap().cmdline, "firefox");
+        assert_eq!(relaunch_wrapper_of(&p.0, 300), None);
+        assert_eq!(relaunch_wrapper_of(&p.0, 999), None);
     }
 
     #[test]
