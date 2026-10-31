@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 
 pub use error::{ConfigError, Location};
 pub use model::{
-    ClassTiling, Config, DEFAULT_HEADER_FONT, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderConfig,
-    HeaderMode, LauncherConfig, OverlayConfig, OverlayStyle, PickerConfig, Rgb, TerminalConfig,
-    TilingConfig, clamp_ring, substitute_gap,
+    ClassTiling, Config, DEFAULT_HEADER_FONT, GHOSTTY_OVERLAY_DEFAULT_ARGS, HEADER_SIZE_MAX,
+    HEADER_SIZE_MIN, HeaderConfig, HeaderMode, LauncherConfig, OverlayConfig, OverlayStyle,
+    PickerConfig, Rgb, TerminalConfig, TilingConfig, clamp_ring, substitute_gap,
 };
 pub use schema::parse;
 

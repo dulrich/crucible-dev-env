@@ -57,10 +57,11 @@ pub type WarmKey = (String, String, Vec<String>, Vec<String>, Vec<(String, u32)>
 /// The [`WarmKey`] of `config` given the resolved `terminal` program.
 #[must_use]
 pub fn warm_key(config: &Config, terminal: String) -> WarmKey {
+    let overlay_args = config.overlay.effective_terminal_args(&terminal);
     (
         terminal,
         config.terminal.exec_flag.clone(),
-        config.overlay.terminal_args.clone(),
+        overlay_args,
         config.launcher.tui.clone(),
         config
             .outputs
@@ -189,6 +190,23 @@ mod tests {
         };
         assert_eq!(warm_key(&a, "t".into()), warm_key(&a.clone(), "t".into()));
         assert_ne!(warm_key(&a, "t".into()), warm_key(&b, "t".into()));
+    }
+
+    #[test]
+    fn warm_key_carries_effective_overlay_args() {
+        let c = Config::default();
+        let defaults: Vec<String> = crucible_config::GHOSTTY_OVERLAY_DEFAULT_ARGS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(warm_key(&c, "/tmp/cde/ghostty-cde".into()).2, defaults);
+        assert!(warm_key(&c, "foot".into()).2.is_empty());
+        let mut opt_out = c.clone();
+        opt_out.overlay.terminal_args = Some(vec![]);
+        assert_ne!(
+            warm_key(&c, "ghostty".into()),
+            warm_key(&opt_out, "ghostty".into())
+        );
     }
 
     #[test]

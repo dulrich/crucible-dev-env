@@ -221,7 +221,7 @@ fn parse_overlay(node: NodeReader<'_>) -> Result<OverlayConfig, ConfigError> {
                     )
                 })?;
             }
-            "terminal-args" => out.terminal_args = child.string_list()?,
+            "terminal-args" => out.terminal_args = Some(child.string_list()?),
             _ => return Err(child.unknown_node("overlay")),
         }
     }
@@ -313,6 +313,7 @@ fn parse_binds(node: NodeReader<'_>) -> Result<Vec<(String, String)>, ConfigErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::GHOSTTY_OVERLAY_DEFAULT_ARGS;
     use std::path::Path;
 
     const FULL: &str = r##"
@@ -643,7 +644,7 @@ binds {
         let c = parse("").unwrap();
         assert!(c.overlay.border);
         assert_eq!(c.overlay.style, OverlayStyle::N1Med);
-        assert!(c.overlay.terminal_args.is_empty());
+        assert_eq!(c.overlay.terminal_args, None);
     }
 
     #[test]
@@ -654,7 +655,41 @@ binds {
         .unwrap();
         assert!(!c.overlay.border);
         assert_eq!(c.overlay.style, OverlayStyle::N1Light);
-        assert_eq!(c.overlay.terminal_args, vec!["--a=1", "--b"]);
+        assert_eq!(
+            c.overlay.terminal_args,
+            Some(vec!["--a=1".to_string(), "--b".to_string()])
+        );
+    }
+
+    #[test]
+    fn overlay_empty_terminal_args_is_some_empty() {
+        let c = parse("overlay {\n terminal-args\n}\n").unwrap();
+        assert_eq!(c.overlay.terminal_args, Some(vec![]));
+    }
+
+    #[test]
+    fn overlay_effective_args_resolution() {
+        let defaults: Vec<String> = GHOSTTY_OVERLAY_DEFAULT_ARGS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let unset = OverlayConfig::default();
+        for p in ["ghostty", "/usr/bin/ghostty", "/tmp/cde/ghostty-cde"] {
+            assert_eq!(unset.effective_terminal_args(p), defaults, "{p}");
+        }
+        for p in ["foot", "alacritty", "ghostty-foo", "myghostty", "", "/a/.."] {
+            assert!(unset.effective_terminal_args(p).is_empty(), "{p}");
+        }
+        let empty = OverlayConfig {
+            terminal_args: Some(vec![]),
+            ..OverlayConfig::default()
+        };
+        assert!(empty.effective_terminal_args("ghostty").is_empty());
+        let x = OverlayConfig {
+            terminal_args: Some(vec!["--x".into()]),
+            ..OverlayConfig::default()
+        };
+        assert_eq!(x.effective_terminal_args("ghostty"), vec!["--x"]);
     }
 
     #[test]

@@ -252,7 +252,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return;
         }
         let program = self.terminal_program();
-        let args = with_terminal_args(&self.config.overlay.terminal_args, args);
+        let args = with_terminal_args(&self.config.overlay.effective_terminal_args(&program), args);
         if let Some(pid) = self.spawn_process(&program, &args, None, SpawnKind::Overlay) {
             self.persist.placement.pending.insert(
                 pid,
@@ -449,7 +449,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         );
         let program = self.terminal_program();
         let args = with_terminal_args(
-            &self.config.overlay.terminal_args,
+            &self.config.overlay.effective_terminal_args(&program),
             warm_host_args(&self.config.terminal.exec_flag, &crucible, &socket),
         );
         if let Some(pid) = self.spawn_process(&program, &args, None, SpawnKind::Overlay) {

@@ -154,8 +154,39 @@ pub struct OverlayConfig {
     pub border: bool,
     /// The overlay style.
     pub style: OverlayStyle,
-    /// Extra terminal arguments inserted before the exec flag on overlay spawns.
-    pub terminal_args: Vec<String>,
+    /// Extra terminal arguments inserted before the exec flag on overlay spawns. `None` means not
+    /// set: [`OverlayConfig::effective_terminal_args`] then applies the built-in ghostty default.
+    /// `Some(list)` (even empty) replaces the default.
+    pub terminal_args: Option<Vec<String>>,
+}
+
+/// Overlay args CDE adds by default when the terminal program is ghostty.
+pub const GHOSTTY_OVERLAY_DEFAULT_ARGS: [&str; 2] = [
+    "--window-padding-color=extend-always",
+    "--window-padding-balance=true",
+];
+
+impl OverlayConfig {
+    /// The terminal args to use for overlay spawns with terminal `program`: the explicit list when
+    /// set (even if empty), else the ghostty defaults when the basename is exactly `ghostty` or
+    /// `ghostty-cde`, else nothing.
+    #[must_use]
+    pub fn effective_terminal_args(&self, program: &str) -> Vec<String> {
+        if let Some(list) = &self.terminal_args {
+            return list.clone();
+        }
+        let is_ghostty = std::path::Path::new(program)
+            .file_name()
+            .is_some_and(|n| n == "ghostty" || n == "ghostty-cde");
+        if is_ghostty {
+            GHOSTTY_OVERLAY_DEFAULT_ARGS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 impl Default for OverlayConfig {
@@ -163,7 +194,7 @@ impl Default for OverlayConfig {
         Self {
             border: true,
             style: OverlayStyle::N1Med,
-            terminal_args: Vec::new(),
+            terminal_args: None,
         }
     }
 }

@@ -113,7 +113,6 @@ A config save takes effect on the next launcher open (the pre-warmed launcher is
 overlay {
     border #true
     style "n1-med"
-    terminal-args "--window-padding-color=extend-always" "--window-padding-balance=true"
 }
 ```
 
@@ -121,7 +120,7 @@ Presentation of the picker, launcher and settings overlays. Every child is optio
 
 - `border` — `#true` (default) or `#false`. Draws a ring outside the overlay; while an overlay is open the pane focus ring and stack pips are not drawn over it.
 - `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` (default) or `"n1-light"`; any other value is a config error. `terminal` keeps the terminal's own look and the teal ring; the N1 styles paint opaque surrounds with an orange ring. The chosen style is passed to overlay programs as `CDE_OVERLAY_STYLE`.
-- `terminal-args` — extra terminal arguments, zero or more strings, inserted before the exec flag on overlay spawns only. Default: none. As a ghostty example only, `terminal-args "--window-padding-color=extend-always" "--window-padding-balance=true"` fills ghostty's window padding (and the leftover strip where the cell grid does not divide the overlay evenly) with the N1 surround and spreads it evenly, so the surround reaches the border on every side (verified on host-b, ghostty 1.3.1; `--background-opacity=1` is not needed); `--config-file=<path>` adds to the user config, while `--config-default-files=false` replaces it.
+- `terminal-args` — extra terminal arguments, zero or more strings, inserted before the exec flag on overlay spawns only. Default: when the terminal program's basename is `ghostty` or `ghostty-cde`, CDE adds `--window-padding-color=extend-always --window-padding-balance=true`; with any other terminal, nothing. Any explicit `terminal-args` replaces the default, and an empty `terminal-args` node turns it off. These ghostty defaults fill ghostty's window padding (and the leftover strip where the cell grid does not divide the overlay evenly) with the N1 surround and spread it evenly, so the surround reaches the border on every side (verified on host-b, ghostty 1.3.1; `--background-opacity=1` is not needed); `--config-file=<path>` adds to the user config, while `--config-default-files=false` replaces it.
 
 Overlay terminals are pre-started: one hidden overlay terminal (running `crucible overlay-host`) is kept ready and is handed the overlay when one opens. It uses the same `terminal` program, exec flag and `overlay.terminal-args`; changing any of them on hot reload restarts it. There is nothing to configure.
 
@@ -140,7 +139,7 @@ A clickable workspace strip at the top of every output, listing that output's wo
 
 - `mode` — `"off"`, `"always"` or `"toggle"` (default); any other value (including the old `"alt"`) is a config error. `off`: no strip and no input effect; `toggle-header` does nothing. `always`: the strip is always shown and its height is reserved at the top of each output (tiles, rings and X11 placement all shrink by exactly that height). `toggle`: the strip is hidden until the `toggle-header` action (default `Super+B`) shows it; while shown it reserves its height exactly like `always` (every window is re-configured to the reflowed rects), and `Super+B` again hides it and gives the space back.
 - `font` — a font file path (a value containing `/`) or a fontconfig family name resolved with `fc-match`. Default `"DejaVu Sans"`. If no font can be loaded the strip still draws its background and highlight, without labels (one warning is logged).
-- `size` — label size in pixels, an integer from 6 to 96; default 14. The strip height is the size plus padding.
+- `size` — label size in pixels, an integer from 6 to 96; default 14. The strip height is the size plus padding. The size is in logical pixels, while terminals usually size fonts in points; at scale 1 the conversion is px ≈ pt × 96/72 (14 pt ≈ 19 px).
 - `slots` — `#true` or `#false` (default `#false`). When on, the label of a workspace pinned to a slot shows the slot digit with a Super glyph (`⌘` + digit, e.g. `⌘3 name`); if the header font lacks the glyph the badge falls back to `S-3 name`. Unpinned labels are unchanged.
 
 Clicking a workspace name focuses that output and switches it to that workspace (the press and its release are consumed by the strip, never sent to the window beneath). A click never hides the strip; in `toggle` mode only `toggle-header` does. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
@@ -238,7 +237,6 @@ picker {
 overlay {
     border #true
     style "n1-med"
-    terminal-args "--window-padding-color=extend-always" "--window-padding-balance=true"
 }
 header {
     mode "toggle"
