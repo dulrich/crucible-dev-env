@@ -148,6 +148,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(ret) => ret,
             Err(err) => {
                 error!(%err, "Failed to start XWayland");
+                self.run_autostart();
                 return;
             }
         };
@@ -189,16 +190,22 @@ impl<B: Backend + 'static> CrucibleState<B> {
                                 "XWayland ready (DISPLAY=:{display_number})"
                             );
                             merge_xresources(display_number);
+                            data.run_autostart();
                         }
-                        Err(err) => error!(%err, "Failed to attach X11 window manager"),
+                        Err(err) => {
+                            error!(%err, "Failed to attach X11 window manager");
+                            data.run_autostart();
+                        }
                     }
                 }
                 XWaylandEvent::Error => {
                     warn!("XWayland crashed on startup");
+                    data.run_autostart();
                 }
             });
         if let Err(err) = ret {
             error!(%err, "Failed to insert the XWayland source into the event loop");
+            self.run_autostart();
         }
     }
 

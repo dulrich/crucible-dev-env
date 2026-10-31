@@ -232,6 +232,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub xwm: Option<X11Wm>,
     /// The X11 `DISPLAY` number XWayland is serving (e.g. `1` for `:1`), once known.
     pub xdisplay: Option<u32>,
+    /// Once-only latch for the `autostart` commands (see [`crate::autostart`]).
+    pub autostart_gate: crate::autostart::AutostartGate,
     /// Whether pointer motion moves focus onto the managed window (or output) under the cursor.
     ///
     /// On by default; set from the config (`focus-follows-mouse`) by [`Self::apply_config`].
@@ -473,6 +475,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             suppressed_keys: SuppressedKeys::new(),
             xwm: None,
             xdisplay: None,
+            autostart_gate: crate::autostart::AutostartGate::default(),
             focus_follows_mouse: true,
             config: Config::default(),
             bindings: Bindings::default(),

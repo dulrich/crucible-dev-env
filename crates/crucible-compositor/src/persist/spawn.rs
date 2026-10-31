@@ -83,6 +83,15 @@ impl SpawnRegistry {
             .is_some_and(|rec| rec.kind == SpawnKind::Terminal)
     }
 }
+/// Session identity every spawned child gets, overriding inherited values (the compositor's own
+/// environment is left untouched).
+pub(crate) fn session_env() -> [(&'static str, &'static str); 2] {
+    [
+        ("XDG_CURRENT_DESKTOP", "CDE"),
+        ("XDG_SESSION_TYPE", "wayland"),
+    ]
+}
+
 /// What a CDE-spawned process is, remembered per PID so a mapped window can be classified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnKind {
@@ -393,7 +402,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return None;
         };
         let mut cmd = Command::new(program);
-        cmd.args(args).env("WAYLAND_DISPLAY", &socket);
+        cmd.args(args)
+            .envs(session_env())
+            .env("WAYLAND_DISPLAY", &socket);
         if let Some(path) = &self.persist.ipc_path {
             cmd.env(SOCKET_ENV, path);
         }
@@ -674,6 +685,13 @@ pub(super) fn prepare_restore(
 mod tests {
     use super::*;
     use crucible_persist::{PaneRecord, RecordNode};
+
+    #[test]
+    fn session_env_names_cde_on_wayland() {
+        let env = session_env();
+        assert!(env.contains(&("XDG_CURRENT_DESKTOP", "CDE")));
+        assert!(env.contains(&("XDG_SESSION_TYPE", "wayland")));
+    }
 
     fn rec(root: Option<&str>, tree: RecordNode) -> WorkspaceRecord {
         WorkspaceRecord {

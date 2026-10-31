@@ -33,6 +33,9 @@ pub mod layout;
 /// XWayland integration: server lifecycle and X11 window management.
 pub mod xwayland;
 
+/// Once-per-process `autostart` commands.
+pub mod autostart;
+
 /// Per-frame rendering and presentation.
 pub mod render;
 

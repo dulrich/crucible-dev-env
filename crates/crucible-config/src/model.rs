@@ -309,6 +309,9 @@ pub struct Config {
     /// The screen locker the `lock` action spawns (`lock-command`), split on whitespace into
     /// program + arguments (no shell quoting). Default `"swaylock"`.
     pub lock_command: String,
+    /// Shell command lines run once per CDE start (`autostart`, repeatable), in file order, via
+    /// `/bin/sh -c`. Default empty.
+    pub autostart: Vec<String>,
     /// Extra TUI program names for the launcher.
     pub launcher: LauncherConfig,
     /// Binding overrides as raw `(chord, action)` strings, in file order.
@@ -349,6 +352,7 @@ impl Default for Config {
             binds: Vec::new(),
             outputs: BTreeMap::new(),
             lock_command: "swaylock".to_string(),
+            autostart: Vec::new(),
         }
     }
 }

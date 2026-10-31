@@ -13,12 +13,16 @@ Usage: cde.sh [--help|-h] [extra crucible args...]
 
 Launch the CDE (crucible-dev-env) compositor on a bare TTY with logging. Runs
 `cargo build` first, then ./target/debug/crucible with the mode flag followed by
-any extra args, which are passed through unchanged.
+any extra args, which are passed through unchanged. With CDE_BIN set, the build
+is skipped and that binary runs instead.
 
 Environment overrides:
   TERMINAL   terminal CDE spawns (default: /tmp/cde/ghostty-cde, a wrapper that
              runs ghostty with --gtk-single-instance=false)
   RUST_LOG   log filter (default: info)
+  CDE_BIN    path to a prebuilt crucible binary (e.g. ~/.local/bin/crucible):
+             skips `cargo build` and runs it instead of ./target/debug/crucible;
+             exits 1 if set but not executable (default: unset)
   CDE_MODE   crucible mode flag (default: --tty-udev)
   CDE_WALLPAPER  set to 0 to skip the startup wallpaper (default: in --tty-udev
              mode, scripts/wallpaper-rotate.sh runs once the compositor
@@ -30,6 +34,15 @@ USAGE
 		;;
 	esac
 done
+
+# CDE_BIN: a prebuilt binary to run instead of the dev build. Validate before anything starts.
+if [ -n "${CDE_BIN:-}" ]; then
+	case "$CDE_BIN" in /*) ;; *) CDE_BIN="$PWD/$CDE_BIN" ;; esac
+	if [ ! -f "$CDE_BIN" ] || [ ! -x "$CDE_BIN" ]; then
+		echo "cde.sh: CDE_BIN is not an executable file: $CDE_BIN" >&2
+		exit 1
+	fi
+fi
 
 # shellcheck source=lib/build-id.sh
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/build-id.sh"
@@ -64,7 +77,9 @@ cd "$repo" || { echo "cde.sh: repo not found: $repo" >&2; exit 1; }
 } | tee "$log"
 
 # Rebuild so code changes since the last run are picked up (no-op when current).
-if ! cargo build 2>&1 | tee -a "$log"; then
+if [ -n "${CDE_BIN:-}" ]; then
+	echo "== CDE_BIN=$CDE_BIN (skipping cargo build)" | tee -a "$log"
+elif ! cargo build 2>&1 | tee -a "$log"; then
 	echo "cde.sh: build failed, see $log" >&2
 	exit 1
 fi
@@ -75,7 +90,7 @@ if [ "$mode" = --tty-udev ] && [ "${CDE_WALLPAPER:-1}" != 0 ]; then
 	env -u WAYLAND_DISPLAY "$repo/scripts/wallpaper-rotate.sh" --wait 30 >>"$log" 2>&1 </dev/null &
 fi
 
-./target/debug/crucible "$mode" "$@" 2>&1 | tee -a "$log"
+"${CDE_BIN:-./target/debug/crucible}" "$mode" "$@" 2>&1 | tee -a "$log"
 status=${PIPESTATUS[0]}
 echo "== crucible exited $status at $(date -Is)" | tee -a "$log"
 exit "$status"

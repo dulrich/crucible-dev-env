@@ -31,7 +31,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
     })?;
 
     let mut config = Config::default();
-    for node in Children::new(text, doc.nodes(), &["output"]) {
+    for node in Children::new(text, doc.nodes(), &["output", "autostart"]) {
         let node = node?;
         match node.name() {
             "terminal" => parse_terminal(node, &mut config.terminal)?,
@@ -70,6 +70,12 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 let cmd = node.string_arg("a command string")?;
                 node.nonempty("command", cmd)?;
                 config.lock_command = cmd.to_string();
+            }
+            "autostart" => {
+                node.no_properties()?;
+                let cmd = node.string_arg("a command string")?;
+                node.nonempty("command", cmd)?;
+                config.autostart.push(cmd.to_string());
             }
             _ => return Err(node.unknown_node("the top level")),
         }
@@ -342,6 +348,18 @@ binds {
         assert!(matches!(err, ConfigError::InvalidValue { .. }));
         let (err, _) = err_at("lock-command \"a\"\nlock-command \"b\"\n");
         assert!(matches!(err, ConfigError::Duplicate { .. }));
+    }
+
+    #[test]
+    fn autostart_repeats_in_order_and_rejects_empty_or_extra_args() {
+        assert!(Config::default().autostart.is_empty());
+        let c = parse("autostart \"b; c\"\nautostart \"a\"\nautostart \"b; c\"\n").unwrap();
+        assert_eq!(c.autostart, vec!["b; c", "a", "b; c"]);
+        let (err, _) = err_at("autostart \"  \"\n");
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
+        let (err, at) = err_at("autostart \"a\" \"b\"\n");
+        assert!(!matches!(err, ConfigError::InvalidValue { .. }));
+        assert_eq!(at.line, 1);
     }
 
     #[test]

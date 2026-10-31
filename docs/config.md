@@ -61,6 +61,15 @@ The screen locker the `lock` action (default `Super+Escape`) spawns, detached (n
 
 CDE implements `ext-session-lock-v1`, so any Wayland locker (swaylock, gtklock, waylock, …) works. While locked only the locker is shown (over black) and only it receives input; no CDE chord runs except VT switching (`Ctrl+Alt+F<n>`). If the locker dies the screen stays black and locked; running the locker again (from a VT, or over ssh with `WAYLAND_DISPLAY` set) takes over the lock, and unlocking it unlocks the session.
 
+### `autostart`
+
+```kdl
+autostart "dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"
+autostart "nm-applet & sleep 1; some-daemon >> /tmp/some-daemon.log 2>&1"
+```
+
+A shell command line to run at startup. The node is repeatable: each one takes exactly one non-empty string, and they run in file order (no deduplication). Each runs once per CDE start via `/bin/sh -c`, after XWayland is ready (or has failed to start), so `DISPLAY` is already exported when XWayland works. Because it goes through `sh -c`, compound lines (`a; b`, redirects) work. Edits take effect on the next CDE start: a config hot reload never re-runs autostart. Each command inherits `WAYLAND_DISPLAY`, `DISPLAY`, `CDE_SOCKET` and the XDG session variables (`XDG_CURRENT_DESKTOP=CDE`, `XDG_SESSION_TYPE=wayland`). Intended for background programs: a window an autostart command opens is placed and saved like any other app window. A failed spawn only logs a warning and the remaining entries still run. See [`session.md`](session.md).
+
 ### `picker`
 
 ```kdl
@@ -237,6 +246,7 @@ header {
     size 14
 }
 output "DP-1" { scale 1.4167 }
+autostart "dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"
 binds {
     bind "Super+P" "open-picker"
     bind "Super+Backslash" "split right"
