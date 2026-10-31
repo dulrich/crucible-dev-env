@@ -28,6 +28,7 @@
 //! | `Super+Shift+]`       | `MoveWindowToWorkspace(1)`     | `World::move_window_to_workspace` |
 //! | `Super+Shift+[`       | `MoveWindowToWorkspace(-1)`    | `World::move_window_to_workspace` |
 //! | `Super+M`             | `MarkWindow`                   | `World::mark_window`              |
+//! | `Super+Shift+M`       | `SwapMarkedWindow`             | `World::swap_marked_window`       |
 //! | `Super+Shift+W`       | `CloseWorkspace`               | save, then `World::remove_workspace` |
 //! | `Super+Ctrl+]`        | `MoveWorkspaceToOutput(1)`     | `World::move_workspace_to_output` |
 //! | `Super+Ctrl+[`        | `MoveWorkspaceToOutput(-1)`    | `World::move_workspace_to_output` |
@@ -197,6 +198,8 @@ mod tests {
             (Keysym::L, Action::Move(Direction::Right)),
             (Keysym::Tab, Action::CycleStack(-1)),
             (Keysym::ISO_Left_Tab, Action::CycleStack(-1)),
+            (Keysym::m, Action::SwapMarkedWindow),
+            (Keysym::M, Action::SwapMarkedWindow),
             (Keysym::bracketright, Action::MoveWindowToWorkspace(1)),
             (Keysym::bracketleft, Action::MoveWindowToWorkspace(-1)),
             (Keysym::w, Action::CloseWorkspace),
@@ -393,6 +396,7 @@ mod tests {
             (true, false, Keysym::k | Keysym::K) => Some(Action::Move(Direction::Up)),
             (true, false, Keysym::l | Keysym::L) => Some(Action::Move(Direction::Right)),
             (true, false, Keysym::Tab | Keysym::ISO_Left_Tab) => Some(Action::CycleStack(-1)),
+            (true, false, Keysym::m | Keysym::M) => Some(Action::SwapMarkedWindow),
             (true, false, Keysym::bracketright) => Some(Action::MoveWindowToWorkspace(1)),
             (true, false, Keysym::bracketleft) => Some(Action::MoveWindowToWorkspace(-1)),
             (true, false, Keysym::w | Keysym::W) => Some(Action::CloseWorkspace),

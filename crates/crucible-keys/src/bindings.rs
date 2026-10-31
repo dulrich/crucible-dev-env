@@ -231,6 +231,7 @@ impl Default for Bindings {
         bind(sup_shift, &[Keysym::Return], Action::RunTerminal);
         bind(sup_shift, &[Keysym::q, Keysym::Q], Action::Quit);
         bind(sup_shift, &[Keysym::r, Keysym::R], Action::RenameWorkspace);
+        bind(sup_shift, &[Keysym::m, Keysym::M], Action::SwapMarkedWindow);
         bind(
             sup_shift,
             &[Keysym::h, Keysym::H],
@@ -651,6 +652,7 @@ mod tests {
                 Action::RunInTerminal("htop -d 5".into()),
             ),
             ("mark-window", Action::MarkWindow),
+            ("swap-marked-window", Action::SwapMarkedWindow),
             ("new-workspace", Action::NewWorkspace),
             ("close-workspace", Action::CloseWorkspace),
             ("close-all-workspaces", Action::CloseAllWorkspaces),

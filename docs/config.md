@@ -197,6 +197,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `new-workspace` | Create and switch to a new workspace |
 | `move-window-to-workspace <n>` | Send the focused window `n` workspaces over |
 | `mark-window` | (default chord `Super+M`) Mark the focused window; the next press elsewhere moves it into the focused pane (any workspace or output); a press in its own pane clears the mark |
+| `swap-marked-window` | (default chord `Super+Shift+M`) Like `mark-window`, but swaps: the marked window takes the focused pane's active window's place and that window takes the marked one's; with no mark it marks; into an empty pane it moves |
 | `close-workspace` | Save, then close the active workspace and end its windows (refused on the output's last workspace) |
 | `close-all-workspaces` | Save and close every open workspace, leaving one fresh workspace per output (unbound by default) |
 | `move-workspace-to-output <n>` | Send the active workspace `n` outputs over (wraparound) |

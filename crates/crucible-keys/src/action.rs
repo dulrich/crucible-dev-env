@@ -13,7 +13,7 @@
 //! action grammar and `FromStr` parses it back. Verbs: `quit`, `close-pane`, `run-terminal`,
 //! `run <command…>`, `run-in-terminal <command…>`, `focus|move|split|resize <left|right|up|down>`,
 //! `cycle-stack <±n>`, `cycle-workspace <±n>`, `new-workspace`, `move-window-to-workspace <±n>`,
-//! `mark-window`,
+//! `mark-window`, `swap-marked-window`,
 //! `close-workspace`, `close-all-workspaces`, `slot <0-9>`, `pin-slot <0-9>`,
 //! `move-workspace-to-output <±n>`, `open-picker`, `open-launcher`, `open-settings`,
 //! `toggle-header`, `rename-workspace` and `lock`. `vt-switch <n>` is printed but deliberately
@@ -95,6 +95,10 @@ pub enum Action {
     ///
     /// No-op when there is no mark and no focused window.
     MarkWindow,
+    /// Like [`Action::MarkWindow`], but swaps: the marked window takes the focused pane's active
+    /// window's place and that window takes the marked one's. With no mark it marks; into an empty
+    /// pane it moves; in the marked window's own pane it clears. `Super+Shift+M`.
+    SwapMarkedWindow,
     /// Close the focused output's active workspace: its record is saved first, then its windows
     /// are ended. Refused on the output's last workspace or while a restore is pending.
     /// `Super+Shift+W`.
@@ -158,6 +162,7 @@ impl std::fmt::Display for Action {
             Self::NewWorkspace => f.write_str("new-workspace"),
             Self::MoveWindowToWorkspace(n) => write!(f, "move-window-to-workspace {n}"),
             Self::MarkWindow => f.write_str("mark-window"),
+            Self::SwapMarkedWindow => f.write_str("swap-marked-window"),
             Self::CloseWorkspace => f.write_str("close-workspace"),
             Self::CloseAllWorkspaces => f.write_str("close-all-workspaces"),
             Self::Slot(n) => write!(f, "slot {n}"),
@@ -194,6 +199,8 @@ pub enum LayoutVerb {
     MoveWindowToWorkspace(i64),
     /// [`Action::MarkWindow`].
     MarkWindow,
+    /// [`Action::SwapMarkedWindow`].
+    SwapMarkedWindow,
     /// [`Action::ClosePane`].
     ClosePane,
 }
@@ -212,6 +219,7 @@ impl Action {
             Self::CycleWorkspace(n) => Some(LayoutVerb::CycleWorkspace(*n)),
             Self::MoveWindowToWorkspace(n) => Some(LayoutVerb::MoveWindowToWorkspace(*n)),
             Self::MarkWindow => Some(LayoutVerb::MarkWindow),
+            Self::SwapMarkedWindow => Some(LayoutVerb::SwapMarkedWindow),
             Self::ClosePane => Some(LayoutVerb::ClosePane),
             Self::Quit
             | Self::RunTerminal
@@ -326,6 +334,7 @@ impl FromStr for Action {
             "cycle-workspace" => unary(Self::CycleWorkspace(delta(words.get(1))?)),
             "move-window-to-workspace" => unary(Self::MoveWindowToWorkspace(delta(words.get(1))?)),
             "mark-window" => nullary(Self::MarkWindow),
+            "swap-marked-window" => nullary(Self::SwapMarkedWindow),
             "close-workspace" => nullary(Self::CloseWorkspace),
             "close-all-workspaces" => nullary(Self::CloseAllWorkspaces),
             "lock" => nullary(Self::Lock),
@@ -375,6 +384,7 @@ mod tests {
             Action::NewWorkspace,
             Action::MoveWindowToWorkspace(2),
             Action::MarkWindow,
+            Action::SwapMarkedWindow,
             Action::CloseWorkspace,
             Action::CloseAllWorkspaces,
             Action::Slot(3),
@@ -419,7 +429,7 @@ mod tests {
             .into_iter()
             .filter(|a| a.layout_verb().is_some())
             .count();
-        assert_eq!(model, 9);
+        assert_eq!(model, 10);
         assert_eq!(
             Action::MoveWindowToWorkspace(2).layout_verb(),
             Some(LayoutVerb::MoveWindowToWorkspace(2))
@@ -427,6 +437,10 @@ mod tests {
         assert_eq!(
             Action::MarkWindow.layout_verb(),
             Some(LayoutVerb::MarkWindow)
+        );
+        assert_eq!(
+            Action::SwapMarkedWindow.layout_verb(),
+            Some(LayoutVerb::SwapMarkedWindow)
         );
         assert_eq!(Action::ClosePane.layout_verb(), Some(LayoutVerb::ClosePane));
         assert_eq!(Action::CloseWorkspace.layout_verb(), None);

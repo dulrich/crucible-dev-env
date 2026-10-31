@@ -171,6 +171,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             | Action::CycleWorkspace(_)
             | Action::MoveWindowToWorkspace(_)
             | Action::MarkWindow
+            | Action::SwapMarkedWindow
             | Action::ClosePane => unreachable!("layout verbs are routed by layout_verb above"),
         }
         Ok(())
@@ -244,6 +245,9 @@ fn apply_model_action(world: &mut World, verb: LayoutVerb) -> Result<(), LayoutE
         }
         LayoutVerb::MarkWindow => {
             world.mark_window();
+        }
+        LayoutVerb::SwapMarkedWindow => {
+            world.swap_marked_window();
         }
         LayoutVerb::ClosePane => return world.close_pane(),
     }
@@ -471,6 +475,13 @@ mod tests {
         let mut world = World::new("1");
         world.open_window();
         assert_dispatches(world, Action::MarkWindow, |w| w.mark_window());
+    }
+
+    #[test]
+    fn swap_marked_window_dispatches_to_world_swap_marked_window() {
+        let mut world = World::new("1");
+        world.open_window();
+        assert_dispatches(world, Action::SwapMarkedWindow, |w| w.swap_marked_window());
     }
 
     #[test]
