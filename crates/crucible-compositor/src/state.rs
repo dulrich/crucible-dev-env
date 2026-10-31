@@ -13,7 +13,8 @@
 //!   clients see a seat with the right caps and a cursor renders. Input events are routed into the
 //!   seat by [`crate::input`]; this module only advertises the seat and its capabilities.
 //! - **wl_data_device** ([`DataDeviceState`]) + **primary selection** ([`PrimarySelectionState`]) —
-//!   clipboard/DnD plumbing with minimal handlers.
+//!   clipboard plumbing with minimal handlers, plus Wayland-client pointer drag-and-drop grabs
+//!   (touch and XWayland-initiated DnD are not driven).
 //!
 //! The structure mirrors anvil's `AnvilState`/`Backend` split (a state struct generic over a
 //! backend trait, with backend specifics isolated in `winit.rs`/`udev.rs`) so anvil-derived code
@@ -32,9 +33,9 @@ use smithay::{
     desktop::{PopupManager, Space},
     input::{
         Seat, SeatHandler, SeatState,
-        dnd::DndGrabHandler,
+        dnd::{DnDGrab, DndGrabHandler, DndTarget, GrabType, Source},
         keyboard::{LedState, XkbConfig},
-        pointer::{CursorImageStatus, PointerHandle},
+        pointer::{CursorImageStatus, Focus, PointerHandle},
     },
     output::Output,
     reexports::{
@@ -45,7 +46,7 @@ use smithay::{
             protocol::{wl_buffer::WlBuffer, wl_surface::WlSurface},
         },
     },
-    utils::{Clock, Monotonic},
+    utils::{Clock, Logical, Monotonic, Point, Serial},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -257,6 +258,18 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub header_text: crate::text::TextRenderer,
     /// Screen-lock state (`ext-session-lock-v1`); see [`crate::lock`].
     pub session_lock: crate::lock::SessionLock,
+    /// The icon of the active pointer drag-and-drop grab, if any; composed at the pointer by
+    /// [`crate::render::frame_elements`] and cleared when the drag ends.
+    pub dnd_icon: Option<DndIcon>,
+}
+
+/// The icon surface a client attached to a pointer drag, with its accumulated hotspot offset.
+#[derive(Debug, Clone)]
+pub struct DndIcon {
+    /// The icon's `wl_surface`.
+    pub surface: WlSurface,
+    /// Offset of the icon from the pointer, accumulated from the surface's `attach` offsets.
+    pub offset: Point<i32, Logical>,
 }
 
 /// What the pointer hovers, for focus-follows-mouse enter detection.
@@ -485,6 +498,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             header: crate::header::HeaderState::default(),
             header_text: crate::text::TextRenderer::from_font(None),
             session_lock,
+            dnd_icon: None,
         }
     }
 }
@@ -529,6 +543,22 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
 
         // Drive popup commit bookkeeping.
         self.popups.commit(surface);
+
+        // A drag icon's `attach` offset moves its hotspot: accumulate it (as anvil does).
+        if let Some(icon) = self.dnd_icon.as_mut()
+            && &icon.surface == surface
+        {
+            with_states(&icon.surface, |states| {
+                let delta = states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .buffer_delta
+                    .take()
+                    .unwrap_or_default();
+                icon.offset += delta;
+            });
+        }
 
         // Send the first configure for whichever role this surface holds, if not yet sent.
         let warm = self.warm_element_for(surface);
@@ -629,11 +659,59 @@ impl<B: Backend + 'static> DataDeviceHandler for CrucibleState<B> {
     }
 }
 
-// DnD grab handlers: minimal. `WaylandDndGrabHandler`'s default `dnd_requested` cancels
-// the drag; `DndGrabHandler`'s defaults clear the icon on drop/cancel. CDE does not yet drive
-// interactive DnD grabs.
-impl<B: Backend + 'static> WaylandDndGrabHandler for CrucibleState<B> {}
-impl<B: Backend + 'static> DndGrabHandler for CrucibleState<B> {}
+// Wayland client pointer drag-and-drop. A pointer request installs Smithay's `DnDGrab` (the grab
+// drives focus and offers); the icon is stored for the scene assembler. A touch request is
+// cancelled: CDE has no touch seat capability yet.
+impl<B: Backend + 'static> WaylandDndGrabHandler for CrucibleState<B> {
+    fn dnd_requested<S: Source>(
+        &mut self,
+        source: S,
+        icon: Option<WlSurface>,
+        seat: Seat<Self>,
+        serial: Serial,
+        type_: GrabType,
+    ) {
+        match type_ {
+            GrabType::Pointer => {
+                let Some(pointer) = seat.get_pointer() else {
+                    source.cancel();
+                    return;
+                };
+                let Some(start_data) = pointer.grab_start_data() else {
+                    source.cancel();
+                    return;
+                };
+                self.dnd_icon = icon.map(|surface| DndIcon {
+                    surface,
+                    offset: (0, 0).into(),
+                });
+                pointer.set_grab(
+                    self,
+                    DnDGrab::new_pointer(&self.display_handle, start_data, source, seat),
+                    serial,
+                    Focus::Keep,
+                );
+            }
+            GrabType::Touch => source.cancel(),
+        }
+    }
+}
+
+impl<B: Backend + 'static> DndGrabHandler for CrucibleState<B> {
+    fn dropped(
+        &mut self,
+        _target: Option<DndTarget<'_, Self>>,
+        _validated: bool,
+        _seat: Seat<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+        self.dnd_icon = None;
+    }
+
+    fn cancelled(&mut self, _seat: Seat<Self>, _location: Point<f64, Logical>) {
+        self.dnd_icon = None;
+    }
+}
 
 impl<B: Backend + 'static> PrimarySelectionHandler for CrucibleState<B> {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
@@ -798,21 +876,56 @@ use smithay::{
         with_surfaces_surface_tree,
     },
     wayland::{
-        compositor::with_states, dmabuf::DmabufFeedback, fractional_scale::with_fractional_scale,
+        compositor::{SurfaceAttributes, with_states},
+        dmabuf::DmabufFeedback,
+        fractional_scale::with_fractional_scale,
     },
 };
+
+/// Sends frame callbacks to the drag icon's surface tree, when a drag is active.
+///
+/// The icon is not in the `Space`, so the backends' per-window frame-callback loops miss it.
+pub fn send_dnd_icon_frames(
+    dnd_icon: Option<&DndIcon>,
+    output: &Output,
+    time: impl Into<std::time::Duration>,
+    throttle: Option<std::time::Duration>,
+) {
+    if let Some(icon) = dnd_icon {
+        smithay::desktop::utils::send_frames_surface_tree(
+            &icon.surface,
+            output,
+            time,
+            throttle,
+            |_, _| Some(output.clone()),
+        );
+    }
+}
 
 /// Records, for every surface on `output`, which output actually scanned it out this frame.
 ///
 /// Smithay needs this bookkeeping to deliver correct `wl_surface.frame` throttling and presentation
 /// feedback when a surface spans multiple outputs. Used by the udev/DRM render path after a frame is
 /// rendered (the nested `winit` path has a single output and does not need it). Mirrors anvil's
-/// helper, trimmed to CDE's window set (no DnD icon / cursor-surface scanout tracking yet).
+/// helper, trimmed to CDE's window set plus the DnD icon (no cursor-surface scanout tracking yet).
 pub fn update_primary_scanout_output(
     space: &Space<WindowElement>,
     output: &Output,
+    dnd_icon: Option<&DndIcon>,
     render_element_states: &RenderElementStates,
 ) {
+    if let Some(icon) = dnd_icon {
+        with_surfaces_surface_tree(&icon.surface, |surface, states| {
+            update_surface_primary_scanout_output(
+                surface,
+                output,
+                states,
+                None,
+                render_element_states,
+                default_primary_scanout_output_compare,
+            );
+        });
+    }
     space.elements().for_each(|window| {
         window.0.with_surfaces(|surface, states| {
             update_surface_primary_scanout_output(

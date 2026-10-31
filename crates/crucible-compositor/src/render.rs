@@ -20,9 +20,9 @@ use smithay::{
             solid::SolidColorRenderElement, surface::WaylandSurfaceRenderElement,
         },
     },
-    desktop::space::{Space, SpaceRenderElements},
+    desktop::space::{Space, SpaceRenderElements, SurfaceTree},
     output::Output,
-    utils::{Physical, Point, Scale},
+    utils::{IsAlive, Logical, Physical, Point, Scale},
 };
 
 use crate::{
@@ -32,6 +32,7 @@ use crate::{
     header::HeaderLayout,
     layout::LayoutState,
     lock::SessionLock,
+    state::DndIcon,
     text::TextRenderer,
 };
 
@@ -122,6 +123,19 @@ pub struct FrameView<'a> {
     pub header_output: Option<OutputId>,
     /// The header font size.
     pub header_size: u32,
+    /// The active pointer drag's icon, drawn at the cursor (unlocked frames only).
+    pub dnd_icon: Option<&'a DndIcon>,
+}
+
+/// Where a drag icon's surface origin is drawn: the output-local physical `cursor` plus the icon's
+/// logical hotspot `offset` scaled to physical pixels.
+#[must_use]
+pub fn icon_location(
+    cursor: Point<i32, Physical>,
+    offset: Point<i32, Logical>,
+    scale: Scale<f64>,
+) -> Point<i32, Physical> {
+    cursor + offset.to_f64().to_physical(scale).to_i32_round()
 }
 
 /// Composes one output's frame: the element list (front-to-back) and the clear colour.
@@ -170,11 +184,27 @@ where
         .output_geometry(view.output)
         .map_or((0, 0), |g| (g.loc.x, g.loc.y));
 
-    // Front-to-back: cursor → header → chrome → windows.
+    // Front-to-back: cursor → drag icon → header → chrome → windows.
     let mut custom: Vec<CustomRenderElements<R>> = match cursor {
         Some(location) => pointer.render_elements(renderer, location, view.scale, 1.0),
         None => Vec::new(),
     };
+    if let (Some(icon), Some(cursor)) = (view.dnd_icon, cursor)
+        && icon.surface.alive()
+    {
+        let location = icon_location(cursor, icon.offset, view.scale);
+        custom.extend(
+            AsRenderElements::<R>::render_elements(
+                &SurfaceTree::from_surface(&icon.surface),
+                renderer,
+                location,
+                view.scale,
+                1.0,
+            )
+            .into_iter()
+            .map(CustomRenderElements::Surface),
+        );
+    }
     if let Some(output_id) = view.header_output {
         custom.extend(crate::header::build_header_elements(
             view.header_layouts,
@@ -212,4 +242,23 @@ where
     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
 
     (elements, crate::winit::CLEAR_COLOR.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn icon_sits_at_cursor_plus_offset() {
+        let at = icon_location((100, 50).into(), (0, 0).into(), Scale::from(1.0));
+        assert_eq!(at, Point::<i32, Physical>::from((100, 50)));
+        let at = icon_location((100, 50).into(), (-8, 4).into(), Scale::from(1.0));
+        assert_eq!(at, Point::<i32, Physical>::from((92, 54)));
+    }
+
+    #[test]
+    fn icon_offset_scales_to_physical_pixels() {
+        let at = icon_location((100, 50).into(), (-8, 4).into(), Scale::from(1.5));
+        assert_eq!(at, Point::<i32, Physical>::from((88, 56)));
+    }
 }

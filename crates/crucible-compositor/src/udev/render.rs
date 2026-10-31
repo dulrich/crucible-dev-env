@@ -229,6 +229,7 @@ impl CrucibleState<UdevData> {
             header_layouts: &header_layouts,
             header_output: crate::layout::model_output_id(&output),
             header_size: self.config.header.size,
+            dnd_icon: self.dnd_icon.as_ref(),
         };
         let (elements, clear_color) = frame_elements(
             view,
@@ -261,7 +262,7 @@ impl CrucibleState<UdevData> {
             });
 
         let result = result.and_then(|(rendered, states)| {
-            update_primary_scanout_output(&self.space, &output, &states);
+            update_primary_scanout_output(&self.space, &output, self.dnd_icon.as_ref(), &states);
             if rendered {
                 let feedback = take_presentation_feedback(&output, &self.space, &states);
                 // A failed queue must reach the recovery match below: swallowing it (as this
@@ -283,6 +284,7 @@ impl CrucibleState<UdevData> {
             self.space.elements().for_each(|window| {
                 window.send_frame(&output, now, throttle, |_, _| Some(output.clone()));
             });
+            crate::state::send_dnd_icon_frames(self.dnd_icon.as_ref(), &output, now, throttle);
             if let Some(fb) = surface.dmabuf_feedback.as_ref() {
                 send_dmabuf_feedback(
                     &self.space,

@@ -14,9 +14,9 @@
 //! [`KeyboardTarget`] impl on `X11Surface` issues the X11 `set_input_focus`/take-focus); CDE
 //! additionally raises it via [`X11Wm::raise_window`](smithay::xwayland::X11Wm) on the input path.
 //!
-//! CDE has no server-side decorations and no compositor-driven drag-and-drop yet, so anvil's `SSD`
-//! pointer arm and `DndFocus` machinery are intentionally omitted; they can be added if those
-//! features land.
+//! CDE has no server-side decorations, so anvil's `SSD` pointer arm is intentionally omitted.
+//! Wayland-client pointer drag-and-drop is driven (see [`CrucibleOfferData`] and the grab in
+//! [`crate::state`]); touch and XWayland-initiated DnD are not.
 
 use std::{borrow::Cow, sync::Arc};
 
@@ -383,8 +383,8 @@ impl<B: Backend + 'static> TouchTarget<CrucibleState<B>> for PointerFocusTarget 
 ///
 /// [`X11Wm::start_wm`](smithay::xwayland::X11Wm) requires the seat's `PointerFocus` to implement
 /// [`DndFocus`]; this enum lets a single [`PointerFocusTarget`] satisfy that by delegating to either
-/// Smithay's Wayland or X11 offer data. CDE does not yet drive interactive DnD grabs, so
-/// this exists to satisfy the bound and forward correctly when DnD does arrive.
+/// Smithay's Wayland or X11 offer data. Native Wayland pointer drags run through the Wayland arm
+/// (`DnDGrab` installed by `dnd_requested` in [`crate::state`]); the X11 arm only forwards.
 pub enum CrucibleOfferData<S: Source> {
     /// Offer data for a native Wayland DnD target.
     Wayland(WlOfferData<S>),

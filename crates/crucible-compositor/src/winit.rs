@@ -305,6 +305,7 @@ pub fn run_winit() {
                 header_layouts: &header_layouts,
                 header_output: crate::layout::model_output_id(&output),
                 header_size: state.config.header.size,
+                dnd_icon: state.dnd_icon.as_ref(),
             };
             let header_text = &mut state.header_text;
             let render_res = backend.bind().and_then(|(renderer, mut fb)| {
@@ -333,6 +334,7 @@ pub fn run_winit() {
                     crate::state::update_primary_scanout_output(
                         &state.space,
                         &output,
+                        state.dnd_icon.as_ref(),
                         &render_output_result.states,
                     );
                     if let Some(damage) = render_output_result.damage {
@@ -373,6 +375,12 @@ pub fn run_winit() {
                 Some(output.clone())
             });
         });
+        crate::state::send_dnd_icon_frames(
+            state.dnd_icon.as_ref(),
+            &output,
+            frame_time,
+            Some(Duration::ZERO),
+        );
         state.update_fractional_scales(&output);
 
         let result = event_loop.dispatch(Some(Duration::from_millis(16)), &mut state);
