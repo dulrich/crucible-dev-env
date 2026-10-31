@@ -2,7 +2,7 @@
   "entrypoints": [
     { "path": "scripts/cde.sh" },
     { "path": "scripts/wallpaper-rotate.sh" },
-    { "path": "crates/crucible/src/main.rs", "subcommands": ["pick", "launch", "keys", "resume", "relaunch", "msg", "overlay-host"] }
+    { "path": "crates/crucible/src/main.rs", "subcommands": ["pick", "launch", "keys", "resume", "relaunch", "mem", "msg", "overlay-host"] }
   ],
   "exclude": []
 }
