@@ -55,7 +55,7 @@ use smithay::{
         output::{OutputHandler, OutputManagerState},
         seat::WaylandFocus,
         selection::{
-            SelectionHandler,
+            SelectionHandler, SelectionSource, SelectionTarget,
             data_device::{
                 DataDeviceHandler, DataDeviceState, WaylandDndGrabHandler, set_data_device_focus,
             },
@@ -579,8 +579,41 @@ impl<B: Backend + 'static> SeatHandler for CrucibleState<B> {
     }
 }
 
+// Wayland → X11 half of the clipboard bridge (the X11 → Wayland half is `XwmHandler::new_selection`
+// / `send_selection` in `crate::xwayland`). Without it a Wayland client's clipboard (e.g. a
+// Firefox screenshot) is invisible to XWayland clients: `xclip -t TARGETS` finds no owner.
 impl<B: Backend + 'static> SelectionHandler for CrucibleState<B> {
     type SelectionUserData = ();
+
+    /// A Wayland client set (or cleared) a selection: advertise its mime types to XWayland.
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if let Some(xwm) = self.xwm.as_mut()
+            && let Err(err) = xwm.new_selection(ty, source.map(|source| source.mime_types()))
+        {
+            warn!(?err, ?ty, "Failed to set XWayland selection");
+        }
+    }
+
+    /// A Wayland client is reading a selection an X11 client owns: pump it from XWayland.
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: std::os::fd::OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        if let Some(xwm) = self.xwm.as_mut()
+            && let Err(err) = xwm.send_selection(ty, mime_type, fd)
+        {
+            warn!(?err, ?ty, "Failed to send XWayland selection to Wayland");
+        }
+    }
 }
 
 impl<B: Backend + 'static> DataDeviceHandler for CrucibleState<B> {
