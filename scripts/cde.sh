@@ -90,7 +90,21 @@ if [ "$mode" = --tty-udev ] && [ "${CDE_WALLPAPER:-1}" != 0 ]; then
 	env -u WAYLAND_DISPLAY "$repo/scripts/wallpaper-rotate.sh" --wait 30 >>"$log" 2>&1 </dev/null &
 fi
 
+# Portal reset (bare TTY only; nested modes share the parent session's portals). When CDE
+# exits, xdg-desktop-portal-gtk loses its display and xdg-desktop-portal re-activates it at
+# once against the dead display; the failed activation stays pending in dbus for 120 s, and
+# every GTK4 app (ghostty) started meanwhile blocks before mapping (host-a 2026-10-31 14:44).
+# Stopping both units leaves them to dbus activation with the next session's environment.
+reset_portals() {
+	[ "$mode" = --tty-udev ] || return 0
+	systemctl --user stop xdg-desktop-portal.service xdg-desktop-portal-gtk.service >/dev/null 2>&1
+	systemctl --user reset-failed xdg-desktop-portal-gtk.service >/dev/null 2>&1
+	echo "== portals reset ($1)" | tee -a "$log"
+}
+
+reset_portals start
 "${CDE_BIN:-./target/debug/crucible}" "$mode" "$@" 2>&1 | tee -a "$log"
 status=${PIPESTATUS[0]}
+reset_portals exit
 echo "== crucible exited $status at $(date -Is)" | tee -a "$log"
 exit "$status"
