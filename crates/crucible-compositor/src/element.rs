@@ -245,3 +245,12 @@ where
             .collect()
     }
 }
+
+/// Whether `surface` has a committed buffer (the X2 focus-readiness check).
+#[must_use]
+pub fn surface_has_buffer(surface: &WlSurface) -> bool {
+    smithay::backend::renderer::utils::with_renderer_surface_state(surface, |s| {
+        s.buffer().is_some()
+    })
+    .unwrap_or(false)
+}

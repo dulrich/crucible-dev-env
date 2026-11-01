@@ -145,11 +145,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
         {
             return;
         }
+        // X2: a Wayland toplevel without its first buffer is parked and granted on that commit
+        // (`CompositorHandler::commit`); the old focus stays. Any other target supersedes it.
+        if let Some(KeyboardFocusTarget::Window(w)) = &target
+            && let Some(root) = w.wl_surface()
+            && crate::state::defer_focus(!w.is_x11(), crate::element::surface_has_buffer(&root))
+        {
+            self.pending_keyboard_focus.park(w.clone());
+            return;
+        }
         self.force_keyboard_focus(target);
     }
 
     /// Sets keyboard focus unconditionally (the lock glue's own path; see [`Self::set_keyboard_focus`]).
     pub(crate) fn force_keyboard_focus(&mut self, target: Option<KeyboardFocusTarget>) {
+        self.pending_keyboard_focus.clear();
         let Some(keyboard) = self.seat.get_keyboard() else {
             return;
         };
