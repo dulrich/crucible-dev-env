@@ -5,6 +5,7 @@
 //! `/proc`; tests point it at a fixture tree).
 
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -148,6 +149,72 @@ fn read_cmdline(proc_root: &Path, pid: u32) -> Vec<String> {
     fs::read(pid_dir(proc_root, pid).join("cmdline"))
         .map(|b| parse_cmdline(&b))
         .unwrap_or_default()
+}
+
+fn read_comm(proc_root: &Path, pid: u32) -> String {
+    fs::read_to_string(pid_dir(proc_root, pid).join("comm"))
+        .map(|c| c.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// One process of a [`ProcSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcInfo {
+    /// Parent pid.
+    pub ppid: u32,
+    /// The kernel's short process name (`comm`); empty when unreadable.
+    pub comm: String,
+    /// The command line; empty for kernel threads and unreadable processes.
+    pub argv: Vec<String>,
+}
+
+/// Every process under a `proc_root` with a parseable `stat`, read once.
+#[derive(Debug, Clone, Default)]
+pub struct ProcSnapshot(HashMap<u32, ProcInfo>);
+
+impl ProcSnapshot {
+    /// Reads every numeric `<proc_root>/<pid>` directory with a parseable `stat`.
+    #[must_use]
+    pub fn read(proc_root: &Path) -> Self {
+        let Ok(entries) = fs::read_dir(proc_root) else {
+            return Self::default();
+        };
+        let procs = entries
+            .filter_map(Result::ok)
+            .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
+            .filter_map(|pid| {
+                let ppid = u32::try_from(read_stat(proc_root, pid)?.ppid).ok()?;
+                let info = ProcInfo {
+                    ppid,
+                    comm: read_comm(proc_root, pid),
+                    argv: read_cmdline(proc_root, pid),
+                };
+                Some((pid, info))
+            })
+            .collect();
+        Self(procs)
+    }
+
+    /// The process `pid`, if it was in the snapshot.
+    #[must_use]
+    pub fn get(&self, pid: u32) -> Option<&ProcInfo> {
+        self.0.get(&pid)
+    }
+
+    /// Every `(pid, process)` pair, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = (u32, &ProcInfo)> {
+        self.0.iter().map(|(p, i)| (*p, i))
+    }
+
+    /// Parent pid to its child pids (each list in no particular order).
+    #[must_use]
+    pub fn children(&self) -> HashMap<u32, Vec<u32>> {
+        let mut kids: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (pid, info) in self.iter() {
+            kids.entry(info.ppid).or_default().push(pid);
+        }
+        kids
+    }
 }
 
 /// The ancestors of `pid` (parent first), walking `ppid` up to `max_depth` steps; stops at pid 0
@@ -514,6 +581,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn proc_snapshot_reads_numeric_dirs_with_stat() {
+        let p = Proc::new("snapshot");
+        p.add((10, "crucible", 1), 10, "/", &["/x/crucible", "mem"], &[11]);
+        p.add((11, "bash", 10), 10, "/", &[], &[]);
+        fs::write(p.0.join("11").join("comm"), "bash\n").unwrap();
+        fs::create_dir_all(p.0.join("self")).unwrap(); // not numeric
+        fs::create_dir_all(p.0.join("12")).unwrap(); // no stat
+        let snap = ProcSnapshot::read(&p.0);
+        assert_eq!(snap.iter().count(), 2);
+        let ten = snap.get(10).unwrap();
+        assert_eq!((ten.ppid, ten.comm.as_str()), (1, ""));
+        assert_eq!(ten.argv, ["/x/crucible", "mem"]);
+        let eleven = snap.get(11).unwrap();
+        assert_eq!((eleven.ppid, eleven.comm.as_str()), (10, "bash"));
+        assert!(eleven.argv.is_empty());
+        assert!(snap.get(12).is_none());
+        assert_eq!(snap.children()[&10], [11]);
+        assert!(ProcSnapshot::read(&p.0.join("missing")).get(1).is_none());
     }
 
     #[test]

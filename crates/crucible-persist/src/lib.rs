@@ -32,7 +32,8 @@ pub mod store;
 pub mod wrapper;
 
 pub use capture::{
-    TerminalCapture, ancestors, capture_terminal, children_of, relaunch_wrapper_of, window_record,
+    ProcInfo, ProcSnapshot, TerminalCapture, ancestors, capture_terminal, children_of,
+    relaunch_wrapper_of, window_record,
 };
 pub use error::PersistError;
 pub use executable::{
@@ -41,4 +42,6 @@ pub use executable::{
 pub use format::FORMAT_VERSION;
 pub use policy::should_save;
 pub use record::{PaneRecord, RecordNode, WindowRecord, WorkspaceRecord};
-pub use wrapper::{CdeWrapper, RelaunchWrapper, ResumeWrapper};
+pub use wrapper::{
+    CdeWrapper, RelaunchWrapper, ResumeWrapper, crucible_subcommand, is_cde_process,
+};

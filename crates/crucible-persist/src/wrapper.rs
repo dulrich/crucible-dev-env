@@ -168,8 +168,25 @@ impl RelaunchWrapper {
 
 /// The args after `sub` when `argv` is `[<…/crucible>, sub, …]`.
 fn subcommand_args<'a>(argv: &'a [String], sub: &str) -> Option<&'a [String]> {
+    (crucible_subcommand(argv)? == sub).then(|| &argv[2..])
+}
+
+/// `argv[1]` when `argv[0]`'s basename is `crucible`: the CDE subcommand the process runs.
+#[must_use]
+pub fn crucible_subcommand(argv: &[String]) -> Option<&str> {
     let exe = Path::new(argv.first()?).file_name()?;
-    (exe == "crucible" && argv.get(1)? == sub).then(|| &argv[2..])
+    (exe == "crucible").then_some(())?;
+    argv.get(1).map(String::as_str)
+}
+
+/// Whether a process is one of CDE's own `crucible` processes: `argv[0]`'s basename is
+/// `crucible`, or (argv unreadable or empty) its `comm` is.
+#[must_use]
+pub fn is_cde_process(argv: &[String], comm: &str) -> bool {
+    match argv.first() {
+        Some(a) => Path::new(a).file_name().is_some_and(|n| n == "crucible"),
+        None => comm == "crucible",
+    }
 }
 
 /// What a CDE restore wrapper found in a window's own argv stands for.
@@ -205,9 +222,7 @@ impl CdeWrapper {
 }
 
 fn is_wrapper_start(argv: &[String]) -> bool {
-    argv.first()
-        .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "crucible"))
-        && matches!(argv.get(1).map(String::as_str), Some("relaunch" | "resume"))
+    matches!(crucible_subcommand(argv), Some("relaunch" | "resume"))
 }
 
 #[cfg(test)]
@@ -220,6 +235,21 @@ mod tests {
 
     fn strings(args: Vec<OsString>) -> Vec<String> {
         args.into_iter().map(|a| a.into_string().unwrap()).collect()
+    }
+
+    #[test]
+    fn crucible_subcommand_and_cde_process() {
+        assert_eq!(
+            crucible_subcommand(&v(&["/x/crucible", "mem"])),
+            Some("mem")
+        );
+        assert_eq!(crucible_subcommand(&v(&["crucible"])), None);
+        assert_eq!(crucible_subcommand(&v(&["/x/other", "mem"])), None);
+        assert_eq!(crucible_subcommand(&[]), None);
+        assert!(is_cde_process(&v(&["/x/crucible"]), "x"));
+        assert!(!is_cde_process(&v(&["htop"]), "crucible"));
+        assert!(is_cde_process(&[], "crucible"));
+        assert!(!is_cde_process(&[], "bash"));
     }
 
     // --- Round trip ---

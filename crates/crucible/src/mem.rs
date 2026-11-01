@@ -5,19 +5,20 @@
 //! on `/proc`: no IPC, no compositor involvement. Every `/proc` read goes through a `proc_root`
 //! parameter so the core is tested on a fixture tree.
 
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-use crucible_persist::capture::{is_shell_program, parse_cmdline, parse_stat};
-use crucible_persist::{RelaunchWrapper, ResumeWrapper, ancestors};
+use crucible_persist::capture::{ProcInfo, ProcSnapshot, ancestors, is_shell_program};
+use crucible_persist::{crucible_subcommand, is_cde_process};
 
 use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible mem --help`.
-pub const USAGE: &str = "usage: crucible mem [--pid <n>]\n\nReal memory per logical app of a running CDE: one row per direct child process of the compositor\n(PSS, swap, process count, label), largest PSS first, then the compositor itself and a TOTAL.\nPSS and swap are summed over the child's whole process subtree from /proc/<pid>/smaps_rollup. The\nlabel is the child's name plus the deepest process under it that is neither a `crucible`\nrelaunch/resume wrapper nor a shell (ties: largest PSS), e.g. `ghostty › htop`.\n\n  --pid <n>    the compositor's pid. Without it, the compositor is the process owned by you whose\n               command is `crucible` with `--winit` or `--tty-udev`; with several, the one that is an\n               ancestor of this command, else the lowest pid. None found: message on stderr, exit 1.\n  -h, --help   print this usage and exit 0\n\nOnly processes CDE spawned itself are counted: D-Bus-activated apps parented to `systemd --user`\nare not. A process that is unreadable or vanished counts as zero and its row is marked `*`.\n";
+pub const USAGE: &str = "usage: crucible mem [--pid <n>]\n\nReal memory per logical app of a running CDE: one row per direct child process of the compositor\n(PSS, swap, process count, label), largest PSS first, then the compositor itself and a TOTAL.\nPSS and swap are summed over the child's whole process subtree from /proc/<pid>/smaps_rollup. The\nlabel is the child's name plus the deepest process under it that is not a shell and\nnot one of CDE's own `crucible` processes (ties: largest PSS), e.g. `ghostty › htop`. A child whose\nsubtree holds the overlay host gets ` (overlay)` appended.\n\n  --pid <n>    the compositor's pid. Without it, the compositor is the process owned by you whose\n               command is `crucible` with `--winit` or `--tty-udev`; with several, the one that is an\n               ancestor of this command, else the lowest pid. None found: message on stderr, exit 1.\n  -h, --help   print this usage and exit 0\n\nOnly processes CDE spawned itself are counted: D-Bus-activated apps parented to `systemd --user`\nare not. A process that is unreadable or vanished counts as zero and its row is marked `*`.\n";
 
 /// Parsed arguments.
 #[derive(Debug, PartialEq, Eq)]
@@ -57,14 +58,6 @@ pub fn parse_args(args: &[String]) -> Result<Parsed<Args>, String> {
     Ok(Parsed::Run(Args { pid }))
 }
 
-/// One process of the snapshot.
-#[derive(Debug, Clone)]
-struct Proc {
-    ppid: u32,
-    comm: String,
-    argv: Vec<String>,
-}
-
 /// `(pss_kb, swap_pss_kb)` from the text of an `smaps_rollup` file; a missing field is 0.
 fn parse_rollup(text: &str) -> (u64, u64) {
     let field = |name: &str| {
@@ -86,49 +79,14 @@ fn read_rollup(proc_root: &Path, pid: u32) -> Option<(u64, u64)> {
     Some(parse_rollup(&text))
 }
 
-/// Every numeric `<proc_root>/<pid>` with a readable `stat` (ppid), plus its comm and argv.
-fn snapshot(proc_root: &Path) -> HashMap<u32, Proc> {
-    let mut out = HashMap::new();
-    let Ok(entries) = fs::read_dir(proc_root) else {
-        return out;
-    };
-    for e in entries.filter_map(Result::ok) {
-        let Some(pid) = e.file_name().to_str().and_then(|n| n.parse::<u32>().ok()) else {
-            continue;
-        };
-        let dir = e.path();
-        let Some(stat) = fs::read_to_string(dir.join("stat"))
-            .ok()
-            .and_then(|t| parse_stat(&t))
-        else {
-            continue;
-        };
-        let Ok(ppid) = u32::try_from(stat.ppid) else {
-            continue;
-        };
-        let comm = fs::read_to_string(dir.join("comm"))
-            .map(|c| c.trim().to_string())
-            .unwrap_or_default();
-        let argv = fs::read(dir.join("cmdline"))
-            .map(|b| parse_cmdline(&b))
-            .unwrap_or_default();
-        out.insert(pid, Proc { ppid, comm, argv });
-    }
-    out
-}
-
 /// The compositor pid: the process owned by `uid` whose argv[0] is `crucible` (basename) with a
 /// `--winit` or `--tty-udev` argument. Several: an ancestor of `self_pid` wins, else the lowest.
 #[must_use]
 pub fn find_compositor(proc_root: &Path, uid: u32, self_pid: u32) -> Option<u32> {
-    let mut found: Vec<u32> = snapshot(proc_root)
-        .into_iter()
+    let mut found: Vec<u32> = ProcSnapshot::read(proc_root)
+        .iter()
         .filter(|(pid, p)| {
-            let is_crucible = p
-                .argv
-                .first()
-                .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "crucible"));
-            is_crucible
+            crucible_subcommand(&p.argv).is_some()
                 && p.argv.iter().any(|a| a == "--winit" || a == "--tty-udev")
                 && fs::metadata(proc_root.join(pid.to_string())).is_ok_and(|m| m.uid() == uid)
         })
@@ -169,10 +127,10 @@ pub struct Report {
     pub total: Row,
 }
 
-/// Whether a process is a CDE restore wrapper or a shell (skipped when labelling).
-fn is_wrapper_or_shell(p: &Proc) -> bool {
-    RelaunchWrapper::from_argv(&p.argv).is_some()
-        || ResumeWrapper::from_argv(&p.argv).is_some()
+/// Whether a process is skipped when labelling: a shell or one of CDE's own `crucible` processes
+/// (resume/relaunch wrappers, the overlay host, `crucible mem` itself).
+fn skipped_in_label(p: &ProcInfo) -> bool {
+    is_cde_process(&p.argv, &p.comm)
         || p.argv.first().is_some_and(|a| is_shell_program(a))
         || (p.argv.is_empty() && is_shell_program(&p.comm))
 }
@@ -180,16 +138,15 @@ fn is_wrapper_or_shell(p: &Proc) -> bool {
 /// Builds the report for the compositor `pid` from a `/proc`-shaped tree.
 #[must_use]
 pub fn build_report(proc_root: &Path, pid: u32) -> Report {
-    let procs = snapshot(proc_root);
-    let mut kids: HashMap<u32, Vec<u32>> = HashMap::new();
-    for (p, info) in &procs {
-        if *p != pid {
-            kids.entry(info.ppid).or_default().push(*p);
-        }
+    let procs = ProcSnapshot::read(proc_root);
+    let mut kids = procs.children();
+    // The compositor is never anybody's child here (also guards a pid-1 style self-parent).
+    for list in kids.values_mut() {
+        list.retain(|&p| p != pid);
     }
     let name = |p: u32| {
         procs
-            .get(&p)
+            .get(p)
             .map_or_else(|| format!("[{p}]"), |i| i.comm.clone())
     };
 
@@ -209,25 +166,29 @@ pub fn build_report(proc_root: &Path, pid: u32) -> Report {
             i += 1;
         }
         let (mut pss, mut swap, mut unreadable) = (0, 0, false);
-        let mut best: Option<(usize, u64, u32)> = None;
+        let mut best: Option<(usize, u64, Reverse<u32>)> = None;
+        let mut overlay = false;
         for &(p, d) in &tree {
             let mem = read_rollup(proc_root, p);
             unreadable |= mem.is_none();
             let (a, b) = mem.unwrap_or((0, 0));
             pss += a;
             swap += b;
-            if d > 0 && procs.get(&p).is_some_and(|i| !is_wrapper_or_shell(i)) {
+            let Some(info) = procs.get(p) else {
+                continue;
+            };
+            overlay |= crucible_subcommand(&info.argv) == Some("overlay-host");
+            if d > 0 && !skipped_in_label(info) {
                 // Deepest first, then largest PSS, then lowest pid (deterministic).
-                let better = best
-                    .is_none_or(|(bd, ba, bp)| (d, a) > (bd, ba) || ((d, a) == (bd, ba) && p < bp));
-                if better {
-                    best = Some((d, a, p));
-                }
+                best = best.max(Some((d, a, Reverse(p))));
             }
         }
         let mut label = name(child);
-        if let Some((_, _, p)) = best {
+        if let Some((_, _, Reverse(p))) = best {
             let _ = write!(label, " › {}", name(p));
+        }
+        if overlay {
+            label.push_str(" (overlay)");
         }
         children.push(Row {
             pss_kb: pss,
@@ -412,6 +373,28 @@ mod tests {
         assert_eq!(r.total.pss_kb, 100 + 3100 + 1100 + 410);
         assert_eq!(r.total.procs, 1 + 3 + 4 + 2);
         assert!(!r.total.unreadable);
+    }
+
+    #[test]
+    fn overlay_host_is_suffixed_and_cde_processes_never_label() {
+        let f = Fixture::new("overlay");
+        f.proc(10, 1, "crucible", &["/x/crucible", "--winit"], None);
+        // terminal -> crucible overlay-host
+        f.proc(20, 10, "ghostty", &["ghostty"], Some((100, 0)));
+        f.proc(
+            21,
+            20,
+            "crucible",
+            &["/x/crucible", "overlay-host", "--socket", "/s"],
+            Some((10, 0)),
+        );
+        // terminal -> shell -> crucible mem
+        f.proc(30, 10, "ghostty", &["ghostty"], Some((200, 0)));
+        f.proc(31, 30, "bash", &["bash"], Some((10, 0)));
+        f.proc(32, 31, "crucible", &["crucible", "mem"], Some((10, 0)));
+        let r = build_report(&f.0, 10);
+        let labels: Vec<_> = r.children.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["ghostty", "ghostty (overlay)"]);
     }
 
     #[test]
