@@ -15,6 +15,7 @@ use std::path::Path;
 use crucible_persist::capture::{ProcInfo, ProcSnapshot, ancestors, is_shell_program};
 use crucible_persist::{crucible_subcommand, is_cde_process};
 
+use crate::table::{self, Col};
 use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible mem --help`.
@@ -229,27 +230,35 @@ fn mib(kb: u64) -> String {
     format!("{v:.1} MiB")
 }
 
-/// Renders the report as text.
+/// Renders the report as text: a table (PSS, SWAP and PROCS right-aligned, widths from the
+/// content) plus the unreadable-process footnote.
 #[must_use]
 pub fn format_report(pid: u32, r: &Report) -> String {
-    let mut out = format!(
-        "{:>11}  {:>11}  {:>5}  APP (compositor pid {pid})\n",
-        "PSS", "SWAP", "PROCS"
-    );
-    let mut any_flag = false;
-    for row in r.children.iter().chain([&r.compositor, &r.total]) {
-        any_flag |= row.unreadable;
-        let _ = writeln!(
-            out,
-            "{:>11}  {:>11}  {:>5}  {}{}",
-            mib(row.pss_kb),
-            mib(row.swap_kb),
-            row.procs,
-            row.label,
-            if row.unreadable { " *" } else { "" }
-        );
+    let app = format!("APP (compositor pid {pid})");
+    let cols = [
+        Col::right("PSS"),
+        Col::right("SWAP"),
+        Col::right("PROCS"),
+        Col::left(&app),
+    ];
+    let rows: Vec<&Row> = r.children.iter().chain([&r.compositor, &r.total]).collect();
+    let cells: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            vec![
+                mib(row.pss_kb),
+                mib(row.swap_kb),
+                row.procs.to_string(),
+                format!("{}{}", row.label, if row.unreadable { " *" } else { "" }),
+            ]
+        })
+        .collect();
+    let (header, lines) = table::layout(&cols, &cells);
+    let mut out = format!("{header}\n");
+    for line in lines {
+        let _ = writeln!(out, "{line}");
     }
-    if any_flag {
+    if rows.iter().any(|row| row.unreadable) {
         out.push_str("* some processes were unreadable or vanished and count as zero\n");
     }
     out
@@ -395,6 +404,32 @@ mod tests {
         let r = build_report(&f.0, 10);
         let labels: Vec<_> = r.children.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["ghostty", "ghostty (overlay)"]);
+    }
+
+    #[test]
+    fn report_columns_take_their_widths_from_the_content() {
+        let row = |pss_kb, procs, label: &str| Row {
+            pss_kb,
+            swap_kb: 0,
+            procs,
+            label: label.into(),
+            unreadable: false,
+        };
+        let r = Report {
+            children: vec![row(10240, 3, "ghostty")],
+            compositor: row(2048, 1, "crucible"),
+            total: row(12288, 4, "TOTAL"),
+        };
+        // Before (fixed widths 11/11/5), the header row was
+        // "        PSS         SWAP  PROCS  APP (compositor pid 10)" and the child row
+        // "   10.0 MiB      0.0 MiB      3  ghostty".
+        let lines = [
+            "     PSS     SWAP  PROCS  APP (compositor pid 10)",
+            "10.0 MiB  0.0 MiB      3  ghostty",
+            " 2.0 MiB  0.0 MiB      1  crucible",
+            "12.0 MiB  0.0 MiB      4  TOTAL",
+        ];
+        assert_eq!(format_report(10, &r), lines.join("\n") + "\n");
     }
 
     #[test]

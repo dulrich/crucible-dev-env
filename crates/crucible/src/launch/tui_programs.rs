@@ -131,8 +131,7 @@ pub fn tui_items(programs: &[(String, PathBuf)], entries: &[DesktopEntry]) -> Ve
         .iter()
         .filter(|(name, _)| !desktop.contains(name.as_str()))
         .map(|(name, path)| Item {
-            filter: name.clone(),
-            label: name.clone(),
+            name: name.clone(),
             class: LaunchClass::Tui,
             cmd: sq(&path.to_string_lossy()),
         })
@@ -230,7 +229,7 @@ mod tests {
         }];
         let items = tui_items(&programs, &entries);
         assert_eq!(items.len(), 1);
-        assert!(items[0].class == LaunchClass::Tui && items[0].label == "k9s");
+        assert!(items[0].class == LaunchClass::Tui && items[0].name == "k9s");
         assert_eq!(items[0].cmd, "'/opt/it'\\''s/k9s'");
         assert_eq!(tui_items(&programs, &[]).len(), 2);
     }

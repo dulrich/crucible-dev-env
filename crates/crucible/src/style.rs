@@ -72,13 +72,37 @@ impl Style {
         format!("\x1b[H{}\x1b[2J", self.base())
     }
 
-    /// A selected row: reverse video for `Terminal`; the `line` background with the `accent`
-    /// foreground for N1, followed by the base attributes again.
+    /// What opens a selected row: reverse video for `Terminal`; the `line` background with the
+    /// `accent` foreground for N1.
+    #[must_use]
+    pub fn highlight_start(&self) -> String {
+        match self {
+            Style::Terminal => "\x1b[7m".to_string(),
+            Style::N1(p) => format!("{}{}", bg(p.line), fg(p.accent)),
+        }
+    }
+
+    /// A selected row: [`Self::highlight_start`], the text, a reset, then (N1) the base attributes
+    /// again.
     #[must_use]
     pub fn highlight(&self, text: &str) -> String {
+        format!("{}{text}\x1b[0m{}", self.highlight_start(), self.base())
+    }
+
+    /// Dimmed text (a column header): `SGR 2` .. `SGR 22` for `Terminal`; for N1 a muted
+    /// foreground (the per-channel midpoint of `text` and `bg`) and then the text colour again --
+    /// never `\x1b[0m`, which would drop the N1 background.
+    #[must_use]
+    pub fn dim(&self, text: &str) -> String {
         match self {
-            Style::Terminal => format!("\x1b[7m{text}\x1b[0m"),
-            Style::N1(p) => format!("{}{}{text}\x1b[0m{}", bg(p.line), fg(p.accent), self.base()),
+            Style::Terminal => format!("\x1b[2m{text}\x1b[22m"),
+            Style::N1(p) => {
+                let mid =
+                    |a: u8, b: u8| u8::try_from((u16::from(a) + u16::from(b)) / 2).unwrap_or(a);
+                let (Rgb(tr, tg, tb), Rgb(br, bgc, bb)) = (p.text, p.bg);
+                let muted = Rgb(mid(tr, br), mid(tg, bgc), mid(tb, bb));
+                format!("{}{text}{}", fg(muted), fg(p.text))
+            }
         }
     }
 }
@@ -123,6 +147,17 @@ mod tests {
         assert_eq!(s.reset(), "");
         assert_eq!(s.frame_start(), "\x1b[H\x1b[2J");
         assert_eq!(s.highlight("x"), "\x1b[7mx\x1b[0m");
+    }
+
+    #[test]
+    fn dim_is_sgr_dim_for_terminal_and_a_muted_foreground_for_n1() {
+        assert_eq!(Style::Terminal.dim("x"), "\x1b[2mx\x1b[22m");
+        assert_eq!(Style::Terminal.highlight_start(), "\x1b[7m");
+        let s = Style::parse(Some("n1-dark"));
+        // Midpoint of text (233,233,234) and bg (14,14,16), then the text colour; no reset.
+        assert_eq!(s.dim("x"), "\x1b[38;2;123;123;125mx\x1b[38;2;233;233;234m");
+        assert!(!s.dim("x").contains("\x1b[0m"));
+        assert!(s.highlight("x").starts_with(&s.highlight_start()));
     }
 
     #[test]

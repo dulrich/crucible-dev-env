@@ -18,6 +18,7 @@ mod pick;
 mod relaunch;
 mod resume;
 mod style;
+mod table;
 mod tty;
 
 const USAGE: &str = "usage: crucible [--winit | --tty-udev]\n       crucible pick [--rename <name> | --root <path>]\n       crucible launch\n       crucible keys\n       crucible resume [--now [--exit]] --cwd <dir> [-- <command>]\n       crucible relaunch [--app-id <id>] -- <cmdline>\n       crucible mem [--pid <n>]\n       crucible msg <request...>\n       crucible overlay-host --socket <path>\n\n  --winit                  run the nested development compositor\n  --tty-udev               run the DRM/KMS backend on a real TTY (multi-output)\n  pick                     the workspace picker (needs $CDE_SOCKET)\n  launch                   the program launcher (needs $CDE_SOCKET)\n  keys                     the read-only settings overlay: effective keybindings (needs $CDE_SOCKET)\n  resume                   restored-terminal banner: Enter runs the old command (--now: run it immediately; --exit: then exit)\n  relaunch                 restored-app placeholder: Enter relaunches the app in its slot\n  mem                      real memory (PSS, swap) per app of the running CDE\n  msg                      send one request line to the compositor and print the reply\n  overlay-host             a pre-started overlay terminal's program (spawned by CDE)\n  -h, --help               print this usage and exit 0 (`crucible <subcommand> --help` for details)\n\nWith no backend flag, a one-line banner is printed and nothing is started.\n";

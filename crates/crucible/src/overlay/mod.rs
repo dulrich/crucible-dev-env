@@ -15,7 +15,7 @@ use crate::tty::{RawGuard, window_size};
 pub mod list;
 pub mod term;
 
-use list::ListState;
+use list::{Applied, ListState};
 use term::{Key, decode_keys};
 
 /// What the runner must do after a key or response.
@@ -35,11 +35,42 @@ pub trait Overlay {
     /// overlay `style`.
     fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String;
 
-    /// Applies one key.
-    fn step(&mut self, key: Key) -> Outcome;
-
     /// The shared query / selection / status state.
     fn list_mut(&mut self) -> &mut ListState;
+
+    /// How many rows are selectable now (clamps Down).
+    fn row_count(&self) -> usize;
+
+    /// What Enter / Alt+Enter (`key`) does.
+    fn enter(&mut self, key: Key) -> Outcome;
+
+    /// Whether an edited query clears the status line (the default); an overlay whose status must
+    /// outlive typing overrides this.
+    fn clears_status_on_edit(&self) -> bool {
+        true
+    }
+
+    /// Applies one key: the shared navigation and editing, then [`Self::enter`] for Enter.
+    fn step(&mut self, key: Key) -> Outcome {
+        let count = self.row_count();
+        match self.list_mut().apply(key, count) {
+            Applied::Exit => Outcome::Exit,
+            Applied::Edited => {
+                if self.clears_status_on_edit() {
+                    self.list_mut().status = None;
+                }
+                Outcome::Continue
+            }
+            Applied::Moved | Applied::Ignored => Outcome::Continue,
+            Applied::Enter(k) => self.enter(k),
+        }
+    }
+
+    /// The screen in the unstyled `Terminal` style, for tests.
+    #[cfg(test)]
+    fn render(&self, cols: u16, rows: u16) -> String {
+        self.render_styled(cols, rows, &Style::Terminal)
+    }
 
     /// Applies the compositor's answer to the last [`Outcome::Send`]: `ok` leaves, `err` stays
     /// open with the reason in the status line. Shared; overlays do not override it.

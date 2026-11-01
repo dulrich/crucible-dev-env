@@ -11,10 +11,11 @@ use std::path::PathBuf;
 use crucible_compositor::ipc::{LAUNCHER_TUI_ENV, Request, TERMINAL_ENV};
 
 use crate::fuzzy;
-use crate::overlay::list::{self, Applied, Body, ListState};
+use crate::overlay::list::{Body, Frame, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
+use crate::table::{self, Col};
 use crate::{Parsed, help_requested};
 
 use desktop::{DesktopEntry, data_dirs_from_env, desktop_entries};
@@ -81,8 +82,7 @@ fn term_program(exec: &str) -> String {
 /// One selectable row: the name (matched and shown), its class and the shell command it runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
-    filter: String,
-    label: String,
+    name: String,
     class: LaunchClass,
     cmd: String,
 }
@@ -99,14 +99,17 @@ pub fn build_items(
 ) -> Vec<Item> {
     let mut items: Vec<Item> = entries
         .iter()
-        .map(|e| Item {
-            filter: e.name.clone(),
-            label: e.name.clone(),
-            class: LaunchClass::of_desktop(e),
-            cmd: match LaunchClass::of_desktop(e) {
+        .map(|e| {
+            let class = LaunchClass::of_desktop(e);
+            let cmd = match class {
                 LaunchClass::Term => term_program(&e.exec),
                 _ => e.exec.clone(),
-            },
+            };
+            Item {
+                name: e.name.clone(),
+                class,
+                cmd,
+            }
         })
         .collect();
     items.extend(tui_items(programs, entries));
@@ -136,7 +139,7 @@ impl Launcher {
     /// Indices of the items matching the query, best first (ties keep list order).
     #[must_use]
     pub fn rows(&self) -> Vec<usize> {
-        let names: Vec<&str> = self.items.iter().map(|i| i.filter.as_str()).collect();
+        let names: Vec<&str> = self.items.iter().map(|i| i.name.as_str()).collect();
         fuzzy::filter(&self.list.query, &names)
     }
 
@@ -176,29 +179,17 @@ impl Launcher {
             }
         }
     }
-
-    /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings).
-    #[cfg(test)]
-    #[must_use]
-    pub fn render(&self, cols: u16, rows: u16) -> String {
-        self.render_styled(cols, rows, &Style::Terminal)
-    }
 }
 
 impl Overlay for Launcher {
-    fn step(&mut self, key: Key) -> Outcome {
-        let count = self.rows().len();
-        match self.list.apply(key, count) {
-            Applied::Exit => Outcome::Exit,
-            Applied::Edited => {
-                self.list.status = None;
-                Outcome::Continue
-            }
-            Applied::Moved | Applied::Ignored => Outcome::Continue,
-            Applied::Enter(key) => match self.shell_line().map(str::to_string) {
-                Some(cmd) => self.enter_shell(&cmd, key),
-                None => self.enter_row(),
-            },
+    fn row_count(&self) -> usize {
+        self.rows().len()
+    }
+
+    fn enter(&mut self, key: Key) -> Outcome {
+        match self.shell_line().map(str::to_string) {
+            Some(cmd) => self.enter_shell(&cmd, key),
+            None => self.enter_row(),
         }
     }
 
@@ -212,28 +203,30 @@ impl Overlay for Launcher {
                 "SH  {}  [Enter: run in terminal, Alt+Enter: run detached]",
                 sanitize(cmd)
             );
-            return self
-                .list
-                .render("run> ", Body::Highlighted(&text), "", cols, rows, style);
+            let frame = Frame {
+                prompt: "run> ",
+                header: None,
+                body: Body::Highlighted(&text),
+                idle_status: "",
+            };
+            return self.list.render(frame, cols, rows, style);
         }
         let cells: Vec<Vec<String>> = self
             .rows()
             .iter()
             .map(|&idx| {
                 let item = &self.items[idx];
-                vec![item.class.label().to_string(), sanitize(&item.label)]
+                vec![item.class.label().to_string(), sanitize(&item.name)]
             })
             .collect();
-        let (header, texts) = list::columns(&["class", "name"], &cells);
-        self.list.render_with_header(
-            "run> ",
-            (!cells.is_empty()).then_some(header.as_str()),
-            Body::Rows(&texts),
-            "",
-            cols,
-            rows,
-            style,
-        )
+        let (header, texts) = table::layout(&[Col::left("class"), Col::left("name")], &cells);
+        let frame = Frame {
+            prompt: "run> ",
+            header: (!cells.is_empty()).then_some(header.as_str()),
+            body: Body::Rows(&texts),
+            idle_status: "",
+        };
+        self.list.render(frame, cols, rows, style)
     }
 }
 
@@ -335,7 +328,7 @@ mod tests {
         let entries = [entry("Editor", "vim", true), entry("Browser", "ff", false)];
         let items = build_items(&entries, &[], false);
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].filter, "Browser");
+        assert_eq!(items[0].name, "Browser");
     }
 
     #[test]
@@ -345,7 +338,7 @@ mod tests {
         let names = |terminal_known| -> Vec<String> {
             build_items(&entries, &programs, terminal_known)
                 .iter()
-                .map(|i| i.label.clone())
+                .map(|i| i.name.clone())
                 .collect()
         };
         assert_eq!(names(true), ["Editor", "Browser", "k9s"]);
@@ -481,7 +474,7 @@ mod tests {
         let out = Launcher::new(build_items(&[entry("a", "a", false)], &[], false))
             .render_styled(40, 8, &st);
         assert!(out.starts_with(&format!("\x1b[H{}\x1b[2J", st.base())));
-        assert!(out.contains(&st.highlight("")[..20]));
+        assert!(out.contains(&st.highlight_start()));
         assert!(out.contains(&format!("\x1b[0m{}", st.base())));
         assert!(!out.contains("\x1b[7m"));
         assert_eq!(

@@ -11,10 +11,11 @@ use crucible_persist::PickTarget;
 
 use crate::client::{Client, ClientError};
 use crate::fuzzy;
-use crate::overlay::list::{self, Applied, Body, ListState};
+use crate::overlay::list::{Body, Frame, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
+use crate::table::{self, Col};
 use crate::{Parsed, help_requested};
 
 /// The command-key glyph (`⌘`) prefixing a pinned row's slot number; matches the header's.
@@ -23,13 +24,11 @@ const SUPER_GLYPH: char = '\u{2318}';
 /// Usage text for `crucible pick --help`.
 pub const USAGE: &str = "usage: crucible pick [--rename <encoded-name> | --root <encoded-path>]\n\nThe CDE workspace picker (needs $CDE_SOCKET; CDE runs it in an overlay on Super+P).\nType to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter opens the selection (or creates a new\nworkspace from the typed name); Esc or Ctrl+C closes.\n\n  --rename <name>   single-line rename prompt prefilled with <name> (percent-encoded: %25 %3A %09 %0A %0D)\n  --root <path>     workspace-root prompt prefilled with <path> (percent-encoded; empty = none); Enter on empty clears\n";
 
-/// Picker or rename-prompt behaviour.
+/// Picker behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Fuzzy workspace picker.
     Pick,
-    /// Single-line rename prompt.
-    Rename,
     /// Workspace-root prompt: a path line over the configured folders.
     Root,
 }
@@ -80,23 +79,12 @@ pub struct Picker {
 impl Picker {
     /// A fuzzy picker over `candidates`.
     #[must_use]
-    pub fn new(candidates: Vec<Candidate>) -> Picker {
+    pub fn new(candidates: Vec<Candidate>, home: Option<String>) -> Picker {
         Picker {
             mode: Mode::Pick,
             candidates,
             list: ListState::new(),
-            home: home_dir(),
-        }
-    }
-
-    /// A rename prompt prefilled with `current`.
-    #[must_use]
-    pub fn rename(current: String) -> Picker {
-        Picker {
-            mode: Mode::Rename,
-            candidates: Vec::new(),
-            list: ListState::with_query(current),
-            home: None,
+            home,
         }
     }
 
@@ -134,9 +122,6 @@ impl Picker {
     /// non-empty and is not exactly a live/saved workspace name.
     #[must_use]
     pub fn rows(&self) -> Vec<Row> {
-        if self.mode == Mode::Rename {
-            return Vec::new();
-        }
         let query = &self.list.query;
         let root = self.mode == Mode::Root;
         let names: Vec<&str> = self.candidates.iter().map(|c| c.name.as_str()).collect();
@@ -154,15 +139,8 @@ impl Picker {
         rows
     }
 
-    /// Enter / Alt+Enter: rename the workspace, or open / create the selected row.
-    fn enter(&mut self) -> Outcome {
-        if self.mode == Mode::Rename {
-            if self.list.query.is_empty() {
-                self.list.status = Some("name required".into());
-                return Outcome::Continue;
-            }
-            return Outcome::Send(Request::Rename(self.list.query.clone()));
-        }
+    /// Enter / Alt+Enter: open / create the selected row (or, in root mode, set the root).
+    fn enter_selected(&mut self) -> Outcome {
         if self.mode == Mode::Root {
             return self.enter_root();
         }
@@ -212,13 +190,6 @@ impl Picker {
         Outcome::Continue
     }
 
-    /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings).
-    #[cfg(test)]
-    #[must_use]
-    pub fn render(&self, cols: u16, rows: u16) -> String {
-        self.render_styled(cols, rows, &Style::Terminal)
-    }
-
     /// The table cells of a candidate row: kind, slot badge (or empty), name, root/path (or
     /// empty), all sanitised.
     fn cells(&self, c: &Candidate) -> Vec<String> {
@@ -242,76 +213,103 @@ impl Picker {
     }
 
     /// The table header (`None` when there are no candidate rows) and one display string per
-    /// row of [`Self::rows`]. The `new workspace` row is not a table row and stays unpadded; the
-    /// slot column is dropped when no row has a slot. Widths cover every row of the current
-    /// filter, so columns do not jitter while scrolling.
+    /// row of [`Self::rows`]. The table covers the candidate rows; the `new workspace` row is
+    /// always last and is appended unpadded. The slot column is dropped when no row has a slot.
+    /// Widths cover every row of the current filter, so columns do not jitter while scrolling.
     fn table(&self) -> (Option<String>, Vec<String>) {
         let rows = self.rows();
-        let mut cells: Vec<Vec<String>> = rows
+        let cells: Vec<Vec<String>> = rows
             .iter()
             .filter_map(|r| match r {
                 Row::Candidate(i) => Some(self.cells(&self.candidates[*i])),
                 Row::New(_) => None,
             })
             .collect();
-        let mut headers = vec!["kind", "slot", "name", "root"];
-        if cells.iter().all(|c| c[1].is_empty()) {
-            headers.remove(1);
-            for c in &mut cells {
-                c.remove(1);
-            }
+        let cols = [
+            Col::left("kind"),
+            Col::left("slot").hidden_if_empty(),
+            Col::left("name"),
+            Col::left("root"),
+        ];
+        let (header, mut texts) = table::layout(&cols, &cells);
+        if let Some(Row::New(n)) = rows.last() {
+            texts.push(format!("new workspace {}", sanitize(n)));
         }
-        let (header, mut lines) = list::columns(&headers, &cells);
-        lines.reverse();
-        let texts = rows
-            .iter()
-            .map(|r| match r {
-                Row::New(n) => format!("new workspace {}", sanitize(n)),
-                Row::Candidate(_) => lines.pop().unwrap_or_default(),
-            })
-            .collect();
-        (if cells.is_empty() { None } else { Some(header) }, texts)
+        ((!cells.is_empty()).then_some(header), texts)
     }
 }
 
 impl Overlay for Picker {
-    fn step(&mut self, key: Key) -> Outcome {
-        let count = self.rows().len();
-        match self.list.apply(key, count) {
-            Applied::Exit => Outcome::Exit,
-            Applied::Edited => {
-                self.list.status = None;
-                Outcome::Continue
-            }
-            Applied::Moved | Applied::Ignored => Outcome::Continue,
-            Applied::Enter(_) => self.enter(),
-        }
-    }
-
     fn list_mut(&mut self) -> &mut ListState {
         &mut self.list
+    }
+
+    fn row_count(&self) -> usize {
+        self.rows().len()
+    }
+
+    fn enter(&mut self, _key: Key) -> Outcome {
+        self.enter_selected()
     }
 
     fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
         let prompt = match self.mode {
             Mode::Pick => "workspace> ",
-            Mode::Rename => "rename> ",
             Mode::Root => "root> ",
         };
-        let (header, texts) = if self.mode == Mode::Rename {
-            (None, Vec::new())
-        } else {
-            self.table()
-        };
-        self.list.render_with_header(
+        let (header, texts) = self.table();
+        let frame = Frame {
             prompt,
-            header.as_deref(),
-            Body::Rows(&texts),
-            "",
-            cols,
-            rows,
-            style,
-        )
+            header: header.as_deref(),
+            body: Body::Rows(&texts),
+            idle_status: "",
+        };
+        self.list.render(frame, cols, rows, style)
+    }
+}
+
+/// The single-line rename prompt (`crucible pick --rename`): no rows, Enter sends the typed name.
+#[derive(Debug)]
+pub struct RenamePrompt {
+    list: ListState,
+}
+
+impl RenamePrompt {
+    /// A rename prompt prefilled with `current`.
+    #[must_use]
+    pub fn new(current: String) -> RenamePrompt {
+        RenamePrompt {
+            list: ListState::with_query(current),
+        }
+    }
+}
+
+impl Overlay for RenamePrompt {
+    fn list_mut(&mut self) -> &mut ListState {
+        &mut self.list
+    }
+
+    fn row_count(&self) -> usize {
+        0
+    }
+
+    /// An empty name is refused locally; anything else is sent as the rename.
+    fn enter(&mut self, _key: Key) -> Outcome {
+        if self.list.query.is_empty() {
+            self.list.status = Some("name required".into());
+            return Outcome::Continue;
+        }
+        Outcome::Send(Request::Rename(self.list.query.clone()))
+    }
+
+    fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
+        let frame = Frame {
+            prompt: "rename> ",
+            header: None,
+            body: Body::Rows(&[]),
+            idle_status: "",
+        };
+        self.list.render(frame, cols, rows, style)
     }
 }
 
@@ -346,12 +344,17 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
-    run_overlay("pick", |client| match parsed {
-        PickTarget::Rename(current) => Ok(Picker::rename(current)),
-        PickTarget::Root(current) => fetch_candidates(client)
-            .map(|candidates| Picker::root(&current, candidates, home_dir())),
-        PickTarget::Workspace => fetch_candidates(client).map(Picker::new),
-    })
+    // The one place `$HOME` is read; every constructor takes it.
+    let home = home_dir();
+    match parsed {
+        PickTarget::Rename(current) => run_overlay("pick", |_| Ok(RenamePrompt::new(current))),
+        PickTarget::Root(current) => run_overlay("pick", |client| {
+            fetch_candidates(client).map(|candidates| Picker::root(&current, candidates, home))
+        }),
+        PickTarget::Workspace => run_overlay("pick", |client| {
+            fetch_candidates(client).map(|candidates| Picker::new(candidates, home))
+        }),
+    }
 }
 
 fn fetch_candidates(client: &mut Client) -> Result<Vec<Candidate>, String> {
@@ -398,7 +401,7 @@ mod tests {
 
     #[test]
     fn rename_mode_has_no_header() {
-        let p = Picker::rename("x".into());
+        let p = RenamePrompt::new("x".into());
         assert_eq!(
             p.render(40, 6),
             "\x1b[H\x1b[2Jrename> x_\r\n\r\n\r\n\r\n\r\n"
@@ -406,11 +409,14 @@ mod tests {
     }
 
     fn sample() -> Picker {
-        Picker::new(vec![
-            cand(CandidateKind::Live, "alpha", None),
-            cand(CandidateKind::Saved, "beta", None),
-            cand(CandidateKind::Folder, "proj", Some("/home/u/proj")),
-        ])
+        Picker::new(
+            vec![
+                cand(CandidateKind::Live, "alpha", None),
+                cand(CandidateKind::Saved, "beta", None),
+                cand(CandidateKind::Folder, "proj", Some("/home/u/proj")),
+            ],
+            None,
+        )
     }
 
     fn type_str(p: &mut Picker, s: &str) {
@@ -505,7 +511,7 @@ mod tests {
 
     #[test]
     fn empty_query_and_no_candidates_enter_is_noop() {
-        let mut p = Picker::new(vec![]);
+        let mut p = Picker::new(vec![], None);
         assert_eq!(p.step(Key::Enter), Outcome::Continue);
     }
 
@@ -547,9 +553,9 @@ mod tests {
 
     #[test]
     fn rename_prompt_prefills_and_sends() {
-        let mut p = Picker::rename("old name".into());
-        assert_eq!(p.query(), "old name");
-        assert!(p.rows().is_empty());
+        let mut p = RenamePrompt::new("old name".into());
+        assert_eq!(p.list.query, "old name");
+        assert_eq!(p.row_count(), 0);
         assert_eq!(
             p.step(Key::Enter),
             Outcome::Send(Request::Rename("old name".into()))
@@ -563,10 +569,10 @@ mod tests {
 
     #[test]
     fn rename_empty_is_rejected_locally() {
-        let mut p = Picker::rename("a".into());
+        let mut p = RenamePrompt::new("a".into());
         p.step(Key::Backspace);
         assert_eq!(p.step(Key::Enter), Outcome::Continue);
-        assert_eq!(p.status(), Some("name required"));
+        assert_eq!(p.list.status.as_deref(), Some("name required"));
         assert_eq!(p.step(Key::Esc), Outcome::Exit);
     }
 
@@ -575,7 +581,7 @@ mod tests {
         let st = Style::parse(Some("n1-dark"));
         let out = sample().render_styled(40, 8, &st);
         assert!(out.starts_with(&format!("\x1b[H{}\x1b[2J", st.base())));
-        assert!(out.contains(&st.highlight("")[..20]));
+        assert!(out.contains(&st.highlight_start()));
         assert!(out.contains(&format!("\x1b[0m{}", st.base())));
         assert!(!out.contains("\x1b[7m"));
         assert_eq!(
@@ -601,11 +607,14 @@ mod tests {
 
     #[test]
     fn render_neutralises_control_characters_and_truncates() {
-        let p = Picker::new(vec![cand(CandidateKind::Live, "a\x1b[31mb", None)]);
+        let p = Picker::new(vec![cand(CandidateKind::Live, "a\x1b[31mb", None)], None);
         let s = p.render(60, 8);
         assert!(!s.contains("a\x1b[31m"));
         assert!(s.contains("a?[31mb"));
-        let long = Picker::new(vec![cand(CandidateKind::Live, &"x".repeat(200), None)]);
+        let long = Picker::new(
+            vec![cand(CandidateKind::Live, &"x".repeat(200), None)],
+            None,
+        );
         assert!(long.render(20, 8).lines().all(|l| l.chars().count() < 40));
     }
     #[test]
@@ -714,12 +723,14 @@ mod tests {
 
     #[test]
     fn live_and_saved_rows_show_their_root_with_tilde() {
-        let mut p = Picker::new(vec![
-            cand(CandidateKind::Live, "alpha", Some("/home/u/code")),
-            cand(CandidateKind::Saved, "beta", Some("/srv/b")),
-            cand(CandidateKind::Saved, "gamma", None),
-        ]);
-        p.home = Some("/home/u".into());
+        let p = Picker::new(
+            vec![
+                cand(CandidateKind::Live, "alpha", Some("/home/u/code")),
+                cand(CandidateKind::Saved, "beta", Some("/srv/b")),
+                cand(CandidateKind::Saved, "gamma", None),
+            ],
+            Some("/home/u".into()),
+        );
         let s = p.render(60, 8);
         assert!(s.contains("live   alpha  ~/code"));
         assert!(s.contains("saved  beta   /srv/b"));

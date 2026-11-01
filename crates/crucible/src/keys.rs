@@ -7,10 +7,11 @@ use crucible_compositor::ipc::{Request, Response, parse_bindings};
 
 use crate::client::{Client, ClientError};
 use crate::fuzzy;
-use crate::overlay::list::{Applied, Body, ListState};
+use crate::overlay::list::{Body, Frame, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
+use crate::table::{self, Col};
 use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible keys --help`.
@@ -64,53 +65,52 @@ impl Keys {
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         fuzzy::filter(&self.list.query, &refs)
     }
-
-    /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings).
-    #[cfg(test)]
-    #[must_use]
-    pub fn render(&self, cols: u16, rows: u16) -> String {
-        self.render_styled(cols, rows, &Style::Terminal)
-    }
 }
 
 impl Overlay for Keys {
-    /// Enter sends the selected row's action for execution.
-    fn step(&mut self, key: Key) -> Outcome {
-        let count = self.matches().len();
-        match self.list.apply(key, count) {
-            Applied::Exit => Outcome::Exit,
-            Applied::Enter(_) => {
-                if let Some(&idx) = self.matches().get(self.list.selected) {
-                    self.list.status = None;
-                    return Outcome::Send(Request::Exec(self.rows[idx].1.clone()));
-                }
-                Outcome::Continue
-            }
-            Applied::Moved | Applied::Edited | Applied::Ignored => Outcome::Continue,
-        }
-    }
-
     fn list_mut(&mut self) -> &mut ListState {
         &mut self.list
     }
 
+    fn row_count(&self) -> usize {
+        self.matches().len()
+    }
+
+    /// Typing keeps a refusal visible (it clears only when Enter runs a binding).
+    fn clears_status_on_edit(&self) -> bool {
+        false
+    }
+
+    /// Enter sends the selected row's action for execution.
+    fn enter(&mut self, _key: Key) -> Outcome {
+        if let Some(&idx) = self.matches().get(self.list.selected) {
+            self.list.status = None;
+            return Outcome::Send(Request::Exec(self.rows[idx].1.clone()));
+        }
+        Outcome::Continue
+    }
+
+    /// The chord column is padded to the widest chord over all rows, so the layout is computed
+    /// once over every row and the matching lines are selected.
     fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
-        let pad = self
+        let cells: Vec<Vec<String>> = self
             .rows
             .iter()
-            .map(|(c, _)| sanitize(c).chars().count())
-            .max()
-            .unwrap_or(0);
+            .map(|(c, a)| vec![sanitize(c), sanitize(a)])
+            .collect();
+        let (_, lines) = table::layout(&[Col::left(""), Col::left("")], &cells);
         let texts: Vec<String> = self
             .matches()
             .iter()
-            .map(|&idx| {
-                let (chord, action) = &self.rows[idx];
-                format!("{:<pad$}  {}", sanitize(chord), sanitize(action))
-            })
+            .map(|&idx| lines[idx].clone())
             .collect();
-        self.list
-            .render("keys> ", Body::Rows(&texts), STATUS, cols, rows, style)
+        let frame = Frame {
+            prompt: "keys> ",
+            header: None,
+            body: Body::Rows(&texts),
+            idle_status: STATUS,
+        };
+        self.list.render(frame, cols, rows, style)
     }
 }
 
@@ -240,7 +240,7 @@ mod tests {
         let st = Style::parse(Some("n1-dark"));
         let out = Keys::new(rows()).render_styled(40, 8, &st);
         assert!(out.starts_with(&format!("\x1b[H{}\x1b[2J", st.base())));
-        assert!(out.contains(&st.highlight("")[..20]));
+        assert!(out.contains(&st.highlight_start()));
         assert!(out.contains(&format!("\x1b[0m{}", st.base())));
         assert!(!out.contains("\x1b[7m"));
         assert_eq!(
