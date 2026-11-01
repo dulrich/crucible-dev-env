@@ -771,9 +771,34 @@ binds {
                 && c[1].starts_with("key-bindings.")
                 && c[1].ends_with("=none"))
         );
+        // The default n1-med style adds its opaque surround as foot's background.
+        let mut foot_med = foot.clone();
+        foot_med.extend(
+            [
+                "-o",
+                "colors-dark.background=3a3a3b",
+                "-o",
+                "colors-dark.alpha=1.0",
+            ]
+            .map(String::from),
+        );
         for p in ["foot", "/x/foot", "/home/u/.local/opt/foot/bin/foot"] {
-            assert_eq!(unset.effective_terminal_args(p), foot, "{p}");
+            assert_eq!(unset.effective_terminal_args(p), foot_med, "{p}");
         }
+        let term_style = OverlayConfig {
+            style: OverlayStyle::Terminal,
+            ..OverlayConfig::default()
+        };
+        assert_eq!(term_style.effective_terminal_args("foot"), foot);
+        assert_eq!(term_style.effective_terminal_args("ghostty"), defaults);
+        let dark = OverlayConfig {
+            style: OverlayStyle::N1Dark,
+            ..OverlayConfig::default()
+        };
+        assert!(
+            dark.effective_terminal_args("foot")
+                .contains(&"colors-dark.background=0e0e10".to_string())
+        );
         for p in [
             "footclient",
             "foot-wrapper",

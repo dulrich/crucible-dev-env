@@ -156,6 +156,18 @@ impl OverlayStyle {
         }
     }
 
+    /// The opaque N1 surround colour (`(r, g, b)`), or `None` for [`OverlayStyle::Terminal`]. Must
+    /// match the palette `bg` the overlay TUIs paint (`crucible::style`, which tests the match).
+    #[must_use]
+    pub fn surround_rgb(self) -> Option<(u8, u8, u8)> {
+        match self {
+            Self::Terminal => None,
+            Self::N1Dark => Some((0x0e, 0x0e, 0x10)),
+            Self::N1Med => Some((0x3a, 0x3a, 0x3b)),
+            Self::N1Light => Some((0xf4, 0xf4, 0xf5)),
+        }
+    }
+
     /// Parses the exact spelling; anything else is `None`.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
@@ -205,6 +217,8 @@ pub const GHOSTTY_OVERLAY_DEFAULT_ARGS: [&str; 3] = [
 /// that a user config could bind. `[search-bindings]` and `[url-bindings]` are only reachable
 /// through `search-start` / `show-urls-*` (disabled here), and `[mouse-bindings]` take no keyboard
 /// key (modifiers only), so none of those are touched.
+/// [`OverlayConfig::effective_terminal_args`] appends the N1 style's opaque surround as foot's
+/// background (see [`OverlayStyle::surround_rgb`]).
 pub const FOOT_OVERLAY_DEFAULT_ARGS: [&str; 56] = [
     "-o",
     "key-bindings.scrollback-up-page=none",
@@ -274,14 +288,27 @@ impl OverlayConfig {
             return list.clone();
         }
         let name = std::path::Path::new(program).file_name();
+        let is_foot = name.is_some_and(|n| n == "foot");
         let defaults: &[&str] = if name.is_some_and(|n| n == "ghostty" || n == "ghostty-cde") {
             &GHOSTTY_OVERLAY_DEFAULT_ARGS
-        } else if name.is_some_and(|n| n == "foot") {
+        } else if is_foot {
             &FOOT_OVERLAY_DEFAULT_ARGS
         } else {
             &[]
         };
-        defaults.iter().map(|s| (*s).to_string()).collect()
+        let mut args: Vec<String> = defaults.iter().map(|s| (*s).to_string()).collect();
+        // foot has no ghostty `--window-padding-color=extend-always`: the strip left where the cell
+        // grid does not divide the overlay shows foot's own background, so make that the opaque
+        // N1 surround (no gap between the surround and the border).
+        if is_foot && let Some((r, g, b)) = self.style.surround_rgb() {
+            args.extend([
+                "-o".to_string(),
+                format!("colors-dark.background={r:02x}{g:02x}{b:02x}"),
+                "-o".to_string(),
+                "colors-dark.alpha=1.0".to_string(),
+            ]);
+        }
+        args
     }
 }
 

@@ -135,6 +135,23 @@ mod tests {
     }
 
     #[test]
+    fn config_surround_matches_palette_bg() {
+        // crucible-config hands foot this colour as its overlay background; it must be the bg the
+        // overlay TUIs paint, or the leftover cell-grid strip shows as a gap.
+        for s in [
+            OverlayStyle::N1Dark,
+            OverlayStyle::N1Med,
+            OverlayStyle::N1Light,
+        ] {
+            let Style::N1(p) = Style::from(s) else {
+                unreachable!()
+            };
+            assert_eq!(s.surround_rgb(), Some(p.bg), "{}", s.as_str());
+        }
+        assert_eq!(OverlayStyle::Terminal.surround_rgb(), None);
+    }
+
+    #[test]
     fn from_overlay_style_covers_every_variant() {
         assert_eq!(Style::from(OverlayStyle::Terminal), Style::Terminal);
         assert_eq!(Style::from(OverlayStyle::N1Dark), Style::N1(N1_DARK));

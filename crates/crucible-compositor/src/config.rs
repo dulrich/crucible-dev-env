@@ -204,7 +204,7 @@ mod tests {
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        assert_eq!(warm_key(&c, "foot".into()).2, foot);
+        assert_eq!(warm_key(&c, "foot".into()).2[..foot.len()], foot[..]);
         assert!(warm_key(&c, "footclient".into()).2.is_empty());
         let mut opt_out = c.clone();
         opt_out.overlay.terminal_args = Some(vec![]);
