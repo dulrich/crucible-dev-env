@@ -15,7 +15,7 @@ use super::placement::{
     select_siblings,
 };
 use super::workspace::folder_workspace_name;
-use super::{close_element, proc_root};
+use super::{capture_env, close_element, proc_root};
 use crate::input::{ActionError, Origin};
 use crate::ipc::{Request, Response};
 use crate::state::{Backend, CrucibleState};
@@ -348,7 +348,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .focused_window()
             .ok_or_else(|| "no focused window".to_string())?;
         let pid = terminal_pid(self.layout.meta(id))?;
-        let cwd = crucible_persist::capture_terminal(proc_root(), None, pid)
+        let cwd = crucible_persist::capture_terminal(&capture_env(), pid)
             .ok_or_else(|| "cannot read the terminal's working directory".to_string())?
             .cwd;
         self.ipc_set_root(Some(cwd))

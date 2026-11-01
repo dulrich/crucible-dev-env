@@ -32,8 +32,8 @@ pub mod store;
 pub mod wrapper;
 
 pub use capture::{
-    ProcInfo, ProcSnapshot, TerminalCapture, ancestors, capture_terminal, children_of,
-    relaunch_wrapper_of, window_record,
+    CaptureEnv, ProcInfo, ProcSnapshot, SpawnClass, TerminalCapture, WindowRecordInput, ancestors,
+    capture_terminal, children_of, relaunch_wrapper_of, window_record,
 };
 pub use error::PersistError;
 pub use executable::{

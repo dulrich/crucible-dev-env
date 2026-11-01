@@ -45,7 +45,9 @@ use std::time::{Duration, Instant, SystemTime};
 use crucible_layout::{OutputId, PaneId, WindowId, WorkspaceId};
 use crucible_persist::session::{Session, plan_restore, session_path};
 use crucible_persist::slots::{Slots, slots_path};
-use crucible_persist::{WindowRecord, WorkspaceRecord, store};
+use crucible_persist::{
+    CaptureEnv, SpawnClass, WindowRecord, WindowRecordInput, WorkspaceRecord, store,
+};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
@@ -256,16 +258,19 @@ fn proc_root() -> &'static Path {
     Path::new("/proc")
 }
 
-/// `<claude-home>/sessions`, where claude keeps its per-pid session records. `<claude-home>` is
-/// `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`. Read per capture (cheap); a missing home yields a
-/// relative path that simply reads nothing.
-fn claude_sessions_dir() -> PathBuf {
+/// What capture reads: `/proc` and the claude home, where claude keeps its per-pid session
+/// records (`<claude-home>/sessions`). The home is `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`.
+/// Read per capture (cheap); a missing home yields a relative path that simply reads nothing.
+pub(super) fn capture_env() -> CaptureEnv {
     let home = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))
         .unwrap_or_default();
-    home.join("sessions")
+    CaptureEnv {
+        proc_root: proc_root().to_path_buf(),
+        claude_home: home,
+    }
 }
 
 fn element_app_id(element: &WindowElement) -> Option<String> {
@@ -583,11 +588,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     fn capture_record(&self, ws: WorkspaceId) -> Option<WorkspaceRecord> {
+        let env = capture_env();
         let mut record = WorkspaceRecord::from_world(
             &self.layout.world,
             ws,
             self.persist.workspace.roots.get(&ws).cloned(),
-            |id| self.window_record(id),
+            |id| self.window_record(&env, id),
         )?;
         record.output = self.persist.workspace.last_output.get(&ws).cloned();
         Some(record)
@@ -595,16 +601,22 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// The saved record for window `id`: its meta (pid, class, spawn origin), element app id and
     /// the exec flag, classified by [`crucible_persist::window_record`].
-    fn window_record(&self, id: WindowId) -> WindowRecord {
+    fn window_record(&self, env: &CaptureEnv, id: WindowId) -> WindowRecord {
         let meta = self.layout.meta(id);
+        let class = if meta.is_some_and(|m| m.class == crate::layout::WindowClass::Terminal) {
+            SpawnClass::Terminal
+        } else {
+            SpawnClass::App
+        };
         crucible_persist::window_record(
-            proc_root(),
-            Some(&claude_sessions_dir()),
-            meta.and_then(|m| m.pid),
-            meta.is_some_and(|m| m.class == crate::layout::WindowClass::Terminal),
-            meta.and_then(|m| m.origin.as_ref()),
-            self.layout.element(id).and_then(element_app_id),
-            &self.config.terminal.exec_flag,
+            env,
+            WindowRecordInput {
+                pid: meta.and_then(|m| m.pid),
+                class,
+                origin: meta.and_then(|m| m.origin.as_ref()),
+                app_id: self.layout.element(id).and_then(element_app_id),
+                exec_flag: &self.config.terminal.exec_flag,
+            },
         )
     }
 
