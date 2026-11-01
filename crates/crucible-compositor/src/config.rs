@@ -200,7 +200,12 @@ mod tests {
             .map(|s| (*s).to_string())
             .collect();
         assert_eq!(warm_key(&c, "/tmp/cde/ghostty-cde".into()).2, defaults);
-        assert!(warm_key(&c, "foot".into()).2.is_empty());
+        let foot: Vec<String> = crucible_config::FOOT_OVERLAY_DEFAULT_ARGS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(warm_key(&c, "foot".into()).2, foot);
+        assert!(warm_key(&c, "footclient".into()).2.is_empty());
         let mut opt_out = c.clone();
         opt_out.overlay.terminal_args = Some(vec![]);
         assert_ne!(

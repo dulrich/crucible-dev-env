@@ -375,7 +375,7 @@ fn parse_binds(node: NodeReader<'_>) -> Result<Vec<(String, String)>, ConfigErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::GHOSTTY_OVERLAY_DEFAULT_ARGS;
+    use crate::model::{FOOT_OVERLAY_DEFAULT_ARGS, GHOSTTY_OVERLAY_DEFAULT_ARGS};
     use std::path::Path;
 
     const FULL: &str = r##"
@@ -761,7 +761,28 @@ binds {
         for p in ["ghostty", "/usr/bin/ghostty", "/tmp/cde/ghostty-cde"] {
             assert_eq!(unset.effective_terminal_args(p), defaults, "{p}");
         }
-        for p in ["foot", "alacritty", "ghostty-foo", "myghostty", "", "/a/.."] {
+        let foot: Vec<String> = FOOT_OVERLAY_DEFAULT_ARGS
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(foot.len(), 56);
+        assert!(
+            foot.chunks(2).all(|c| c[0] == "-o"
+                && c[1].starts_with("key-bindings.")
+                && c[1].ends_with("=none"))
+        );
+        for p in ["foot", "/x/foot", "/home/u/.local/opt/foot/bin/foot"] {
+            assert_eq!(unset.effective_terminal_args(p), foot, "{p}");
+        }
+        for p in [
+            "footclient",
+            "foot-wrapper",
+            "alacritty",
+            "ghostty-foo",
+            "myghostty",
+            "",
+            "/a/..",
+        ] {
             assert!(unset.effective_terminal_args(p).is_empty(), "{p}");
         }
         let empty = OverlayConfig {
@@ -769,11 +790,13 @@ binds {
             ..OverlayConfig::default()
         };
         assert!(empty.effective_terminal_args("ghostty").is_empty());
+        assert!(empty.effective_terminal_args("foot").is_empty());
         let x = OverlayConfig {
             terminal_args: Some(vec!["--x".into()]),
             ..OverlayConfig::default()
         };
         assert_eq!(x.effective_terminal_args("ghostty"), vec!["--x"]);
+        assert_eq!(x.effective_terminal_args("foot"), vec!["--x"]);
     }
 
     #[test]

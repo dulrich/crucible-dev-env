@@ -177,7 +177,8 @@ pub struct OverlayConfig {
     /// The overlay style.
     pub style: OverlayStyle,
     /// Extra terminal arguments inserted before the exec flag on overlay spawns. `None` means not
-    /// set: [`OverlayConfig::effective_terminal_args`] then applies the built-in ghostty default.
+    /// set: [`OverlayConfig::effective_terminal_args`] then applies the built-in ghostty or foot
+    /// default for those terminals.
     /// `Some(list)` (even empty) replaces the default.
     pub terminal_args: Option<Vec<String>>,
 }
@@ -191,26 +192,96 @@ pub const GHOSTTY_OVERLAY_DEFAULT_ARGS: [&str; 3] = [
     "--keybind=clear",
 ];
 
+/// Overlay args CDE adds by default when the terminal program is foot (1.28).
+///
+/// The overlays (picker, launcher, settings) are CDE TUIs: no foot key binding may take a key
+/// (Escape, Ctrl+Shift+...) before them. foot has no `keybind=clear`, so every default action
+/// (and the other plain actions) is set to `none` with a `-o key-bindings.<action>=none` pair;
+/// this also overrides the user's foot.ini for these actions (`pipe-*`, `regex-*` and
+/// `color-theme-switch-*` binds there are not cleared).
+/// foot 1.28's own defaults in `[key-bindings]` are scrollback-up/down-page, clipboard-copy/paste,
+/// primary-paste, search-start, font-increase/decrease/reset, spawn-terminal, show-urls-launch,
+/// unicode-input and prompt-prev/next; the rest here are the actions that have no default but
+/// that a user config could bind. `[search-bindings]` and `[url-bindings]` are only reachable
+/// through `search-start` / `show-urls-*` (disabled here), and `[mouse-bindings]` take no keyboard
+/// key (modifiers only), so none of those are touched.
+pub const FOOT_OVERLAY_DEFAULT_ARGS: [&str; 56] = [
+    "-o",
+    "key-bindings.scrollback-up-page=none",
+    "-o",
+    "key-bindings.scrollback-up-half-page=none",
+    "-o",
+    "key-bindings.scrollback-up-line=none",
+    "-o",
+    "key-bindings.scrollback-down-page=none",
+    "-o",
+    "key-bindings.scrollback-down-half-page=none",
+    "-o",
+    "key-bindings.scrollback-down-line=none",
+    "-o",
+    "key-bindings.scrollback-home=none",
+    "-o",
+    "key-bindings.scrollback-end=none",
+    "-o",
+    "key-bindings.clipboard-copy=none",
+    "-o",
+    "key-bindings.clipboard-paste=none",
+    "-o",
+    "key-bindings.primary-paste=none",
+    "-o",
+    "key-bindings.search-start=none",
+    "-o",
+    "key-bindings.font-increase=none",
+    "-o",
+    "key-bindings.font-decrease=none",
+    "-o",
+    "key-bindings.font-reset=none",
+    "-o",
+    "key-bindings.spawn-terminal=none",
+    "-o",
+    "key-bindings.minimize=none",
+    "-o",
+    "key-bindings.maximize=none",
+    "-o",
+    "key-bindings.fullscreen=none",
+    "-o",
+    "key-bindings.show-urls-launch=none",
+    "-o",
+    "key-bindings.show-urls-copy=none",
+    "-o",
+    "key-bindings.show-urls-persistent=none",
+    "-o",
+    "key-bindings.prompt-prev=none",
+    "-o",
+    "key-bindings.prompt-next=none",
+    "-o",
+    "key-bindings.unicode-input=none",
+    "-o",
+    "key-bindings.color-theme-toggle=none",
+    "-o",
+    "key-bindings.noop=none",
+    "-o",
+    "key-bindings.quit=none",
+];
+
 impl OverlayConfig {
     /// The terminal args to use for overlay spawns with terminal `program`: the explicit list when
     /// set (even if empty), else the ghostty defaults when the basename is exactly `ghostty` or
-    /// `ghostty-cde`, else nothing.
+    /// `ghostty-cde`, else the foot defaults when it is exactly `foot`, else nothing.
     #[must_use]
     pub fn effective_terminal_args(&self, program: &str) -> Vec<String> {
         if let Some(list) = &self.terminal_args {
             return list.clone();
         }
-        let is_ghostty = std::path::Path::new(program)
-            .file_name()
-            .is_some_and(|n| n == "ghostty" || n == "ghostty-cde");
-        if is_ghostty {
-            GHOSTTY_OVERLAY_DEFAULT_ARGS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect()
+        let name = std::path::Path::new(program).file_name();
+        let defaults: &[&str] = if name.is_some_and(|n| n == "ghostty" || n == "ghostty-cde") {
+            &GHOSTTY_OVERLAY_DEFAULT_ARGS
+        } else if name.is_some_and(|n| n == "foot") {
+            &FOOT_OVERLAY_DEFAULT_ARGS
         } else {
-            Vec::new()
-        }
+            &[]
+        };
+        defaults.iter().map(|s| (*s).to_string()).collect()
     }
 }
 
