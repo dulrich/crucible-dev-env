@@ -188,8 +188,6 @@ pub struct HeaderState {
 pub struct HeaderLayout {
     /// The model output.
     pub output: OutputId,
-    /// The output's global rect (unshrunk).
-    pub output_rect: Rect,
     /// The strip rect (global).
     pub strip: Rect,
     /// Workspace names in stack order.
@@ -228,8 +226,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Every output's strip layout; empty while the strip is hidden.
     pub(crate) fn header_layouts(&self) -> Vec<HeaderLayout> {
+        self.raw_output_rects()
+            .into_iter()
+            .filter_map(|(id, rect)| self.header_layout_for(id, rect))
+            .collect()
+    }
+
+    /// The strip layout of model output `id` whose global rect is `rect`; `None` while the strip
+    /// is hidden or when the model has no such output.
+    pub(crate) fn header_layout_for(&self, id: OutputId, rect: Rect) -> Option<HeaderLayout> {
         if !self.header_shown() {
-            return Vec::new();
+            return None;
         }
         let size = self.config.header.size;
         let height = strip_height(size);
@@ -238,48 +245,42 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let divider_color = self.config.header.divider_color;
         let badges = self.config.header.slots;
         let glyph = badges && self.header_text.has_glyph(SUPER_GLYPH);
-        self.raw_output_rects()
-            .into_iter()
-            .filter_map(|(id, rect)| {
-                let output = self.layout.world.output(id)?;
-                let strip = strip_rect(rect, height);
-                let (mut names, mut workspaces) = (Vec::new(), Vec::new());
-                for ws in output.workspaces() {
-                    let name = &self.layout.world.workspace(*ws)?.name;
-                    let slot = if badges {
-                        self.persist.slots.slot_of(name)
-                    } else {
-                        None
-                    };
-                    names.push(badge_label(name, slot, glyph));
-                    workspaces.push(*ws);
-                }
-                let widths: Vec<i32> = names
-                    .iter()
-                    .map(|n| {
-                        self.header_text
-                            .measure(n, size)
-                            .unwrap_or_else(|| fallback_width(n, size))
-                    })
-                    .collect();
-                let (segments, dividers) = segment_layout(&widths, strip, divider);
-                let dividers = dividers
-                    .into_iter()
-                    .filter_map(|d| inset_divider(d, inset))
-                    .collect();
-                Some(HeaderLayout {
-                    output: id,
-                    output_rect: rect,
-                    strip,
-                    names,
-                    workspaces,
-                    active: output.active_index(),
-                    segments,
-                    dividers,
-                    divider_color,
-                })
+        let output = self.layout.world.output(id)?;
+        let strip = strip_rect(rect, height);
+        let (mut names, mut workspaces) = (Vec::new(), Vec::new());
+        for ws in output.workspaces() {
+            let name = &self.layout.world.workspace(*ws)?.name;
+            let slot = if badges {
+                self.persist.slots.slot_of(name)
+            } else {
+                None
+            };
+            names.push(badge_label(name, slot, glyph));
+            workspaces.push(*ws);
+        }
+        let widths: Vec<i32> = names
+            .iter()
+            .map(|n| {
+                self.header_text
+                    .measure(n, size)
+                    .unwrap_or_else(|| fallback_width(n, size))
             })
-            .collect()
+            .collect();
+        let (segments, dividers) = segment_layout(&widths, strip, divider);
+        let dividers = dividers
+            .into_iter()
+            .filter_map(|d| inset_divider(d, inset))
+            .collect();
+        Some(HeaderLayout {
+            output: id,
+            strip,
+            names,
+            workspaces,
+            active: output.active_index(),
+            segments,
+            dividers,
+            divider_color,
+        })
     }
 
     /// The strip hit under global `(x, y)`: the output and, on a label, its workspace.
@@ -336,11 +337,10 @@ fn fallback_width(name: &str, size: u32) -> i32 {
 }
 
 /// Builds the strip's render elements (front-to-back: labels, then highlight and background
-/// solids) for `output` only, positioned in the output's frame at
+/// solids) for one output's `layout`, positioned in the output's frame at
 /// `origin`. Without a loaded font only the backgrounds and highlight are produced.
 pub fn build_header_elements<R>(
-    layouts: &[HeaderLayout],
-    output: OutputId,
+    layout: &HeaderLayout,
     origin: (i32, i32),
     size: u32,
     text: &mut TextRenderer,
@@ -355,36 +355,33 @@ where
     let to_origin = |r: Rect| r.translate(-origin.0, -origin.1);
     let mut labels = Vec::new();
     let mut solids = Vec::new();
-    for l in layouts.iter().filter(|l| l.output == output) {
-        let strip = map.rect(to_origin(l.strip));
-        let line = (f64::from(size) * 1.2 * scale.y).round() as i32;
-        let text_y = strip.loc.y + (strip.size.h - line) / 2;
-        let pad_x = (f64::from(PAD_X) * scale.x).round() as i32;
-        for seg in &l.segments {
-            let active = seg.index == l.active;
-            let seg_rect = map.rect(to_origin(seg.rect));
-            if active {
-                solids.push(solid(seg_rect, BORDER_COLOR));
-            }
-            let rgba = if active {
-                LABEL_ACTIVE_RGBA
-            } else {
-                LABEL_RGBA
-            };
-            let loc = Point::<f64, Physical>::from((
-                f64::from(seg_rect.loc.x + pad_x),
-                f64::from(text_y),
-            ));
-            if let Some(el) = text.element(renderer, loc, &l.names[seg.index], size, rgba, scale) {
-                labels.push(CustomRenderElements::Text(el));
-            }
+    let l = layout;
+    let strip = map.rect(to_origin(l.strip));
+    let line = (f64::from(size) * 1.2 * scale.y).round() as i32;
+    let text_y = strip.loc.y + (strip.size.h - line) / 2;
+    let pad_x = (f64::from(PAD_X) * scale.x).round() as i32;
+    for seg in &l.segments {
+        let active = seg.index == l.active;
+        let seg_rect = map.rect(to_origin(seg.rect));
+        if active {
+            solids.push(solid(seg_rect, BORDER_COLOR));
         }
-        let divider = l.divider_color.to_rgba_f32();
-        for div in &l.dividers {
-            solids.push(solid(map.rect(to_origin(*div)), divider));
+        let rgba = if active {
+            LABEL_ACTIVE_RGBA
+        } else {
+            LABEL_RGBA
+        };
+        let loc =
+            Point::<f64, Physical>::from((f64::from(seg_rect.loc.x + pad_x), f64::from(text_y)));
+        if let Some(el) = text.element(renderer, loc, &l.names[seg.index], size, rgba, scale) {
+            labels.push(CustomRenderElements::Text(el));
         }
-        solids.push(solid(strip, STRIP_BG));
     }
+    let divider = l.divider_color.to_rgba_f32();
+    for div in &l.dividers {
+        solids.push(solid(map.rect(to_origin(*div)), divider));
+    }
+    solids.push(solid(strip, STRIP_BG));
     labels.extend(solids.into_iter().map(CustomRenderElements::SolidColor));
     labels
 }

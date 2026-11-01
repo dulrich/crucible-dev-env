@@ -19,13 +19,11 @@ use smithay::{
         drm::{DrmAccessError, DrmError, DrmEventMetadata, DrmNode, compositor::FrameFlags},
         renderer::damage::Error as OutputDamageTrackerError,
     },
-    input::pointer::CursorImageStatus,
     reexports::{
         calloop::timer::{TimeoutAction, Timer},
         drm::control::crtc,
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
     },
-    utils::{IsAlive, Scale},
     wayland::presentation::Refresh,
 };
 use tracing::{debug, error, warn};
@@ -177,28 +175,9 @@ impl CrucibleState<UdevData> {
         }
         let render_node = device.render_node.unwrap_or(primary_gpu);
 
-        // Reset a dead client cursor surface to the default before drawing.
-        if let CursorImageStatus::Surface(ref s) = self.cursor_status {
-            if !s.alive() {
-                self.cursor_status = CursorImageStatus::default_named();
-            }
-        }
-        self.backend_data
-            .pointer_element
-            .set_status(self.cursor_status.clone());
-
-        let scale = Scale::from(output.current_scale().fractional_scale());
-        let output_geo = self.space.output_geometry(&output).unwrap();
-        let pointer_location = self.pointer.current_location();
-        let empty_focus_rect = self.focused_empty_pane_rect();
-        let overlay_chrome = self.overlay_chrome();
-        let header_layouts = self.header_layouts();
-        // The cursor is drawn only on the output the pointer is over, output-local.
-        let cursor = output_geo.to_f64().contains(pointer_location).then(|| {
-            (pointer_location - output_geo.loc.to_f64())
-                .to_physical(scale)
-                .to_i32_round()
-        });
+        // Dead-cursor reset plus this output's owned frame inputs (the cursor only when the
+        // pointer is over this output, output-local).
+        let inputs = self.begin_frame(&output);
 
         // Select a renderer: same-GPU is a single renderer, cross-GPU needs the scanout format.
         let format = self.backend_data.backends[&node].surfaces[&crtc]
@@ -213,31 +192,21 @@ impl CrucibleState<UdevData> {
         }
         .unwrap();
 
-        // Compose from disjoint field borrows: `renderer` holds `self.backend_data.gpus`, the
-        // pointer element is the separate `self.backend_data.pointer_element` field.
+        // Compose from disjoint field borrows: `renderer` holds `self.backend_data.gpus`; the
+        // cursor is the separate `self.cursor` field.
         let locked = self.session_lock.is_locked();
         let view = FrameView {
             output: &output,
-            scale,
             space: &self.space,
             session_lock: &self.session_lock,
             layout: &self.layout,
             projection: &self.projection,
-            empty_focus_rect,
-            overlay: overlay_chrome,
             tiling: &self.config.tiling,
-            header_layouts: &header_layouts,
-            header_output: crate::layout::model_output_id(&output),
-            header_size: self.config.header.size,
             dnd_icon: self.dnd_icon.as_ref(),
+            inputs: &inputs,
         };
-        let (elements, clear_color) = frame_elements(
-            view,
-            &mut self.header_text,
-            &self.backend_data.pointer_element,
-            cursor,
-            &mut renderer,
-        );
+        let (elements, clear_color) =
+            frame_elements(view, &mut self.header_text, &mut self.cursor, &mut renderer);
 
         let surface = self
             .backend_data
@@ -268,7 +237,11 @@ impl CrucibleState<UdevData> {
                 // A failed queue must reach the recovery match below: swallowing it (as this
                 // port once did) leaves the CRTC with no page-flip pending and no timer, so the
                 // output never renders again — the black screen after a VT round-trip.
-                surface
+                self.backend_data
+                    .backends
+                    .get_mut(&node)
+                    .and_then(|device| device.surfaces.get_mut(&crtc))
+                    .expect("the surface rendered above still exists")
                     .drm_output
                     .queue_frame(Some(feedback))
                     .map_err(Into::<SwapBuffersError>::into)?;
@@ -276,16 +249,17 @@ impl CrucibleState<UdevData> {
                 self.session_lock.note_queued(&output, locked);
             }
             // Send frame callbacks so clients draw their next frame.
-            let now = self.clock.now();
-            let throttle = Some(Duration::from_secs(1));
-            if locked {
-                crate::lock::send_lock_frames(&self.session_lock, &output, now, throttle);
-            }
-            self.space.elements().for_each(|window| {
-                window.send_frame(&output, now, throttle, |_, _| Some(output.clone()));
-            });
-            crate::state::send_dnd_icon_frames(self.dnd_icon.as_ref(), &output, now, throttle);
-            if let Some(fb) = surface.dmabuf_feedback.as_ref() {
+            self.finish_frame(
+                &output,
+                self.clock.now().into(),
+                Some(Duration::from_secs(1)),
+            );
+            let surface = self
+                .backend_data
+                .backends
+                .get(&node)
+                .and_then(|device| device.surfaces.get(&crtc));
+            if let Some(fb) = surface.and_then(|surface| surface.dmabuf_feedback.as_ref()) {
                 send_dmabuf_feedback(
                     &self.space,
                     &output,

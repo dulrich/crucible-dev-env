@@ -145,7 +145,7 @@ impl<B: Backend + 'static> SeatHandler for CrucibleState<B> {
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
-        self.cursor_status = image;
+        self.cursor.status = image;
     }
 
     fn led_state_changed(&mut self, _seat: &Seat<Self>, led_state: LedState) {

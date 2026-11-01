@@ -93,7 +93,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some(lock) = self.session_lock.surface_for(output) {
             set_tree_preferred_scale(lock.wl_surface(), output);
         }
-        if let CursorImageStatus::Surface(ref surface) = self.cursor_status {
+        if let CursorImageStatus::Surface(ref surface) = self.cursor.status {
             let location = self.pointer.current_location();
             if let Some(under) = self.space.output_under(location).next() {
                 set_tree_preferred_scale(surface, under);

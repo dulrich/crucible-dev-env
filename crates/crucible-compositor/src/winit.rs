@@ -30,7 +30,7 @@ use smithay::{
     reexports::{
         calloop::EventLoop, wayland_server::Display, winit::event_loop::pump_events::PumpStatus,
     },
-    utils::{Scale, Transform},
+    utils::Transform,
     wayland::dmabuf::{
         DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
     },
@@ -38,7 +38,6 @@ use smithay::{
 use tracing::{error, info, warn};
 
 use crate::{
-    drawing::PointerElement,
     render::{FrameView, frame_elements},
     state::{Backend, CrucibleState},
 };
@@ -70,17 +69,13 @@ impl DmabufHandler for CrucibleState<WinitData> {
         dmabuf: Dmabuf,
         notifier: ImportNotifier,
     ) {
-        if self
+        let imported = self
             .backend_data
             .backend
             .renderer()
             .import_dmabuf(&dmabuf, None)
-            .is_ok()
-        {
-            let _ = notifier.successful::<CrucibleState<WinitData>>();
-        } else {
-            notifier.failed();
-        }
+            .is_ok();
+        crate::dmabuf::notify_import::<Self>(imported, &dmabuf, notifier, |_| {});
     }
 }
 
@@ -186,22 +181,16 @@ pub fn run_winit() {
             None
         }
     };
-    let mut dmabuf_state = DmabufState::new();
-    let dmabuf_global = match default_feedback {
-        Some(feedback) => dmabuf_state
-            .create_global_with_default_feedback::<CrucibleState<WinitData>>(
-                &display_handle,
-                &feedback,
-            ),
-        None => {
-            dmabuf_state.create_global::<CrucibleState<WinitData>>(&display_handle, dmabuf_formats)
-        }
-    };
+    let dmabuf_state = crate::dmabuf::create_global::<CrucibleState<WinitData>>(
+        &display_handle,
+        dmabuf_formats,
+        default_feedback.as_ref(),
+    );
 
     let data = WinitData {
         backend,
         damage_tracker,
-        dmabuf_state: (dmabuf_state, dmabuf_global),
+        dmabuf_state,
     };
 
     let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
@@ -223,7 +212,6 @@ pub fn run_winit() {
     state.start_xwayland();
 
     let start_time = Instant::now();
-    let mut pointer_element = PointerElement::default();
 
     info!("Initialization completed, starting the main loop.");
 
@@ -260,27 +248,12 @@ pub fn run_winit() {
             break;
         }
 
-        // Reset the cursor to the default if the client surface backing it went away.
-        if let smithay::input::pointer::CursorImageStatus::Surface(ref surface) =
-            state.cursor_status
-        {
-            if !smithay::utils::IsAlive::alive(surface) {
-                state.cursor_status = smithay::input::pointer::CursorImageStatus::default_named();
-            }
-        }
-        pointer_element.set_status(state.cursor_status.clone());
-
         // Compose and present the frame: mapped surfaces from the Space, with the cursor on top.
         {
-            let scale = Scale::from(output.current_scale().fractional_scale());
-            let cursor_pos = state.pointer.current_location();
-            let cursor_phys = cursor_pos.to_physical(scale).to_i32_round();
-
-            // Inputs that need `&state` as a whole are read before the backend borrow below; the
-            // frame is then composed from disjoint field borrows beside the renderer.
-            let header_layouts = state.header_layouts();
-            let empty_focus_rect = state.focused_empty_pane_rect();
-            let overlay = state.overlay_chrome();
+            // Inputs that need `&mut state` as a whole (incl. the dead-cursor reset) are built
+            // before the backend borrow below; the frame is then composed from disjoint field
+            // borrows beside the renderer.
+            let inputs = state.begin_frame(&output);
 
             let backend = &mut state.backend_data.backend;
             let damage_tracker = &mut state.backend_data.damage_tracker;
@@ -288,29 +261,18 @@ pub fn run_winit() {
             let locked = state.session_lock.is_locked();
             let view = FrameView {
                 output: &output,
-                scale,
                 space: &state.space,
                 session_lock: &state.session_lock,
                 layout: &state.layout,
                 projection: &state.projection,
-                empty_focus_rect,
-                overlay,
                 tiling: &state.config.tiling,
-                header_layouts: &header_layouts,
-                header_output: crate::layout::model_output_id(&output),
-                header_size: state.config.header.size,
                 dnd_icon: state.dnd_icon.as_ref(),
+                inputs: &inputs,
             };
             let header_text = &mut state.header_text;
+            let cursor = &mut state.cursor;
             let render_res = backend.bind().and_then(|(renderer, mut fb)| {
-                // winit draws the cursor unconditionally at the pointer position.
-                let (elements, clear_color) = frame_elements(
-                    view,
-                    header_text,
-                    &pointer_element,
-                    Some(cursor_phys),
-                    renderer,
-                );
+                let (elements, clear_color) = frame_elements(view, header_text, cursor, renderer);
                 damage_tracker
                     .render_output(renderer, &mut fb, age, &elements, clear_color)
                     .map_err(|err| match err {
@@ -355,26 +317,7 @@ pub fn run_winit() {
         }
 
         // Send frame callbacks so clients render their next frame.
-        let frame_time = start_time.elapsed();
-        if state.session_lock.is_locked() {
-            crate::lock::send_lock_frames(
-                &state.session_lock,
-                &output,
-                frame_time,
-                Some(Duration::ZERO),
-            );
-        }
-        state.space.elements().for_each(|window| {
-            window.send_frame(&output, frame_time, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
-        });
-        crate::state::send_dnd_icon_frames(
-            state.dnd_icon.as_ref(),
-            &output,
-            frame_time,
-            Some(Duration::ZERO),
-        );
+        state.finish_frame(&output, start_time.elapsed(), Some(Duration::ZERO));
         state.update_fractional_scales(&output);
 
         let result = event_loop.dispatch(Some(Duration::from_millis(16)), &mut state);

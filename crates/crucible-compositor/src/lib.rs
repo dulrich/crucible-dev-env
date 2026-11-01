@@ -42,8 +42,11 @@ pub mod autostart;
 /// Per-frame rendering and presentation.
 pub mod render;
 
-/// Compositor-drawn chrome: cursor, borders, stack indicators.
-pub mod drawing;
+/// `zwp_linux_dmabuf_v1` global creation and import notification shared by both backends.
+pub mod dmabuf;
+
+/// The compositor-drawn pointer cursor (the single cursor owner).
+pub mod cursor;
 
 /// Focus-ring border and per-pane stack indicator chrome.
 pub mod chrome;

@@ -40,7 +40,7 @@ use smithay::{
     input::{
         Seat, SeatState,
         keyboard::{LedState, XkbConfig},
-        pointer::{CursorImageStatus, PointerHandle},
+        pointer::PointerHandle,
     },
     output::Output,
     reexports::{
@@ -202,9 +202,9 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub seat: Seat<CrucibleState<B>>,
     /// Pointer handle for the seat. Held so the cursor position is available to the render path.
     pub pointer: PointerHandle<CrucibleState<B>>,
-    /// Current cursor image requested by the focused client (or the default), drawn by the render
-    /// path.
-    pub cursor_status: CursorImageStatus,
+    /// The compositor cursor: the image requested by the focused client (or the default) plus the
+    /// cached default-cursor buffers, drawn by the render path.
+    pub cursor: crate::cursor::Cursor,
     /// Human-readable seat name advertised to clients.
     pub seat_name: String,
     /// Physical keycodes whose *press* was intercepted as a Super-leader chord.
@@ -380,7 +380,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             seat_state,
             seat,
             pointer,
-            cursor_status: CursorImageStatus::default_named(),
+            cursor: crate::cursor::Cursor::default(),
             seat_name,
             suppressed_keys: SuppressedKeys::new(),
             xwm: None,

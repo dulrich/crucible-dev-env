@@ -10,8 +10,10 @@
 //! ## Scope
 //! Window previews are not rendered.
 
+use std::time::Duration;
+
 use crucible_config::TilingConfig;
-use crucible_layout::{OutputId, Projection, Rect};
+use crucible_layout::{Projection, Rect};
 use smithay::{
     backend::renderer::{
         Color32F, ImportAll, ImportMem, Renderer,
@@ -21,18 +23,19 @@ use smithay::{
         },
     },
     desktop::space::{Space, SpaceRenderElements, SurfaceTree},
+    input::pointer::CursorImageStatus,
     output::Output,
-    utils::{IsAlive, Logical, Physical, Point, Scale},
+    utils::{IsAlive, Logical, Physical, Point, Rectangle, Scale},
 };
 
 use crate::{
     chrome::OverlayChrome,
-    drawing::{PointerElement, PointerRenderElement},
+    cursor::{Cursor, PointerRenderElement},
     element::WindowElement,
     header::HeaderLayout,
     layout::LayoutState,
     lock::SessionLock,
-    state::DndIcon,
+    state::{Backend, CrucibleState, DndIcon},
     text::TextRenderer,
 };
 
@@ -43,7 +46,7 @@ smithay::backend::renderer::element::render_elements! {
     /// Compositor-drawn render elements that are not part of the desktop [`Space`]: the cursor,
     /// plus focus-ring borders and per-pane stack indicators.
     pub CustomRenderElements<R> where R: ImportAll + ImportMem;
-    /// The pointer cursor element from [`crate::drawing`].
+    /// The pointer cursor element from [`crate::cursor`].
     Pointer=PointerRenderElement<R>,
     /// A bare Wayland surface (e.g. a drag-and-drop icon) drawn outside the space.
     Surface=WaylandSurfaceRenderElement<R>,
@@ -98,14 +101,32 @@ pub type WindowRenderElement<R> = <WindowElement as AsRenderElements<R>>::Render
 /// One frame's composited element list (front-to-back) for renderer `R`.
 pub type FrameElements<R> = Vec<OutputRenderElements<R, WindowRenderElement<R>>>;
 
+/// The owned per-output inputs of one frame, built by [`CrucibleState::begin_frame`] before the
+/// backend takes its renderer borrow.
+#[derive(Debug, Clone)]
+pub struct FrameInputs {
+    /// The output's fractional scale.
+    pub scale: Scale<f64>,
+    /// Where the cursor is drawn (output-local, physical); `None` when the pointer is not over
+    /// this output.
+    pub cursor: Option<Point<i32, Physical>>,
+    /// The focused empty pane's tile, if any (it gets the terminal ring).
+    pub empty_focus_rect: Option<Rect>,
+    /// The mapped overlay's chrome settings, if an overlay is mapped.
+    pub overlay: Option<OverlayChrome>,
+    /// This output's header strip layout; `None` while the strip is hidden or for an output the
+    /// model has not bound.
+    pub header: Option<HeaderLayout>,
+    /// The header font size.
+    pub header_size: u32,
+}
+
 /// The read-only state one output's frame is composed from: disjoint borrows of
-/// [`CrucibleState`](crate::state::CrucibleState) fields, taken by each backend beside its own
-/// renderer borrow (which holds the backend data).
+/// [`CrucibleState`] fields, taken by each backend beside its own renderer borrow (which holds the
+/// backend data), plus the frame's [`FrameInputs`].
 pub struct FrameView<'a> {
     /// The output being rendered.
     pub output: &'a Output,
-    /// Its fractional scale.
-    pub scale: Scale<f64>,
     /// The mapped windows (the model's visible set).
     pub space: &'a Space<WindowElement>,
     /// The session lock (selects the lock branch and supplies the lock surface).
@@ -114,20 +135,68 @@ pub struct FrameView<'a> {
     pub layout: &'a LayoutState,
     /// The projection last applied to the `Space`.
     pub projection: &'a Projection,
-    /// The focused empty pane's tile, if any (it gets the terminal ring).
-    pub empty_focus_rect: Option<Rect>,
-    /// The mapped overlay's chrome settings, if an overlay is mapped.
-    pub overlay: Option<OverlayChrome>,
     /// Per-class tiling settings (rings, gaps, fill).
     pub tiling: &'a TilingConfig,
-    /// Every output's header strip layout.
-    pub header_layouts: &'a [HeaderLayout],
-    /// The model id of `output`; `None` (an output the model has not bound) draws no header.
-    pub header_output: Option<OutputId>,
-    /// The header font size.
-    pub header_size: u32,
     /// The active pointer drag's icon, drawn at the cursor (unlocked frames only).
     pub dnd_icon: Option<&'a DndIcon>,
+    /// The per-output inputs from [`CrucibleState::begin_frame`].
+    pub inputs: &'a FrameInputs,
+}
+
+/// The output-local physical cursor location when `pointer` (global, logical) lies inside
+/// `output_geo`; `None` otherwise. Both backends draw the cursor only on the output under it.
+#[must_use]
+pub fn cursor_on_output(
+    output_geo: Rectangle<i32, Logical>,
+    pointer: Point<f64, Logical>,
+    scale: Scale<f64>,
+) -> Option<Point<i32, Physical>> {
+    output_geo.to_f64().contains(pointer).then(|| {
+        (pointer - output_geo.loc.to_f64())
+            .to_physical(scale)
+            .to_i32_round()
+    })
+}
+
+impl<B: Backend + 'static> CrucibleState<B> {
+    /// Starts `output`'s frame: resets a dead client cursor surface to the default, then builds
+    /// the frame's owned [`FrameInputs`] (only this output's header is laid out).
+    pub(crate) fn begin_frame(&mut self, output: &Output) -> FrameInputs {
+        if let CursorImageStatus::Surface(ref surface) = self.cursor.status
+            && !surface.alive()
+        {
+            self.cursor.status = CursorImageStatus::default_named();
+        }
+        let scale = Scale::from(output.current_scale().fractional_scale());
+        let output_geo = self.space.output_geometry(output);
+        let pointer = self.pointer.current_location();
+        let cursor = output_geo.and_then(|geo| cursor_on_output(geo, pointer, scale));
+        let header = crate::layout::model_output_id(output)
+            .zip(output_geo)
+            .and_then(|(id, geo)| {
+                self.header_layout_for(id, Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h))
+            });
+        FrameInputs {
+            scale,
+            cursor,
+            empty_focus_rect: self.focused_empty_pane_rect(),
+            overlay: self.overlay_chrome(),
+            header,
+            header_size: self.config.header.size,
+        }
+    }
+
+    /// Sends `output`'s post-render frame callbacks at `time` with `throttle`: the lock surface's
+    /// while locked, every mapped window's, and the drag icon's.
+    pub(crate) fn finish_frame(&self, output: &Output, time: Duration, throttle: Option<Duration>) {
+        if self.session_lock.is_locked() {
+            crate::lock::send_lock_frames(&self.session_lock, output, time, throttle);
+        }
+        self.space.elements().for_each(|window| {
+            window.send_frame(output, time, throttle, |_, _| Some(output.clone()));
+        });
+        crate::state::send_dnd_icon_frames(self.dnd_icon.as_ref(), output, time, throttle);
+    }
 }
 
 /// Where a drag icon's surface origin is drawn: the output-local physical `cursor` plus the icon's
@@ -146,13 +215,13 @@ pub fn icon_location(
 /// - **Locked** (or locking): only `output`'s lock surface, over
 ///   [`LOCK_CLEAR_COLOR`](crate::lock::LOCK_CLEAR_COLOR). Chrome, header, cursor and windows are
 ///   not built.
-/// - **Unlocked**: cursor (only when `cursor` is `Some`, at that output-local physical location)
+/// - **Unlocked**: cursor (only when `inputs.cursor` is `Some`, at that output-local physical location)
 ///   → header strip → chrome → the mapped windows from the `space`, over
 ///   [`CLEAR_COLOR`].
 ///
 /// Chrome and header are positioned in the output's frame: both take the output's global origin
-/// from `space.output_geometry(output)`. Whether and where the cursor is drawn is the backend's
-/// rule (udev: only on the output containing the pointer; winit: always), so it is passed in.
+/// from `space.output_geometry(output)`. Both backends draw the cursor only on the output under the
+/// pointer ([`cursor_on_output`], applied by [`CrucibleState::begin_frame`]).
 ///
 /// ## Visibility (decision #4)
 /// The `space` is already the model's **visible** set: [`CrucibleState::apply_layout`]
@@ -165,17 +234,18 @@ pub fn icon_location(
 pub fn frame_elements<R>(
     view: FrameView<'_>,
     header_text: &mut TextRenderer,
-    pointer: &PointerElement,
-    cursor: Option<Point<i32, Physical>>,
+    cursor: &mut Cursor,
     renderer: &mut R,
 ) -> (FrameElements<R>, Color32F)
 where
     R: Renderer + ImportAll + ImportMem,
     R::TextureId: Send + Clone + 'static,
 {
+    let inputs = view.inputs;
+    let scale = inputs.scale;
     if view.session_lock.is_locked() {
         let elements =
-            crate::lock::lock_render_elements(view.session_lock, view.output, renderer, view.scale)
+            crate::lock::lock_render_elements(view.session_lock, view.output, renderer, scale)
                 .into_iter()
                 .map(OutputRenderElements::Custom)
                 .collect();
@@ -188,46 +258,49 @@ where
         .map_or((0, 0), |g| (g.loc.x, g.loc.y));
 
     // Front-to-back: cursor → drag icon → header → chrome → windows.
-    let mut custom: Vec<CustomRenderElements<R>> = match cursor {
-        Some(location) => pointer.render_elements(renderer, location, view.scale, 1.0),
+    let mut custom: Vec<CustomRenderElements<R>> = match inputs.cursor {
+        Some(location) => cursor
+            .render_elements(renderer, location, scale, 1.0)
+            .into_iter()
+            .map(CustomRenderElements::Pointer)
+            .collect(),
         None => Vec::new(),
     };
-    if let (Some(icon), Some(cursor)) = (view.dnd_icon, cursor)
+    if let (Some(icon), Some(cursor)) = (view.dnd_icon, inputs.cursor)
         && icon.surface.alive()
     {
-        let location = icon_location(cursor, icon.offset, view.scale);
+        let location = icon_location(cursor, icon.offset, scale);
         custom.extend(
             AsRenderElements::<R>::render_elements(
                 &SurfaceTree::from_surface(&icon.surface),
                 renderer,
                 location,
-                view.scale,
+                scale,
                 1.0,
             )
             .into_iter()
             .map(CustomRenderElements::Surface),
         );
     }
-    if let Some(output_id) = view.header_output {
+    if let Some(header) = &inputs.header {
         custom.extend(crate::header::build_header_elements(
-            view.header_layouts,
-            output_id,
+            header,
             origin,
-            view.header_size,
+            inputs.header_size,
             header_text,
             renderer,
-            view.scale,
+            scale,
         ));
     }
     custom.extend(
         crate::chrome::build_chrome_elements(
             view.layout,
             view.projection,
-            view.empty_focus_rect,
-            view.overlay,
+            inputs.empty_focus_rect,
+            inputs.overlay,
             origin,
             view.tiling,
-            view.scale,
+            scale,
         )
         .into_iter()
         .map(CustomRenderElements::SolidColor),
@@ -263,5 +336,21 @@ mod tests {
     fn icon_offset_scales_to_physical_pixels() {
         let at = icon_location((100, 50).into(), (-8, 4).into(), Scale::from(1.5));
         assert_eq!(at, Point::<i32, Physical>::from((88, 56)));
+    }
+
+    #[test]
+    fn cursor_is_drawn_only_on_the_output_under_the_pointer() {
+        let geo = Rectangle::<i32, Logical>::new((1000, 0).into(), (800, 600).into());
+        let s = Scale::from(1.5);
+        assert_eq!(cursor_on_output(geo, (999.0, 10.0).into(), s), None);
+        assert_eq!(cursor_on_output(geo, (1800.0, 10.0).into(), s), None);
+        assert_eq!(
+            cursor_on_output(geo, (1000.0, 0.0).into(), s),
+            Some(Point::<i32, Physical>::from((0, 0)))
+        );
+        assert_eq!(
+            cursor_on_output(geo, (1100.0, 20.0).into(), s),
+            Some(Point::<i32, Physical>::from((150, 30)))
+        );
     }
 }

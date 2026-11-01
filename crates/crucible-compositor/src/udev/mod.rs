@@ -24,7 +24,7 @@
 //! from the primary GPU plus per-output render/scanout feedback (see [`output`] and [`render`]).
 //! Compared to anvil this backend omits `drm_syncobj`, DRM leasing, the on-screen FPS overlay and the
 //! multi-GPU pointer-texture cache (the DnD icon is composed by [`crate::render::frame_elements`]); CDE draws its self-contained default cursor
-//! via [`PointerElement`](crate::drawing::PointerElement) just like the winit path.
+//! via [`Cursor`](crate::cursor::Cursor) just like the winit path.
 //!
 //! # Module map
 //!
@@ -77,7 +77,6 @@ use smithay::{
 use tracing::{error, info, warn};
 
 use crate::{
-    drawing::PointerElement,
     element::WindowElement,
     render::OutputRenderElements,
     state::{Backend, CrucibleState},
@@ -120,8 +119,6 @@ pub struct UdevData {
     gpus: GpuManager<GbmGlesBackend<GlesRenderer, DrmDeviceFd>>,
     /// Per-DRM-device state, keyed by the device's [`DrmNode`].
     backends: HashMap<DrmNode, BackendData>,
-    /// The compositor's self-contained default cursor (shared with the winit path).
-    pointer_element: PointerElement,
     /// Keyboards currently present, tracked so LED state can be pushed to them.
     keyboards: Vec<smithay::reexports::input::Device>,
     /// The `zwp_linux_dmabuf_v1` state and global; `None` until the primary renderer exists (or
@@ -157,12 +154,9 @@ impl DmabufHandler for CrucibleState<UdevData> {
                 .is_ok(),
             Err(_) => false,
         };
-        if imported {
+        crate::dmabuf::notify_import::<Self>(imported, &dmabuf, notifier, |dmabuf| {
             dmabuf.set_node(primary_gpu);
-            let _ = notifier.successful::<CrucibleState<UdevData>>();
-        } else {
-            notifier.failed();
-        }
+        });
     }
 }
 
@@ -262,7 +256,6 @@ pub fn run_udev() {
         primary_gpu,
         gpus,
         backends: HashMap::new(),
-        pointer_element: PointerElement::default(),
         keyboards: Vec::new(),
         dmabuf_state: None,
     };
@@ -382,13 +375,13 @@ pub fn run_udev() {
             let formats = renderer.dmabuf_formats();
             match DmabufFeedbackBuilder::new(primary_gpu.dev_id(), formats).build() {
                 Ok(default_feedback) => {
-                    let mut dmabuf_state = DmabufState::new();
-                    let global = dmabuf_state
-                        .create_global_with_default_feedback::<CrucibleState<UdevData>>(
+                    state.backend_data.dmabuf_state =
+                        Some(crate::dmabuf::create_global::<CrucibleState<UdevData>>(
                             &display_handle,
-                            &default_feedback,
-                        );
-                    state.backend_data.dmabuf_state = Some((dmabuf_state, global));
+                            // v5 takes its formats from the default feedback.
+                            std::iter::empty(),
+                            Some(&default_feedback),
+                        ));
                 }
                 Err(err) => {
                     warn!(%err, "Failed to build dmabuf default feedback; running without linux-dmabuf")
