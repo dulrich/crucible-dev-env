@@ -6,6 +6,7 @@
 use smithay::backend::renderer::utils::on_commit_buffer_handler;
 use smithay::delegate_dispatch2;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
+use smithay::desktop::space::SpaceElement;
 use smithay::utils::IsAlive;
 use smithay::wayland::shell::xdg::ToplevelSurface;
 use smithay::{
@@ -142,6 +143,7 @@ impl<B: Backend + 'static> SeatHandler for CrucibleState<B> {
             .and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
+        self.sync_activation(clears_activation(target));
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
@@ -150,6 +152,32 @@ impl<B: Backend + 'static> SeatHandler for CrucibleState<B> {
 
     fn led_state_changed(&mut self, _seat: &Seat<Self>, led_state: LedState) {
         self.backend_data.update_led_state(led_state);
+    }
+}
+
+/// Whether a keyboard-focus change to `target` leaves no window activated. Only "no focus" does:
+/// a popup or layer surface taking keys keeps its toplevel activated, and a new window target is
+/// activated by its raise (`Space::raise_element(.., true)` deactivates the rest).
+fn clears_activation(target: Option<&KeyboardFocusTarget>) -> bool {
+    target.is_none()
+}
+
+impl<B: Backend + 'static> CrucibleState<B> {
+    /// Delivers the xdg `activated` state that raising set as *pending* (optionally clearing it on
+    /// every window first). Without the configure a client never learns it is focused: foot then
+    /// draws its unfocused hollow, non-blinking cursor. `send_pending_configure` is a no-op for a
+    /// toplevel whose pending state equals what it was last sent.
+    fn sync_activation(&mut self, clear: bool) {
+        for window in self.space.elements() {
+            if clear {
+                window.set_activate(false);
+            }
+            if let Some(toplevel) = window.toplevel()
+                && toplevel.is_initial_configure_sent()
+            {
+                toplevel.send_pending_configure();
+            }
+        }
     }
 }
 
@@ -200,6 +228,17 @@ impl<B: Backend + 'static> smithay::wayland::shell::xdg::decoration::XdgDecorati
 // above). One invocation therefore wires compositor + shm + output + xdg-shell + layer-shell +
 // seat + data-device + primary-selection (and any future globals) at once.
 delegate_dispatch2!(@<B: Backend + 'static> CrucibleState<B>);
+
+#[cfg(test)]
+mod activation_tests {
+    use super::clears_activation;
+
+    #[test]
+    fn only_losing_all_focus_clears_activation() {
+        // Window, popup, layer and lock targets need live surfaces; the rule is "None only".
+        assert!(clears_activation(None));
+    }
+}
 
 #[cfg(test)]
 mod decoration_tests {
