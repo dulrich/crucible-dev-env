@@ -5,6 +5,7 @@
 //! a real TTY across multiple outputs. The `pick`, `resume` and `msg` subcommands are the
 //! client-side tools the compositor spawns (and scripts can call).
 
+mod cli;
 mod client;
 mod fuzzy;
 mod keys;
@@ -27,32 +28,6 @@ const USAGE: &str = "usage: crucible [--winit | --tty-udev]\n       crucible pic
 /// Help wins over the backend flags, so `--tty-udev --help` never takes the DRM/KMS device.
 fn wants_help(args: &[String]) -> bool {
     args.iter().skip(1).any(|a| a == "--help" || a == "-h")
-}
-
-/// What a subcommand's parser found: a request for its usage, or the parsed arguments.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Parsed<T> {
-    /// `--help`/`-h` in a non-payload position: print the usage, exit 0, no side effect.
-    Help,
-    /// The parsed arguments to run with.
-    Run(T),
-}
-
-/// True when `--help`/`-h` appears in a non-payload position of a subcommand's arguments. Payload
-/// positions never count: the value of any of `value_flags` (for example `--rename`), and, when
-/// `stop_at_dashdash`, everything from `--` on.
-pub fn help_requested(args: &[String], value_flags: &[&str], stop_at_dashdash: bool) -> bool {
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--" if stop_at_dashdash => return false,
-            f if value_flags.contains(&f) => i += 1,
-            "--help" | "-h" => return true,
-            _ => {}
-        }
-        i += 1;
-    }
-    false
 }
 
 /// A subcommand: its name, its `--help` text and its entry point. The entry point's parser
@@ -146,35 +121,6 @@ mod tests {
         assert!(wants_help(&args(&["crucible", "-h", "--winit"])));
         assert!(!wants_help(&args(&["crucible", "--winit"])));
         assert!(!wants_help(&args(&["crucible"])));
-    }
-
-    #[test]
-    fn help_requested_skips_the_value_flag_and_stops_at_dashdash() {
-        assert!(help_requested(&args(&["--help"]), &[], false));
-        assert!(help_requested(&args(&["x", "-h"]), &[], false));
-        assert!(!help_requested(&args(&[]), &[], false));
-        assert!(!help_requested(
-            &args(&["--rename", "--help"]),
-            &["--rename", "--root"],
-            false
-        ));
-        assert!(help_requested(
-            &args(&["--rename", "x", "-h"]),
-            &["--rename", "--root"],
-            false
-        ));
-        assert!(!help_requested(
-            &args(&["--root", "--help"]),
-            &["--rename", "--root"],
-            false
-        ));
-        assert!(help_requested(
-            &args(&["--root", "", "--help"]),
-            &["--rename", "--root"],
-            false
-        ));
-        assert!(!help_requested(&args(&["--", "-h"]), &[], true));
-        assert!(help_requested(&args(&["--", "-h"]), &[], false));
     }
 
     #[test]

@@ -5,6 +5,7 @@
 
 use crucible_compositor::ipc::{Request, Response, parse_bindings};
 
+use crate::cli::{Parsed, help_requested};
 use crate::client::{Client, ClientError};
 use crate::fuzzy;
 use crate::overlay::list::{Body, Frame, ListState};
@@ -12,7 +13,6 @@ use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
 use crate::table::{self, Col};
-use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible keys --help`.
 pub const USAGE: &str = "usage: crucible keys\n\nThe CDE settings overlay (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Comma).\nLists the effective keybindings. Type to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter runs the\nselected binding; Esc or Ctrl+C closes. Edit binds in config.kdl (docs/config.md).\n";
@@ -116,16 +116,9 @@ impl Overlay for Keys {
 
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    match parse_args(args) {
-        Ok(Parsed::Help) => {
-            print!("{USAGE}");
-            0
-        }
-        Ok(Parsed::Run(())) => run_overlay("keys", |client| fetch_bindings(client).map(Keys::new)),
-        Err(e) => {
-            eprintln!("crucible keys: {e}\n\n{USAGE}");
-            2
-        }
+    match crate::cli::parse_or_exit("keys", USAGE, parse_args(args)) {
+        Ok(()) => run_overlay("keys", |client| fetch_bindings(client).map(Keys::new)),
+        Err(code) => code,
     }
 }
 

@@ -10,13 +10,13 @@ use std::path::PathBuf;
 
 use crucible_compositor::ipc::{LAUNCHER_TUI_ENV, Request, TERMINAL_ENV};
 
+use crate::cli::{Parsed, help_requested};
 use crate::fuzzy;
 use crate::overlay::list::{Body, Frame, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
 use crate::table::{self, Col};
-use crate::{Parsed, help_requested};
 
 use desktop::{DesktopEntry, data_dirs_from_env, desktop_entries};
 use tui_programs::{resolve_tui, tui_items, tui_patterns};
@@ -266,16 +266,9 @@ pub fn parse_args(args: &[String]) -> Result<Parsed<()>, String> {
 
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    match parse_args(args) {
-        Ok(Parsed::Help) => {
-            print!("{USAGE}");
-            0
-        }
-        Ok(Parsed::Run(())) => run_overlay("launch", |_client| Ok(Launcher::new(discover_items()))),
-        Err(e) => {
-            eprintln!("crucible launch: {e}\n\n{USAGE}");
-            2
-        }
+    match crate::cli::parse_or_exit("launch", USAGE, parse_args(args)) {
+        Ok(()) => run_overlay("launch", |_client| Ok(Launcher::new(discover_items()))),
+        Err(code) => code,
     }
 }
 

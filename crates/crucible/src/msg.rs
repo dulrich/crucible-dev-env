@@ -2,7 +2,7 @@
 
 use crucible_compositor::ipc::{Request, SOCKET_ENV, encode_field};
 
-use crate::Parsed;
+use crate::cli::Parsed;
 use crate::client::{Client, socket_from_env};
 
 /// Usage text for `crucible msg --help`.
@@ -60,16 +60,9 @@ pub fn parse_args(args: &[String]) -> Result<Parsed<String>, String> {
 
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    let line = match parse_args(args) {
-        Ok(Parsed::Run(l)) => l,
-        Ok(Parsed::Help) => {
-            print!("{USAGE}");
-            return 0;
-        }
-        Err(e) => {
-            eprintln!("crucible msg: {e}");
-            return 2;
-        }
+    let line = match crate::cli::parse_or_exit_terse("msg", USAGE, parse_args(args)) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
     let path = match socket_from_env(std::env::var_os(SOCKET_ENV)) {
         Ok(p) => p,

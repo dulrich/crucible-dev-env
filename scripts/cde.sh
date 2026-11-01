@@ -5,10 +5,8 @@
 # Logs: /tmp/cde/cde-<timestamp>.log, newest symlinked as /tmp/cde/latest.log
 set -uo pipefail
 
-for arg in "$@"; do
-	case "$arg" in
-	--help | -h)
-		cat <<'USAGE'
+usage() {
+	cat <<'USAGE'
 Usage: cde.sh [--help|-h] [extra crucible args...]
 
 Launch the CDE (crucible-dev-env) compositor on a bare TTY with logging. Runs
@@ -32,10 +30,12 @@ Environment overrides:
 
 Logs: /tmp/cde/cde-<timestamp>.log, newest symlinked as /tmp/cde/latest.log
 USAGE
-		exit 0
-		;;
-	esac
-done
+}
+
+# shellcheck source=lib/build-id.sh
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/build-id.sh"
+case " $* " in *" --help "* | *" -h "*) usage; exit 0 ;; esac
+build_flags "${BASH_SOURCE[0]}" "$@"
 
 # CDE_BIN: a prebuilt binary to run instead of the dev build. Validate before anything starts.
 if [ -n "${CDE_BIN:-}" ]; then
@@ -45,10 +45,6 @@ if [ -n "${CDE_BIN:-}" ]; then
 		exit 1
 	fi
 fi
-
-# shellcheck source=lib/build-id.sh
-. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/build-id.sh"
-build_flags "${BASH_SOURCE[0]}" "$@"
 
 repo=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
 logdir=/tmp/cde

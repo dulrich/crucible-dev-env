@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use crucible_persist::PickTarget;
 
-use crate::{Parsed, help_requested};
+use crate::cli::{Parsed, help_requested};
 
 /// Usage text for `crucible overlay-host --help`.
 pub const USAGE: &str = "usage: crucible overlay-host --socket <path>\n\nA pre-started overlay terminal's program (spawned by CDE; not for interactive use). Binds\n<path>, waits for one mode line `<epoch-ms>\\t<mode>[\\t<arg>...]` (mode: pick, launch, keys),\nremoves the socket, then runs that overlay in-process.\n";
@@ -122,16 +122,9 @@ fn parse_args(args: &[String]) -> Result<Parsed<PathBuf>, String> {
 
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    let path = match parse_args(args) {
-        Ok(Parsed::Run(p)) => p,
-        Ok(Parsed::Help) => {
-            print!("{USAGE}");
-            return 0;
-        }
-        Err(e) => {
-            eprintln!("crucible overlay-host: {e}\n\n{USAGE}");
-            return 2;
-        }
+    let path = match crate::cli::parse_or_exit("overlay-host", USAGE, parse_args(args)) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
     let _ = std::fs::remove_file(&path);
     let listener = match UnixListener::bind(&path) {

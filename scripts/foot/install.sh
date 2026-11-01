@@ -5,7 +5,7 @@ set -euo pipefail
 MIN_VER=1.20.2
 
 usage() {
-	cat <<'USAGE'
+	cat <<USAGE
 Usage: install.sh <tarball>
        install.sh [--help|-h] [--build|--version]
 
@@ -15,14 +15,14 @@ foot-<ver>/) for the current user:
     (the stable absolute path CDE configures: ~/.local/opt/foot/bin/foot)
   - symlink foot and footclient into ~/.local/bin (interactive shells only; CDE does
     not rely on PATH)
-  - ensure terminfo `foot` and `foot-direct` resolve, else `tic -x` the shipped source
+  - ensure terminfo \`foot\` and \`foot-direct\` resolve, else \`tic -x\` the shipped source
     into ~/.terminfo
   - write ~/.local/share/applications/org.codeberg.dnkl.{foot,footclient}.desktop
     pointing at the installed binaries and a Hidden=true org.codeberg.dnkl.foot-server.desktop
-  - fail on any `not found` in ldd, and refuse to finish unless
-    ~/.local/opt/foot/bin/foot --version reports >= 1.20.2 (older foot, e.g. the distro
+  - fail on any \`not found\` in ldd, and refuse to finish unless
+    ~/.local/opt/foot/bin/foot --version reports >= $MIN_VER (older foot, e.g. the distro
     1.16.2, crashes on CDE: upstream #1910)
-Re-running with the same tarball is a no-op in effect. Honors $HOME.
+Re-running with the same tarball is a no-op in effect. Honors \$HOME.
 
   --build, --version   print the tool-scoped build id (this repo's: last commit touching it)
   --help, -h           print this usage
@@ -35,13 +35,7 @@ die() {
 }
 
 here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-for arg in "$@"; do
-	case "$arg" in --help | -h)
-		usage
-		exit 0
-		;;
-	esac
-done
+case " $* " in *" --help "* | *" -h "*) usage; exit 0 ;; esac
 # shellcheck source=../lib/build-id.sh
 . "$here/../lib/build-id.sh"
 build_flags "${BASH_SOURCE[0]}" "$@"

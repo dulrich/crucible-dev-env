@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build foot 1.28.0 (dev host only) into a relocatable tarball for scripts/foot/install.sh.
+# Build the pinned foot (dev host only) into a relocatable tarball for scripts/foot/install.sh.
 set -euo pipefail
 
 FOOT_VER=1.28.0
@@ -10,18 +10,18 @@ MESON_VER=1.12.1
 NINJA_VER=1.13.2
 
 usage() {
-	cat <<'USAGE'
+	cat <<USAGE
 Usage: build.sh [--help|-h] [--build|--version]
 
-Build foot 1.28.0 (fcft 3.3.3 and tllist 1.1.0 as static subprojects, utf8proc 2.9.0
-as a static lib, meson 1.12.1 run as `python3 -I meson.py`, ninja 1.13.2) and package
+Build foot $FOOT_VER (fcft $FCFT_VER and tllist $TLLIST_VER as static subprojects, utf8proc $UTF8PROC_VER
+as a static lib, meson $MESON_VER run as \`python3 -I meson.py\`, ninja $NINJA_VER) and package
 it for scripts/foot/install.sh. Dev host only: needs gcc, python3, pkg-config,
 wayland-scanner, unzip, curl or wget, and the foot -dev packages.
 
 Sources are sha256-pinned and cached under target/foot-build/dl/ (seeded from
 target/spike-foot/dl/ when present). Output, under target/foot-build/:
-  foot-1.28.0-<arch>.tar.gz       top dir foot-1.28.0/ with bin/, share/
-  foot-1.28.0-<arch>.ldd.txt      ldd of foot and footclient; any `not found` fails the build
+  foot-$FOOT_VER-<arch>.tar.gz       top dir foot-$FOOT_VER/ with bin/, share/
+  foot-$FOOT_VER-<arch>.ldd.txt      ldd of foot and footclient; any \`not found\` fails the build
 
   --build, --version   print the tool-scoped build id (this repo's: last commit touching it)
   --help, -h           print this usage
@@ -29,13 +29,7 @@ USAGE
 }
 
 here=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
-for arg in "$@"; do
-	case "$arg" in --help | -h)
-		usage
-		exit 0
-		;;
-	esac
-done
+case " $* " in *" --help "* | *" -h "*) usage; exit 0 ;; esac
 # shellcheck source=../lib/build-id.sh
 . "$here/../lib/build-id.sh"
 build_flags "${BASH_SOURCE[0]}" "$@"
@@ -98,11 +92,10 @@ done
 src=$work/src
 rm -rf "$src" "$work/build" "$work/stage" "$work/utf8proc-out"
 mkdir -p "$src" "$work/stage" "$work/utf8proc-out/pc"
-tar -xzf "$dl/foot/foot-$FOOT_VER.tar.gz" -C "$src"
-tar -xzf "$dl/fcft/fcft-$FCFT_VER.tar.gz" -C "$src"
-tar -xzf "$dl/tllist/tllist-$TLLIST_VER.tar.gz" -C "$src"
-tar -xzf "$dl/utf8proc/utf8proc-$UTF8PROC_VER.tar.gz" -C "$src"
-tar -xzf "$dl/meson/meson-$MESON_VER.tar.gz" -C "$src"
+for pin in "${pins[@]}"; do
+	IFS='|' read -r _ rel _ _ <<<"$pin"
+	case "$rel" in *.tar.gz) tar -xzf "$dl/$rel" -C "$src" ;; esac
+done
 mkdir -p "$src/ninja"
 unzip -q -o "$dl/ninja/ninja-linux.zip" -d "$src/ninja"
 chmod +x "$src/ninja/ninja"

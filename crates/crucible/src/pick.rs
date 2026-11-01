@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use crucible_compositor::ipc::{Candidate, CandidateKind, Request, Response, parse_candidates};
 use crucible_persist::PickTarget;
 
+use crate::cli::{Parsed, help_requested};
 use crate::client::{Client, ClientError};
 use crate::fuzzy;
 use crate::overlay::list::{Body, Frame, ListState};
@@ -16,7 +17,6 @@ use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
 use crate::table::{self, Col};
-use crate::{Parsed, help_requested};
 
 /// The command-key glyph (`⌘`) prefixing a pinned row's slot number; matches the header's.
 const SUPER_GLYPH: char = '\u{2318}';
@@ -333,16 +333,9 @@ fn home_dir() -> Option<String> {
 
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    let parsed = match parse_args(args) {
-        Ok(Parsed::Run(r)) => r,
-        Ok(Parsed::Help) => {
-            print!("{USAGE}");
-            return 0;
-        }
-        Err(e) => {
-            eprintln!("crucible pick: {e}\n\n{USAGE}");
-            return 2;
-        }
+    let parsed = match crate::cli::parse_or_exit("pick", USAGE, parse_args(args)) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
     // The one place `$HOME` is read; every constructor takes it.
     let home = home_dir();

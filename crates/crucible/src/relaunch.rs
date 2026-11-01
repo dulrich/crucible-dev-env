@@ -12,9 +12,9 @@ use std::path::Path;
 use crucible_compositor::ipc::{Request, Response};
 use crucible_persist::RelaunchWrapper;
 
+use crate::cli::{Parsed, help_requested};
 use crate::client::{Client, ClientError, socket_from_env};
 use crate::tty::RawGuard;
-use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible relaunch --help`.
 pub const USAGE: &str = "usage: crucible relaunch [--app-id <id>] -- <cmdline>\n\nRestored-app placeholder used by CDE: shows which app was in this slot and waits. Enter asks the\ncompositor (over $CDE_SOCKET) to relaunch the app in the same pane slot and close this placeholder;\nCtrl+C, Ctrl+D or EOF dismisses it. The command is one argument (a shell string) and is never run\nby this process.\n";
@@ -66,16 +66,9 @@ pub fn parse_args(args: &[String]) -> Result<Parsed<RelaunchWrapper>, String> {
 
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    let parsed = match parse_args(args) {
-        Ok(Parsed::Run(p)) => p,
-        Ok(Parsed::Help) => {
-            print!("{USAGE}");
-            return 0;
-        }
-        Err(e) => {
-            eprintln!("crucible relaunch: {e}\n\n{USAGE}");
-            return 2;
-        }
+    let parsed = match crate::cli::parse_or_exit("relaunch", USAGE, parse_args(args)) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
     let mut out = std::io::stdout();
     let _ = writeln!(out, "{}", banner(&parsed));

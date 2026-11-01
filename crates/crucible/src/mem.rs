@@ -15,8 +15,8 @@ use std::path::Path;
 use crucible_persist::capture::{ProcInfo, ProcSnapshot, ancestors, is_shell_program};
 use crucible_persist::{crucible_subcommand, is_cde_process};
 
+use crate::cli::{Parsed, help_requested};
 use crate::table::{self, Col};
-use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible mem --help`.
 pub const USAGE: &str = "usage: crucible mem [--pid <n>]\n\nReal memory per logical app of a running CDE: one row per direct child process of the compositor\n(PSS, swap, process count, label), largest PSS first, then the compositor itself and a TOTAL.\nPSS and swap are summed over the child's whole process subtree from /proc/<pid>/smaps_rollup. The\nlabel is the child's name plus the deepest process under it that is not a shell and\nnot one of CDE's own `crucible` processes (ties: largest PSS), e.g. `ghostty › htop`. A child whose\nsubtree holds the overlay host gets ` (overlay)` appended.\n\n  --pid <n>    the compositor's pid. Without it, the compositor is the process owned by you whose\n               command is `crucible` with `--winit` or `--tty-udev`; with several, the one that is an\n               ancestor of this command, else the lowest pid. None found: message on stderr, exit 1.\n  -h, --help   print this usage and exit 0\n\nOnly processes CDE spawned itself are counted: D-Bus-activated apps parented to `systemd --user`\nare not. A process that is unreadable or vanished counts as zero and its row is marked `*`.\n";
@@ -266,16 +266,9 @@ pub fn format_report(pid: u32, r: &Report) -> String {
 
 /// Runs the subcommand; returns the exit code.
 pub fn run(args: &[String]) -> i32 {
-    let parsed = match parse_args(args) {
-        Ok(Parsed::Run(p)) => p,
-        Ok(Parsed::Help) => {
-            print!("{USAGE}");
-            return 0;
-        }
-        Err(e) => {
-            eprintln!("crucible mem: {e}\n\n{USAGE}");
-            return 2;
-        }
+    let parsed = match crate::cli::parse_or_exit("mem", USAGE, parse_args(args)) {
+        Ok(v) => v,
+        Err(code) => return code,
     };
     let proc_root = Path::new("/proc");
     let pid = parsed.pid.or_else(|| {
