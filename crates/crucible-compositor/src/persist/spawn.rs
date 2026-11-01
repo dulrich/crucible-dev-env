@@ -176,7 +176,7 @@ fn wrapper_args(exec_flag: &str, crucible: &Path, sub: &str, args: Vec<OsString>
 
 /// The terminal arguments for `run-in-terminal` / `run-tui`: `<exec-flag> <crucible> resume --now
 /// [--exit] --cwd <dir> -- <command>` (the command is ONE element); `exit` (`run-tui`) closes the
-/// terminal when the command exits.
+/// terminal when the command exits (unless it exits abnormally: `resume` then shows the crash banner first).
 #[must_use]
 pub fn run_in_terminal_args(
     exec_flag: &str,
@@ -502,7 +502,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     /// `run-tui`: as [`Self::run_in_terminal_checked`], but `resume --exit` closes the terminal
-    /// when the program exits.
+    /// when the program exits (unless it exits abnormally: `resume` then shows the crash banner first).
     ///
     /// # Errors
     /// As [`Self::run_checked`].

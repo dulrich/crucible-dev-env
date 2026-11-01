@@ -133,7 +133,7 @@ pub enum Request {
     /// answers `err <reason>`.
     Exec(String),
     /// `run-tui <command>` — like `exec run-in-terminal`, but the terminal closes when the command
-    /// exits (`crucible resume --now --exit`).
+    /// exits (`crucible resume --now --exit`), unless the command exits abnormally: `resume` then shows the crash banner first.
     RunTui(String),
     /// `run-term <program>` — spawn the bare emulator `program` (no arguments) as a CDE terminal in
     /// the focused pane; the launcher's TERM rows.

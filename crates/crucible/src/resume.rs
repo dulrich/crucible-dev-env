@@ -9,20 +9,24 @@
 //! SIGQUIT handlers (caught, not ignored), so a Ctrl+C kills only the command; caught
 //! dispositions reset to default across `exec`, so the command keeps normal Ctrl+C semantics.
 //!
+//! Crash banner: when the command dies abnormally (a fatal signal other than SIGINT, or a nonzero
+//! exit code other than 130), `resume` keeps the pane and shows `<cmd> exited (<label>). Press Enter
+//! to run it again, or Ctrl+C for a shell.` instead of starting the shell straight away.
+//!
 //! `--exit` (only valid with `--now`, as CDE's `run-tui` sends it): when the command finishes, `resume`
 //! exits with the command's exit code instead of starting a shell, so the terminal window closes.
 
 use crucible_persist::ResumeWrapper;
 use std::ffi::OsString;
 use std::io::Read;
-use std::os::unix::process::CommandExt;
-use std::process::Command;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::process::{Command, ExitStatus};
 
 use crate::tty::RawGuard;
 use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible resume --help`.
-pub const USAGE: &str = "usage: crucible resume [--now [--exit]] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). With --now, --exit exits with the command's exit code instead of starting a shell afterwards (--exit without --now is a usage error). Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
+pub const USAGE: &str = "usage: crucible resume [--now [--exit]] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). With --now, --exit exits with the command's exit code instead of starting a shell afterwards (--exit without --now is a usage error). If the command exits abnormally (a crash signal or a nonzero exit code other than a Ctrl+C), a crash banner offers Enter to run it again or Ctrl+C for a shell (or to close the terminal with --exit). Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
 
 /// The banner shown before waiting (or before the immediate shell).
 #[must_use]
@@ -103,19 +107,94 @@ pub fn run(args: &[String]) -> i32 {
         return exec_shell(&shell);
     };
     ignore_interrupts_while_resident();
-    if parsed.now || wait_for_choice() == Wait::Run {
-        let code = run_command(&shell, &cmd);
-        if parsed.exit {
-            return code.unwrap_or(0);
+    let mut run_it = parsed.now || wait_for_choice() == Wait::Run;
+    let mut last = None;
+    while run_it {
+        last = run_command(&shell, &cmd);
+        match last.map_or(Outcome::Clean, exit_outcome) {
+            Outcome::Abnormal(label) => {
+                println!("{}", crash_banner(&cmd, &label, parsed.exit));
+                run_it = wait_for_choice() == Wait::Run;
+            }
+            Outcome::Clean | Outcome::Interrupted => run_it = false,
         }
+    }
+    if parsed.exit {
+        return return_code(last);
     }
     exec_shell(&shell)
 }
 
+/// How a command's exit status is treated.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Exit code 0.
+    Clean,
+    /// SIGINT or exit code 130: the user quit it.
+    Interrupted,
+    /// A crash: the label names the signal or `code <n>`.
+    Abnormal(String),
+}
+
+/// Classifies an exit status. A fatal signal other than SIGINT, or a nonzero code other than 130,
+/// is abnormal. `$SHELL -c` may report a crashed child as code 128+n; that is just `code <n>`.
+#[must_use]
+pub fn exit_outcome(status: ExitStatus) -> Outcome {
+    if let Some(sig) = status.signal() {
+        return match sig {
+            libc::SIGINT => Outcome::Interrupted,
+            other => Outcome::Abnormal(signal_name(other)),
+        };
+    }
+    match status.code() {
+        Some(0) | None => Outcome::Clean,
+        Some(130) => Outcome::Interrupted,
+        Some(n) => Outcome::Abnormal(format!("code {n}")),
+    }
+}
+
+fn signal_name(sig: i32) -> String {
+    let name = match sig {
+        libc::SIGABRT => "SIGABRT",
+        libc::SIGSEGV => "SIGSEGV",
+        libc::SIGBUS => "SIGBUS",
+        libc::SIGFPE => "SIGFPE",
+        libc::SIGILL => "SIGILL",
+        libc::SIGKILL => "SIGKILL",
+        libc::SIGTERM => "SIGTERM",
+        libc::SIGHUP => "SIGHUP",
+        libc::SIGPIPE => "SIGPIPE",
+        libc::SIGQUIT => "SIGQUIT",
+        libc::SIGTRAP => "SIGTRAP",
+        libc::SIGSYS => "SIGSYS",
+        libc::SIGUSR1 => "SIGUSR1",
+        libc::SIGUSR2 => "SIGUSR2",
+        _ => return format!("signal {sig}"),
+    };
+    name.to_string()
+}
+
+/// The crash banner shown after an abnormal exit.
+#[must_use]
+pub fn crash_banner(cmd: &str, label: &str, exit: bool) -> String {
+    let fallback = if exit {
+        "to close this terminal"
+    } else {
+        "for a shell"
+    };
+    format!("{cmd} exited ({label}). Press Enter to run it again, or Ctrl+C {fallback}.")
+}
+
+/// The `--exit` return code: the command's exit code; a signal-killed or unknown status is 0.
+#[must_use]
+pub fn return_code(status: Option<ExitStatus>) -> i32 {
+    status.and_then(|s| s.code()).unwrap_or(0)
+}
+
 /// Runs `$shell -c <cmd>` as a child (the command string is one argument, never re-split) and
 /// waits for it. Failures are reported; the caller execs the shell either way (unless `--exit`).
-/// Returns the command's exit code, or `None` when it could not be determined.
-fn run_command(shell: &OsString, cmd: &str) -> Option<i32> {
+/// Returns the command's exit status, or `None` when it could not be determined.
+fn run_command(shell: &OsString, cmd: &str) -> Option<ExitStatus> {
     match Command::new(shell).arg("-c").arg(cmd).spawn() {
         Ok(mut child) => loop {
             match child.wait() {
@@ -124,7 +203,7 @@ fn run_command(shell: &OsString, cmd: &str) -> Option<i32> {
                     eprintln!("crucible resume: waiting for the command failed: {e}");
                     break None;
                 }
-                Ok(status) => break status.code(),
+                Ok(status) => break Some(status),
             }
         },
         Err(e) => {
@@ -344,5 +423,49 @@ mod tests {
         assert_eq!(classify(Some(0x04)), Wait::Shell);
         assert_eq!(classify(None), Wait::Shell);
         assert_eq!(classify(Some(b'x')), Wait::Ignore);
+    }
+
+    fn sig(n: i32) -> ExitStatus {
+        ExitStatus::from_raw(n)
+    }
+
+    fn code(c: i32) -> ExitStatus {
+        ExitStatus::from_raw(c << 8)
+    }
+
+    #[test]
+    fn exit_outcome_classifies() {
+        assert_eq!(
+            exit_outcome(sig(libc::SIGABRT)),
+            Outcome::Abnormal("SIGABRT".into())
+        );
+        assert_eq!(
+            exit_outcome(sig(libc::SIGSEGV)),
+            Outcome::Abnormal("SIGSEGV".into())
+        );
+        assert_eq!(exit_outcome(sig(libc::SIGINT)), Outcome::Interrupted);
+        assert_eq!(exit_outcome(code(0)), Outcome::Clean);
+        assert_eq!(exit_outcome(code(130)), Outcome::Interrupted);
+        assert_eq!(exit_outcome(code(1)), Outcome::Abnormal("code 1".into()));
+        assert_eq!(exit_outcome(sig(50)), Outcome::Abnormal("signal 50".into()));
+    }
+
+    #[test]
+    fn crash_banner_variants() {
+        assert_eq!(
+            crash_banner("htop", "SIGSEGV", false),
+            "htop exited (SIGSEGV). Press Enter to run it again, or Ctrl+C for a shell."
+        );
+        assert_eq!(
+            crash_banner("htop", "code 1", true),
+            "htop exited (code 1). Press Enter to run it again, or Ctrl+C to close this terminal."
+        );
+    }
+
+    #[test]
+    fn exit_return_code_mapping() {
+        assert_eq!(return_code(Some(code(3))), 3);
+        assert_eq!(return_code(Some(sig(libc::SIGABRT))), 0);
+        assert_eq!(return_code(None), 0);
     }
 }
