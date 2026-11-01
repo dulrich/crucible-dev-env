@@ -34,6 +34,7 @@
 mod execute;
 
 pub(crate) use execute::{ActionError, Origin, admit};
+mod hover;
 mod keyboard;
 mod modal;
 mod pointer;
@@ -47,6 +48,7 @@ use crate::winit::WinitData;
 /// [`keyboard::SuppressedKeys`]'s docs; re-exported here (rather than making the `keyboard`
 /// submodule itself public) since [`crate::state::CrucibleState::suppressed_keys`] is a public
 /// field and therefore needs a public path to its type.
+pub use hover::HoverTarget;
 pub use keyboard::SuppressedKeys;
 
 impl CrucibleState<WinitData> {

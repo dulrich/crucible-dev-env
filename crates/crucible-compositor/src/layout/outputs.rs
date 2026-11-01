@@ -62,13 +62,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// is otherwise unbound); every subsequent output calls [`World::add_output`] to get its own
     /// independent workspace stack, its seed named by `new_workspace_name` off the live and saved
     /// names. Either way the chosen model [`OutputId`] is stashed in the
-    /// Smithay output's `user_data()` and its stored rect is set to `rect` (the live pixel geometry
-    /// in global Space coordinates). Returns the model [`OutputId`]. Idempotent: re-registering an
-    /// already-bound output only refreshes its rect.
-    pub fn register_output(&mut self, output: &Output, rect: Rect) -> OutputId {
+    /// Smithay output's `user_data()` and its stored rect is set to the output's live `Space`
+    /// geometry (logical, global Space coordinates). Returns the model [`OutputId`]. Idempotent:
+    /// re-registering an already-bound output only refreshes its rect.
+    ///
+    /// The output must already be mapped into the `Space` (with its scale set before mapping);
+    /// registering an unmapped output is a programming error: it is logged and skipped (`None`).
+    pub fn register_output(&mut self, output: &Output) -> Option<OutputId> {
+        let Some(rect) = self.output_rect(output) else {
+            warn!(output = %output.name(), "register_output before map_output; ignoring");
+            return None;
+        };
         if let Some(existing) = model_output_id(output) {
             self.set_model_output_rect(existing, rect);
-            return existing;
+            return Some(existing);
         }
 
         // The binding decision (adopt the initial model output vs. allocate) is the model half of
@@ -79,7 +86,22 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let model_id = self.layout.bind_output(&bound, rect, &saved);
         set_model_output_id(output, model_id);
         self.apply_layout();
-        model_id
+        Some(model_id)
+    }
+
+    /// The model rect of a mapped `output`: its `Space` geometry, or `None` while unmapped.
+    fn output_rect(&self, output: &Output) -> Option<Rect> {
+        let geo = self.space.output_geometry(output)?;
+        Some(Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h))
+    }
+
+    /// Re-arranges `output`'s layer map in place, then re-syncs its model rect from the `Space`.
+    ///
+    /// The per-output step shared by [`Backend::outputs_changed`] and the udev reflow; the caller
+    /// re-applies the layout once after its loop.
+    pub fn relayout_output(&mut self, output: &Output) {
+        smithay::desktop::layer_map_for_output(output).arrange();
+        self.sync_output_rect(output);
     }
 
     /// Updates the stored model rect for `output` from its current Space geometry.
@@ -90,10 +112,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let Some(model_id) = model_output_id(output) else {
             return;
         };
-        let Some(geo) = self.space.output_geometry(output) else {
+        let Some(rect) = self.output_rect(output) else {
             return;
         };
-        let rect = Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h);
         self.set_model_output_rect(model_id, rect);
         self.lock_output_resized(output);
     }

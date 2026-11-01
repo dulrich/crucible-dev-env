@@ -33,6 +33,9 @@ pub mod layout;
 /// XWayland integration: server lifecycle and X11 window management.
 pub mod xwayland;
 
+/// The clipboard bridge, primary selection and pointer drag-and-drop.
+pub mod selection;
+
 /// Once-per-process `autostart` commands.
 pub mod autostart;
 

@@ -89,21 +89,33 @@ pub struct RasterText {
     pub data: Vec<u8>,
 }
 
-/// Lays out `text` horizontally at `px` pixels and rasterizes it in `rgba` (straight alpha in,
-/// premultiplied `Argb8888` out). Empty text yields a 0×0 raster.
-pub fn rasterize(font: &fontdue::Font, text: &str, px: f32, rgba: [u8; 4]) -> RasterText {
+/// Lays `text` out horizontally at `px` pixels in `font`.
+fn layout_text(font: &fontdue::Font, text: &str, px: f32) -> fontdue::layout::Layout {
     use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
     let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
     layout.reset(&LayoutSettings::default());
     layout.append(&[font], &TextStyle::new(text, px, 0));
+    layout
+}
 
-    let glyphs = layout.glyphs();
-    let width = glyphs
+/// The width in pixels of a laid-out `layout`: the rightmost glyph extent (0 when empty).
+fn glyph_extent_width(layout: &fontdue::layout::Layout) -> i32 {
+    layout
+        .glyphs()
         .iter()
         .map(|g| (g.x + g.width as f32).ceil() as i32)
         .max()
         .unwrap_or(0)
-        .max(0);
+        .max(0)
+}
+
+/// Lays out `text` horizontally at `px` pixels and rasterizes it in `rgba` (straight alpha in,
+/// premultiplied `Argb8888` out). Empty text yields a 0×0 raster.
+pub fn rasterize(font: &fontdue::Font, text: &str, px: f32, rgba: [u8; 4]) -> RasterText {
+    let layout = layout_text(font, text, px);
+
+    let glyphs = layout.glyphs();
+    let width = glyph_extent_width(&layout);
     let height = if glyphs.is_empty() {
         0
     } else {
@@ -247,20 +259,8 @@ impl TextRenderer {
     /// Width in pixels `text` lays out to at `px` (no rasterization); `None` when text is
     /// disabled. Used by the header to size segments and hit-test clicks.
     pub fn measure(&self, text: &str, px: u32) -> Option<i32> {
-        use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
         let font = self.font.as_ref()?;
-        let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-        layout.reset(&LayoutSettings::default());
-        layout.append(&[font], &TextStyle::new(text, px as f32, 0));
-        Some(
-            layout
-                .glyphs()
-                .iter()
-                .map(|g| (g.x + g.width as f32).ceil() as i32)
-                .max()
-                .unwrap_or(0)
-                .max(0),
-        )
+        Some(glyph_extent_width(&layout_text(font, text, px as f32)))
     }
 
     /// Number of rasterizations (cache misses) so far.

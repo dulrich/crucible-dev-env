@@ -16,10 +16,11 @@ use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 
 use tracing::{info, warn};
 
+use super::hover::{HoverTarget, hover_entered, hover_pane_key};
 use super::modal::{InputMode, hover_defers, hover_moves_focus, hover_tracks, press_route};
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
-use crate::state::{Backend, CrucibleState, HoverTarget, hover_entered, hover_pane_key};
+use crate::state::{Backend, CrucibleState};
 
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Maps absolute winit pointer motion into the output and delivers it to the seat.

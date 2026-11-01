@@ -25,26 +25,14 @@
 //! [`XwmHandler::resize_request`] are deliberate no-ops. Placement comes from the projection, never
 //! from the client.
 
-use std::os::unix::io::OwnedFd;
+use std::os::unix::{io::OwnedFd, net::UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use smithay::{
+    reexports::wayland_server::Client,
     utils::{Logical, Rectangle},
-    wayland::{
-        compositor::CompositorHandler,
-        selection::{
-            SelectionTarget,
-            data_device::{
-                clear_data_device_selection, current_data_device_selection_userdata,
-                request_data_device_client_selection, set_data_device_selection,
-            },
-            primary_selection::{
-                clear_primary_selection, current_primary_selection_userdata,
-                request_primary_client_selection, set_primary_selection,
-            },
-        },
-    },
+    wayland::{compositor::CompositorHandler, selection::SelectionTarget},
     xwayland::{
         X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler,
         xwm::{Reorder, ResizeEdge as X11ResizeEdge, XwmId},
@@ -55,25 +43,14 @@ use tracing::{debug, error, info, trace, warn};
 use crate::{
     element::WindowElement,
     layout::{Binding, Teardown},
+    selection::{
+        claim_x11_selection, x11_cleared_selection, x11_new_selection, x11_send_selection,
+    },
     state::{Backend, CrucibleState},
 };
 
 /// Environment variable that overrides the scale applied to XWayland clients.
 const XWAYLAND_SCALE_ENV: &str = "CDE_XWAYLAND_SCALE";
-
-/// Flush queued X11 requests (notably `SetSelectionOwner`) to the X server.
-///
-/// Smithay's `X11Wm::new_selection` queues `SetSelectionOwner` on the x11rb connection without
-/// flushing, so the ownership change only reaches XWayland on the next X11 event and an X11
-/// client reading right after a Wayland copy sees the stale owner. `get_randr_primary_output`
-/// is a public round trip whose `.reply()` forces x11rb to flush everything queued before it.
-/// It blocks on the X server, which never waits on the compositor to answer a RandR query;
-/// that cost is accepted for a once-per-copy event.
-pub(crate) fn flush_xwm(wm: &X11Wm) {
-    if let Err(err) = wm.get_randr_primary_output() {
-        debug!(?err, "XWM flush round trip failed");
-    }
-}
 
 /// Resolves the scale applied to XWayland clients.
 ///
@@ -167,7 +144,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
         };
 
-        let display_handle = self.display_handle.clone();
         let ret = self
             .handle
             .insert_source(xwayland, move |event, _, data| match event {
@@ -175,55 +151,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     x11_socket,
                     display_number,
                 } => {
-                    // X11 clients can't interpret fractional wl_output scale; apply it per-client.
-                    let scale = xwayland_scale(
-                        std::env::var(XWAYLAND_SCALE_ENV).ok().as_deref(),
-                        data.config.max_output_scale(),
-                    );
-                    data.client_compositor_state(&client)
-                        .set_client_scale(scale);
-
-                    match X11Wm::start_wm(
-                        data.handle.clone(),
-                        &display_handle,
-                        x11_socket,
-                        client.clone(),
-                    ) {
-                        Ok(mut wm) => {
-                            // Own both X11 selections from the start (with no data yet).
-                            // `X11Wm::new_selection` queues `SetSelectionOwner` without
-                            // flushing, so an ownership change only reaches the X server on
-                            // the next X11 event, and an `xclip` started after a Wayland copy
-                            // loses that race. Owning early means a later Wayland copy only
-                            // updates the mime types; `flush_xwm` below (and after every later
-                            // `new_selection`) pushes the queued ownership out immediately.
-                            for ty in [SelectionTarget::Clipboard, SelectionTarget::Primary] {
-                                if let Err(err) = wm.new_selection(ty, Some(Vec::new())) {
-                                    warn!(?err, ?ty, "Failed to claim XWayland selection");
-                                }
-                            }
-                            flush_xwm(&wm);
-                            data.xwm = Some(wm);
-                            data.xdisplay = Some(display_number);
-                            // Export DISPLAY so X11 children spawned by CDE reach this server.
-                            // SAFETY: set during single-threaded event-loop dispatch, before any
-                            // child is spawned that would read it.
-                            #[allow(unsafe_code)]
-                            unsafe {
-                                std::env::set_var("DISPLAY", format!(":{display_number}"));
-                            }
-                            info!(
-                                display = display_number,
-                                "XWayland ready (DISPLAY=:{display_number})"
-                            );
-                            merge_xresources(display_number);
-                            data.run_autostart();
-                        }
-                        Err(err) => {
-                            error!(%err, "Failed to attach X11 window manager");
-                            data.run_autostart();
-                        }
-                    }
+                    data.on_xwayland_ready(&client, x11_socket, display_number);
+                    // Success or WM-attach failure alike: autostart runs exactly once.
+                    data.run_autostart();
                 }
                 XWaylandEvent::Error => {
                     warn!("XWayland crashed on startup");
@@ -233,6 +163,58 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Err(err) = ret {
             error!(%err, "Failed to insert the XWayland source into the event loop");
             self.run_autostart();
+        }
+    }
+
+    /// Handles [`XWaylandEvent::Ready`]: applies the per-client scale, attaches the [`X11Wm`],
+    /// claims both selections, records the `DISPLAY` number and exports it.
+    ///
+    /// A failed WM attach is logged and leaves `xwm` unset. Does **not** run the autostart; the
+    /// event-loop callback does that once per outcome.
+    fn on_xwayland_ready(&mut self, client: &Client, x11_socket: UnixStream, display_number: u32) {
+        // X11 clients can't interpret fractional wl_output scale; apply it per-client.
+        let scale = xwayland_scale(
+            std::env::var(XWAYLAND_SCALE_ENV).ok().as_deref(),
+            self.config.max_output_scale(),
+        );
+        self.client_compositor_state(client).set_client_scale(scale);
+
+        match X11Wm::start_wm(
+            self.handle.clone(),
+            &self.display_handle,
+            x11_socket,
+            client.clone(),
+        ) {
+            Ok(mut wm) => {
+                // Own both X11 selections from the start (with no data yet).
+                // `X11Wm::new_selection` queues `SetSelectionOwner` without
+                // flushing, so an ownership change only reaches the X server on
+                // the next X11 event, and an `xclip` started after a Wayland copy
+                // loses that race. Owning early means a later Wayland copy only
+                // updates the mime types; `claim_x11_selection` flushes each claim
+                // (as it does after every later Wayland copy) so the queued
+                // ownership goes out immediately.
+                for ty in [SelectionTarget::Clipboard, SelectionTarget::Primary] {
+                    claim_x11_selection(&mut wm, ty, Some(Vec::new()));
+                }
+                self.xwm = Some(wm);
+                self.xdisplay = Some(display_number);
+                // Export DISPLAY so X11 children spawned by CDE reach this server.
+                // SAFETY: set during single-threaded event-loop dispatch, before any
+                // child is spawned that would read it.
+                #[allow(unsafe_code)]
+                unsafe {
+                    std::env::set_var("DISPLAY", format!(":{display_number}"));
+                }
+                info!(
+                    display = display_number,
+                    "XWayland ready (DISPLAY=:{display_number})"
+                );
+                merge_xresources(display_number);
+            }
+            Err(err) => {
+                error!(%err, "Failed to attach X11 window manager");
+            }
         }
     }
 
@@ -372,46 +354,15 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
         mime_type: String,
         fd: OwnedFd,
     ) {
-        // X11 client asked for the current Wayland selection: pump it to the provided fd.
-        match selection {
-            SelectionTarget::Clipboard => {
-                if let Err(err) = request_data_device_client_selection(&self.seat, mime_type, fd) {
-                    error!(?err, "Failed to send Wayland clipboard to XWayland");
-                }
-            }
-            SelectionTarget::Primary => {
-                if let Err(err) = request_primary_client_selection(&self.seat, mime_type, fd) {
-                    error!(?err, "Failed to send Wayland primary selection to XWayland");
-                }
-            }
-        }
+        x11_send_selection(self, selection, mime_type, fd);
     }
 
     fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
-        // An X11 client took ownership of a selection: advertise it to Wayland clients.
-        match selection {
-            SelectionTarget::Clipboard => {
-                set_data_device_selection(&self.display_handle, &self.seat, mime_types, ());
-            }
-            SelectionTarget::Primary => {
-                set_primary_selection(&self.display_handle, &self.seat, mime_types, ());
-            }
-        }
+        x11_new_selection(self, selection, mime_types);
     }
 
     fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
-        match selection {
-            SelectionTarget::Clipboard => {
-                if current_data_device_selection_userdata(&self.seat).is_some() {
-                    clear_data_device_selection(&self.display_handle, &self.seat);
-                }
-            }
-            SelectionTarget::Primary => {
-                if current_primary_selection_userdata(&self.seat).is_some() {
-                    clear_primary_selection(&self.display_handle, &self.seat);
-                }
-            }
-        }
+        x11_cleared_selection(self, selection);
     }
 
     fn disconnected(&mut self, _xwm: XwmId) {

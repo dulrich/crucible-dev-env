@@ -22,8 +22,8 @@
 //!
 //! Selected at runtime via `--tty-udev`. `zwp_linux_dmabuf_v1` is advertised with default feedback
 //! from the primary GPU plus per-output render/scanout feedback (see [`output`] and [`render`]).
-//! Compared to anvil this backend omits `drm_syncobj`, DRM leasing, the on-screen FPS overlay, DnD-icon
-//! rendering, and the multi-GPU pointer-texture cache; CDE draws its self-contained default cursor
+//! Compared to anvil this backend omits `drm_syncobj`, DRM leasing, the on-screen FPS overlay and the
+//! multi-GPU pointer-texture cache (the DnD icon is composed by [`crate::render::frame_elements`]); CDE draws its self-contained default cursor
 //! via [`PointerElement`](crate::drawing::PointerElement) just like the winit path.
 //!
 //! # Module map

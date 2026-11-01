@@ -217,10 +217,7 @@ pub fn run_winit() {
     state.space.map_output(&output, (0, 0));
     // Adopt the model's initial output for this single winit output and size it to its logical
     // size (the window's pixels divided by the configured scale).
-    state.register_output(
-        &output,
-        crate::state::logical_output_rect((0, 0), size, scale.fractional_scale()),
-    );
+    state.register_output(&output);
     // The output exists now: restore the last session or open the cold-start picker.
     state.start_session();
 

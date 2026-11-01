@@ -232,9 +232,9 @@ fn apply_positions(state: &mut CrucibleState<UdevData>, plan: &OutputPlan<UdevOu
         };
         state.space.map_output(&output, placement.position);
         output.change_current_state(None, None, None, Some(placement.position.into()));
-        smithay::desktop::layer_map_for_output(&output).arrange();
-        // Keep the model's stored rect origin/size in sync with the new Space position.
-        state.sync_output_rect(&output);
+        // Re-arrange the layer map and keep the model's stored rect origin/size in sync with the
+        // new Space position.
+        state.relayout_output(&output);
     }
     // Output positions/sizes changed: re-assert the model-driven projection (idempotent).
     state.apply_layout();
@@ -345,8 +345,6 @@ impl CrucibleState<UdevData> {
         // Snapshot the data needed to register this connector with the model once the `device`
         // borrow is released (the registration must touch `self`, but `device` borrows `self`).
         let register_output = output.clone();
-        let register_rect =
-            crate::state::logical_output_rect(position, wl_mode.size, scale.fractional_scale());
 
         let planes = match drm_device.planes(&crtc) {
             Ok(planes) => planes,
@@ -397,7 +395,7 @@ impl CrucibleState<UdevData> {
         // Register this connector with the model now that the `device` borrow is released: the first
         // compositor output adopts the existing `World::new()` output; subsequent connectors get
         // their own independent workspace stack via `add_output`, seeded off the live and saved names.
-        self.register_output(&register_output, register_rect);
+        self.register_output(&register_output);
 
         // Kick off rendering for the new output.
         self.handle
