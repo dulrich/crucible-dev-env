@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crucible_layout::{OutputId, WorkspaceId, World};
+use crucible_layout::{OutputId, PaneId, WorkspaceId, World};
 use crucible_persist::slots::slots_path;
 use tracing::{debug, info, warn};
 
@@ -13,17 +13,40 @@ use super::overlay::PickerMode;
 use super::skip_record;
 use crate::state::{Backend, CrucibleState};
 
-/// Workspace roots, last-viewed outputs and the pending slot pin (a field of
-/// [`super::PersistState`]).
+/// One workspace's persistence-side facts: the single record behind what used to be two parallel maps.
+#[derive(Debug, Default)]
+pub(super) struct WorkspaceMeta {
+    /// Folder root of the workspace (new terminals start there).
+    pub(super) root: Option<PathBuf>,
+    /// Connector name of the output the workspace was last viewed on (see [`note_last_viewed`]).
+    pub(super) last_output: Option<String>,
+}
+
+/// Per-workspace meta and the pending slot pin (a field of [`super::PersistState`]).
 #[derive(Debug, Default)]
 pub(super) struct WorkspaceState {
-    /// Folder roots of workspaces (new terminals start there).
-    pub(super) roots: HashMap<WorkspaceId, PathBuf>,
-    /// Connector name of the output each workspace was last viewed on (see [`note_last_viewed`]).
-    pub(super) last_output: HashMap<WorkspaceId, String>,
+    /// Per-workspace root and last-viewed output; dropped together by `forget_workspace`.
+    pub(super) meta: HashMap<WorkspaceId, WorkspaceMeta>,
     /// Slot `n` awaiting a workspace: set when an unpinned `Super+<n>` opens the picker, applied by the
     /// next successful open/new/open-folder, cleared by any overlay close or other overlay.
     pub(super) pending_pin: Option<u8>,
+}
+
+impl WorkspaceState {
+    /// The root of `ws`, if it has one.
+    pub(super) fn root(&self, ws: WorkspaceId) -> Option<&PathBuf> {
+        self.meta.get(&ws).and_then(|m| m.root.as_ref())
+    }
+
+    /// Sets (`Some`) or clears (`None`) the root of `ws`.
+    pub(super) fn set_root(&mut self, ws: WorkspaceId, root: Option<PathBuf>) {
+        self.meta.entry(ws).or_default().root = root;
+    }
+
+    /// The output `ws` was last viewed on, if known.
+    pub(super) fn last_output(&self, ws: WorkspaceId) -> Option<&String> {
+        self.meta.get(&ws).and_then(|m| m.last_output.as_ref())
+    }
 }
 
 /// Something that changes the pending slot pin (see [`pin_transition`]).
@@ -80,12 +103,13 @@ pub fn startup_seed_name(saved: &HashSet<String>) -> String {
 /// bound output. Workspaces not active anywhere (e.g. migrated inactive by an unplug) keep their
 /// entry untouched.
 pub fn note_last_viewed(
-    map: &mut HashMap<WorkspaceId, String>,
+    map: &mut HashMap<WorkspaceId, WorkspaceMeta>,
     viewed: &[(OutputId, WorkspaceId, String)],
 ) {
     for (_, ws, name) in viewed {
-        if map.get(ws) != Some(name) {
-            map.insert(*ws, name.clone());
+        let meta = map.entry(*ws).or_default();
+        if meta.last_output.as_ref() != Some(name) {
+            meta.last_output = Some(name.clone());
         }
     }
 }
@@ -210,7 +234,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 Some((id, ws, o.name()))
             })
             .collect();
-        note_last_viewed(&mut self.persist.workspace.last_output, &viewed);
+        note_last_viewed(&mut self.persist.workspace.meta, &viewed);
     }
 
     /// Closes the focused output's active workspace (`close-workspace`): refuse while a restore is
@@ -266,16 +290,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.end_window(meta.pid, Some(&element));
         }
         // (g) Drop per-workspace bookkeeping.
-        self.persist.workspace.roots.remove(&ws);
-        self.persist.workspace.last_output.remove(&ws);
+        self.forget_workspace(ws, &panes);
+        info!(?ws, "workspace closed");
+    }
+
+    /// Drops everything keyed by the removed workspace `ws`: its meta (root, last output), its
+    /// pending placements and its placed entries, by the `panes` it had.
+    pub(super) fn forget_workspace(&mut self, ws: WorkspaceId, panes: &[PaneId]) {
+        self.persist.workspace.meta.remove(&ws);
         self.persist
             .placement
             .pending
             .retain(|_, p| p.target.pane().is_none_or(|pane| !panes.contains(&pane)));
-        for pane in &panes {
+        for pane in panes {
             self.persist.placement.placed.remove(pane);
         }
-        info!(?ws, "workspace closed");
     }
 
     /// Moves the focused output's active workspace `delta` outputs along the model output order
@@ -342,7 +371,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(crate) fn slot_open(&mut self, n: u8) {
         let pinned = self.persist.slots.get(n).map(str::to_string);
         let target = match pinned {
-            None => SlotTarget::Unpinned,
+            None => SlotTarget::OpenPicker { stale: None },
             Some(name) => {
                 let live = self.layout.world.workspace_by_name(&name).is_some();
                 // An invalid name has no saved file, so it counts as not saved (stale).
@@ -351,20 +380,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
         };
         match target {
-            SlotTarget::Unpinned => {
-                info!(
-                    slot = n,
-                    "slot is not pinned; opening the picker in pin mode"
-                );
-                self.pin_event(PinEvent::SlotOpen(n));
-                self.open_picker(PickerMode::Pick);
-            }
-            SlotTarget::Stale(name) => {
-                info!(
-                    slot = n,
-                    workspace = name,
-                    "pinned workspace no longer exists; opening the picker in pin mode"
-                );
+            SlotTarget::OpenPicker { stale } => {
+                match stale {
+                    None => info!(
+                        slot = n,
+                        "slot is not pinned; opening the picker in pin mode"
+                    ),
+                    Some(name) => info!(
+                        slot = n,
+                        workspace = name,
+                        "pinned workspace no longer exists; opening the picker in pin mode"
+                    ),
+                }
                 self.pin_event(PinEvent::SlotOpen(n));
                 self.open_picker(PickerMode::Pick);
             }
@@ -385,10 +412,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
 /// What a slot press resolves to.
 #[derive(Debug, PartialEq, Eq)]
 enum SlotTarget {
-    /// No pin: open the pin-mode picker.
-    Unpinned,
-    /// Pinned to a workspace that is neither live nor saved: open the pin-mode picker.
-    Stale(String),
+    /// Open the pin-mode picker: no pin (`stale` is `None`), or a pin to a workspace that is
+    /// neither live nor saved (`stale` is its name).
+    OpenPicker { stale: Option<String> },
     /// Pinned to a live or saved workspace: open it (a failure is an `info!` no-op).
     Pinned(String),
 }
@@ -397,9 +423,9 @@ enum SlotTarget {
 /// workspace is live / has a saved file.
 fn slot_target(pinned: Option<String>, live: bool, saved: bool) -> SlotTarget {
     match pinned {
-        None => SlotTarget::Unpinned,
+        None => SlotTarget::OpenPicker { stale: None },
         Some(name) if live || saved => SlotTarget::Pinned(name),
-        Some(name) => SlotTarget::Stale(name),
+        Some(name) => SlotTarget::OpenPicker { stale: Some(name) },
     }
 }
 
@@ -410,10 +436,15 @@ mod tests {
     #[test]
     fn slot_target_decisions() {
         let pin = || Some("vault".to_string());
-        assert_eq!(slot_target(None, false, false), SlotTarget::Unpinned);
+        assert_eq!(
+            slot_target(None, false, false),
+            SlotTarget::OpenPicker { stale: None }
+        );
         assert_eq!(
             slot_target(pin(), false, false),
-            SlotTarget::Stale("vault".into())
+            SlotTarget::OpenPicker {
+                stale: Some("vault".into())
+            }
         );
         assert_eq!(
             slot_target(pin(), true, false),
@@ -570,14 +601,18 @@ mod tests {
         assert_eq!(restore_target(None, &connected, oid(2)), oid(2));
     }
 
+    fn last(map: &HashMap<WorkspaceId, WorkspaceMeta>, ws: WorkspaceId) -> Option<&str> {
+        map.get(&ws).and_then(|m| m.last_output.as_deref())
+    }
+
     #[test]
     fn note_last_viewed_records_only_active_workspaces() {
         let mut map = HashMap::new();
         let (a, b) = (WorkspaceId::from_raw(1), WorkspaceId::from_raw(2));
         note_last_viewed(&mut map, &[(oid(1), a, "DP-1".into())]);
         note_last_viewed(&mut map, &[(oid(1), b, "HDMI-1".into())]);
-        assert_eq!(map.get(&a).map(String::as_str), Some("DP-1"));
-        assert_eq!(map.get(&b).map(String::as_str), Some("HDMI-1"));
+        assert_eq!(last(&map, a), Some("DP-1"));
+        assert_eq!(last(&map, b), Some("HDMI-1"));
     }
 
     /// Audit E2: a workspace last viewed on A, migrated inactive onto B by A's unplug, still says A
@@ -609,15 +644,12 @@ mod tests {
         assert!(world.output(b).unwrap().workspaces().contains(&on_a));
         assert_eq!(world.output(b).unwrap().active_workspace(), on_b);
         note_last_viewed(&mut map, &viewed(&world, &[(b, "HDMI-1")]));
-        assert_eq!(map.get(&on_a).map(String::as_str), Some("DP-1"));
+        assert_eq!(last(&map, on_a), Some("DP-1"));
         // A reconnects as a fresh model output; the record (output = DP-1) targets it.
         let a2 = world
             .add_output(crucible_layout::Rect::new(0, 0, 1920, 1080), "3")
             .unwrap();
         let connected = vec![("HDMI-1".to_string(), b), ("DP-1".to_string(), a2)];
-        assert_eq!(
-            restore_target(map.get(&on_a).map(String::as_str), &connected, b),
-            a2
-        );
+        assert_eq!(restore_target(last(&map, on_a), &connected, b), a2);
     }
 }

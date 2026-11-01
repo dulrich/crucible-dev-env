@@ -459,13 +459,24 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
 /// Sends SIGTERM to `pid`; whether it was delivered.
 pub(super) fn terminate(pid: u32) -> bool {
+    terminate_with(pid, |pid| {
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).map_err(Into::into)
+    })
+}
+
+/// [`terminate`] with the signal sender injected: converts `pid` (`false` when it is not a valid
+/// process id) and reports whether `send` delivered.
+fn terminate_with(
+    pid: u32,
+    send: impl FnOnce(rustix::process::Pid) -> std::io::Result<()>,
+) -> bool {
     let Some(pid) = i32::try_from(pid)
         .ok()
         .and_then(rustix::process::Pid::from_raw)
     else {
         return false;
     };
-    match rustix::process::kill_process(pid, rustix::process::Signal::TERM) {
+    match send(pid) {
         Ok(()) => true,
         Err(err) => {
             warn!(%err, pid = pid.as_raw_nonzero().get(), "cannot end a placeholder wrapper");
@@ -484,16 +495,21 @@ mod tests {
     /// close, which makes ghostty confirm); an unknown pid reports failure so the caller falls
     /// back to closing the window.
     #[test]
-    fn terminate_ends_the_process_and_reports_failure() {
-        use std::os::unix::process::ExitStatusExt;
-        let mut child = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .unwrap();
-        assert!(terminate(child.id()));
-        let status = child.wait().unwrap();
-        const SIGTERM: i32 = 15; // Linux
-        assert_eq!(status.signal(), Some(SIGTERM));
+    fn terminate_converts_the_pid_and_reports_the_outcome() {
+        let sent = std::cell::Cell::new(None);
+        assert!(terminate_with(4242, |pid| {
+            sent.set(Some(pid.as_raw_nonzero().get()));
+            Ok(())
+        }));
+        assert_eq!(sent.get(), Some(4242));
+        assert!(!terminate_with(4242, |_| Err(std::io::Error::other(
+            "gone"
+        ))));
+        // A pid that is not a valid process id never reaches the sender.
+        assert!(!terminate_with(0, |_| panic!("sent to pid 0")));
+        assert!(!terminate_with(u32::MAX, |_| panic!(
+            "sent to a negative pid"
+        )));
         assert!(!terminate(0));
         assert!(!terminate(u32::MAX));
     }

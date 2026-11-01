@@ -13,7 +13,7 @@ use tracing::info;
 use super::placement::{
     ANCESTOR_DEPTH, Pending, SlotEntry, Target, match_pending, placeholder_cmdline, select_siblings,
 };
-use super::spawn::SpawnRequest;
+use super::spawn::{DirPolicy, SpawnRequest};
 use super::workspace::folder_workspace_name;
 use super::{capture_env, close_element, proc_root};
 use crate::input::{ActionError, Origin};
@@ -185,11 +185,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             app_id: capture.app_id.clone(),
             cmdline: Some(capture.cmdline.clone()),
         };
-        let root = self.persist.workspace.roots.get(&ws).cloned();
+        let dir = self.spawn_dir(DirPolicy::Inherit, ws);
         let pid = self
             .spawn(
                 SpawnRequest::shell_app(&capture.cmdline)
-                    .in_dir(root)
+                    .in_dir(dir.run_in)
                     .with_origin(Some(origin)),
             )
             .ok_or_else(|| "spawn failed".to_string())?;
@@ -280,10 +280,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let live = self
             .persist
             .workspace
-            .roots
+            .meta
             .iter()
-            .find(|(ws, root)| {
-                root.as_path() == path && self.layout.world.workspace(**ws).is_some()
+            .find(|(ws, meta)| {
+                meta.root.as_deref() == Some(path) && self.layout.world.workspace(**ws).is_some()
             })
             .map(|(ws, _)| *ws);
         if let Some(ws) = live {
@@ -319,10 +319,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Some(path) => {
                 check_root(&path)?;
                 info!(workspace = name, root = %path.display(), "workspace root set");
-                self.persist.workspace.roots.insert(ws, path);
+                self.persist.workspace.set_root(ws, Some(path));
             }
             None => {
-                self.persist.workspace.roots.remove(&ws);
+                self.persist.workspace.set_root(ws, None);
                 info!(workspace = name, "workspace root cleared");
             }
         }
@@ -466,10 +466,17 @@ mod tests {
 
     #[test]
     fn check_root_wants_an_absolute_existing_directory() {
-        assert_eq!(check_root(Path::new("/tmp")), Ok(()));
+        let scratch = std::env::temp_dir().join(format!("cde-checkroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let dir = scratch.join("dir");
+        let file = scratch.join("file");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(check_root(&dir), Ok(()));
         assert!(check_root(Path::new("tmp")).is_err());
-        assert!(check_root(Path::new("/nonexistent-cde-root-xyz")).is_err());
-        assert!(check_root(Path::new("/etc/passwd")).is_err());
+        assert!(check_root(&scratch.join("missing")).is_err());
+        assert!(check_root(&file).is_err());
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]

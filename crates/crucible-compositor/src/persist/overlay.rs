@@ -178,8 +178,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 PickTarget::Root(
                     self.persist
                         .workspace
-                        .roots
-                        .get(&ws)
+                        .root(ws)
                         .map(|p| p.to_string_lossy().into_owned())
                         .unwrap_or_default(),
                 )

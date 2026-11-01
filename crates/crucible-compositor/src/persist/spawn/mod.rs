@@ -13,7 +13,7 @@ pub use registry::{SpawnKind, SpawnRecord};
 pub(super) use registry::{SpawnRegistry, epoch_ms_now};
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crucible_layout::WorkspaceId;
@@ -102,6 +102,50 @@ impl SpawnRequest {
     }
 }
 
+/// Where a workspace-scoped spawn runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DirPolicy {
+    /// The workspace root if any, else inherit the compositor's cwd (`run`, `run-term`, a terminal
+    /// here, a relaunch).
+    Inherit,
+    /// The workspace root, else `$HOME`, else `/` (`run-in-terminal`, `run-tui`).
+    Terminal,
+}
+
+/// The directories one [`DirPolicy`] resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SpawnDir {
+    /// The spawn's `current_dir` (`None`: inherit the compositor's).
+    pub(super) run_in: Option<PathBuf>,
+    /// The directory the command is pre-flighted (resolved) against.
+    pub(super) preflight: PathBuf,
+}
+
+/// The one spawn-dir policy table, pure: `root` is the workspace root, `home` is `$HOME`, `cwd` is
+/// the compositor's current directory. The pre-flight directory is always the one the command
+/// will really run in (for `Inherit` without a root, that is the compositor's cwd, else `/`).
+#[must_use]
+pub(super) fn spawn_dir(
+    policy: DirPolicy,
+    root: Option<&Path>,
+    home: Option<&Path>,
+    cwd: Option<&Path>,
+) -> SpawnDir {
+    match policy {
+        DirPolicy::Inherit => SpawnDir {
+            run_in: root.map(Path::to_path_buf),
+            preflight: root.or(cwd).unwrap_or(Path::new("/")).to_path_buf(),
+        },
+        DirPolicy::Terminal => {
+            let dir = root.or(home).unwrap_or(Path::new("/")).to_path_buf();
+            SpawnDir {
+                run_in: Some(dir.clone()),
+                preflight: dir,
+            }
+        }
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     // ---- spawning ------------------------------------------------------------------------------
 
@@ -184,18 +228,28 @@ impl<B: Backend + 'static> CrucibleState<B> {
         Some(child_path(dir, std::env::var_os("PATH").as_deref()))
     }
 
-    /// Pre-flights `cmd` for workspace `ws`: its first word must resolve against the child's
-    /// `PATH`, relative to the spawn's effective cwd (the workspace root, else the compositor's).
-    pub(super) fn preflight(&self, cmd: &str, ws: WorkspaceId) -> Result<(), String> {
-        let cwd = self
-            .persist
-            .workspace
-            .roots
-            .get(&ws)
-            .cloned()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("/"));
-        preflight_command(cmd, &cwd, Self::spawn_path().as_deref())
+    /// The root of workspace `ws`, if it has one (the one spawn-side root lookup).
+    pub(super) fn workspace_root(&self, ws: WorkspaceId) -> Option<PathBuf> {
+        self.persist.workspace.root(ws).cloned()
+    }
+
+    /// The spawn directories of `policy` for workspace `ws`, from its root, `$HOME` and the
+    /// compositor's cwd.
+    pub(super) fn spawn_dir(&self, policy: DirPolicy, ws: WorkspaceId) -> SpawnDir {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let cwd = std::env::current_dir().ok();
+        spawn_dir(
+            policy,
+            self.workspace_root(ws).as_deref(),
+            home.as_deref(),
+            cwd.as_deref(),
+        )
+    }
+
+    /// Pre-flights `cmd`: its first word must resolve against the child's `PATH`, relative to the
+    /// directory the spawn will run in (`dir`, from [`spawn_dir`]).
+    pub(super) fn preflight(cmd: &str, dir: &Path) -> Result<(), String> {
+        preflight_command(cmd, dir, Self::spawn_path().as_deref())
     }
 
     /// `run`: pre-flights, then runs `cmd` via `/bin/sh -c 'exec <cmd>'` ([`SpawnRequest::shell_app`])
@@ -205,10 +259,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// `unknown command <word>` when the pre-flight fails, `spawn failed` when the spawn does.
     pub fn run_checked(&mut self, cmd: &str) -> Result<u32, String> {
         let ws = self.layout.world.active_workspace_id();
-        self.preflight(cmd, ws)
-            .map_err(|word| format!("unknown command {word}"))?;
-        let root = self.persist.workspace.roots.get(&ws).cloned();
-        self.spawn(SpawnRequest::shell_app(cmd).in_dir(root))
+        let dir = self.spawn_dir(DirPolicy::Inherit, ws);
+        Self::preflight(cmd, &dir.preflight).map_err(|word| format!("unknown command {word}"))?;
+        self.spawn(SpawnRequest::shell_app(cmd).in_dir(dir.run_in))
             .ok_or_else(|| "spawn failed".to_string())
     }
 
@@ -239,35 +292,27 @@ impl<B: Backend + 'static> CrucibleState<B> {
         mode: ResumeMode,
     ) -> Result<u32, String> {
         let ws = self.layout.world.active_workspace_id();
-        self.preflight(cmd, ws)
-            .map_err(|word| format!("unknown command {word}"))?;
+        let dir = self.spawn_dir(DirPolicy::Terminal, ws);
+        Self::preflight(cmd, &dir.preflight).map_err(|word| format!("unknown command {word}"))?;
         let crucible = Self::crucible_exe(label).ok_or("spawn failed")?;
-        let dir = self
-            .persist
-            .workspace
-            .roots
-            .get(&ws)
-            .cloned()
-            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-            .unwrap_or_else(|| PathBuf::from("/"));
         let invocation = Invocation::Resume(ResumeWrapper {
-            cwd: dir.clone(),
+            cwd: dir.preflight,
             command: Some(cmd.to_string()),
             mode,
         });
         let args = self
             .with_tiling_args(invocation.terminal_argv(&self.config.terminal.exec_flag, &crucible));
         let program = self.terminal_program();
-        self.spawn(SpawnRequest::new(program, args, SpawnKind::Terminal).in_dir(Some(dir)))
+        self.spawn(SpawnRequest::new(program, args, SpawnKind::Terminal).in_dir(dir.run_in))
             .ok_or_else(|| "spawn failed".to_string())
     }
 
     /// Spawns a terminal into the focused pane, starting in the active workspace's root if any.
     pub fn spawn_terminal_here(&mut self, program: &str) {
         let ws = self.layout.world.active_workspace_id();
-        let root = self.persist.workspace.roots.get(&ws).cloned();
+        let dir = self.spawn_dir(DirPolicy::Inherit, ws);
         let args = self.with_tiling_args(Vec::new());
-        self.spawn(SpawnRequest::new(program, args, SpawnKind::Terminal).in_dir(root));
+        self.spawn(SpawnRequest::new(program, args, SpawnKind::Terminal).in_dir(dir.run_in));
     }
 
     /// `run-term`: spawns the emulator `program` as a CDE terminal ([`SpawnKind::Terminal`]) in the
@@ -282,12 +327,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// failed` when the spawn does.
     pub fn run_term_checked(&mut self, program: &str) -> Result<u32, String> {
         let ws = self.layout.world.active_workspace_id();
-        let root = self.persist.workspace.roots.get(&ws).cloned();
-        let cwd = root
-            .clone()
-            .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("/"));
-        let resolved = resolve_program(program, &cwd, Self::spawn_path().as_deref())
+        let dir = self.spawn_dir(DirPolicy::Inherit, ws);
+        let resolved = resolve_program(program, &dir.preflight, Self::spawn_path().as_deref())
             .map_err(|word| format!("unknown command {word}"))?;
         let args = if same_program(program, &self.terminal_program()) {
             self.with_tiling_args(Vec::new())
@@ -295,7 +336,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Vec::new()
         };
         self.spawn(
-            SpawnRequest::new(resolved.to_string_lossy(), args, SpawnKind::Terminal).in_dir(root),
+            SpawnRequest::new(resolved.to_string_lossy(), args, SpawnKind::Terminal)
+                .in_dir(dir.run_in),
         )
         .ok_or_else(|| "spawn failed".to_string())
     }
@@ -321,6 +363,65 @@ mod tests {
         let got: Vec<&str> = got.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(got, ["--a=1", "--b", "-e", "/c", "pick"]);
         assert_eq!(with_terminal_args(&[], base.clone()), base);
+    }
+
+    fn p(s: &str) -> Option<&Path> {
+        Some(Path::new(s))
+    }
+
+    #[test]
+    fn the_root_wins_for_both_policies() {
+        for policy in [DirPolicy::Inherit, DirPolicy::Terminal] {
+            let got = spawn_dir(policy, p("/root"), p("/home"), p("/cwd"));
+            assert_eq!(got.run_in.as_deref(), p("/root"), "{policy:?}");
+            assert_eq!(got.preflight, Path::new("/root"), "{policy:?}");
+        }
+    }
+
+    #[test]
+    fn without_a_root_inherit_keeps_the_compositor_cwd() {
+        let got = spawn_dir(DirPolicy::Inherit, None, p("/home"), p("/cwd"));
+        assert_eq!(got.run_in, None);
+        assert_eq!(got.preflight, Path::new("/cwd"));
+        let got = spawn_dir(DirPolicy::Inherit, None, p("/home"), None);
+        assert_eq!((got.run_in, got.preflight), (None, PathBuf::from("/")));
+    }
+
+    #[test]
+    fn without_a_root_terminal_runs_in_home_else_slash() {
+        let got = spawn_dir(DirPolicy::Terminal, None, p("/home"), p("/cwd"));
+        assert_eq!(got.run_in.as_deref(), p("/home"));
+        assert_eq!(got.preflight, Path::new("/home"));
+        let got = spawn_dir(DirPolicy::Terminal, None, None, p("/cwd"));
+        assert_eq!(got.run_in.as_deref(), p("/"));
+        assert_eq!(got.preflight, Path::new("/"));
+    }
+
+    /// C9: a relative `./x` that exists only in the home directory passes the `Terminal`
+    /// pre-flight (it runs in home), while the `Inherit` pre-flight dir is the compositor cwd.
+    #[test]
+    fn terminal_preflight_resolves_relative_commands_against_home() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::temp_dir().join(format!("cde-spawndir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let exe = home.join("x");
+        std::fs::write(
+            &exe,
+            b"#!/bin/sh
+",
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let cwd = Path::new("/");
+        let terminal = spawn_dir(DirPolicy::Terminal, None, Some(&home), Some(cwd));
+        assert_eq!(terminal.preflight, home);
+        assert_eq!(preflight_command("./x", &terminal.preflight, None), Ok(()));
+        let inherit = spawn_dir(DirPolicy::Inherit, None, Some(&home), Some(cwd));
+        assert_eq!(inherit.preflight, cwd);
+        assert_ne!(inherit.preflight, home);
+        assert!(preflight_command("./x", &inherit.preflight, None).is_err());
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

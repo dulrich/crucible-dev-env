@@ -96,6 +96,8 @@ pub struct PersistState {
     workspace: workspace::WorkspaceState,
     /// Last record written per workspace name, and when.
     saved: HashMap<String, (WorkspaceRecord, Instant)>,
+    /// Roots read from saved files for the picker, keyed by file and mtime.
+    picker_roots: SavedRootCache,
     config_mtime: Option<SystemTime>,
     /// The session record last written (an unchanged session writes nothing).
     session_written: Option<Session>,
@@ -116,6 +118,7 @@ impl PersistState {
             placement: placement::PlacementState::default(),
             workspace: workspace::WorkspaceState::default(),
             saved: HashMap::new(),
+            picker_roots: SavedRootCache::default(),
             config_mtime: None,
             session_written: None,
             session_started: false,
@@ -211,18 +214,53 @@ pub fn build_candidates(
     out
 }
 
+/// The root of each saved file, cached by file path and modification time: a file is parsed only
+/// when it is new or has changed since it was last read.
+#[derive(Debug, Default)]
+pub struct SavedRootCache {
+    entries: HashMap<PathBuf, (SystemTime, Option<PathBuf>)>,
+}
+
+impl SavedRootCache {
+    /// The root of `file` as of `mtime`: the cached one when `mtime` matches the cached read, else
+    /// `load()` (cached under `mtime`). With no `mtime` the file is always loaded and never cached.
+    pub fn root(
+        &mut self,
+        file: &Path,
+        mtime: Option<SystemTime>,
+        load: impl FnOnce() -> Option<PathBuf>,
+    ) -> Option<PathBuf> {
+        let Some(mtime) = mtime else { return load() };
+        if let Some((seen, root)) = self.entries.get(file) {
+            if *seen == mtime {
+                return root.clone();
+            }
+        }
+        let root = load();
+        self.entries
+            .insert(file.to_path_buf(), (mtime, root.clone()));
+        root
+    }
+
+    /// Forgets every file not in `listed` (deleted saves).
+    pub fn retain_listed(&mut self, listed: &[(String, PathBuf)]) {
+        self.entries
+            .retain(|file, _| listed.iter().any(|(_, f)| f == file));
+    }
+}
+
 /// Saved workspaces with their roots: the `cached` record's root when `cached` knows the name
-/// (`Some(root)`), else the root of the saved file itself; an unreadable file just has no root.
+/// (`Some(root)`), else `file_root` of the saved file itself (an unreadable file just has no root).
 #[must_use]
 pub fn saved_with_roots(
     listed: Vec<(String, PathBuf)>,
     cached: impl Fn(&str) -> Option<Option<PathBuf>>,
+    mut file_root: impl FnMut(&Path) -> Option<PathBuf>,
 ) -> Vec<(String, Option<PathBuf>)> {
     listed
         .into_iter()
         .map(|(name, file)| {
-            let root =
-                cached(&name).unwrap_or_else(|| store::load(&file).ok().and_then(|r| r.root));
+            let root = cached(&name).unwrap_or_else(|| file_root(&file));
             (name, root)
         })
         .collect()
@@ -385,19 +423,24 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         // Drop the (empty) seeds the restore replaced; an output's last workspace stays.
         for ws in seeds {
-            let empty = self.layout.world.workspace(ws).is_some_and(|w| {
-                w.panes()
+            let panes = self
+                .layout
+                .world
+                .workspace(ws)
+                .map(|w| w.panes())
+                .unwrap_or_default();
+            let empty = !panes.is_empty()
+                && panes
                     .iter()
                     .filter_map(|p| self.layout.world.pane(*p))
-                    .all(|p| p.windows().is_empty())
-            });
+                    .all(|p| p.windows().is_empty());
             if empty
                 && self
                     .with_model(|w| w.remove_workspace(ws).map(|_| ()))
                     .is_ok()
             {
-                self.persist.workspace.roots.remove(&ws);
-                self.persist.workspace.last_output.remove(&ws);
+                // Every pane is empty, so no restore can be pending on it; the prune is a no-op.
+                self.forget_workspace(ws, &panes);
             }
         }
         let id_of = |name: &str| connected.iter().find(|(n, _)| n == name).map(|(_, id)| *id);
@@ -603,10 +646,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let mut record = WorkspaceRecord::from_world(
             &self.layout.world,
             ws,
-            self.persist.workspace.roots.get(&ws).cloned(),
+            self.persist.workspace.root(ws).cloned(),
             |id| self.window_record(&env, id),
         )?;
-        record.output = self.persist.workspace.last_output.get(&ws).cloned();
+        record.output = self.persist.workspace.last_output(ws).cloned();
         Some(record)
     }
 
@@ -631,19 +674,27 @@ impl<B: Backend + 'static> CrucibleState<B> {
         )
     }
 
-    fn candidates(&self) -> Vec<Candidate> {
+    fn candidates(&mut self) -> Vec<Candidate> {
         let world = &self.layout.world;
         let live = self
             .live_workspaces()
             .into_iter()
             .filter_map(|(_, ws)| {
                 let name = world.workspace(ws)?.name.clone();
-                Some((name, self.persist.workspace.roots.get(&ws).cloned()))
+                Some((name, self.persist.workspace.root(ws).cloned()))
             })
             .collect();
-        let saved = saved_with_roots(store::list_saved(&self.persist.store_dir), |n| {
-            self.persist.saved.get(n).map(|(r, _)| r.root.clone())
-        });
+        let listed = store::list_saved(&self.persist.store_dir);
+        self.persist.picker_roots.retain_listed(&listed);
+        let (saved_cache, picker_roots) = (&self.persist.saved, &mut self.persist.picker_roots);
+        let saved = saved_with_roots(
+            listed,
+            |n| saved_cache.get(n).map(|(r, _)| r.root.clone()),
+            |file| {
+                let mtime = std::fs::metadata(file).and_then(|m| m.modified()).ok();
+                picker_roots.root(file, mtime, || store::load(file).ok().and_then(|r| r.root))
+            },
+        );
         let mut out = build_candidates(live, saved, folder_entries(&self.config.picker.roots));
         if self.config.picker.slots {
             apply_slots(&mut out, |n| self.persist.slots.slot_of(n));
@@ -685,15 +736,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
         .map_err(|e| e.to_string())?;
         let (ws, panes) = created.expect("set on success");
         // Seed the last-viewed output from the record; a viewing event (apply_layout) wins.
+        let meta = self.persist.workspace.meta.entry(ws).or_default();
         if let Some(name) = &record.output {
-            self.persist
-                .workspace
-                .last_output
-                .entry(ws)
-                .or_insert_with(|| name.clone());
+            meta.last_output.get_or_insert_with(|| name.clone());
         }
         if let Some(root) = &record.root {
-            self.persist.workspace.roots.insert(ws, root.clone());
+            meta.root = Some(root.clone());
         }
         let program = self.terminal_program();
         let now = Instant::now();
@@ -736,8 +784,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let Some(ws) = created else {
             return Err("workspace was not created".into());
         };
-        if let Some(root) = root {
-            self.persist.workspace.roots.insert(ws, root);
+        if root.is_some() {
+            self.persist.workspace.set_root(ws, root);
         }
         self.save_now(ws)
     }
@@ -832,13 +880,40 @@ mod tests {
             ("cached".to_string(), dir.join("missing.kdl")),
             ("broken".to_string(), dir.join("missing2.kdl")),
         ];
-        let got = saved_with_roots(listed, |n| match n {
-            "cached" => Some(Some(PathBuf::from("/cached"))),
-            _ => None,
-        });
+        let loads = std::cell::Cell::new(0);
+        let mut cache = SavedRootCache::default();
+        let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let mut read = |listed: Vec<(String, PathBuf)>, mtime| {
+            saved_with_roots(
+                listed,
+                |n| match n {
+                    "cached" => Some(Some(PathBuf::from("/cached"))),
+                    _ => None,
+                },
+                |file| {
+                    cache.root(file, Some(mtime), || {
+                        loads.set(loads.get() + 1);
+                        store::load(file).ok().and_then(|r| r.root)
+                    })
+                },
+            )
+        };
+        let got = read(listed.clone(), mtime);
         assert_eq!(got[0].1, Some(PathBuf::from("/on/disk")));
         assert_eq!(got[1].1, Some(PathBuf::from("/cached")));
         assert_eq!(got[2].1, None);
+        assert_eq!(loads.get(), 2); // "cached" is answered without reading its file
+        // Unchanged mtime: no file is parsed again.
+        assert_eq!(read(listed.clone(), mtime), got);
+        assert_eq!(loads.get(), 2);
+        // A changed mtime re-reads exactly the changed file.
+        let mut rec = record(Some("/moved"), pane(vec![]));
+        rec.name = "disk".into();
+        store::save(&dir, &rec).unwrap();
+        let later = mtime + std::time::Duration::from_secs(1);
+        let got = read(listed, later);
+        assert_eq!(got[0].1, Some(PathBuf::from("/moved")));
+        assert_eq!(loads.get(), 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
