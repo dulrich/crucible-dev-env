@@ -32,6 +32,25 @@ pub(super) struct OverlayRuntime {
     pub(super) warm: WarmSlot<WindowElement>,
     /// Counter making each warm host's socket path unique.
     pub(super) warm_counter: u32,
+    /// What the latest warm host was spawned with, for diagnosing an early death.
+    pub(super) warm_spawn: Option<WarmSpawn>,
+}
+
+/// A warm host's spawn record (see [`warm_died_early`]).
+#[derive(Debug)]
+pub(super) struct WarmSpawn {
+    at: Instant,
+    exe: PathBuf,
+    program: String,
+    args: Vec<OsString>,
+}
+
+/// A warm host that dies within this long of its spawn almost certainly failed to start.
+const WARM_EARLY_DEATH: Duration = Duration::from_secs(2);
+
+/// Whether a warm host that lived `lived` died early enough to warrant a diagnostic.
+fn warm_died_early(lived: Duration) -> bool {
+    lived < WARM_EARLY_DEATH
 }
 
 /// Which program an overlay slot runs.
@@ -199,9 +218,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     pub(super) fn crucible_exe(what: &str) -> Option<PathBuf> {
-        match std::env::current_exe() {
+        match crucible_persist::crucible_exe() {
             Ok(p) => Some(p),
             Err(err) => {
+                // `err` names the path when the binary was removed under the running compositor.
                 error!(%err, "cannot resolve the crucible binary; no {what}");
                 None
             }
@@ -475,6 +495,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             warm_host_args(&self.config.terminal.exec_flag, &crucible, &socket),
         );
         if let Some(pid) = self.spawn_process(&program, &args, None, SpawnKind::Overlay) {
+            self.persist.overlay.warm_spawn = Some(WarmSpawn {
+                at: Instant::now(),
+                exe: crucible.clone(),
+                program: program.clone(),
+                args: args.clone(),
+            });
             self.persist.placement.pending.insert(
                 pid,
                 Pending {
@@ -493,6 +519,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
     fn warm_died(&mut self, effects: Vec<WarmEffect<WindowElement>>) {
         if effects.is_empty() {
             return;
+        }
+        if let Some(spawn) = self.persist.overlay.warm_spawn.take() {
+            let lived = spawn.at.elapsed();
+            if warm_died_early(lived) {
+                warn!(
+                    exe = %spawn.exe.display(),
+                    program = %spawn.program,
+                    args = ?spawn.args,
+                    lived_ms = lived.as_millis(),
+                    "warm overlay host died within 2 s of its spawn"
+                );
+            }
         }
         if effects.contains(&WarmEffect::Spawn) {
             info!("warm overlay host died before use; respawning once");
@@ -642,6 +680,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warm_death_within_two_seconds_is_early() {
+        assert!(warm_died_early(Duration::from_millis(1999)));
+        assert!(!warm_died_early(Duration::from_secs(2)));
+    }
 
     #[test]
     fn overlay_is_centred_at_sixty_by_fifty_percent() {

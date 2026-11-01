@@ -640,7 +640,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let exec_flag = self.config.terminal.exec_flag.clone();
         let jobs = prepare_restore(
             &record,
-            std::env::current_exe(),
+            Self::crucible_exe("restore")
+                .ok_or_else(|| std::io::Error::other("crucible binary unavailable")),
             home.as_deref(),
             &exec_flag,
             Path::is_dir,

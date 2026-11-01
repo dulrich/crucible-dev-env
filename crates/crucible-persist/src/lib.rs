@@ -35,7 +35,9 @@ pub use capture::{
     TerminalCapture, ancestors, capture_terminal, children_of, relaunch_wrapper_of, window_record,
 };
 pub use error::PersistError;
-pub use executable::is_executable_file;
+pub use executable::{
+    CrucibleExeError, ExeRemoved, crucible_exe, is_executable_file, reinstalled_exe,
+};
 pub use format::FORMAT_VERSION;
 pub use policy::should_save;
 pub use record::{PaneRecord, RecordNode, WindowRecord, WorkspaceRecord};

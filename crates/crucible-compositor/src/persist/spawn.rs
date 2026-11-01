@@ -461,7 +461,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// The `PATH` every spawned child gets: this binary's directory (so `crucible` resolves) in
     /// front of the compositor's own `PATH`. `None` when the executable path is unknown.
     pub(super) fn spawn_path() -> Option<OsString> {
-        let exe = std::env::current_exe().ok()?;
+        let exe = Self::crucible_exe("child PATH")?;
         let dir = exe.parent()?;
         Some(child_path(dir, std::env::var_os("PATH").as_deref()))
     }
@@ -680,7 +680,7 @@ fn app_cwd(root: Option<&Path>, home: Option<&Path>, is_dir: impl Fn(&Path) -> b
 }
 
 /// Every fallible restore precondition plus the spawn plan, resolved before the model is
-/// touched: `crucible` is the result of `current_exe()`, and a failure leaves nothing to undo.
+/// touched: `crucible` is the reinstall-safe executable path, and a failure leaves nothing to undo.
 pub(super) fn prepare_restore(
     record: &WorkspaceRecord,
     crucible: std::io::Result<PathBuf>,
