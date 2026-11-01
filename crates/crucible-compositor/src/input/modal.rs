@@ -91,18 +91,57 @@ pub(super) fn hover_tracks<O>(mode: &InputMode<O>) -> bool {
     !mode.is_locked()
 }
 
-/// Whether a hover may move focus: only on a fresh enter, with no pointer grab and no modal
-/// (lock or overlay) mode.
-#[must_use]
-pub(super) fn hover_moves_focus<O>(mode: &InputMode<O>, entered: bool, grabbed: bool) -> bool {
-    entered && !grabbed && matches!(mode, InputMode::Normal)
+/// What a hover does to focus ([`hover_decision`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum HoverDecision {
+    /// Nothing: no fresh enter, a pointer grab, or a locked session.
+    Ignore,
+    /// A mapped overlay holds the enter back: it is deferred to the next overlay open, which
+    /// applies it so the overlay opens on the pointer's output.
+    Defer,
+    /// Focus moves to the hover target.
+    Move,
 }
 
-/// Whether a hover enter is held back by a mapped overlay (rather than by a grab): it is deferred
-/// to the next overlay open, which applies it so the overlay opens on the pointer's output.
+/// What a hover does: `Move` only on a fresh enter, with no pointer grab and no modal (lock or
+/// overlay) mode; `Defer` on a fresh ungrabbed enter while an overlay is mapped; else `Ignore`.
 #[must_use]
-pub(super) fn hover_defers<O>(mode: &InputMode<O>, entered: bool, grabbed: bool) -> bool {
-    entered && !grabbed && mode.has_overlay()
+pub(super) fn hover_decision<O>(
+    mode: &InputMode<O>,
+    entered: bool,
+    grabbed: bool,
+) -> HoverDecision {
+    if !entered || grabbed {
+        HoverDecision::Ignore
+    } else if matches!(mode, InputMode::Normal) {
+        HoverDecision::Move
+    } else if mode.has_overlay() {
+        HoverDecision::Defer
+    } else {
+        HoverDecision::Ignore
+    }
+}
+
+/// What applying a deferred hover does ([`deferred_hover_action`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DeferredHover {
+    /// Nothing resolvable under the pointer: the hover tracker is cleared, no focus moves.
+    Clear,
+    /// Record the target, but a pointer grab is active so no focus moves.
+    Track,
+    /// Record the target and focus it.
+    Focus,
+}
+
+/// How a deferred hover resolves, given whether a hover target is under the pointer now and
+/// whether a pointer grab is active (the same outcome as a fresh enter in `Normal` mode).
+#[must_use]
+pub(super) fn deferred_hover_action(current_is_some: bool, grabbed: bool) -> DeferredHover {
+    match (current_is_some, grabbed) {
+        (false, _) => DeferredHover::Clear,
+        (true, true) => DeferredHover::Track,
+        (true, false) => DeferredHover::Focus,
+    }
 }
 
 /// Whether a chord closes the mapped overlay before it runs: the keyboard twin of the click rule
@@ -181,33 +220,89 @@ mod tests {
 
     #[test]
     fn hover_moves_focus_only_when_unblocked() {
-        assert!(hover_moves_focus(&normal(), true, false));
-        assert!(!hover_moves_focus(&normal(), false, false), "no enter");
-        assert!(!hover_moves_focus(&normal(), true, true), "grabbed");
+        assert_eq!(hover_decision(&normal(), true, false), HoverDecision::Move);
+        assert_eq!(
+            hover_decision(&normal(), false, false),
+            HoverDecision::Ignore,
+            "no enter"
+        );
+        assert_eq!(
+            hover_decision(&normal(), true, true),
+            HoverDecision::Ignore,
+            "grabbed"
+        );
     }
 
     #[test]
     fn overlay_hover_moves_no_focus_but_still_tracks() {
-        assert!(!hover_moves_focus(&overlay(), true, false));
+        assert_ne!(hover_decision(&overlay(), true, false), HoverDecision::Move);
         assert!(hover_tracks(&overlay()));
     }
 
     #[test]
     fn only_an_overlay_defers_a_hover_enter() {
-        assert!(hover_defers(&overlay(), true, false));
-        assert!(!hover_defers(&overlay(), false, false), "no enter");
-        assert!(!hover_defers(&overlay(), true, true), "grabbed");
-        assert!(
-            !hover_defers(&normal(), true, false),
+        assert_eq!(
+            hover_decision(&overlay(), true, false),
+            HoverDecision::Defer
+        );
+        assert_eq!(
+            hover_decision(&overlay(), false, false),
+            HoverDecision::Ignore,
+            "no enter"
+        );
+        assert_eq!(
+            hover_decision(&overlay(), true, true),
+            HoverDecision::Ignore,
+            "grabbed"
+        );
+        assert_ne!(
+            hover_decision(&normal(), true, false),
+            HoverDecision::Defer,
             "normal mode moves focus instead"
         );
-        assert!(!hover_defers(&locked(), true, false));
+        assert_ne!(hover_decision(&locked(), true, false), HoverDecision::Defer);
     }
 
     #[test]
     fn locked_hover_neither_tracks_nor_moves_focus() {
-        assert!(!hover_moves_focus(&locked(), true, false));
+        assert_eq!(
+            hover_decision(&locked(), true, false),
+            HoverDecision::Ignore
+        );
         assert!(!hover_tracks(&locked()));
+    }
+
+    #[test]
+    fn hover_decision_table() {
+        use HoverDecision::{Defer, Ignore, Move};
+        for (mode, name, enter_free) in [
+            (normal(), "normal", Move),
+            (overlay(), "overlay", Defer),
+            (locked(), "locked", Ignore),
+        ] {
+            for entered in [false, true] {
+                for grabbed in [false, true] {
+                    let want = if entered && !grabbed {
+                        enter_free
+                    } else {
+                        Ignore
+                    };
+                    assert_eq!(
+                        hover_decision(&mode, entered, grabbed),
+                        want,
+                        "{name} entered={entered} grabbed={grabbed}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_hover_action_table() {
+        assert_eq!(deferred_hover_action(false, false), DeferredHover::Clear);
+        assert_eq!(deferred_hover_action(false, true), DeferredHover::Clear);
+        assert_eq!(deferred_hover_action(true, true), DeferredHover::Track);
+        assert_eq!(deferred_hover_action(true, false), DeferredHover::Focus);
     }
 
     #[test]

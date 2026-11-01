@@ -52,23 +52,61 @@ pub fn plan_bindings(current: &Bindings, config: &Config) -> (Bindings, Option<B
 /// overlay terminal args, the launcher's TUI entries, and the configured output scales (the
 /// hidden host is on no output, so it never sees a rescale and would open sized for the old
 /// scale). A change in any of them invalidates the warm host.
-pub type WarmKey = (String, String, Vec<String>, Vec<String>, Vec<(String, u32)>);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmKey {
+    /// The resolved terminal program.
+    pub terminal: String,
+    /// The terminal's exec flag.
+    pub exec_flag: String,
+    /// The effective overlay terminal args for `terminal`.
+    pub overlay_args: Vec<String>,
+    /// The launcher's TUI entries.
+    pub launcher_tui: Vec<String>,
+    /// The configured `(output name, scale_120)` pairs.
+    pub output_scales: Vec<(String, u32)>,
+}
 
 /// The [`WarmKey`] of `config` given the resolved `terminal` program.
 #[must_use]
 pub fn warm_key(config: &Config, terminal: String) -> WarmKey {
     let overlay_args = config.overlay.effective_terminal_args(&terminal);
-    (
+    WarmKey {
         terminal,
-        config.terminal.exec_flag.clone(),
+        exec_flag: config.terminal.exec_flag.clone(),
         overlay_args,
-        config.launcher.tui.clone(),
-        config
+        launcher_tui: config.launcher.tui.clone(),
+        output_scales: config
             .outputs
             .iter()
             .map(|(name, output)| (name.clone(), output.scale_120))
             .collect(),
-    )
+    }
+}
+
+/// The config-only decisions of applying `new` over `old`, computed once by [`Self::between`]
+/// so [`CrucibleState::apply_config`] applies them as one delta.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ConfigDelta {
+    /// The tiling insets or the header changed: the applied projection must be forgotten so
+    /// every window is re-placed (and re-configured) with the new geometry.
+    pub relayout: bool,
+    /// The header changed and its new mode is not `toggle`: the strip is hidden again.
+    pub hide_header: bool,
+    /// The `(old, new)` maximum configured output scale, for the XWayland scale note.
+    pub max_scale: (f64, f64),
+}
+
+impl ConfigDelta {
+    /// The delta from `old` to `new`.
+    #[must_use]
+    pub fn between(old: &Config, new: &Config) -> Self {
+        let header_changed = old.header != new.header;
+        Self {
+            relayout: old.tiling != new.tiling || header_changed,
+            hide_header: header_changed && new.header.mode != crucible_config::HeaderMode::Toggle,
+            max_scale: (old.max_output_scale(), new.max_output_scale()),
+        }
+    }
 }
 
 /// The terminal command to spawn: the configured one when set, else the keys crate's resolution.
@@ -85,21 +123,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Public so the persist tick's config reload can call it; safe to call before any output exists.
     pub fn apply_config(&mut self, config: Config) {
         let old_overlay_terminal = warm_key(&self.config, self.terminal_program());
+        let delta = ConfigDelta::between(&self.config, &config);
         let (bindings, bind_error) = plan_bindings(&self.bindings, &config);
         if let Some(err) = bind_error {
             error!(%err, "invalid binds in config; keeping the previous bindings");
         }
         self.bindings = bindings;
-        if config.tiling != self.config.tiling {
-            // Class insets changed: forget the applied projection so every window is re-placed (and
-            // re-configured) with the new geometry instead of diffing to nothing.
+        // Class insets or the header reservation changed: forget the applied projection so every
+        // window is re-placed (and re-configured), once. A header hide on an already-hidden
+        // strip does not force this by itself (`set_header_visible`'s early return).
+        if delta.relayout || (delta.hide_header && self.header.visible) {
             self.invalidate_projection();
         }
-        let mut hide_header = false;
-        if config.header != self.config.header {
-            // The reservation may have changed height: re-place every window.
-            self.invalidate_projection();
-            hide_header = config.header.mode != crucible_config::HeaderMode::Toggle;
+        if delta.hide_header {
+            self.header.visible = false;
         }
         // Load lazily (also on the first apply, when the header equals the default): only when
         // the strip can ever show and the font spec differs from what is loaded.
@@ -110,19 +147,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 crate::text::TextRenderer::load(config.header.font_path(), &config.header.font);
             self.header.font_loaded = Some(config.header.font.clone());
         }
-        self.focus_follows_mouse = config.focus_follows_mouse;
-        crate::xwayland::note_xwayland_scale_change(
-            self.config.max_output_scale(),
-            config.max_output_scale(),
-        );
+        crate::xwayland::note_xwayland_scale_change(delta.max_scale.0, delta.max_scale.1);
         self.config = config;
         self.apply_output_scales();
         if old_overlay_terminal != warm_key(&self.config, self.terminal_program()) {
             self.warm_config_changed();
-        }
-        if hide_header {
-            // Same path as `toggle-header` (resets the projection, re-applies the layout).
-            self.set_header_visible(false);
         }
         self.apply_layout();
     }
@@ -179,6 +208,66 @@ mod tests {
         }
     }
 
+    fn header_mode(mode: crucible_config::HeaderMode) -> Config {
+        let mut c = Config::default();
+        c.header.mode = mode;
+        c
+    }
+
+    #[test]
+    fn delta_no_change_is_inert() {
+        let c = Config::default();
+        let d = ConfigDelta::between(&c, &c.clone());
+        assert!(!d.relayout);
+        assert!(!d.hide_header);
+        assert_eq!(d.max_scale, (1.0, 1.0));
+    }
+
+    #[test]
+    fn delta_tiling_only_relayouts_without_hiding() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.tiling.app.gap = old.tiling.app.gap + 1;
+        let d = ConfigDelta::between(&old, &new);
+        assert!(d.relayout);
+        assert!(!d.hide_header);
+    }
+
+    #[test]
+    fn delta_header_toggle_mode_relayouts_without_hiding() {
+        use crucible_config::HeaderMode;
+        let d = ConfigDelta::between(
+            &header_mode(HeaderMode::Always),
+            &header_mode(HeaderMode::Toggle),
+        );
+        assert!(d.relayout);
+        assert!(!d.hide_header);
+    }
+
+    #[test]
+    fn delta_header_always_or_off_relayouts_and_hides() {
+        use crucible_config::HeaderMode;
+        for mode in [HeaderMode::Always, HeaderMode::Off] {
+            let d = ConfigDelta::between(&header_mode(HeaderMode::Toggle), &header_mode(mode));
+            assert!(d.relayout, "{mode:?}");
+            assert!(d.hide_header, "{mode:?}");
+        }
+    }
+
+    #[test]
+    fn delta_both_changed_and_scale_pair() {
+        use crucible_config::HeaderMode;
+        let old = header_mode(HeaderMode::Toggle);
+        let mut new = header_mode(HeaderMode::Always);
+        new.tiling.app.gap = old.tiling.app.gap + 1;
+        new.outputs = crucible_config::parse("output \"DP-1\" { scale 2; }\n")
+            .unwrap()
+            .outputs;
+        let d = ConfigDelta::between(&old, &new);
+        assert!(d.relayout && d.hide_header);
+        assert_eq!(d.max_scale, (1.0, 2.0));
+    }
+
     #[test]
     fn warm_key_tracks_launcher_entries() {
         let a = Config::default();
@@ -199,13 +288,19 @@ mod tests {
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        assert_eq!(warm_key(&c, "/tmp/cde/ghostty-cde".into()).2, defaults);
+        assert_eq!(
+            warm_key(&c, "/tmp/cde/ghostty-cde".into()).overlay_args,
+            defaults
+        );
         let foot: Vec<String> = crucible_config::FOOT_OVERLAY_DEFAULT_ARGS
             .iter()
             .map(|s| (*s).to_string())
             .collect();
-        assert_eq!(warm_key(&c, "foot".into()).2[..foot.len()], foot[..]);
-        assert!(warm_key(&c, "footclient".into()).2.is_empty());
+        assert_eq!(
+            warm_key(&c, "foot".into()).overlay_args[..foot.len()],
+            foot[..]
+        );
+        assert!(warm_key(&c, "footclient".into()).overlay_args.is_empty());
         let mut opt_out = c.clone();
         opt_out.overlay.terminal_args = Some(vec![]);
         assert_ne!(

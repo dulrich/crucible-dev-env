@@ -224,10 +224,6 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub xdisplay: Option<u32>,
     /// Once-only latch for the `autostart` commands (see [`crate::autostart`]).
     pub autostart_gate: crate::autostart::AutostartGate,
-    /// Whether pointer motion moves focus onto the managed window (or output) under the cursor.
-    ///
-    /// On by default; set from the config (`focus-follows-mouse`) by [`Self::apply_config`].
-    pub focus_follows_mouse: bool,
     /// The active configuration (defaults until a config file is applied); see
     /// [`Self::apply_config`].
     pub config: Config,
@@ -386,7 +382,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
             xwm: None,
             xdisplay: None,
             autostart_gate: crate::autostart::AutostartGate::default(),
-            focus_follows_mouse: true,
             config: Config::default(),
             bindings: Bindings::default(),
             hover_target: None,

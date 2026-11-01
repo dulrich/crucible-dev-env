@@ -17,7 +17,10 @@ use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 use tracing::{info, warn};
 
 use super::hover::{HoverTarget, hover_entered, hover_pane_key};
-use super::modal::{InputMode, hover_defers, hover_moves_focus, hover_tracks, press_route};
+use super::modal::{
+    DeferredHover, HoverDecision, InputMode, deferred_hover_action, hover_decision, hover_tracks,
+    press_route,
+};
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
 use crate::state::{Backend, CrucibleState};
@@ -324,13 +327,33 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// one seen ([`hover_entered`]), so keyboard-driven focus (a split, `Super+H`…) is not reverted
     /// by a pointer twitch. Routing: over a managed window the window is focused; over a pane's
     /// uncovered area the pane is. While a pointer grab is active (button held, drag) the tracker
-    /// still updates but no focus moves. Overlays are modal ([`hover_moves_focus`]): while one is
+    /// still updates but no focus moves. Overlays are modal ([`hover_decision`]): while one is
     /// mapped the tracker still updates but hovering never moves focus off it. Does nothing when
     /// the option is off.
     fn focus_follows_pointer(&mut self, mode: &InputMode) {
-        if !self.focus_follows_mouse || !hover_tracks(mode) {
+        if !self.config.focus_follows_mouse || !hover_tracks(mode) {
             return;
         }
+        let (current, managed) = self.hover_under_pointer();
+        let mut stored = self.hover_target.take();
+        let entered = hover_entered(&mut stored, current);
+        self.hover_target = stored;
+        let grabbed = self.pointer.is_grabbed();
+        match hover_decision(mode, entered, grabbed) {
+            HoverDecision::Ignore => {}
+            HoverDecision::Defer => self.hover_deferred = true,
+            HoverDecision::Move => {
+                self.hover_deferred = false;
+                if let Some(target) = self.hover_target.clone() {
+                    self.focus_hover_target(target, managed);
+                }
+            }
+        }
+    }
+
+    /// What the pointer hovers now: the pane-level [`HoverTarget`] (falling back to the output)
+    /// and the managed window under it, if any. No side effects.
+    fn hover_under_pointer(&self) -> (Option<HoverTarget>, Option<crucible_layout::WindowId>) {
         let location = self.pointer.current_location();
         let element_under = self.space.element_under(location).map(|(w, _)| w.clone());
         let current = match &element_under {
@@ -348,44 +371,46 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     .map(HoverTarget::Output),
             },
         };
-        let mut stored = self.hover_target.take();
-        let entered = hover_entered(&mut stored, current);
-        self.hover_target = stored;
-        let grabbed = self.pointer.is_grabbed();
-        if hover_defers(mode, entered, grabbed) {
-            self.hover_deferred = true;
-        }
-        if !hover_moves_focus(mode, entered, grabbed) {
-            return;
-        }
-        self.hover_deferred = false;
-        let managed = element_under.and_then(|w| w.window_id());
-        match (self.hover_target.clone(), managed) {
-            (Some(HoverTarget::Pane(_)), Some(id)) => {
+        (current, element_under.and_then(|w| w.window_id()))
+    }
+
+    /// Routes a hover focus move: a pane plus a managed window focuses the window; a pane alone
+    /// focuses the pane; an output focuses the output.
+    fn focus_hover_target(
+        &mut self,
+        target: HoverTarget,
+        managed: Option<crucible_layout::WindowId>,
+    ) {
+        match (target, managed) {
+            (HoverTarget::Pane(_), Some(id)) => {
                 if self.focus_window_in_model(id, "hover") {
                     // If the model already pointed at `id` (no projected focus change),
                     // `apply_focus` did not run; reconcile syncs keyboard focus to it.
                     self.reconcile_keyboard_focus();
                 }
             }
-            (Some(HoverTarget::Pane(pane)), None) => self.focus_pane_in_model(pane, "hover"),
+            (HoverTarget::Pane(pane), None) => self.focus_pane_in_model(pane, "hover"),
             // `focus_output` is a no-op when that output is already focused.
-            (Some(HoverTarget::Output(output)), _) => self.focus_output(&output),
-            _ => {}
+            (HoverTarget::Output(output), _) => self.focus_output(&output),
         }
     }
 
-    /// Applies a hover enter that a mapped overlay held back ([`hover_defers`]): with
+    /// Applies a hover enter that a mapped overlay held back ([`HoverDecision::Defer`]): with
     /// focus-follows-mouse on, focus moves to what is under the pointer now, as if the pointer had
     /// just entered it. Called before an overlay opens, so it opens on the pointer's output rather
     /// than where the previous overlay was. Nothing moves when no enter was deferred, so
     /// keyboard-driven focus is kept.
     pub(crate) fn apply_deferred_hover(&mut self) {
-        if !std::mem::take(&mut self.hover_deferred) || !self.focus_follows_mouse {
+        if !std::mem::take(&mut self.hover_deferred) || !self.config.focus_follows_mouse {
             return;
         }
-        self.hover_target = None;
-        self.focus_follows_pointer(&InputMode::Normal);
+        let (current, managed) = self.hover_under_pointer();
+        let action = deferred_hover_action(current.is_some(), self.pointer.is_grabbed());
+        // `Clear` ends with no tracker, as a fresh enter against a cleared tracker would.
+        self.hover_target = current.clone();
+        if let (DeferredHover::Focus, Some(target)) = (action, current) {
+            self.focus_hover_target(target, managed);
+        }
     }
 
     /// Raises `window` in the [`Space`](smithay::desktop::Space) and gives it keyboard focus.
