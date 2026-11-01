@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Launch the CDE (crucible-dev-env) compositor on a bare TTY with logging.
 # Usage: scripts/cde.sh [extra crucible args...]   (or ~/cde.sh via a symlink to it)
-#   env overrides: TERMINAL (default ghostty), RUST_LOG (default info), CDE_MODE (default --tty-udev)
+#   env overrides: TERMINAL (fallback only; default ghostty-cde wrapper), RUST_LOG (default info), CDE_MODE (default --tty-udev)
 # Logs: /tmp/cde/cde-<timestamp>.log, newest symlinked as /tmp/cde/latest.log
 set -uo pipefail
 
@@ -17,8 +17,10 @@ any extra args, which are passed through unchanged. With CDE_BIN set, the build
 is skipped and that binary runs instead.
 
 Environment overrides:
-  TERMINAL   terminal CDE spawns (default: /tmp/cde/ghostty-cde, a wrapper that
-             runs ghostty with --gtk-single-instance=false)
+  TERMINAL   fallback terminal, used only when config.kdl sets no top-level
+             `terminal` (foot, configured there, is the default; a configured
+             terminal wins over $TERMINAL). Default: /tmp/cde/ghostty-cde, a
+             wrapper that runs ghostty with --gtk-single-instance=false (rollback)
   RUST_LOG   log filter (default: info)
   CDE_BIN    path to a prebuilt crucible binary (e.g. ~/.local/bin/crucible):
              skips `cargo build` and runs it instead of ./target/debug/crucible;
@@ -54,6 +56,8 @@ mkdir -p "$logdir"
 log="$logdir/cde-$(date +%Y%m%d-%H%M%S).log"
 ln -sfn "$log" "$logdir/latest.log"
 
+# Fallback/rollback terminal: foot, set as `terminal` in config.kdl, is the default and makes
+# $TERMINAL moot (config wins). Without it CDE spawns $TERMINAL, which defaults to ghostty.
 # ghostty defaults to GTK single-instance: a new launch is handed over the user D-Bus to the
 # already-running ghostty (i3 on VT7), so windows open there. CDE spawns $TERMINAL with no
 # args, so wrap it to force a separate instance bound to CDE's Wayland socket.

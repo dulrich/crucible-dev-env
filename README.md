@@ -54,7 +54,7 @@ working Smithay-based tiling Wayland compositor you can run today.
 
 ## Running
 
-The TTY launcher is `scripts/cde.sh`: it rebuilds first, wraps ghostty so it opens as a separate instance, logs to `/tmp/cde/latest.log`, and can be symlinked as `~/cde.sh`; `scripts/cde.sh --help` lists the env overrides. Set `CDE_BIN` to a prebuilt binary (e.g. a release install) to skip the rebuild and run that instead. To boot straight into CDE from tty1, see [`docs/session.md`](docs/session.md).
+The TTY launcher is `scripts/cde.sh`: it rebuilds first, exports a fallback `$TERMINAL` (a ghostty wrapper that opens a separate instance — used only when `config.kdl` sets no `terminal`; foot configured there is the default and ghostty the rollback), logs to `/tmp/cde/latest.log`, and can be symlinked as `~/cde.sh`; `scripts/cde.sh --help` lists the env overrides. Set `CDE_BIN` to a prebuilt binary (e.g. a release install) to skip the rebuild and run that instead. To boot straight into CDE from tty1, see [`docs/session.md`](docs/session.md).
 
 Requires a recent stable Rust (1.85+, edition 2024) and a terminal emulator on `$PATH` (defaults to
 `foot`; set `$TERMINAL` to override — e.g. `alacritty`, `kitty`).
