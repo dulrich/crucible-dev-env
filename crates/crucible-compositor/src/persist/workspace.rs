@@ -10,8 +10,7 @@ use crucible_persist::slots::slots_path;
 use tracing::{debug, info, warn};
 
 use super::overlay::PickerMode;
-use super::placement::Target;
-use super::{close_element, skip_record};
+use super::skip_record;
 use crate::state::{Backend, CrucibleState};
 
 /// Workspace roots, last-viewed outputs and the pending slot pin (a field of
@@ -264,9 +263,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         };
         // (f) Policy: end each window — kill a CDE-spawned child, else ask the client to close.
         for (element, meta) in ended {
-            if !meta.pid.is_some_and(|p| self.persist.spawn.kill(p)) {
-                close_element(&element);
-            }
+            self.end_window(meta.pid, Some(&element));
         }
         // (g) Drop per-workspace bookkeeping.
         self.persist.workspace.roots.remove(&ws);
@@ -274,10 +271,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.persist
             .placement
             .pending
-            .retain(|_, p| match p.target {
-                Target::Pane { pane, .. } | Target::Slot { pane, .. } => !panes.contains(&pane),
-                Target::Overlay | Target::WarmOverlay => true,
-            });
+            .retain(|_, p| p.target.pane().is_none_or(|pane| !panes.contains(&pane)));
         for pane in &panes {
             self.persist.placement.placed.remove(pane);
         }

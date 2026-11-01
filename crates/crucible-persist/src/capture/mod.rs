@@ -22,7 +22,8 @@ mod terminal;
 pub use classify::{SpawnClass, WindowRecordInput, relaunch_wrapper_of, window_record};
 pub use claude::{claude_resume_argv, claude_session_id};
 pub use procfs::{
-    ProcInfo, ProcSnapshot, Stat, ancestors, children_of, parse_children, parse_cmdline, parse_stat,
+    ProcInfo, ProcSnapshot, Stat, ancestors, children_of, parse_children, parse_cmdline,
+    parse_stat, read_cmdline,
 };
 pub use shell::{is_shell_program, join_command, shell_quote};
 pub use terminal::{TerminalCapture, capture_terminal};

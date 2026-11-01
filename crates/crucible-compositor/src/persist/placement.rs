@@ -1,5 +1,12 @@
 //! Window placement: pending placements keyed by spawned PID ([`Target`]), PID-ancestor matching,
 //! restore-order insertion, and the new-toplevel map paths.
+//!
+//! A relaunch spawn's slot queue lives inside its own [`Pending`] entry (`queue`): the
+//! relaunched placeholder's [`Slot`] first, then each sibling placeholder standing for the same
+//! cmdline. The queue hands out one slot per new toplevel (a dialog takes none) and the entry is
+//! dropped exactly when the queue is exhausted; expiry and workspace close drop the queue with the
+//! entry, so "is this placeholder already queued" is answered from `pending` alone. Placeholders
+//! are recognised from spawn-time facts ([`placeholder_cmdline`]), never from `/proc`.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -16,10 +23,14 @@ use crate::state::{Backend, CrucibleState};
 #[derive(Debug, Default)]
 pub(super) struct PlacementState {
     pub(super) pending: HashMap<u32, Pending>,
-    /// Per relaunch spawn pid: the slots still to fill, in order (P's slot first, then each
-    /// sibling placeholder). The spawn's `pending` entry stays until its queue is empty.
-    pub(super) slot_queues: HashMap<u32, VecDeque<SlotEntry>>,
     pub(super) placed: HashMap<PaneId, Vec<(WindowId, usize)>>,
+}
+
+impl PlacementState {
+    /// Whether `id` is a sibling placeholder still queued by some live relaunch spawn.
+    pub(super) fn is_queued(&self, id: WindowId) -> bool {
+        is_queued(self.pending.values(), id)
+    }
 }
 
 /// How long a pending placement waits for its window to map.
@@ -27,6 +38,20 @@ pub const PENDING_TTL: Duration = Duration::from_secs(30);
 
 /// How far up `/proc` a client PID is walked looking for a spawned/pending ancestor.
 pub const ANCESTOR_DEPTH: usize = 8;
+
+/// The live slot a relaunch placeholder held: `pane` at `index` (its position in the pane's
+/// stack when Enter was pressed, never the saved order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slot {
+    /// The placeholder's pane.
+    pub pane: PaneId,
+    /// The placeholder's current index in that pane's stack.
+    pub index: usize,
+    /// Whether the placeholder was the pane's focused window.
+    pub focused: bool,
+    /// The placeholder's restore placement entry (`placed`), inherited by the app.
+    pub saved_index: Option<usize>,
+}
 
 /// Where a window expected from a spawned PID should land.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,29 +65,31 @@ pub enum Target {
         /// Whether it was the pane's focused window.
         focused: bool,
     },
-    /// Into the live slot a relaunch placeholder held: `pane` at `index` (its position in the
-    /// pane's stack when Enter was pressed, never the saved order).
-    Slot {
-        /// The placeholder's pane.
-        pane: PaneId,
-        /// The placeholder's current index in that pane's stack.
-        index: usize,
-        /// Whether the placeholder was the pane's focused window.
-        focused: bool,
-        /// The placeholder's restore placement entry (`placed`), inherited by the app.
-        saved_index: Option<usize>,
-    },
+    /// Into the live slot a relaunch placeholder held. A pending relaunch entry carries this
+    /// (the relaunched placeholder's own slot, for workspace bookkeeping) plus its slot queue.
+    Slot(Slot),
     /// An overlay (picker / launcher; unmanaged, centred, keyboard-focused).
     Overlay,
     /// A pre-warmed overlay host: stored hidden in the warm slot, never mapped until requested.
     WarmOverlay,
 }
 
+impl Target {
+    /// The pane a placement lands in (`None` for overlays).
+    #[must_use]
+    pub fn pane(&self) -> Option<PaneId> {
+        match self {
+            Target::Pane { pane, .. } | Target::Slot(Slot { pane, .. }) => Some(*pane),
+            Target::Overlay | Target::WarmOverlay => None,
+        }
+    }
+}
+
 /// One slot a relaunch spawn will fill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SlotEntry {
     /// A slot already resolved (the relaunched placeholder's, whose window is closed at relaunch).
-    Resolved(Target),
+    Resolved(Slot),
     /// A sibling placeholder, still on screen: its slot is read from its live position when
     /// filled, and the placeholder is closed then.
     Placeholder(WindowId),
@@ -125,26 +152,52 @@ pub fn select_siblings(
         .collect()
 }
 
-/// Drops the queues of spawns whose pending entry is gone (expired or closed with its workspace).
-pub fn prune_queues(
-    queues: &mut HashMap<u32, VecDeque<SlotEntry>>,
-    has_pending: impl Fn(u32) -> bool,
-) {
-    queues.retain(|pid, _| has_pending(*pid));
-}
-
-/// Whether `id` is a sibling placeholder still queued by some live relaunch spawn.
+/// The relaunch cmdline a window stands for if it is a relaunch placeholder: a CDE-spawned
+/// terminal (`class == Terminal`) whose spawn origin is a saved App record. The class guard is
+/// load-bearing (audit E1): a relaunched app carries the very same App origin but is an `App`.
 #[must_use]
-pub fn is_queued(queues: &HashMap<u32, VecDeque<SlotEntry>>, id: WindowId) -> bool {
-    queues
-        .values()
-        .any(|q| q.contains(&SlotEntry::Placeholder(id)))
+pub fn placeholder_cmdline(meta: &WindowMeta) -> Option<&str> {
+    match (&meta.class, &meta.origin) {
+        (
+            WindowClass::Terminal,
+            Some(crucible_persist::WindowRecord::App {
+                cmdline: Some(cmdline),
+                ..
+            }),
+        ) => Some(cmdline),
+        _ => None,
+    }
 }
 
-#[derive(Debug, Clone, Copy)]
+/// Whether `id` is a sibling placeholder still queued by one of the `pending` relaunch spawns.
+#[must_use]
+pub fn is_queued<'a>(pending: impl IntoIterator<Item = &'a Pending>, id: WindowId) -> bool {
+    pending.into_iter().any(|p| {
+        p.queue
+            .as_ref()
+            .is_some_and(|q| q.contains(&SlotEntry::Placeholder(id)))
+    })
+}
+
+/// One pending placement: its target, when it was registered and, for a relaunch spawn, the slots
+/// it still has to fill (dropped with the entry on expiry or workspace close).
+#[derive(Debug, Clone)]
 pub(super) struct Pending {
     pub(super) target: Target,
     pub(super) since: Instant,
+    /// A relaunch spawn's slot queue (`Some` exactly for relaunch spawns).
+    pub(super) queue: Option<VecDeque<SlotEntry>>,
+}
+
+impl Pending {
+    /// A whole-target placement registered `since`.
+    pub(super) fn new(target: Target, since: Instant) -> Self {
+        Self {
+            target,
+            since,
+            queue: None,
+        }
+    }
 }
 
 /// The key `has` accepts among `pid` itself and then its `ancestors` (parent first).
@@ -189,10 +242,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .placement
             .pending
             .values()
-            .any(|p| match p.target {
-                Target::Pane { pane, .. } | Target::Slot { pane, .. } => panes.contains(&pane),
-                Target::Overlay | Target::WarmOverlay => false,
-            })
+            .any(|p| p.target.pane().is_some_and(|pane| panes.contains(&pane)))
     }
 
     // ---- mapping new windows -------------------------------------------------------------------
@@ -260,13 +310,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }) => {
                 self.map_placed(element, pane, saved_index, focused, meta);
             }
-            Some(Target::Slot {
-                pane,
-                index,
-                focused,
-                saved_index,
-            }) => {
-                self.map_slot(element, pane, index, focused, saved_index, meta);
+            Some(Target::Slot(slot)) => {
+                self.map_slot(element, slot, meta);
             }
             None => {
                 self.map_managed_window(element, meta);
@@ -274,78 +319,34 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// The target the new toplevel of spawn `key` takes. A relaunch spawn hands out its queued
-    /// slots one per toplevel (a dialog takes none) and keeps its pending entry until the queue is
-    /// empty; every other target is consumed whole, as before.
+    /// The target the new toplevel of spawn `key` takes. A relaunch spawn (a pending entry with a
+    /// slot queue) hands out its queued slots one per toplevel (a dialog takes none) and keeps its
+    /// pending entry until the queue is empty; every other target is consumed whole, as before.
     fn take_pending_target(&mut self, key: u32, has_parent: bool) -> Option<Target> {
-        let Target::Slot {
-            pane,
-            index,
-            focused,
-            saved_index,
-        } = self.persist.placement.pending.get(&key)?.target
-        else {
-            return self
-                .persist
-                .placement
-                .pending
-                .remove(&key)
-                .map(|p| p.target);
+        let pending = &mut self.persist.placement.pending;
+        let Some(mut queue) = pending.get_mut(&key)?.queue.take() else {
+            return pending.remove(&key).map(|p| p.target);
         };
-        let mut queue = self
-            .persist
-            .placement
-            .slot_queues
-            .remove(&key)
-            .unwrap_or_else(|| {
-                VecDeque::from([SlotEntry::Resolved(Target::Slot {
-                    pane,
-                    index,
-                    focused,
-                    saved_index,
-                })])
-            });
         let claim = claim_slot(&mut queue, has_parent, |id| {
             self.layout.world.pane_of_window(id).is_some()
         });
         if claim.done {
             self.persist.placement.pending.remove(&key);
-        } else {
-            self.persist.placement.slot_queues.insert(key, queue);
+        } else if let Some(p) = self.persist.placement.pending.get_mut(&key) {
+            p.queue = Some(queue);
         }
         match claim.entry? {
-            SlotEntry::Resolved(target) => Some(target),
+            SlotEntry::Resolved(slot) => Some(Target::Slot(slot)),
             SlotEntry::Placeholder(id) => {
-                let (pane, index, focused, saved_index) = self.placeholder_slot(id)?;
-                // The app takes the placeholder's live slot: close the placeholder. Its
-                // `crucible relaunch` is still waiting for Enter, so asking the terminal window
-                // to close would make the terminal confirm killing a running process (ghostty's
-                // "Close window?" dialog). End the wrapper instead; its terminal then closes on
-                // its own. Only when no wrapper is found is the window asked to close.
-                let wrapper = self
-                    .layout
-                    .meta(id)
-                    .and_then(|m| m.pid)
-                    .and_then(|pid| crucible_persist::relaunch_wrapper_of(proc_root(), pid));
-                let ended = wrapper.is_some_and(|(pid, _)| terminate(pid));
-                if !ended && let Some(element) = self.layout.element(id).cloned() {
-                    super::close_element(&element);
-                }
-                Some(Target::Slot {
-                    pane,
-                    index,
-                    focused,
-                    saved_index,
-                })
+                let slot = self.placeholder_slot(id)?;
+                self.end_placeholder(id);
+                Some(Target::Slot(slot))
             }
         }
     }
 
-    /// The live slot of placeholder window `id`: `(pane, index, focused, saved_index)`.
-    pub(super) fn placeholder_slot(
-        &self,
-        id: WindowId,
-    ) -> Option<(PaneId, usize, bool, Option<usize>)> {
+    /// The live slot of placeholder window `id`.
+    pub(super) fn placeholder_slot(&self, id: WindowId) -> Option<Slot> {
         let world = &self.layout.world;
         let pane_id = world.pane_of_window(id)?;
         let pane = world.pane(pane_id)?;
@@ -356,7 +357,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .placed
             .get(&pane_id)
             .and_then(|v| v.iter().find(|(w, _)| *w == id).map(|(_, i)| *i));
-        Some((pane_id, index, focused, saved_index))
+        Some(Slot {
+            pane: pane_id,
+            index,
+            focused,
+            saved_index,
+        })
     }
 
     pub(super) fn map_placed(
@@ -420,12 +426,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(super) fn map_slot(
         &mut self,
         element: WindowElement,
-        pane: PaneId,
-        index: usize,
-        focused: bool,
-        saved_index: Option<usize>,
+        slot: Slot,
         meta: WindowMeta,
     ) -> WindowId {
+        let Slot {
+            pane,
+            index,
+            focused,
+            saved_index,
+        } = slot;
         let Some(live_len) = self.layout.world.pane(pane).map(|p| p.windows().len()) else {
             warn!(?pane, "relaunch pane is gone; using the focused pane");
             return self.map_managed_window(element, meta);
@@ -449,7 +458,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
 }
 
 /// Sends SIGTERM to `pid`; whether it was delivered.
-fn terminate(pid: u32) -> bool {
+pub(super) fn terminate(pid: u32) -> bool {
     let Some(pid) = i32::try_from(pid)
         .ok()
         .and_then(rustix::process::Pid::from_raw)
@@ -558,12 +567,23 @@ mod tests {
     // ---- relaunch slot queue -------------------------------------------------------------------
 
     fn own_slot() -> SlotEntry {
-        SlotEntry::Resolved(Target::Slot {
+        SlotEntry::Resolved(Slot {
             pane: World::new("x").focused_pane_id(),
             index: 0,
             focused: false,
             saved_index: None,
         })
+    }
+
+    fn relaunch_pending(queue: VecDeque<SlotEntry>) -> Pending {
+        let SlotEntry::Resolved(own) = own_slot() else {
+            unreachable!()
+        };
+        Pending {
+            target: Target::Slot(own),
+            since: Instant::now(),
+            queue: Some(queue),
+        }
     }
 
     fn ids(n: usize) -> Vec<WindowId> {
@@ -615,14 +635,20 @@ mod tests {
         let mut q = VecDeque::from([own_slot(), SlotEntry::Placeholder(w[1])]);
         let first = claim_slot(&mut q, false, |_| true);
         assert!(!first.done, "the sibling is still waiting");
-        let mut queues = HashMap::from([(7u32, q)]);
-        assert!(is_queued(&queues, w[1]));
-        // Expiry drops the spawn's queue: the leftover placeholder is an ordinary one again.
-        prune_queues(&mut queues, |_| false);
-        assert!(!is_queued(&queues, w[1]));
-        let mut live = HashMap::from([(7u32, VecDeque::from([SlotEntry::Placeholder(w[1])]))]);
-        prune_queues(&mut live, |pid| pid == 7);
-        assert!(is_queued(&live, w[1]));
+        let mut state = PlacementState::default();
+        state.pending.insert(7, relaunch_pending(q));
+        assert!(state.is_queued(w[1]));
+        // Expiry drops the spawn's entry and its queue with it: the leftover placeholder is an
+        // ordinary one again.
+        state.pending.retain(|_, _| false);
+        assert!(!state.is_queued(w[1]));
+        let mut live = PlacementState::default();
+        live.pending.insert(
+            7,
+            relaunch_pending(VecDeque::from([SlotEntry::Placeholder(w[1])])),
+        );
+        live.pending.retain(|pid, _| *pid == 7);
+        assert!(live.is_queued(w[1]));
     }
 
     #[test]
@@ -639,10 +665,15 @@ mod tests {
     fn a_queued_sibling_joins_the_live_spawn_and_dead_ones_are_skipped() {
         let w = ids(3);
         let q = VecDeque::from([own_slot(), SlotEntry::Placeholder(w[1])]);
-        let queues = HashMap::from([(7u32, q.clone())]);
+        let mut state = PlacementState::default();
+        state.pending.insert(7, relaunch_pending(q.clone()));
+        // A whole-target entry queues nothing.
+        state
+            .pending
+            .insert(8, Pending::new(Target::WarmOverlay, Instant::now()));
         // A hand relaunch checks `is_queued` and returns without spawning.
-        assert!(is_queued(&queues, w[1]));
-        assert!(!is_queued(&queues, w[2]));
+        assert!(state.is_queued(w[1]));
+        assert!(!state.is_queued(w[2]));
         // A sibling closed by hand before its turn is skipped, not consumed.
         let mut q = q;
         q.push_back(SlotEntry::Placeholder(w[2]));
@@ -650,5 +681,41 @@ mod tests {
         let c = claim_slot(&mut q, false, |id| id == w[2]);
         assert_eq!(c.entry, Some(SlotEntry::Placeholder(w[2])));
         assert!(c.done);
+    }
+
+    /// Audit E1: only a CDE-spawned terminal with an App origin is a placeholder. A relaunched app
+    /// window carries the very same App origin (its spawn stands for the same saved record), and a
+    /// plain terminal has no origin: neither is selected as a sibling.
+    #[test]
+    fn only_placeholder_terminals_are_siblings_not_relaunched_apps_with_the_same_origin() {
+        let w = ids(4);
+        let (own, placeholder, relaunched, plain) = (w[0], w[1], w[2], w[3]);
+        let app = || {
+            Some(crucible_persist::WindowRecord::App {
+                app_id: Some("firefox".to_string()),
+                cmdline: Some("firefox".to_string()),
+            })
+        };
+        let meta = |class, origin| WindowMeta {
+            pid: Some(1),
+            class,
+            origin,
+        };
+        let metas = [
+            (own, meta(WindowClass::Terminal, app())),
+            (placeholder, meta(WindowClass::Terminal, app())),
+            (relaunched, meta(WindowClass::App, app())),
+            (plain, meta(WindowClass::Terminal, None)),
+        ];
+        assert_eq!(placeholder_cmdline(&metas[1].1), Some("firefox"));
+        assert_eq!(placeholder_cmdline(&metas[2].1), None);
+        assert_eq!(placeholder_cmdline(&metas[3].1), None);
+        let cands = metas
+            .iter()
+            .map(|(id, m)| (*id, placeholder_cmdline(m).map(str::to_string)));
+        assert_eq!(
+            select_siblings(cands, own, "firefox", |_| false),
+            vec![placeholder]
+        );
     }
 }

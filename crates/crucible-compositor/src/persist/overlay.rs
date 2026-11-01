@@ -12,7 +12,6 @@ use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use tracing::{error, info, warn};
 
-use super::close_element;
 use super::placement::{Pending, Target};
 use super::spawn::{SpawnKind, SpawnRequest, epoch_ms_now, with_terminal_args};
 use super::warm_slot::{WarmEffect, WarmHost, WarmSlot};
@@ -288,13 +287,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let program = self.terminal_program();
         let args = with_terminal_args(&self.config.overlay.effective_terminal_args(&program), args);
         if let Some(pid) = self.spawn(SpawnRequest::new(program, args, SpawnKind::Overlay)) {
-            self.persist.placement.pending.insert(
-                pid,
-                Pending {
-                    target: Target::Overlay,
-                    since: Instant::now(),
-                },
-            );
+            self.persist
+                .placement
+                .pending
+                .insert(pid, Pending::new(Target::Overlay, Instant::now()));
             self.persist.overlay.overlay = Some(Overlay {
                 kind,
                 pid,
@@ -405,9 +401,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Ends an overlay by killing its terminal process, so the terminal never asks to confirm
     /// closing a window with a running TUI. Falls back to a polite close when CDE holds no handle.
     pub(super) fn end_overlay(&mut self, element: &WindowElement, pid: u32) {
-        if !self.persist.spawn.kill(pid) {
-            close_element(element);
-        }
+        self.end_window(Some(pid), Some(element));
     }
 
     /// Clears the overlay slot (its overlay closed or was given up) and applies
@@ -439,11 +433,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     if let Some(pid) = pid {
                         self.persist.placement.pending.remove(&pid);
                     }
-                    if !pid.is_some_and(|p| self.persist.spawn.kill(p)) {
-                        if let Some(element) = &element {
-                            close_element(element);
-                        }
-                    }
+                    self.end_window(pid, element.as_ref());
                 }
                 WarmEffect::RemoveSocket(socket) => {
                     let _ = std::fs::remove_file(&socket);
@@ -492,13 +482,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 program: program.clone(),
                 args: args.clone(),
             });
-            self.persist.placement.pending.insert(
-                pid,
-                Pending {
-                    target: Target::WarmOverlay,
-                    since: Instant::now(),
-                },
-            );
+            self.persist
+                .placement
+                .pending
+                .insert(pid, Pending::new(Target::WarmOverlay, Instant::now()));
             self.persist
                 .overlay
                 .warm

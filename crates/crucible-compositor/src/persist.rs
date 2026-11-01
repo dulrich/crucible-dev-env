@@ -278,6 +278,33 @@ fn config_mtime() -> Option<SystemTime> {
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
+    /// Ends a window: kill its CDE-spawned child `pid` (so a terminal never asks to confirm
+    /// closing a running process), else politely ask `element` to close.
+    fn end_window(&mut self, pid: Option<u32>, element: Option<&WindowElement>) {
+        if !pid.is_some_and(|p| self.persist.spawn.kill(p)) {
+            if let Some(element) = element {
+                close_element(element);
+            }
+        }
+    }
+
+    /// Ends a relaunch placeholder whose slot an app took. Its `crucible relaunch` is still
+    /// waiting for Enter, so asking the terminal window to close would make the terminal confirm
+    /// killing a running process (ghostty's "Close window?" dialog). End the wrapper instead
+    /// (found by one direct-child lookup from the terminal pid); its terminal then closes on its
+    /// own. Only when no wrapper is found is the window asked to close.
+    fn end_placeholder(&mut self, id: WindowId) {
+        let wrapper = self
+            .layout
+            .meta(id)
+            .and_then(|m| m.pid)
+            .and_then(|pid| crucible_persist::relaunch_wrapper_of(proc_root(), pid));
+        let ended = wrapper.is_some_and(|(pid, _)| placement::terminate(pid));
+        if !ended && let Some(element) = self.layout.element(id) {
+            close_element(element);
+        }
+    }
+
     /// One-time persistence init, called by both backends right after the startup config is
     /// applied (before any output exists): loads the slot pins, binds the IPC socket and arms the
     /// 1 s tick. The output-dependent half is [`Self::start_session`].
@@ -685,7 +712,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.persist
                     .placement
                     .pending
-                    .insert(pid, Pending { target, since: now });
+                    .insert(pid, Pending::new(target, now));
             }
         }
         info!(name = record.name, "workspace restored");

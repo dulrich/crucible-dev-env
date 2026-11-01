@@ -85,7 +85,8 @@ pub(super) fn read_cwd(proc_root: &Path, pid: u32) -> Option<PathBuf> {
     fs::read_link(pid_dir(proc_root, pid).join("cwd")).ok()
 }
 
-pub(super) fn read_cmdline(proc_root: &Path, pid: u32) -> Vec<String> {
+/// The argv of `pid` (its NUL-separated `cmdline`); empty when unreadable.
+pub fn read_cmdline(proc_root: &Path, pid: u32) -> Vec<String> {
     fs::read(pid_dir(proc_root, pid).join("cmdline"))
         .map(|b| parse_cmdline(&b))
         .unwrap_or_default()
