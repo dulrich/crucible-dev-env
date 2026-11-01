@@ -20,10 +20,24 @@ use smithay::{
             surface::WaylandSurfaceRenderElement,
         },
     },
-    input::pointer::CursorImageStatus,
+    input::pointer::{CursorImageStatus, CursorImageSurfaceData},
     render_elements,
-    utils::{Physical, Point, Scale},
+    utils::{Logical, Physical, Point, Scale},
+    wayland::compositor,
 };
+
+/// The hotspot a client set with `wl_pointer.set_cursor` (logical, surface-local), else `(0, 0)`.
+fn cursor_hotspot(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> Point<i32, Logical> {
+    compositor::with_states(surface, |states| {
+        states
+            .data_map
+            .get::<CursorImageSurfaceData>()
+            .and_then(|m| m.lock().ok().map(|a| a.hotspot))
+            .unwrap_or_default()
+    })
+}
 
 /// Side length, in pixels, of the built-in square default-cursor bitmap.
 pub const DEFAULT_CURSOR_SIZE: i32 = 16;
@@ -150,6 +164,9 @@ where
             }
             // A client-provided cursor surface: draw its surface tree.
             CursorImageStatus::Surface(surface) => {
+                // The pointer position is the hotspot, so the surface's top-left sits `hotspot` up-left
+                // of it (unshifted, an I-beam drew right/below where clicks land).
+                let location = location - cursor_hotspot(surface).to_physical_precise_round(scale);
                 let elements: Vec<PointerRenderElement<R>> =
                     smithay::backend::renderer::element::surface::render_elements_from_surface_tree(
                         renderer,
