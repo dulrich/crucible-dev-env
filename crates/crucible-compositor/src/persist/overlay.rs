@@ -14,15 +14,14 @@ use tracing::{error, info, warn};
 
 use super::close_element;
 use super::placement::{Pending, Target};
-use super::spawn::{
-    SpawnKind, epoch_ms_now, keys_args, launcher_args, picker_args, with_terminal_args,
-};
+use super::spawn::{SpawnKind, SpawnRequest, epoch_ms_now, with_terminal_args};
 use super::warm_slot::{WarmEffect, WarmHost, WarmSlot};
 use super::workspace::PinEvent;
 use crate::element::WindowElement;
 use crate::focus::KeyboardFocusTarget;
 use crate::layout::model_output_id;
 use crate::state::{Backend, CrucibleState};
+use crucible_persist::{Invocation, PickTarget};
 
 /// The overlay slot and the pre-warmed host (a field of [`super::PersistState`]).
 #[derive(Debug, Default)]
@@ -116,7 +115,7 @@ pub fn warm_socket_path(
 }
 
 /// The overlay host's mode line for overlay terminal `args` (`[exec-flag, crucible, sub, rest…]`,
-/// as built by [`picker_args`] and friends): `<epoch_ms>\t<sub>[\t<rest>…]\n`. `None` when the argv
+/// as built by `Invocation::terminal_argv`): `<epoch_ms>\t<sub>[\t<rest>…]\n`. `None` when the argv
 /// is too short or a field is not UTF-8 or holds a tab/newline (the caller then spawns cold).
 #[must_use]
 pub fn warm_mode_line(epoch_ms: u128, args: &[OsString]) -> Option<String> {
@@ -132,18 +131,6 @@ pub fn warm_mode_line(epoch_ms: u128, args: &[OsString]) -> Option<String> {
     }
     line.push('\n');
     Some(line)
-}
-
-/// The terminal arguments for a warm host: `<exec-flag> <crucible> overlay-host --socket <path>`.
-#[must_use]
-pub fn warm_host_args(exec_flag: &str, crucible: &Path, socket: &Path) -> Vec<OsString> {
-    vec![
-        exec_flag.into(),
-        crucible.into(),
-        "overlay-host".into(),
-        "--socket".into(),
-        socket.into(),
-    ]
 }
 
 /// Sends `line` to the warm host's socket, bounded to a few ms (never blocks the event loop).
@@ -184,20 +171,25 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Opens the picker, the rename prompt or the workspace-root prompt per `mode`; see
     /// [`Self::open_overlay`]. Rename and root prompts do not keep the pin, like each other.
     pub fn open_picker(&mut self, mode: PickerMode) {
-        let rename =
-            (mode == PickerMode::Rename).then(|| self.layout.world.focus_path().workspace_name);
-        let root = (mode == PickerMode::Root).then(|| {
-            let ws = self.layout.world.active_workspace_id();
-            self.persist
-                .workspace
-                .roots
-                .get(&ws)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        });
+        let target = match mode {
+            PickerMode::Pick => PickTarget::Workspace,
+            PickerMode::Rename => PickTarget::Rename(self.layout.world.focus_path().workspace_name),
+            PickerMode::Root => {
+                let ws = self.layout.world.active_workspace_id();
+                PickTarget::Root(
+                    self.persist
+                        .workspace
+                        .roots
+                        .get(&ws)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
+            }
+        };
+        let invocation = Invocation::Pick(target);
         let exec_flag = self.config.terminal.exec_flag.clone();
         self.open_overlay(OverlayKind::Picker, mode == PickerMode::Pick, |crucible| {
-            picker_args(&exec_flag, crucible, rename.as_deref(), root.as_deref())
+            invocation.terminal_argv(&exec_flag, crucible)
         });
     }
 
@@ -205,7 +197,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub fn open_launcher(&mut self) {
         let exec_flag = self.config.terminal.exec_flag.clone();
         self.open_overlay(OverlayKind::Launcher, false, |crucible| {
-            launcher_args(&exec_flag, crucible)
+            Invocation::Launch.terminal_argv(&exec_flag, crucible)
         });
     }
 
@@ -213,7 +205,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub fn open_settings(&mut self) {
         let exec_flag = self.config.terminal.exec_flag.clone();
         self.open_overlay(OverlayKind::Keys, false, |crucible| {
-            keys_args(&exec_flag, crucible)
+            Invocation::Keys.terminal_argv(&exec_flag, crucible)
         });
     }
 
@@ -288,14 +280,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let used_warm = self.try_open_warm(kind, &args);
         if replaced {
             // The replaced overlay is closing: that is an overlay close for the warm slot too.
-            self.rewarm_after_overlay_close();
+            self.start_warm_overlay();
         }
         if used_warm {
             return;
         }
         let program = self.terminal_program();
         let args = with_terminal_args(&self.config.overlay.effective_terminal_args(&program), args);
-        if let Some(pid) = self.spawn_process(&program, &args, None, SpawnKind::Overlay) {
+        if let Some(pid) = self.spawn(SpawnRequest::new(program, args, SpawnKind::Overlay)) {
             self.persist.placement.pending.insert(
                 pid,
                 Pending {
@@ -432,7 +424,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.clear_overlay_slot();
             self.set_keyboard_focus(None);
             self.reconcile_keyboard_focus();
-            self.rewarm_after_overlay_close();
+            self.start_warm_overlay();
         }
     }
 
@@ -467,11 +459,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.run_warm_effects(effects);
     }
 
-    /// An overlay closed: re-arm the one-respawn allowance and start a warm host if none runs.
-    pub(super) fn rewarm_after_overlay_close(&mut self) {
-        self.start_warm_overlay();
-    }
-
     /// Spawns the warm host (terminal + exec flag + `crucible overlay-host --socket …`, with the
     /// overlay terminal args and the overlay env) unless warming is off or one already runs.
     fn spawn_warm(&mut self) {
@@ -492,9 +479,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let program = self.terminal_program();
         let args = with_terminal_args(
             &self.config.overlay.effective_terminal_args(&program),
-            warm_host_args(&self.config.terminal.exec_flag, &crucible, &socket),
+            Invocation::OverlayHost {
+                socket: socket.clone(),
+            }
+            .terminal_argv(&self.config.terminal.exec_flag, &crucible),
         );
-        if let Some(pid) = self.spawn_process(&program, &args, None, SpawnKind::Overlay) {
+        let req = SpawnRequest::new(program.clone(), args.clone(), SpawnKind::Overlay);
+        if let Some(pid) = self.spawn(req) {
             self.persist.overlay.warm_spawn = Some(WarmSpawn {
                 at: Instant::now(),
                 exe: crucible.clone(),
@@ -742,29 +733,34 @@ mod tests {
 
     #[test]
     fn warm_mode_line_carries_the_cold_subcommand_argv() {
-        let pick = picker_args("-e", Path::new("/c"), Some("a:b"), None);
+        let pick =
+            Invocation::Pick(PickTarget::Rename("a:b".into())).terminal_argv("-e", Path::new("/c"));
         assert_eq!(
             warm_mode_line(42, &pick).as_deref(),
             Some("42\tpick\t--rename\ta%3Ab\n")
         );
-        let root = picker_args("-e", Path::new("/c"), None, Some(""));
+        let root =
+            Invocation::Pick(PickTarget::Root(String::new())).terminal_argv("-e", Path::new("/c"));
         assert_eq!(
             warm_mode_line(3, &root).as_deref(),
             Some("3\tpick\t--root\t\n")
         );
         assert_eq!(
-            warm_mode_line(1, &launcher_args("-e", Path::new("/c"))).as_deref(),
+            warm_mode_line(1, &Invocation::Launch.terminal_argv("-e", Path::new("/c"))).as_deref(),
             Some("1\tlaunch\n")
         );
         assert_eq!(
-            warm_mode_line(1, &keys_args("-e", Path::new("/c"))).as_deref(),
+            warm_mode_line(1, &Invocation::Keys.terminal_argv("-e", Path::new("/c"))).as_deref(),
             Some("1\tkeys\n")
         );
         assert_eq!(warm_mode_line(1, &[OsString::from("-e")]), None);
         let bad = vec![OsString::from("-e"), "/c".into(), "pick\tx".into()];
         assert_eq!(warm_mode_line(1, &bad), None);
         assert_eq!(
-            warm_host_args("-e", Path::new("/c"), Path::new("/s.sock")),
+            Invocation::OverlayHost {
+                socket: "/s.sock".into()
+            }
+            .terminal_argv("-e", Path::new("/c")),
             vec![
                 OsString::from("-e"),
                 "/c".into(),

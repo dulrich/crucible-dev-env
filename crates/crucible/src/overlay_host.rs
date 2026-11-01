@@ -13,6 +13,8 @@ use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
+use crucible_persist::PickTarget;
+
 use crate::{Parsed, help_requested};
 
 /// Usage text for `crucible overlay-host --help`.
@@ -90,10 +92,14 @@ pub fn parse_mode_line(raw: &str) -> Result<ModeLine, String> {
     let name = fields.next().ok_or("missing mode")?;
     let mode = OverlayMode::from_name(name).ok_or_else(|| format!("unknown mode {name:?}"))?;
     let args: Vec<String> = fields.map(str::to_string).collect();
-    match (mode, args.len()) {
-        (OverlayMode::Launch | OverlayMode::Keys | OverlayMode::Pick, 0) => {}
-        (OverlayMode::Pick, 2) if args[0] == "--rename" || args[0] == "--root" => {}
-        _ => return Err(format!("bad arguments for {name}")),
+    // Pick arguments go through the shared `pick` grammar (shape only: the value stays encoded and
+    // is decoded when the picker runs).
+    let ok = match mode {
+        OverlayMode::Launch | OverlayMode::Keys => args.is_empty(),
+        OverlayMode::Pick => PickTarget::parse_encoded(&args).is_ok(),
+    };
+    if !ok {
+        return Err(format!("bad arguments for {name}"));
     }
     Ok(ModeLine {
         epoch_ms,

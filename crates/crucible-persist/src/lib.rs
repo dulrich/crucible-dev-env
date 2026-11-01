@@ -12,7 +12,10 @@
 //! - the named workspace [`slots`] (`Super+<digit>` pins) in `$XDG_STATE_HOME/cde/slots.kdl`, a sibling of the store;
 //! - the [`session`] record (open workspaces per output, focus) in `$XDG_STATE_HOME/cde/session.kdl`, also a sibling;
 //! - `/proc` cwd + foreground-command capture ([`capture`]) for external terminals;
-//! - the one typed CDE wrapper argv contract ([`wrapper`]: `crucible resume` / `crucible relaunch`);
+//! - the one typed `crucible <sub>` argv contract ([`invocation`]: resume, relaunch, pick, launch,
+//!   keys, overlay-host) and its field codec ([`field`]);
+//! - program resolution for spawns ([`program`]: executable check, child `PATH`, pre-flight);
+//! - restore planning ([`restore`]: one spawn job per saved window);
 //! - the auto-save throttle ([`should_save`]).
 //!
 //! MVP restore fidelity is **layout + cwd + relaunch command** for external terminals; true
@@ -22,26 +25,31 @@
 
 pub mod capture;
 mod error;
-mod executable;
+pub mod field;
 mod format;
+pub mod invocation;
 mod policy;
+pub mod program;
 mod record;
+pub mod restore;
 pub mod session;
 pub mod slots;
 pub mod store;
-pub mod wrapper;
 
 pub use capture::{
     CaptureEnv, ProcInfo, ProcSnapshot, SpawnClass, TerminalCapture, WindowRecordInput, ancestors,
     capture_terminal, children_of, relaunch_wrapper_of, window_record,
 };
 pub use error::PersistError;
-pub use executable::{
-    CrucibleExeError, ExeRemoved, crucible_exe, is_executable_file, reinstalled_exe,
-};
 pub use format::FORMAT_VERSION;
-pub use policy::should_save;
-pub use record::{PaneRecord, RecordNode, WindowRecord, WorkspaceRecord};
-pub use wrapper::{
-    CdeWrapper, RelaunchWrapper, ResumeWrapper, crucible_subcommand, is_cde_process,
+pub use invocation::{
+    CdeWrapper, Invocation, PickTarget, RelaunchWrapper, ResumeMode, ResumeWrapper,
+    crucible_subcommand, is_cde_process,
 };
+pub use policy::should_save;
+pub use program::{
+    CrucibleExeError, ExeRemoved, child_path, crucible_exe, is_executable_file, preflight_command,
+    reinstalled_exe, resolve_program, same_program,
+};
+pub use record::{PaneRecord, RecordNode, WindowRecord, WorkspaceRecord};
+pub use restore::{SpawnJob, prepare_restore, resolve_cwd};

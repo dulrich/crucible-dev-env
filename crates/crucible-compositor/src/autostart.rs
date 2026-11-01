@@ -9,7 +9,7 @@ use std::ffi::OsString;
 use tracing::{info, warn};
 
 use crate::{
-    persist::SpawnKind,
+    persist::{SpawnKind, SpawnRequest},
     state::{Backend, CrucibleState},
 };
 
@@ -41,9 +41,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         info!(count = commands.len(), "running autostart commands");
         for cmd in commands {
-            let args = [OsString::from("-c"), OsString::from(&cmd)];
+            let args = vec![OsString::from("-c"), OsString::from(&cmd)];
             if self
-                .spawn_process("/bin/sh", &args, None, SpawnKind::App)
+                .spawn(SpawnRequest::new("/bin/sh", args, SpawnKind::App))
                 .is_none()
             {
                 warn!(command = %cmd, "autostart command failed to spawn");

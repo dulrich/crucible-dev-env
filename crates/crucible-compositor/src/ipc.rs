@@ -9,7 +9,8 @@
 //! **Encoding:** every name, path and reason — in requests and responses alike — goes through
 //! [`encode_field`], which percent-encodes exactly `%`, `:`, TAB, LF and CR (`%25`, `%3A`, `%09`,
 //! `%0A`, `%0D`); every other byte passes through. [`decode_field`] is its exact inverse. The same
-//! rule encodes the argument of `crucible pick --rename <current>`.
+//! rule encodes the argument of `crucible pick --rename <current>`. The codec itself lives in
+//! `crucible_persist::field` and is re-exported here.
 //!
 //! | Request (`Request`)        | Response                                                  |
 //! |----------------------------|-----------------------------------------------------------|
@@ -68,45 +69,9 @@ pub const SPAWN_EPOCH_ENV: &str = "CDE_SPAWN_EPOCH_MS";
 /// Longest request line accepted before the connection is dropped.
 const MAX_LINE: usize = 64 * 1024;
 
-/// Percent-encodes `%`, `:`, TAB, LF and CR in `field`; every other character passes through.
-#[must_use]
-pub fn encode_field(field: &str) -> String {
-    let mut out = String::with_capacity(field.len());
-    for c in field.chars() {
-        match c {
-            '%' => out.push_str("%25"),
-            ':' => out.push_str("%3A"),
-            '\t' => out.push_str("%09"),
-            '\n' => out.push_str("%0A"),
-            '\r' => out.push_str("%0D"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
-/// Inverse of [`encode_field`]. Returns `None` for a `%` not followed by one of the five escapes
-/// (`25`, `3A`, `09`, `0A`, `0D`; hex digits case-insensitive).
-#[must_use]
-pub fn decode_field(field: &str) -> Option<String> {
-    let mut out = String::with_capacity(field.len());
-    let mut rest = field;
-    while let Some(i) = rest.find('%') {
-        out.push_str(&rest[..i]);
-        let esc = rest.get(i + 1..i + 3)?;
-        out.push(match esc.to_ascii_uppercase().as_str() {
-            "25" => '%',
-            "3A" => ':',
-            "09" => '\t',
-            "0A" => '\n',
-            "0D" => '\r',
-            _ => return None,
-        });
-        rest = &rest[i + 3..];
-    }
-    out.push_str(rest);
-    Some(out)
-}
+/// The field codec lives in `crucible_persist::field` (it also encodes `crucible pick`'s
+/// argument); re-exported here under the same names for the IPC protocol and its clients.
+pub use crucible_persist::field::{decode_field, encode_field};
 
 /// One IPC request (decoded arguments).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -546,33 +511,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn codec_round_trips_every_special_character() {
-        for s in [
-            "a:b",
-            "tab\there",
-            "l\nf",
-            "c\rr",
-            "100%",
-            "%3A literal",
-            "plain ü",
-            "",
-        ] {
-            let enc = encode_field(s);
-            assert!(!enc.contains([':', '\t', '\n', '\r']), "{enc:?}");
-            assert_eq!(decode_field(&enc).as_deref(), Some(s));
-        }
-        assert_eq!(encode_field("a%:\t\n\r"), "a%25%3A%09%0A%0D");
-    }
-
-    #[test]
-    fn decode_rejects_unknown_or_truncated_escapes() {
-        assert_eq!(decode_field("%41"), None);
-        assert_eq!(decode_field("%2"), None);
-        assert_eq!(decode_field("x%"), None);
-        assert_eq!(decode_field("%3a").as_deref(), Some(":"));
-    }
 
     #[test]
     fn requests_round_trip_through_the_wire() {

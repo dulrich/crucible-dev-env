@@ -1,11 +1,12 @@
 //! Workspace persistence wired into the compositor: the 1 s tick (auto-save + config reload),
 //! per-window capture by client PID, session record and restore. This module root keeps the
 //! tick/save/capture/restore/session code plus the pure helpers those use (`skip_record`,
-//! `resolve_cwd`, the picker candidate builders); the rest lives in siblings,
+//! the picker candidate builders); the rest lives in siblings,
 //! each with its own `impl CrucibleState` block and its own slice of [`PersistState`]:
 //!
-//! - [`spawn`]: spawn registry ([`SpawnKind`]), env/`PATH`, command preflight, the terminal/overlay
-//!   argv builders and `spawn_process`.
+//! - [`spawn`]: the one spawn (`spawn(SpawnRequest)`), child env/`PATH`, preflight and the spawn
+//!   verbs; its `registry` holds the PID-provenance registry ([`SpawnKind`]). Terminal argv is
+//!   `crucible_persist::Invocation`; restore planning is `crucible_persist::restore`.
 //! - [`overlay`]: the single overlay slot (picker / launcher / keys) and the pre-warmed overlay host.
 //! - [`placement`]: pending placements by PID, the new-toplevel map paths and window classification.
 //! - [`workspace`]: workspace verbs (close, close-all, move to output, slot pins) and their names.
@@ -17,7 +18,7 @@
 //!
 //! ## How windows are classified (origin first)
 //! By **PID provenance**, not app-id matching: every process CDE spawns through
-//! [`CrucibleState::spawn_process`] is held in the [`spawn::SpawnRegistry`] with its
+//! [`CrucibleState::spawn`] is held in the `spawn::SpawnRegistry` with its
 //! [`spawn::SpawnKind`] and, for a restored window or a relaunched app, its **origin** — the saved
 //! record it stands for. A reaped child leaves the registry with its record. At map time a
 //! toplevel whose client PID is itself (exact pid) a live [`spawn::SpawnKind::Terminal`] spawn is
@@ -35,7 +36,7 @@ mod spawn;
 mod warm_slot;
 mod workspace;
 
-pub use spawn::{SpawnKind, SpawnRecord};
+pub use spawn::{SpawnKind, SpawnRecord, SpawnRequest};
 pub use workspace::{new_workspace_name, startup_seed_name};
 
 use std::collections::{HashMap, HashSet};
@@ -59,7 +60,6 @@ use crate::state::{Backend, CrucibleState};
 use overlay::Overlay;
 pub(crate) use overlay::PickerMode;
 use placement::{PENDING_TTL, Pending, Target};
-use spawn::prepare_restore;
 use workspace::restore_target;
 
 /// Auto-save / config-poll cadence.
@@ -149,22 +149,6 @@ pub fn skip_record(record: &WorkspaceRecord) -> bool {
 #[must_use]
 pub fn should_write(record: &WorkspaceRecord, previously_saved: bool) -> bool {
     !skip_record(record) || previously_saved
-}
-
-/// A restored terminal's working directory: the saved cwd, else the workspace root, else `$HOME`,
-/// else `/`.
-#[must_use]
-pub fn resolve_cwd(
-    saved: &Path,
-    root: Option<&Path>,
-    home: Option<&Path>,
-    is_dir: impl Fn(&Path) -> bool,
-) -> PathBuf {
-    [Some(saved), root, home]
-        .into_iter()
-        .flatten()
-        .find(|p| is_dir(p))
-        .map_or_else(|| PathBuf::from("/"), Path::to_path_buf)
 }
 
 /// Immediate, non-hidden subdirectories of each root as `(basename, path)`, each root's entries
@@ -650,7 +634,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         // Every fallible precondition and the spawn plan come first: a failure leaves the model alone.
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let exec_flag = self.config.terminal.exec_flag.clone();
-        let jobs = prepare_restore(
+        let jobs = crucible_persist::prepare_restore(
             &record,
             Self::crucible_exe("restore")
                 .ok_or_else(|| std::io::Error::other("crucible binary unavailable")),
@@ -694,13 +678,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             };
             let (dir, args, origin) = (job.dir, job.args, job.origin);
             let args = self.with_tiling_args(args);
-            if let Some(pid) = self.spawn_process_with(
-                &program,
-                &args,
-                Some(&dir),
-                SpawnKind::Terminal,
-                Some(origin),
-            ) {
+            let req = SpawnRequest::new(program.clone(), args, SpawnKind::Terminal)
+                .in_dir(Some(dir))
+                .with_origin(Some(origin));
+            if let Some(pid) = self.spawn(req) {
                 self.persist
                     .placement
                     .pending
@@ -789,30 +770,6 @@ mod tests {
         assert!(should_write(&emptied, true));
         // A fresh empty seed that was never saved stays unsaved.
         assert!(!should_write(&emptied, false));
-    }
-
-    #[test]
-    fn cwd_falls_back_to_root_then_home() {
-        let ok =
-            |dirs: &'static [&'static str]| move |p: &Path| dirs.iter().any(|d| Path::new(d) == p);
-        let (saved, root, home) = (
-            Path::new("/s"),
-            Some(Path::new("/r")),
-            Some(Path::new("/h")),
-        );
-        assert_eq!(
-            resolve_cwd(saved, root, home, ok(&["/s", "/r"])),
-            PathBuf::from("/s")
-        );
-        assert_eq!(
-            resolve_cwd(saved, root, home, ok(&["/r", "/h"])),
-            PathBuf::from("/r")
-        );
-        assert_eq!(
-            resolve_cwd(saved, None, home, ok(&["/h"])),
-            PathBuf::from("/h")
-        );
-        assert_eq!(resolve_cwd(saved, root, home, ok(&[])), PathBuf::from("/"));
     }
 
     #[test]

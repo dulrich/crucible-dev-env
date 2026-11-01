@@ -8,8 +8,8 @@ use super::{
     shell::join_command,
     terminal::capture_terminal,
 };
+use crate::invocation::{CdeWrapper, RelaunchWrapper, ResumeWrapper};
 use crate::record::WindowRecord;
-use crate::wrapper::{CdeWrapper, RelaunchWrapper, ResumeWrapper};
 
 /// The record a CDE wrapper stands for: `resume` → a terminal, `relaunch` → an app.
 fn wrapper_record(wrapper: CdeWrapper) -> WindowRecord {

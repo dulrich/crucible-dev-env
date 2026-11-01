@@ -6,9 +6,8 @@
 
 use std::path::PathBuf;
 
-use crucible_compositor::ipc::{
-    Candidate, CandidateKind, Request, Response, decode_field, parse_candidates,
-};
+use crucible_compositor::ipc::{Candidate, CandidateKind, Request, Response, parse_candidates};
+use crucible_persist::PickTarget;
 
 use crate::client::{Client, ClientError};
 use crate::fuzzy;
@@ -33,17 +32,6 @@ pub enum Mode {
     Rename,
     /// Workspace-root prompt: a path line over the configured folders.
     Root,
-}
-
-/// What `crucible pick` was asked to do.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PickArgs {
-    /// The fuzzy picker.
-    Pick,
-    /// The rename prompt prefilled with the decoded name.
-    Rename(String),
-    /// The workspace-root prompt prefilled with the decoded current root (empty = none).
-    Root(String),
 }
 
 /// `path` with a leading `home` replaced by `~`, only on a path-component boundary.
@@ -333,29 +321,11 @@ impl Overlay for Picker {
 /// # Errors
 /// A usage message for unknown flags, a missing value, a bad percent escape, or `--rename`
 /// together with `--root`.
-pub fn parse_args(args: &[String]) -> Result<Parsed<PickArgs>, String> {
+pub fn parse_args(args: &[String]) -> Result<Parsed<PickTarget>, String> {
     if help_requested(args, &["--rename", "--root"], false) {
         return Ok(Parsed::Help);
     }
-    let decode = |flag: &str, value: &str| {
-        decode_field(value).ok_or_else(|| format!("malformed percent-encoding in {flag} value"))
-    };
-    match args {
-        [] => Ok(Parsed::Run(PickArgs::Pick)),
-        [flag, value] if flag == "--rename" => {
-            decode(flag, value).map(|v| Parsed::Run(PickArgs::Rename(v)))
-        }
-        [flag, value] if flag == "--root" => {
-            decode(flag, value).map(|v| Parsed::Run(PickArgs::Root(v)))
-        }
-        [flag] if flag == "--rename" || flag == "--root" => Err(format!("{flag} needs a value")),
-        [a, _, b, ..]
-            if (a == "--rename" && b == "--root") || (a == "--root" && b == "--rename") =>
-        {
-            Err("--rename and --root cannot be combined".into())
-        }
-        [other, ..] => Err(format!("unexpected argument {other:?}")),
-    }
+    PickTarget::parse(args).map(Parsed::Run)
 }
 
 /// `$HOME`, if set and non-empty.
@@ -377,10 +347,10 @@ pub fn run(args: &[String]) -> i32 {
         }
     };
     run_overlay("pick", |client| match parsed {
-        PickArgs::Rename(current) => Ok(Picker::rename(current)),
-        PickArgs::Root(current) => fetch_candidates(client)
+        PickTarget::Rename(current) => Ok(Picker::rename(current)),
+        PickTarget::Root(current) => fetch_candidates(client)
             .map(|candidates| Picker::root(&current, candidates, home_dir())),
-        PickArgs::Pick => fetch_candidates(client).map(Picker::new),
+        PickTarget::Workspace => fetch_candidates(client).map(Picker::new),
     })
 }
 
@@ -640,18 +610,18 @@ mod tests {
     }
     #[test]
     fn args_parse_and_decode() {
-        assert_eq!(parse_args(&[]).unwrap(), Parsed::Run(PickArgs::Pick));
+        assert_eq!(parse_args(&[]).unwrap(), Parsed::Run(PickTarget::Workspace));
         assert_eq!(
             parse_args(&["--rename".into(), "a%3Ab%25".into()]).unwrap(),
-            Parsed::Run(PickArgs::Rename("a:b%".into()))
+            Parsed::Run(PickTarget::Rename("a:b%".into()))
         );
         assert_eq!(
             parse_args(&["--root".into(), "/a%3Ab".into()]).unwrap(),
-            Parsed::Run(PickArgs::Root("/a:b".into()))
+            Parsed::Run(PickTarget::Root("/a:b".into()))
         );
         assert_eq!(
             parse_args(&["--root".into(), String::new()]).unwrap(),
-            Parsed::Run(PickArgs::Root(String::new()))
+            Parsed::Run(PickTarget::Root(String::new()))
         );
         assert!(parse_args(&["--root".into()]).is_err());
         let both: Vec<String> = ["--rename", "a", "--root", "b"].map(String::from).to_vec();
@@ -673,11 +643,11 @@ mod tests {
         // `--help` as the rename value is payload (and an invalid escape-free name).
         assert_eq!(
             parse_args(&a(&["--rename", "--help"])),
-            Ok(Parsed::Run(PickArgs::Rename("--help".into())))
+            Ok(Parsed::Run(PickTarget::Rename("--help".into())))
         );
         assert_eq!(
             parse_args(&a(&["--root", "--help"])),
-            Ok(Parsed::Run(PickArgs::Root("--help".into())))
+            Ok(Parsed::Run(PickTarget::Root("--help".into())))
         );
     }
 

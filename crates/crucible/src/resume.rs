@@ -34,7 +34,7 @@ pub const USAGE: &str = "usage: crucible resume [--now [--exit]] --cwd <dir> [--
 #[must_use]
 pub fn banner(args: &ResumeWrapper) -> String {
     match &args.command {
-        Some(cmd) if args.now => format!("CDE is running: {cmd}"),
+        Some(cmd) if args.mode.runs_now() => format!("CDE is running: {cmd}"),
         Some(cmd) => format!(
             "CDE restored this terminal. Last command: {cmd}. Press Enter to run it, or Ctrl+C for a shell."
         ),
@@ -109,7 +109,7 @@ pub fn run(args: &[String]) -> i32 {
         return exec_shell(&shell);
     };
     ignore_interrupts_while_resident();
-    let mut run_it = parsed.now || wait_for_choice() == Wait::Run;
+    let mut run_it = parsed.mode.runs_now() || wait_for_choice() == Wait::Run;
     let mut last = None;
     let saved_termios = tcgetattr(stdin()).ok();
     while run_it {
@@ -117,13 +117,13 @@ pub fn run(args: &[String]) -> i32 {
         match last.map_or(Outcome::Clean, exit_outcome) {
             Outcome::Abnormal(label) => {
                 restore_terminal(saved_termios.as_ref());
-                println!("{}", crash_banner(&cmd, &label, parsed.exit));
+                println!("{}", crash_banner(&cmd, &label, parsed.mode.exits()));
                 run_it = wait_for_choice() == Wait::Run;
             }
             Outcome::Clean | Outcome::Interrupted => run_it = false,
         }
     }
-    if parsed.exit {
+    if parsed.mode.exits() {
         return return_code(last);
     }
     exec_shell(&shell)
@@ -298,6 +298,7 @@ fn wait_for_choice() -> Wait {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crucible_persist::ResumeMode;
     use std::path::PathBuf;
 
     fn v(a: &[&str]) -> Vec<String> {
@@ -356,30 +357,34 @@ mod tests {
     #[test]
     fn now_flag_parses_before_the_separator_only() {
         let a = ResumeWrapper::parse(&v(&["--now", "--cwd", "/p", "--", "htop"])).unwrap();
-        assert!(a.now);
+        assert_eq!(a.mode, ResumeMode::Run);
         assert_eq!(a.command.as_deref(), Some("htop"));
         let a = ResumeWrapper::parse(&v(&["--cwd", "/p", "--now"])).unwrap();
-        assert!(a.now && a.command.is_none());
+        assert!(a.mode == ResumeMode::Run && a.command.is_none());
         let a = ResumeWrapper::parse(&v(&["--cwd", "/p", "--", "--now"])).unwrap();
-        assert!(!a.now);
+        assert_eq!(a.mode, ResumeMode::Banner);
         assert_eq!(a.command.as_deref(), Some("--now"));
-        assert!(!ResumeWrapper::parse(&v(&["--cwd", "/p"])).unwrap().now);
+        assert_eq!(
+            ResumeWrapper::parse(&v(&["--cwd", "/p"])).unwrap().mode,
+            ResumeMode::Banner
+        );
     }
 
     #[test]
     fn exit_flag_parses_like_now_and_needs_now() {
         let a =
             ResumeWrapper::parse(&v(&["--now", "--exit", "--cwd", "/p", "--", "htop"])).unwrap();
-        assert!(a.now && a.exit);
+        assert_eq!(a.mode, ResumeMode::RunThenExit);
         let a = ResumeWrapper::parse(&v(&["--exit", "--now", "--exit", "--cwd", "/p"])).unwrap();
-        assert!(a.exit && a.command.is_none());
+        assert!(a.mode == ResumeMode::RunThenExit && a.command.is_none());
         let a = ResumeWrapper::parse(&v(&["--now", "--cwd", "/p", "--", "--exit"])).unwrap();
-        assert!(!a.exit);
+        assert_eq!(a.mode, ResumeMode::Run);
         assert_eq!(a.command.as_deref(), Some("--exit"));
-        assert!(
-            !ResumeWrapper::parse(&v(&["--now", "--cwd", "/p"]))
+        assert_eq!(
+            ResumeWrapper::parse(&v(&["--now", "--cwd", "/p"]))
                 .unwrap()
-                .exit
+                .mode,
+            ResumeMode::Run
         );
         assert!(ResumeWrapper::parse(&v(&["--exit", "--cwd", "/p", "--", "htop"])).is_err());
     }
@@ -389,8 +394,7 @@ mod tests {
         let a = ResumeWrapper {
             cwd: "/p".into(),
             command: Some("htop".into()),
-            now: true,
-            exit: false,
+            mode: ResumeMode::Run,
         };
         assert_eq!(banner(&a), "CDE is running: htop");
     }
@@ -410,8 +414,7 @@ mod tests {
         let with = ResumeWrapper {
             cwd: "/p".into(),
             command: Some("cargo test".into()),
-            now: false,
-            exit: false,
+            mode: ResumeMode::Banner,
         };
         assert_eq!(
             banner(&with),
@@ -420,8 +423,7 @@ mod tests {
         let without = ResumeWrapper {
             cwd: "/p".into(),
             command: None,
-            now: false,
-            exit: false,
+            mode: ResumeMode::Banner,
         };
         assert_eq!(banner(&without), "CDE restored this terminal in /p.");
     }

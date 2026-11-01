@@ -323,7 +323,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let args: Vec<std::ffi::OsString> = words.map(Into::into).collect();
         info!(cmd, "lock: spawning the locker");
         if self
-            .spawn_process(program, &args, None, crate::persist::SpawnKind::Overlay)
+            .spawn(crate::persist::SpawnRequest::new(
+                program,
+                args,
+                crate::persist::SpawnKind::Overlay,
+            ))
             .is_none()
         {
             warn!(cmd, "lock: the locker could not be spawned");

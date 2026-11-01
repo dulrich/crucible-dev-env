@@ -14,6 +14,7 @@ use super::placement::{
     ANCESTOR_DEPTH, Pending, SlotEntry, Target, is_queued, match_pending, prune_queues,
     select_siblings,
 };
+use super::spawn::SpawnRequest;
 use super::workspace::folder_workspace_name;
 use super::{capture_env, close_element, proc_root};
 use crate::input::{ActionError, Origin};
@@ -193,8 +194,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
             app_id: capture.app_id.clone(),
             cmdline: Some(capture.cmdline.clone()),
         };
+        let root = self.persist.workspace.roots.get(&ws).cloned();
         let pid = self
-            .spawn_command_with(&capture.cmdline, ws, Some(origin))
+            .spawn(
+                SpawnRequest::shell_app(&capture.cmdline)
+                    .in_dir(root)
+                    .with_origin(Some(origin)),
+            )
             .ok_or_else(|| "spawn failed".to_string())?;
         let own = Target::Slot {
             pane,
