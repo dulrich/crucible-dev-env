@@ -168,3 +168,159 @@ fn move_window_to_pane_errors_mutate_nothing() {
     );
     assert_eq!(w, before);
 }
+
+/// Two side-by-side panes: left holds `a`, right holds `b` (focused).
+fn two_panes() -> (World, WindowId, WindowId) {
+    let mut w = World::new("1");
+    let a = w.open_window();
+    w.split(Right);
+    let b = w.open_window();
+    (w, a, b)
+}
+
+#[test]
+fn swaps_within_the_workspace() {
+    let (mut w, a, b) = two_panes();
+    let right = w.focused_pane_id();
+    let left = w.pane_of_window(a).unwrap();
+    w.focus(Left);
+    w.swap_marked_window(); // marks a
+    assert_eq!(w.marked(), Some(a));
+    w.focus(Right);
+    w.swap_marked_window();
+    w.check_invariants();
+    assert_eq!(w.marked(), None);
+    assert_eq!(w.pane_of_window(a), Some(right));
+    assert_eq!(w.pane_of_window(b), Some(left));
+    assert_eq!(w.focused_pane_id(), right);
+    assert_eq!(w.focused_window(), Some(a));
+}
+
+#[test]
+fn swaps_across_workspaces() {
+    let mut w = World::new("1");
+    let a = w.open_window();
+    let ws1 = w.active_workspace_id();
+    w.swap_marked_window();
+    let ws2 = w.new_workspace("two").unwrap();
+    let b = w.open_window();
+    w.swap_marked_window();
+    w.check_invariants();
+    assert_eq!(w.active_workspace_id(), ws2);
+    assert_eq!(w.focused_window(), Some(a));
+    w.switch_workspace(ws1).unwrap();
+    assert_eq!(w.focused_window(), Some(b));
+    w.check_invariants();
+}
+
+#[test]
+fn swaps_across_outputs() {
+    let mut w = World::new("1");
+    let first = w.focused_output();
+    w.set_output_rect(first, Rect::new(0, 0, 1920, 1080))
+        .unwrap();
+    let a = w.open_window();
+    let src = w.focused_pane_id();
+    w.swap_marked_window();
+    let second = w.add_output(Rect::new(1920, 0, 1280, 1024), "o2").unwrap();
+    w.set_focused_output(second).unwrap();
+    let b = w.open_window();
+    let dst = w.focused_pane_id();
+    w.swap_marked_window();
+    w.check_invariants();
+    assert_eq!(w.focused_output(), second);
+    assert_eq!(w.pane_of_window(a), Some(dst));
+    assert_eq!(w.pane_of_window(b), Some(src));
+    assert_eq!(w.focused_window(), Some(a));
+}
+
+#[test]
+fn visible_marked_window_leaves_displaced_window_visible_in_source() {
+    let (mut w, a, b) = two_panes();
+    let left = w.pane_of_window(a).unwrap();
+    w.focus(Left);
+    w.swap_marked_window(); // a is visible in left
+    w.focus(Right);
+    w.swap_marked_window();
+    w.check_invariants();
+    assert_eq!(w.pane(left).unwrap().focused_window(), Some(b));
+}
+
+#[test]
+fn stacked_marked_window_leaves_source_visible_window_alone() {
+    let mut w = World::new("1");
+    let a = w.open_window();
+    let a2 = w.open_window(); // a2 visible, a stacked beneath
+    w.split(Right);
+    let b = w.open_window();
+    let left = w.pane_of_window(a).unwrap();
+    w.focus(Left);
+    w.cycle_stack(1); // a visible
+    w.swap_marked_window(); // marks a
+    w.cycle_stack(1); // a2 visible again, a stacked, still marked
+    w.focus(Right);
+    w.swap_marked_window();
+    w.check_invariants();
+    assert_eq!(w.pane(left).unwrap().focused_window(), Some(a2));
+    assert_eq!(w.pane(left).unwrap().windows(), &[b, a2]);
+    assert_eq!(w.focused_window(), Some(a));
+}
+
+#[test]
+fn empty_destination_moves_the_marked_window() {
+    let mut w = World::new("1");
+    let a = w.open_window();
+    w.split(Right);
+    let empty = w.focused_pane_id();
+    w.focus(Left);
+    w.swap_marked_window();
+    w.focus(Right);
+    w.swap_marked_window();
+    w.check_invariants();
+    assert_eq!(w.marked(), None);
+    assert_eq!(w.pane_of_window(a), Some(empty));
+    assert_eq!(w.focused_window(), Some(a));
+}
+
+#[test]
+fn same_pane_press_clears_and_changes_nothing_else() {
+    let mut w = World::new("1");
+    let a = w.open_window();
+    let pane = w.focused_pane_id();
+    w.swap_marked_window();
+    w.swap_marked_window();
+    w.check_invariants();
+    assert_eq!(w.marked(), None);
+    assert_eq!(w.pane_of_window(a), Some(pane));
+    assert_eq!(w.focused_window(), Some(a));
+}
+
+#[test]
+fn no_mark_marks_the_focused_window() {
+    let mut w = World::new("1");
+    let a = w.open_window();
+    w.swap_marked_window();
+    w.check_invariants();
+    assert_eq!(w.marked(), Some(a));
+}
+
+#[test]
+fn swap_windows_errors_mutate_nothing() {
+    let (mut w, a, b) = two_panes();
+    let b2 = w.open_window(); // same pane as b
+    let before = w.clone();
+    assert_eq!(w.swap_windows(b, b2), Err(LayoutError::SamePane));
+    assert_eq!(w, before);
+    let ghost = WindowId::from_raw(u64::MAX);
+    assert_eq!(
+        w.swap_windows(a, ghost),
+        Err(LayoutError::UnknownWindow(ghost))
+    );
+    assert_eq!(w, before);
+    assert_eq!(
+        w.swap_windows(ghost, a),
+        Err(LayoutError::UnknownWindow(ghost))
+    );
+    assert_eq!(w, before);
+    w.check_invariants();
+}

@@ -189,70 +189,7 @@ impl std::fmt::Display for Action {
     }
 }
 
-/// A model verb: an [`Action`] that is one `crucible_layout::World` operation, applied by the
-/// compositor through its single mutation entry point. Produced by [`Action::layout_verb`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LayoutVerb {
-    /// [`Action::Focus`].
-    Focus(Direction),
-    /// [`Action::Move`].
-    Move(Direction),
-    /// [`Action::Split`].
-    Split(Direction),
-    /// [`Action::Resize`].
-    Resize(Direction),
-    /// [`Action::CycleStack`].
-    CycleStack(i64),
-    /// [`Action::CycleWorkspace`].
-    CycleWorkspace(i64),
-    /// [`Action::MoveWindowToWorkspace`].
-    MoveWindowToWorkspace(i64),
-    /// [`Action::MarkWindow`].
-    MarkWindow,
-    /// [`Action::SwapMarkedWindow`].
-    SwapMarkedWindow,
-    /// [`Action::ClosePane`].
-    ClosePane,
-}
-
 impl Action {
-    /// The model verb this action is, or `None` for a compositor-level verb (spawn, quit, UI,
-    /// workspace bookkeeping, lock, VT switch).
-    #[must_use]
-    pub fn layout_verb(&self) -> Option<LayoutVerb> {
-        match self {
-            Self::Focus(d) => Some(LayoutVerb::Focus(*d)),
-            Self::Move(d) => Some(LayoutVerb::Move(*d)),
-            Self::Split(d) => Some(LayoutVerb::Split(*d)),
-            Self::Resize(d) => Some(LayoutVerb::Resize(*d)),
-            Self::CycleStack(n) => Some(LayoutVerb::CycleStack(*n)),
-            Self::CycleWorkspace(n) => Some(LayoutVerb::CycleWorkspace(*n)),
-            Self::MoveWindowToWorkspace(n) => Some(LayoutVerb::MoveWindowToWorkspace(*n)),
-            Self::MarkWindow => Some(LayoutVerb::MarkWindow),
-            Self::SwapMarkedWindow => Some(LayoutVerb::SwapMarkedWindow),
-            Self::ClosePane => Some(LayoutVerb::ClosePane),
-            Self::Quit
-            | Self::RunTerminal
-            | Self::Run(_)
-            | Self::RunInTerminal(_)
-            | Self::NewWorkspace
-            | Self::CloseWorkspace
-            | Self::CloseAllWorkspaces
-            | Self::Slot(_)
-            | Self::PinSlot(_)
-            | Self::MoveWorkspaceToOutput(_)
-            | Self::OpenPicker
-            | Self::OpenLauncher
-            | Self::OpenSettings
-            | Self::ToggleHeader
-            | Self::RenameWorkspace
-            | Self::CaptureWorkspaceRoot
-            | Self::SetWorkspaceRoot
-            | Self::Lock
-            | Self::VtSwitch(_) => None,
-        }
-    }
-
     /// The lock rule: whether this action may run while the session is locked. Only VT switching
     /// does; every other key goes to the locker and every acting IPC request is refused. The
     /// compositor's keyboard filter and its action gate share this one predicate.
@@ -437,29 +374,6 @@ mod tests {
             "vt-switch 3".parse::<Action>(),
             Err(ActionParseError("unknown action `vt-switch`".into()))
         );
-    }
-
-    #[test]
-    fn layout_verb_covers_exactly_the_model_verbs() {
-        let model = every_variant()
-            .into_iter()
-            .filter(|a| a.layout_verb().is_some())
-            .count();
-        assert_eq!(model, 10);
-        assert_eq!(
-            Action::MoveWindowToWorkspace(2).layout_verb(),
-            Some(LayoutVerb::MoveWindowToWorkspace(2))
-        );
-        assert_eq!(
-            Action::MarkWindow.layout_verb(),
-            Some(LayoutVerb::MarkWindow)
-        );
-        assert_eq!(
-            Action::SwapMarkedWindow.layout_verb(),
-            Some(LayoutVerb::SwapMarkedWindow)
-        );
-        assert_eq!(Action::ClosePane.layout_verb(), Some(LayoutVerb::ClosePane));
-        assert_eq!(Action::CloseWorkspace.layout_verb(), None);
     }
 
     #[test]

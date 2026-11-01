@@ -242,13 +242,6 @@ impl Default for Bindings {
             &[Keysym::d, Keysym::D],
             Action::CaptureWorkspaceRoot,
         );
-
-        // ---- Super+Ctrl+Shift ----
-        bind(
-            sup_ctrl_shift,
-            &[Keysym::d, Keysym::D],
-            Action::SetWorkspaceRoot,
-        );
         bind(
             sup_shift,
             &[Keysym::h, Keysym::H],
@@ -327,6 +320,12 @@ impl Default for Bindings {
             sup_ctrl,
             &[Keysym::l, Keysym::L],
             Action::Resize(Direction::Right),
+        );
+        // ---- Super+Ctrl+Shift ----
+        bind(
+            sup_ctrl_shift,
+            &[Keysym::d, Keysym::D],
+            Action::SetWorkspaceRoot,
         );
 
         Self { map }

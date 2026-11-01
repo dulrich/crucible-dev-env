@@ -372,14 +372,18 @@ mod tests {
         );
     }
 
-    /// The pre-config `match` table, verbatim kept as an oracle.
+    /// The pre-config `match` table, **frozen at the config cut-over `73afe8c`: never edited
+    /// again.** It is the oracle that the default bindings reproduce the original hard-coded
+    /// chords. Behaviour added after the cut-over lives in [`changed_since_cutover`]; a future
+    /// verb is added there, never here. The two arms whose `Action` variants have since been
+    /// retired (`Run`, `StackWindow`) return `None`; [`changed_since_cutover`] covers those chords.
     fn legacy(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
         if !modifiers.logo {
             return None;
         }
         match (modifiers.shift, modifiers.ctrl, keysym) {
-            // Intended change (WP-2): plain Super+Return now opens the launcher.
-            (false, false, Keysym::Return) => Some(Action::OpenLauncher),
+            // `Action::Run` (with an elided payload) was retired from this slot.
+            (false, false, Keysym::Return) => None,
             (false, false, Keysym::w | Keysym::W) => Some(Action::ClosePane),
             (false, false, Keysym::h) => Some(Action::Focus(Direction::Left)),
             (false, false, Keysym::j) => Some(Action::Focus(Direction::Down)),
@@ -391,13 +395,43 @@ mod tests {
             (false, false, Keysym::bracketright) => Some(Action::CycleWorkspace(1)),
             (false, false, Keysym::bracketleft) => Some(Action::CycleWorkspace(-1)),
             (false, false, Keysym::n | Keysym::N) => Some(Action::NewWorkspace),
+            // `Action::StackWindow` was retired from this slot.
+            (true, false, Keysym::Return) => None,
+            (true, false, Keysym::q | Keysym::Q) => Some(Action::Quit),
+            (true, false, Keysym::h | Keysym::H) => Some(Action::Move(Direction::Left)),
+            (true, false, Keysym::j | Keysym::J) => Some(Action::Move(Direction::Down)),
+            (true, false, Keysym::k | Keysym::K) => Some(Action::Move(Direction::Up)),
+            (true, false, Keysym::l | Keysym::L) => Some(Action::Move(Direction::Right)),
+            (true, false, Keysym::Tab | Keysym::ISO_Left_Tab) => Some(Action::CycleStack(-1)),
+            (true, false, Keysym::bracketright) => Some(Action::MoveWindowToWorkspace(1)),
+            (true, false, Keysym::bracketleft) => Some(Action::MoveWindowToWorkspace(-1)),
+            (false, true, Keysym::h | Keysym::H) => Some(Action::Resize(Direction::Left)),
+            (false, true, Keysym::j | Keysym::J) => Some(Action::Resize(Direction::Down)),
+            (false, true, Keysym::k | Keysym::K) => Some(Action::Resize(Direction::Up)),
+            (false, true, Keysym::l | Keysym::L) => Some(Action::Resize(Direction::Right)),
+            _ => None,
+        }
+    }
+
+    /// Every chord whose default action differs from the frozen [`legacy`] oracle today, with the
+    /// action it resolves to now. A future verb (or a changed default) is added here, never to
+    /// `legacy`.
+    fn changed_since_cutover(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
+        if !modifiers.logo {
+            return None;
+        }
+        let digit = (0x30..=0x39).contains(&keysym.raw());
+        let digit_value = || u8::try_from(keysym.raw().wrapping_sub(0x30)).unwrap_or(0);
+        match (modifiers.shift, modifiers.ctrl, keysym) {
+            // Return / Shift+Return: the launcher, and the terminal (was `Run` / `StackWindow`).
+            (false, false, Keysym::Return) => Some(Action::OpenLauncher),
+            (true, false, Keysym::Return) => Some(Action::RunTerminal),
+            // M / Shift+M: the mark toggles.
             (false, false, Keysym::m | Keysym::M) => Some(Action::MarkWindow),
-            (false, false, k) if (0x30..=0x39).contains(&k.raw()) => {
-                Some(Action::Slot(u8::try_from(k.raw() - 0x30).unwrap()))
-            }
-            (true, false, k) if (0x30..=0x39).contains(&k.raw()) => {
-                Some(Action::PinSlot(u8::try_from(k.raw() - 0x30).unwrap()))
-            }
+            (true, false, Keysym::m | Keysym::M) => Some(Action::SwapMarkedWindow),
+            // Workspace slots: Super+<d> switches, Super+Shift+<d or its shifted symbol> pins.
+            (false, false, _) if digit => Some(Action::Slot(digit_value())),
+            (true, false, _) if digit => Some(Action::PinSlot(digit_value())),
             (true, false, Keysym::parenright) => Some(Action::PinSlot(0)),
             (true, false, Keysym::exclam) => Some(Action::PinSlot(1)),
             (true, false, Keysym::at) => Some(Action::PinSlot(2)),
@@ -408,29 +442,24 @@ mod tests {
             (true, false, Keysym::ampersand) => Some(Action::PinSlot(7)),
             (true, false, Keysym::asterisk) => Some(Action::PinSlot(8)),
             (true, false, Keysym::parenleft) => Some(Action::PinSlot(9)),
-            (true, false, Keysym::Return) => Some(Action::RunTerminal),
-            (true, false, Keysym::q | Keysym::Q) => Some(Action::Quit),
-            (true, false, Keysym::h | Keysym::H) => Some(Action::Move(Direction::Left)),
-            (true, false, Keysym::j | Keysym::J) => Some(Action::Move(Direction::Down)),
-            (true, false, Keysym::k | Keysym::K) => Some(Action::Move(Direction::Up)),
-            (true, false, Keysym::l | Keysym::L) => Some(Action::Move(Direction::Right)),
-            (true, false, Keysym::Tab | Keysym::ISO_Left_Tab) => Some(Action::CycleStack(-1)),
-            (true, false, Keysym::m | Keysym::M) => Some(Action::SwapMarkedWindow),
-            (true, false, Keysym::bracketright) => Some(Action::MoveWindowToWorkspace(1)),
-            (true, false, Keysym::bracketleft) => Some(Action::MoveWindowToWorkspace(-1)),
+            // Shift+W closes the workspace; Ctrl+[ / ] move it to the adjacent output.
             (true, false, Keysym::w | Keysym::W) => Some(Action::CloseWorkspace),
             (false, true, Keysym::bracketright) => Some(Action::MoveWorkspaceToOutput(1)),
             (false, true, Keysym::bracketleft) => Some(Action::MoveWorkspaceToOutput(-1)),
-            (false, true, Keysym::h | Keysym::H) => Some(Action::Resize(Direction::Left)),
-            (false, true, Keysym::j | Keysym::J) => Some(Action::Resize(Direction::Down)),
-            (false, true, Keysym::k | Keysym::K) => Some(Action::Resize(Direction::Up)),
-            (false, true, Keysym::l | Keysym::L) => Some(Action::Resize(Direction::Right)),
+            // The seven verbs added after the cut-over.
+            (false, false, Keysym::p | Keysym::P) => Some(Action::OpenPicker),
+            (true, false, Keysym::r | Keysym::R) => Some(Action::RenameWorkspace),
+            (true, false, Keysym::d | Keysym::D) => Some(Action::CaptureWorkspaceRoot),
+            (true, true, Keysym::d | Keysym::D) => Some(Action::SetWorkspaceRoot),
+            (false, false, Keysym::comma) => Some(Action::OpenSettings),
+            (false, false, Keysym::b | Keysym::B) => Some(Action::ToggleHeader),
+            (false, false, Keysym::Escape) => Some(Action::Lock),
             _ => None,
         }
     }
 
     #[test]
-    fn default_bindings_equal_the_legacy_match_over_a_full_sweep() {
+    fn default_bindings_equal_the_frozen_oracle_plus_the_changes_over_a_full_sweep() {
         let mut keysyms: Vec<Keysym> = (0x20..0x7f).map(Keysym::new).collect();
         keysyms.extend([
             Keysym::Return,
@@ -446,25 +475,16 @@ mod tests {
                 for ctrl in [false, true] {
                     let mods = Modifiers { logo, shift, ctrl };
                     for keysym in &keysyms {
-                        let new = resolve(mods, *keysym);
+                        let changed = changed_since_cutover(mods, *keysym);
                         let old = legacy(mods, *keysym);
-                        let is_new_verb = matches!(
-                            new,
-                            Some(
-                                Action::OpenPicker
-                                    | Action::RenameWorkspace
-                                    | Action::CaptureWorkspaceRoot
-                                    | Action::SetWorkspaceRoot
-                                    | Action::OpenSettings
-                                    | Action::ToggleHeader
-                                    | Action::Lock
-                            )
-                        );
-                        if is_new_verb {
-                            assert_eq!(old, None, "{mods:?} {keysym:?}: new verb shadows old");
-                            continue;
+                        if changed.is_some() {
+                            assert_ne!(changed, old, "{mods:?} {keysym:?}: not a change");
                         }
-                        assert_eq!(new, old, "{mods:?} {keysym:?}");
+                        assert_eq!(
+                            resolve(mods, *keysym),
+                            changed.or(old),
+                            "{mods:?} {keysym:?}"
+                        );
                         checked += 1;
                     }
                 }

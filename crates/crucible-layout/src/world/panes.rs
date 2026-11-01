@@ -88,11 +88,16 @@ impl World {
     /// model.
     pub fn focus_pane(&mut self, pane: PaneId) -> Result<(), LayoutError> {
         let workspace = self
-            .workspaces
+            .workspace_of_pane(pane)
+            .ok_or(LayoutError::UnknownPane(pane))?;
+        self.activate(workspace, Some(pane))
+    }
+
+    /// The workspace whose tree holds `pane`, if any (an arena pane in no tree is `None`).
+    pub(super) fn workspace_of_pane(&self, pane: PaneId) -> Option<WorkspaceId> {
+        self.workspaces
             .values()
             .find(|ws| ws.tree.leaves().contains(&pane))
             .map(|ws| ws.id)
-            .ok_or(LayoutError::UnknownPane(pane))?;
-        self.activate(workspace, Some(pane))
     }
 }

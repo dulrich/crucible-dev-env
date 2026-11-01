@@ -9,6 +9,14 @@ pub(super) struct WindowLocation {
     pub(super) pane: PaneId,
 }
 
+/// How the mark toggle places the marked window into the focused pane.
+enum Placement {
+    /// Always move it in (the `mark-window` toggle).
+    Move,
+    /// Swap with the focused pane's active window, or move in when that pane is empty.
+    Swap,
+}
+
 impl World {
     /// Opens a new window into the focused pane of the active workspace and focuses it.
     ///
@@ -217,32 +225,31 @@ impl World {
         let location = self
             .locate_window(window)
             .ok_or(LayoutError::UnknownWindow(window))?;
-        if !self.panes.contains_key(&pane) {
-            return Err(LayoutError::UnknownPane(pane));
-        }
+        // One scan covers "not in the arena" and "in no workspace tree": neither can be focused.
+        let workspace = self
+            .workspace_of_pane(pane)
+            .ok_or(LayoutError::UnknownPane(pane))?;
         if location.pane == pane {
             return Err(LayoutError::SamePane);
         }
-        // A pane in the arena but in no workspace tree cannot be focused; check before mutating.
-        let target_pane_known = self
-            .workspaces
-            .values()
-            .any(|ws| ws.tree.leaves().contains(&pane));
-        if !target_pane_known {
-            return Err(LayoutError::UnknownPane(pane));
-        }
 
-        let source = self.panes.get_mut(&location.pane).expect("source pane");
+        self.transfer(window, location.pane, pane);
+        self.activate(workspace, Some(pane))
+            .expect("a workspace in a tree is owned by an output");
+        Ok(())
+    }
+
+    /// Moves `window` out of the `from` stack and onto the `to` stack (as its focused window),
+    /// leaving focus alone. Both panes must exist and `window` must be in `from`.
+    pub(super) fn transfer(&mut self, window: WindowId, from: PaneId, to: PaneId) {
+        let source = self.panes.get_mut(&from).expect("source pane");
         let removed = source.stack.remove_item(&window);
         debug_assert!(removed, "window in its pane");
         self.panes
-            .get_mut(&pane)
+            .get_mut(&to)
             .expect("target pane")
             .stack
             .push(window);
-        self.focus_pane(pane)
-            .expect("target pane is in a workspace tree");
-        Ok(())
     }
 
     /// The `mark-window` toggle.
@@ -251,14 +258,7 @@ impl World {
     /// window lives in the focused pane, clears it. With a mark elsewhere, moves the marked window
     /// into the focused pane and clears the mark.
     pub fn mark_window(&mut self) {
-        let Some(marked) = self.marked else {
-            self.marked = self.focused_window();
-            return;
-        };
-        let target = self.focused_pane_id();
-        // A same-pane press (or a stale mark) just clears; otherwise place the window.
-        let _ = self.move_window_to_pane(marked, target);
-        self.marked = None;
+        self.place_marked(Placement::Move);
     }
 
     /// Swaps two windows that live in different panes, wherever those panes live.
@@ -295,24 +295,34 @@ impl World {
     /// active window: the marked window takes that window's place (so it is shown in the focused
     /// pane, which stays focused) and that window takes the marked one's, then clears the mark.
     pub fn swap_marked_window(&mut self) {
-        let Some(marked) = self.marked else {
+        self.place_marked(Placement::Swap);
+    }
+
+    /// The shared mark toggle. With no mark, marks the focused window. Otherwise the mark always
+    /// ends cleared: a marked window already in the focused pane (or, defensively, one that no
+    /// longer exists) changes nothing else; `Swap` onto an occupied focused pane swaps with its
+    /// active window; every other case moves the marked window into the focused pane.
+    fn place_marked(&mut self, how: Placement) {
+        let Some(marked) = self.marked.take() else {
             self.marked = self.focused_window();
             return;
         };
         let target = self.focused_pane_id();
-        let same_or_stale = self
-            .locate_window(marked)
-            .is_none_or(|loc| loc.pane == target);
-        if same_or_stale {
-            self.marked = None;
-        } else if let Some(active) = self.focused_window() {
-            if self.swap_windows(marked, active).is_ok() {
-                let _ = self.focus_pane(target);
-            }
-            self.marked = None;
-        } else {
-            self.mark_window();
+        let Some(location) = self.locate_window(marked) else {
+            return;
+        };
+        if location.pane == target {
+            return;
         }
+        let active = match how {
+            Placement::Swap => self.focused_window(),
+            Placement::Move => None,
+        };
+        // Cannot fail: the window lives in another pane and the target is the focused pane.
+        let _ = match active {
+            Some(active) => self.swap_windows(marked, active),
+            None => self.move_window_to_pane(marked, target),
+        };
     }
 
     /// Finds which workspace + pane currently holds `window`.
@@ -330,166 +340,5 @@ impl World {
             }
         }
         None
-    }
-}
-
-#[cfg(test)]
-mod swap_tests {
-    use crate::{Direction::*, LayoutError, Rect, WindowId, World};
-
-    /// Two side-by-side panes: left holds `a`, right holds `b` (focused).
-    fn two_panes() -> (World, WindowId, WindowId) {
-        let mut w = World::new("1");
-        let a = w.open_window();
-        w.split(Right);
-        let b = w.open_window();
-        (w, a, b)
-    }
-
-    #[test]
-    fn swaps_within_the_workspace() {
-        let (mut w, a, b) = two_panes();
-        let right = w.focused_pane_id();
-        let left = w.pane_of_window(a).unwrap();
-        w.focus(Left);
-        w.swap_marked_window(); // marks a
-        assert_eq!(w.marked(), Some(a));
-        w.focus(Right);
-        w.swap_marked_window();
-        w.check_invariants();
-        assert_eq!(w.marked(), None);
-        assert_eq!(w.pane_of_window(a), Some(right));
-        assert_eq!(w.pane_of_window(b), Some(left));
-        assert_eq!(w.focused_pane_id(), right);
-        assert_eq!(w.focused_window(), Some(a));
-    }
-
-    #[test]
-    fn swaps_across_workspaces() {
-        let mut w = World::new("1");
-        let a = w.open_window();
-        let ws1 = w.active_workspace_id();
-        w.swap_marked_window();
-        let ws2 = w.new_workspace("two").unwrap();
-        let b = w.open_window();
-        w.swap_marked_window();
-        w.check_invariants();
-        assert_eq!(w.active_workspace_id(), ws2);
-        assert_eq!(w.focused_window(), Some(a));
-        w.switch_workspace(ws1).unwrap();
-        assert_eq!(w.focused_window(), Some(b));
-        w.check_invariants();
-    }
-
-    #[test]
-    fn swaps_across_outputs() {
-        let mut w = World::new("1");
-        let first = w.focused_output();
-        w.set_output_rect(first, Rect::new(0, 0, 1920, 1080))
-            .unwrap();
-        let a = w.open_window();
-        let src = w.focused_pane_id();
-        w.swap_marked_window();
-        let second = w.add_output(Rect::new(1920, 0, 1280, 1024), "o2").unwrap();
-        w.set_focused_output(second).unwrap();
-        let b = w.open_window();
-        let dst = w.focused_pane_id();
-        w.swap_marked_window();
-        w.check_invariants();
-        assert_eq!(w.focused_output(), second);
-        assert_eq!(w.pane_of_window(a), Some(dst));
-        assert_eq!(w.pane_of_window(b), Some(src));
-        assert_eq!(w.focused_window(), Some(a));
-    }
-
-    #[test]
-    fn visible_marked_window_leaves_displaced_window_visible_in_source() {
-        let (mut w, a, b) = two_panes();
-        let left = w.pane_of_window(a).unwrap();
-        w.focus(Left);
-        w.swap_marked_window(); // a is visible in left
-        w.focus(Right);
-        w.swap_marked_window();
-        w.check_invariants();
-        assert_eq!(w.pane(left).unwrap().focused_window(), Some(b));
-    }
-
-    #[test]
-    fn stacked_marked_window_leaves_source_visible_window_alone() {
-        let mut w = World::new("1");
-        let a = w.open_window();
-        let a2 = w.open_window(); // a2 visible, a stacked beneath
-        w.split(Right);
-        let b = w.open_window();
-        let left = w.pane_of_window(a).unwrap();
-        w.focus(Left);
-        w.cycle_stack(1); // a visible
-        w.swap_marked_window(); // marks a
-        w.cycle_stack(1); // a2 visible again, a stacked, still marked
-        w.focus(Right);
-        w.swap_marked_window();
-        w.check_invariants();
-        assert_eq!(w.pane(left).unwrap().focused_window(), Some(a2));
-        assert_eq!(w.pane(left).unwrap().windows(), &[b, a2]);
-        assert_eq!(w.focused_window(), Some(a));
-    }
-
-    #[test]
-    fn empty_destination_moves_the_marked_window() {
-        let mut w = World::new("1");
-        let a = w.open_window();
-        w.split(Right);
-        let empty = w.focused_pane_id();
-        w.focus(Left);
-        w.swap_marked_window();
-        w.focus(Right);
-        w.swap_marked_window();
-        w.check_invariants();
-        assert_eq!(w.marked(), None);
-        assert_eq!(w.pane_of_window(a), Some(empty));
-        assert_eq!(w.focused_window(), Some(a));
-    }
-
-    #[test]
-    fn same_pane_press_clears_and_changes_nothing_else() {
-        let mut w = World::new("1");
-        let a = w.open_window();
-        let pane = w.focused_pane_id();
-        w.swap_marked_window();
-        w.swap_marked_window();
-        w.check_invariants();
-        assert_eq!(w.marked(), None);
-        assert_eq!(w.pane_of_window(a), Some(pane));
-        assert_eq!(w.focused_window(), Some(a));
-    }
-
-    #[test]
-    fn no_mark_marks_the_focused_window() {
-        let mut w = World::new("1");
-        let a = w.open_window();
-        w.swap_marked_window();
-        w.check_invariants();
-        assert_eq!(w.marked(), Some(a));
-    }
-
-    #[test]
-    fn swap_windows_errors_mutate_nothing() {
-        let (mut w, a, b) = two_panes();
-        let b2 = w.open_window(); // same pane as b
-        let before = w.clone();
-        assert_eq!(w.swap_windows(b, b2), Err(LayoutError::SamePane));
-        assert_eq!(w, before);
-        let ghost = WindowId::from_raw(u64::MAX);
-        assert_eq!(
-            w.swap_windows(a, ghost),
-            Err(LayoutError::UnknownWindow(ghost))
-        );
-        assert_eq!(w, before);
-        assert_eq!(
-            w.swap_windows(ghost, a),
-            Err(LayoutError::UnknownWindow(ghost))
-        );
-        assert_eq!(w, before);
-        w.check_invariants();
     }
 }

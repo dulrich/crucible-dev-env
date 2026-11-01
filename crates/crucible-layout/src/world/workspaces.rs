@@ -187,15 +187,9 @@ impl World {
             return Err(LayoutError::SameWorkspace);
         }
 
-        // Detach from the source pane.
-        let pane = self.panes.get_mut(&location.pane).expect("source pane");
-        let removed = pane.stack.remove_item(&window);
-        debug_assert!(removed, "window present");
-
-        // Attach to the target workspace's focused pane.
+        // Detach from the source pane and attach to the target workspace's focused pane.
         let target_pane_id = self.workspaces.get(&target).expect("target").focused_pane;
-        let target_pane = self.panes.get_mut(&target_pane_id).expect("target pane");
-        target_pane.stack.push(window);
+        self.transfer(window, location.pane, target_pane_id);
 
         Ok(())
     }
