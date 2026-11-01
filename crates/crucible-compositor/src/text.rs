@@ -36,6 +36,8 @@ use smithay::backend::{
 };
 use smithay::utils::{Logical, Physical, Point, Rectangle, Scale, Size, Transform};
 
+use crate::physical::{padded_dims, quantize_scale};
+
 /// Last-resort font file when neither the override nor `fc-match` yields a readable path.
 pub const FALLBACK_FONT: &str = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
 
@@ -159,28 +161,6 @@ pub fn rasterize(font: &fontdue::Font, text: &str, px: f32, rgba: [u8; 4]) -> Ra
 /// scale is quantized (the fractional-scale protocol's own step) so the key stays hashable.
 type CacheKey = (String, u32, [u8; 4], u32, u32);
 
-/// A fractional scale quantized to 1/120 steps (at least 1/120).
-#[must_use]
-pub fn quantize_scale(scale: f64) -> u32 {
-    ((scale * 120.0).round() as u32).max(1)
-}
-
-/// Sizes a rasterized `w`x`h` buffer for 1:1 display at `(sx, sy)`: returns the physical buffer
-/// size (the raster padded with transparent pixels right/bottom) and the integer logical size whose
-/// physical size is exactly that. The renderer sizes an element as `round(logical * scale)`, so
-/// padding to `round(ceil(w / sx) * sx)` makes the texels map one-to-one, never resampled. At scale
-/// 1 this is the identity.
-#[must_use]
-pub fn padded_dims(w: i32, h: i32, sx: f64, sy: f64) -> (Size<i32, Physical>, Size<i32, Logical>) {
-    let fit = |n: i32, s: f64| {
-        let logical = (f64::from(n) / s).ceil() as i32;
-        let phys = (f64::from(logical) * s).round() as i32;
-        (phys.max(n), logical)
-    };
-    let ((pw, lw), (ph, lh)) = (fit(w, sx), fit(h, sy));
-    ((pw, ph).into(), (lw, lh).into())
-}
-
 /// A cached text buffer plus the sizes needed to display it 1:1 (see [`padded_dims`]).
 #[derive(Debug, Clone)]
 pub struct TextBuffer {
@@ -244,11 +224,6 @@ impl TextRenderer {
         }
     }
 
-    /// Whether a font is loaded.
-    pub fn enabled(&self) -> bool {
-        self.font.is_some()
-    }
-
     /// Whether the loaded font carries a glyph for `c` (`false` when text is disabled).
     pub fn has_glyph(&self, c: char) -> bool {
         self.font
@@ -266,11 +241,6 @@ impl TextRenderer {
     /// Number of rasterizations (cache misses) so far.
     pub fn rasterized_count(&self) -> usize {
         self.rasterized
-    }
-
-    /// Drops every cached buffer.
-    pub fn clear_cache(&mut self) {
-        self.cache.clear();
     }
 
     /// Returns the (cached) buffer for `text` at logical `px` size in `rgba`, rasterized at
@@ -405,15 +375,15 @@ mod tests {
         assert_eq!(format!("{a:?}"), format!("{b:?}"));
         t.buffer("ws-1", 14, [255; 4], Scale::from(2.0)).unwrap();
         assert_eq!(t.rasterized_count(), 2);
-        t.clear_cache();
-        t.buffer("ws-1", 14, [255; 4], one).unwrap();
+        // A distinct key forces the third raster.
+        t.buffer("ws-2", 14, [255; 4], one).unwrap();
         assert_eq!(t.rasterized_count(), 3);
     }
 
     #[test]
     fn disabled_renderer_returns_none() {
         let mut t = TextRenderer::from_font(None);
-        assert!(!t.enabled());
+        assert!(t.measure("x", 14).is_none());
         assert!(t.buffer("x", 14, [255; 4], Scale::from(1.0)).is_none());
     }
 
@@ -445,22 +415,6 @@ mod tests {
 #[cfg(test)]
 mod scale_tests {
     use super::*;
-
-    #[test]
-    fn padded_dims_make_texels_map_one_to_one() {
-        // Identity at scale 1.
-        let (p, l) = padded_dims(37, 17, 1.0, 1.0);
-        assert_eq!(((p.w, p.h), (l.w, l.h)), ((37, 17), (37, 17)));
-        // At 170/120 the physical size is exactly round(logical * scale) and never smaller.
-        let s = 170.0 / 120.0;
-        for w in 1..300 {
-            let (p, l) = padded_dims(w, w, s, s);
-            assert!(p.w >= w && p.w - w <= 2, "w={w} padded to {}", p.w);
-            assert_eq!(p.w, (f64::from(l.w) * s).round() as i32);
-        }
-        assert_eq!(quantize_scale(1.4167), 170);
-        assert_eq!(quantize_scale(0.0), 1);
-    }
 
     #[test]
     fn text_is_rasterized_at_physical_size() {

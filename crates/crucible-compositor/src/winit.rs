@@ -46,9 +46,6 @@ use crate::{
 /// Name advertised for the single output backed by the winit window.
 pub const OUTPUT_NAME: &str = "winit";
 
-/// Solid color the output is cleared to each frame (a dark slate), as `[r, g, b, a]`.
-pub const CLEAR_COLOR: [f32; 4] = [0.05, 0.05, 0.08, 1.0];
-
 /// Backend data for the nested `winit` development backend.
 ///
 /// Holds the `winit`-hosted [`GlesRenderer`] and the per-output damage tracker driving rendering.

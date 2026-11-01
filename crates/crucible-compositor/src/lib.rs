@@ -48,6 +48,12 @@ pub mod drawing;
 /// Focus-ring border and per-pane stack indicator chrome.
 pub mod chrome;
 
+/// Logical-to-physical conversions shared by chrome, the header and text.
+pub mod physical;
+
+/// The fixed chrome and header colours.
+pub mod palette;
+
 /// Unified render-element type.
 pub mod element;
 

@@ -36,6 +36,9 @@ use crate::{
     text::TextRenderer,
 };
 
+/// Solid color the output is cleared to each frame (a dark slate), as `[r, g, b, a]`.
+pub const CLEAR_COLOR: [f32; 4] = [0.05, 0.05, 0.08, 1.0];
+
 smithay::backend::renderer::element::render_elements! {
     /// Compositor-drawn render elements that are not part of the desktop [`Space`]: the cursor,
     /// plus focus-ring borders and per-pane stack indicators.
@@ -145,7 +148,7 @@ pub fn icon_location(
 ///   not built.
 /// - **Unlocked**: cursor (only when `cursor` is `Some`, at that output-local physical location)
 ///   → header strip → chrome → the mapped windows from the `space`, over
-///   [`CLEAR_COLOR`](crate::winit::CLEAR_COLOR).
+///   [`CLEAR_COLOR`].
 ///
 /// Chrome and header are positioned in the output's frame: both take the output's global origin
 /// from `space.output_geometry(output)`. Whether and where the cursor is drawn is the backend's
@@ -241,7 +244,7 @@ where
     .expect("output without mode?");
     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
 
-    (elements, crate::winit::CLEAR_COLOR.into())
+    (elements, CLEAR_COLOR.into())
 }
 
 #[cfg(test)]

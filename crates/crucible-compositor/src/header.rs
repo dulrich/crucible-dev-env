@@ -2,7 +2,7 @@
 //! stack, the active one highlighted; clickable, shown always / on a `toggle-header` / never.
 //!
 //! ## Layout
-//! The decision logic is **pure** and Smithay-free (top of this module): [`segment_rects`] maps
+//! The decision logic is **pure** and Smithay-free (top of this module): [`segment_layout`] maps
 //! name widths to segment rects, [`hit_test`] maps a point to a segment, [`ConsumedButtons`] pairs a consumed press with its release, and [`reserved_height`] /
 //! [`Rect::shrink_top`] give the reflow while the strip is shown. The compositor glue (segments from the live
 //! model, render elements) is below.
@@ -30,8 +30,9 @@ use smithay::{
 };
 
 use crate::{
-    chrome::{BORDER_COLOR, PhysicalMap, solid},
     layout::model_output_id,
+    palette::{BORDER_COLOR, STRIP_BG},
+    physical::{PhysicalMap, solid},
     render::CustomRenderElements,
     state::{Backend, CrucibleState},
     text::TextRenderer,
@@ -41,8 +42,6 @@ use crate::{
 pub const PAD_Y: i32 = 5;
 /// Horizontal padding on each side of a label, in pixels.
 pub const PAD_X: i32 = 10;
-/// Strip background (a dark neutral, distinct from the ring accent).
-pub const STRIP_BG: [f32; 4] = [0.09, 0.10, 0.12, 1.0];
 /// Inactive label colour (straight RGBA).
 pub const LABEL_RGBA: [u8; 4] = [205, 208, 214, 255];
 /// Label colour on the highlighted (active) segment (straight RGBA).
@@ -95,18 +94,12 @@ pub struct Segment {
 }
 
 /// Lays out one segment per label width, left to right from the strip's left edge, each
-/// `width + 2 * PAD_X` wide, with no divider. See [`segment_layout`].
-#[must_use]
-pub fn segment_rects(widths: &[i32], strip: Rect) -> Vec<Segment> {
-    segment_layout(widths, strip, 0).0
-}
-
-/// Like [`segment_rects`], with a `divider`-wide gap between adjacent segments (logical px).
+/// `width + 2 * PAD_X` wide, with a `divider`-wide gap between adjacent segments (logical px).
 /// Returns the segments and the divider rects (full strip height), one per adjacent pair of
 /// laid-out segments: none before the first or after the last. Segment `i + 1` starts `divider`
 /// px after segment `i` ends. Clipping is at the strip's right edge: a segment (and the divider
 /// before it) that would start at or beyond it is dropped, the last visible segment is
-/// truncated. With `divider == 0` the segments equal [`segment_rects`] and no dividers return.
+/// truncated. With `divider == 0` segments abut and no dividers return.
 #[must_use]
 pub fn segment_layout(widths: &[i32], strip: Rect, divider: i32) -> (Vec<Segment>, Vec<Rect>) {
     let divider = divider.max(0);
@@ -386,10 +379,9 @@ where
                 labels.push(CustomRenderElements::Text(el));
             }
         }
-        let Rgb(dr, dg, db) = l.divider_color;
+        let divider = l.divider_color.to_rgba_f32();
         for div in &l.dividers {
-            let [r, g, b] = [dr, dg, db].map(|c| f32::from(c) / 255.0);
-            solids.push(solid(map.rect(to_origin(*div)), [r, g, b, 1.0]));
+            solids.push(solid(map.rect(to_origin(*div)), divider));
         }
         solids.push(solid(strip, STRIP_BG));
     }
@@ -400,6 +392,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The divider-free layout (`segment_layout(.., 0).0`).
+    fn segment_rects(widths: &[i32], strip: Rect) -> Vec<Segment> {
+        segment_layout(widths, strip, 0).0
+    }
 
     fn strip() -> Rect {
         Rect::new(100, 0, 300, 24)
@@ -570,7 +567,7 @@ mod scale_tests {
         let s = Scale::from(170.0 / 120.0);
         let map = PhysicalMap::plain(s);
         let strip = Rect::new(100, 0, 300, 24);
-        let segs = segment_rects(&[20, 30], strip);
+        let segs = segment_layout(&[20, 30], strip, 0).0;
         let (ps, p0, p1) = (
             map.rect(strip),
             map.rect(segs[0].rect),

@@ -36,6 +36,17 @@ impl Rgb {
         let byte = |i: usize| u8::from_str_radix(&digits[i..i + 2], 16).ok();
         Some(Self(byte(0)?, byte(2)?, byte(4)?))
     }
+
+    /// The opaque `[R, G, B, A]` float colour (`channel / 255`, alpha 1.0) the renderer takes.
+    #[must_use]
+    pub fn to_rgba_f32(self) -> [f32; 4] {
+        [
+            f32::from(self.0) / 255.0,
+            f32::from(self.1) / 255.0,
+            f32::from(self.2) / 255.0,
+            1.0,
+        ]
+    }
 }
 
 /// Gap, focus-ring thickness and (for apps) inset fill of one window class, in pixels.
@@ -531,6 +542,16 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgb_to_rgba_f32_is_opaque_and_unit_scaled() {
+        assert_eq!(Rgb(0, 0, 0).to_rgba_f32(), [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(Rgb(255, 255, 255).to_rgba_f32(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            Rgb(0x3a, 0x80, 0x01).to_rgba_f32(),
+            [58.0 / 255.0, 128.0 / 255.0, 1.0 / 255.0, 1.0]
+        );
+    }
 
     #[test]
     fn defaults_match_todays_behaviour() {
