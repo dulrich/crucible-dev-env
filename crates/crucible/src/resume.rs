@@ -17,8 +17,10 @@
 //! exits with the command's exit code instead of starting a shell, so the terminal window closes.
 
 use crucible_persist::ResumeWrapper;
+use rustix::stdio::stdin;
+use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
 use std::ffi::OsString;
-use std::io::Read;
+use std::io::{IsTerminal, Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitStatus};
 
@@ -109,10 +111,12 @@ pub fn run(args: &[String]) -> i32 {
     ignore_interrupts_while_resident();
     let mut run_it = parsed.now || wait_for_choice() == Wait::Run;
     let mut last = None;
+    let saved_termios = tcgetattr(stdin()).ok();
     while run_it {
         last = run_command(&shell, &cmd);
         match last.map_or(Outcome::Clean, exit_outcome) {
             Outcome::Abnormal(label) => {
+                restore_terminal(saved_termios.as_ref());
                 println!("{}", crash_banner(&cmd, &label, parsed.exit));
                 run_it = wait_for_choice() == Wait::Run;
             }
@@ -123,6 +127,23 @@ pub fn run(args: &[String]) -> i32 {
         return return_code(last);
     }
     exec_shell(&shell)
+}
+
+/// Undoes what a TUI that died without cleaning up (e.g. SIGABRT) left behind: SGR attributes,
+/// alternate screen, hidden cursor, mouse tracking, bracketed paste, application cursor/keypad keys.
+/// Without it the crash banner prints onto the dead TUI's alternate screen and is not visible.
+pub const TERMINAL_RESET: &str = "\x1b[0m\x1b[?1049l\x1b[?25h\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2004l\x1b[?1l\x1b>";
+
+/// After an abnormal exit: puts back the termios `resume` saw before the command ran (a crashed
+/// TUI leaves its own raw/no-echo modes) and, on a terminal, writes [`TERMINAL_RESET`].
+fn restore_terminal(saved: Option<&Termios>) {
+    let Some(saved) = saved else { return };
+    let _ = tcsetattr(stdin(), OptionalActions::Now, saved);
+    let mut out = std::io::stdout();
+    if out.is_terminal() {
+        let _ = out.write_all(TERMINAL_RESET.as_bytes());
+        let _ = out.flush();
+    }
 }
 
 /// How a command's exit status is treated.
@@ -460,6 +481,19 @@ mod tests {
             crash_banner("htop", "code 1", true),
             "htop exited (code 1). Press Enter to run it again, or Ctrl+C to close this terminal."
         );
+    }
+
+    #[test]
+    fn terminal_reset_leaves_the_alternate_screen_and_shows_the_cursor() {
+        for seq in [
+            "\x1b[0m",
+            "\x1b[?1049l",
+            "\x1b[?25h",
+            "\x1b[?1000l",
+            "\x1b[?2004l",
+        ] {
+            assert!(TERMINAL_RESET.contains(seq), "{seq:?}");
+        }
     }
 
     #[test]

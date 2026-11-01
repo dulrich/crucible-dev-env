@@ -183,9 +183,12 @@ pub struct OverlayConfig {
 }
 
 /// Overlay args CDE adds by default when the terminal program is ghostty.
-pub const GHOSTTY_OVERLAY_DEFAULT_ARGS: [&str; 2] = [
+pub const GHOSTTY_OVERLAY_DEFAULT_ARGS: [&str; 3] = [
     "--window-padding-color=extend-always",
     "--window-padding-balance=true",
+    // The overlays (picker, launcher, settings) are CDE TUIs: no ghostty keybind may take a key
+    // (Escape, Ctrl+Shift+…) before them. A CLI `keybind=clear` clears the user config's binds too.
+    "--keybind=clear",
 ];
 
 impl OverlayConfig {
