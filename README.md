@@ -59,6 +59,8 @@ The TTY launcher is `scripts/cde.sh`: it rebuilds first, wraps ghostty so it ope
 Requires a recent stable Rust (1.85+, edition 2024) and a terminal emulator on `$PATH` (defaults to
 `foot`; set `$TERMINAL` to override — e.g. `alacritty`, `kitty`).
 
+CDE's terminal is foot ≥ 1.20.2, built by `scripts/foot/build.sh` (dev host; output `target/foot-build/foot-1.28.0-<arch>.tar.gz`) and installed on each host by `scripts/foot/install.sh <tarball>` to `~/.local/opt/foot` (the stable absolute path CDE's `terminal` setting should name, `~/.local/opt/foot/bin/foot`), with `foot`/`footclient` symlinked into `~/.local/bin`. The distro foot 1.16.2 crashes on CDE (upstream #1910) and must not be used; `install.sh` refuses to finish unless the installed foot is new enough.
+
 ```sh
 # Nested in your current desktop session (development):
 cargo run -- --winit
