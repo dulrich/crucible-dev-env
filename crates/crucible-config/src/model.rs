@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::overlay::OverlayConfig;
+
 /// The terminal CDE spawns for `Super+Return` / `Super+Shift+Return`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalConfig {
@@ -49,31 +51,40 @@ impl Rgb {
     }
 }
 
-/// Gap, focus-ring thickness and (for apps) inset fill of one window class, in pixels.
+/// Tiling of CDE-spawned terminals, in pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ClassTiling {
-    /// Space between the tile edge and the window content. For terminals the terminal draws it as
-    /// its own padding; for apps CDE insets the window and paints the inset.
+pub struct TerminalTiling {
+    /// Space between the tile edge and the terminal content; the terminal draws it as its own
+    /// padding.
     pub gap: u32,
     /// Focus-ring thickness; never more than `gap` (clamped at parse time).
     pub ring: u32,
-    /// Colour painted over the part of an app's inset the ring does not cover. Unused for terminals.
-    pub fill: Rgb,
-    /// Terminal only: distance the focus ring and `frame` are drawn inside the tile edge; with
-    /// `ring` never more than `gap` (clamped at parse time). Always 0 for apps.
+    /// Distance the focus ring and `frame` are drawn inside the tile edge; with `ring` never more
+    /// than `gap` (clamped at parse time).
     pub ring_inset: u32,
-    /// Terminal only: colour of the frame drawn at the ring position on unfocused tiles.
-    /// `None` (default) draws no frame. Always `None` for apps.
+    /// Colour of the frame drawn at the ring position on unfocused tiles. `None` (default) draws
+    /// no frame.
     pub frame: Option<Rgb>,
+}
+
+/// Tiling of every other managed window, in pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppTiling {
+    /// Space between the tile edge and the window; CDE insets the window and paints the inset.
+    pub gap: u32,
+    /// Focus-ring thickness; never more than `gap` (clamped at parse time).
+    pub ring: u32,
+    /// Colour painted over the part of the inset the ring does not cover.
+    pub fill: Rgb,
 }
 
 /// Per-class tiling: terminals fill their tile, apps are inset by their gap.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TilingConfig {
     /// CDE-spawned terminals.
-    pub terminal: ClassTiling,
+    pub terminal: TerminalTiling,
     /// Every other managed window.
-    pub app: ClassTiling,
+    pub app: AppTiling,
     /// Extra terminal arguments for terminal spawns (`{gap}` = the terminal gap, see
     /// [`substitute_gap`]), inserted before the exec flag.
     pub terminal_args: Vec<String>,
@@ -83,21 +94,17 @@ impl Default for TilingConfig {
     /// Terminal gap 6 / ring 3; app gap 0 / ring 0 with the muted chrome grey (`#737373`, the
     /// inactive stack-pip colour) as fill.
     fn default() -> Self {
-        let fill = Rgb(0x73, 0x73, 0x73);
         Self {
-            terminal: ClassTiling {
+            terminal: TerminalTiling {
                 gap: 6,
                 ring: 3,
-                fill,
                 ring_inset: 0,
                 frame: None,
             },
-            app: ClassTiling {
+            app: AppTiling {
                 gap: 0,
                 ring: 0,
-                fill,
-                ring_inset: 0,
-                frame: None,
+                fill: Rgb(0x73, 0x73, 0x73),
             },
             terminal_args: Vec::new(),
         }
@@ -141,198 +148,6 @@ pub fn clamp_ring_inset(gap: u32, ring: u32, ring_inset: u32) -> (u32, bool) {
     }
 }
 
-/// The look of a CDE overlay (picker, launcher, keys): the terminal's own colours or one of the
-/// N1 Console surrounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayStyle {
-    /// The terminal's inherited look.
-    Terminal,
-    /// Opaque dark N1 surround.
-    N1Dark,
-    /// Opaque medium N1 surround (the default).
-    N1Med,
-    /// Opaque light N1 surround.
-    N1Light,
-}
-
-impl OverlayStyle {
-    /// The config / environment spelling.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Terminal => "terminal",
-            Self::N1Dark => "n1-dark",
-            Self::N1Med => "n1-med",
-            Self::N1Light => "n1-light",
-        }
-    }
-
-    /// The opaque N1 surround colour (`(r, g, b)`), or `None` for [`OverlayStyle::Terminal`]. Must
-    /// match the palette `bg` the overlay TUIs paint (`crucible::style`, which tests the match).
-    #[must_use]
-    pub fn surround_rgb(self) -> Option<(u8, u8, u8)> {
-        match self {
-            Self::Terminal => None,
-            Self::N1Dark => Some((0x0e, 0x0e, 0x10)),
-            Self::N1Med => Some((0x3a, 0x3a, 0x3b)),
-            Self::N1Light => Some((0xf4, 0xf4, 0xf5)),
-        }
-    }
-
-    /// Parses the exact spelling; anything else is `None`.
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "terminal" => Some(Self::Terminal),
-            "n1-dark" => Some(Self::N1Dark),
-            "n1-med" => Some(Self::N1Med),
-            "n1-light" => Some(Self::N1Light),
-            _ => None,
-        }
-    }
-}
-
-/// Overlay presentation settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OverlayConfig {
-    /// Whether a border is drawn around the overlay.
-    pub border: bool,
-    /// The overlay style.
-    pub style: OverlayStyle,
-    /// Extra terminal arguments inserted before the exec flag on overlay spawns. `None` means not
-    /// set: [`OverlayConfig::effective_terminal_args`] then applies the built-in ghostty or foot
-    /// default for those terminals.
-    /// `Some(list)` (even empty) replaces the default.
-    pub terminal_args: Option<Vec<String>>,
-}
-
-/// Overlay args CDE adds by default when the terminal program is ghostty.
-pub const GHOSTTY_OVERLAY_DEFAULT_ARGS: [&str; 3] = [
-    "--window-padding-color=extend-always",
-    "--window-padding-balance=true",
-    // The overlays (picker, launcher, settings) are CDE TUIs: no ghostty keybind may take a key
-    // (Escape, Ctrl+Shift+…) before them. A CLI `keybind=clear` clears the user config's binds too.
-    "--keybind=clear",
-];
-
-/// Overlay args CDE adds by default when the terminal program is foot (1.28).
-///
-/// The overlays (picker, launcher, settings) are CDE TUIs: no foot key binding may take a key
-/// (Escape, Ctrl+Shift+...) before them. foot has no `keybind=clear`, so every default action
-/// (and the other plain actions) is set to `none` with a `-o key-bindings.<action>=none` pair;
-/// this also overrides the user's foot.ini for these actions (`pipe-*`, `regex-*` and
-/// `color-theme-switch-*` binds there are not cleared).
-/// foot 1.28's own defaults in `[key-bindings]` are scrollback-up/down-page, clipboard-copy/paste,
-/// primary-paste, search-start, font-increase/decrease/reset, spawn-terminal, show-urls-launch,
-/// unicode-input and prompt-prev/next; the rest here are the actions that have no default but
-/// that a user config could bind. `[search-bindings]` and `[url-bindings]` are only reachable
-/// through `search-start` / `show-urls-*` (disabled here), and `[mouse-bindings]` take no keyboard
-/// key (modifiers only), so none of those are touched.
-/// [`OverlayConfig::effective_terminal_args`] appends the N1 style's opaque surround as foot's
-/// background (see [`OverlayStyle::surround_rgb`]).
-pub const FOOT_OVERLAY_DEFAULT_ARGS: [&str; 56] = [
-    "-o",
-    "key-bindings.scrollback-up-page=none",
-    "-o",
-    "key-bindings.scrollback-up-half-page=none",
-    "-o",
-    "key-bindings.scrollback-up-line=none",
-    "-o",
-    "key-bindings.scrollback-down-page=none",
-    "-o",
-    "key-bindings.scrollback-down-half-page=none",
-    "-o",
-    "key-bindings.scrollback-down-line=none",
-    "-o",
-    "key-bindings.scrollback-home=none",
-    "-o",
-    "key-bindings.scrollback-end=none",
-    "-o",
-    "key-bindings.clipboard-copy=none",
-    "-o",
-    "key-bindings.clipboard-paste=none",
-    "-o",
-    "key-bindings.primary-paste=none",
-    "-o",
-    "key-bindings.search-start=none",
-    "-o",
-    "key-bindings.font-increase=none",
-    "-o",
-    "key-bindings.font-decrease=none",
-    "-o",
-    "key-bindings.font-reset=none",
-    "-o",
-    "key-bindings.spawn-terminal=none",
-    "-o",
-    "key-bindings.minimize=none",
-    "-o",
-    "key-bindings.maximize=none",
-    "-o",
-    "key-bindings.fullscreen=none",
-    "-o",
-    "key-bindings.show-urls-launch=none",
-    "-o",
-    "key-bindings.show-urls-copy=none",
-    "-o",
-    "key-bindings.show-urls-persistent=none",
-    "-o",
-    "key-bindings.prompt-prev=none",
-    "-o",
-    "key-bindings.prompt-next=none",
-    "-o",
-    "key-bindings.unicode-input=none",
-    "-o",
-    "key-bindings.color-theme-toggle=none",
-    "-o",
-    "key-bindings.noop=none",
-    "-o",
-    "key-bindings.quit=none",
-];
-
-impl OverlayConfig {
-    /// The terminal args to use for overlay spawns with terminal `program`: the explicit list when
-    /// set (even if empty), else the ghostty defaults when the basename is exactly `ghostty` or
-    /// `ghostty-cde`, else the foot defaults when it is exactly `foot`, else nothing.
-    #[must_use]
-    pub fn effective_terminal_args(&self, program: &str) -> Vec<String> {
-        if let Some(list) = &self.terminal_args {
-            return list.clone();
-        }
-        let name = std::path::Path::new(program).file_name();
-        let is_foot = name.is_some_and(|n| n == "foot");
-        let defaults: &[&str] = if name.is_some_and(|n| n == "ghostty" || n == "ghostty-cde") {
-            &GHOSTTY_OVERLAY_DEFAULT_ARGS
-        } else if is_foot {
-            &FOOT_OVERLAY_DEFAULT_ARGS
-        } else {
-            &[]
-        };
-        let mut args: Vec<String> = defaults.iter().map(|s| (*s).to_string()).collect();
-        // foot has no ghostty `--window-padding-color=extend-always`: the strip left where the cell
-        // grid does not divide the overlay shows foot's own background, so make that the opaque
-        // N1 surround (no gap between the surround and the border).
-        if is_foot && let Some((r, g, b)) = self.style.surround_rgb() {
-            args.extend([
-                "-o".to_string(),
-                format!("colors-dark.background={r:02x}{g:02x}{b:02x}"),
-                "-o".to_string(),
-                "colors-dark.alpha=1.0".to_string(),
-            ]);
-        }
-        args
-    }
-}
-
-impl Default for OverlayConfig {
-    fn default() -> Self {
-        Self {
-            border: true,
-            style: OverlayStyle::N1Med,
-            terminal_args: None,
-        }
-    }
-}
-
 /// When the workspace header strip is shown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderMode {
@@ -346,25 +161,28 @@ pub enum HeaderMode {
 }
 
 impl HeaderMode {
+    /// Every mode with its config spelling, in the order error messages list them.
+    pub const NAMES: [(Self, &'static str); 3] = [
+        (Self::Off, "off"),
+        (Self::Always, "always"),
+        (Self::Toggle, "toggle"),
+    ];
+
     /// The config spelling.
     #[must_use]
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Always => "always",
-            Self::Toggle => "toggle",
-        }
+        Self::NAMES
+            .iter()
+            .find_map(|(mode, name)| (*mode == self).then_some(*name))
+            .unwrap_or("toggle")
     }
 
     /// Parses the exact spelling; anything else is `None`.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "off" => Some(Self::Off),
-            "always" => Some(Self::Always),
-            "toggle" => Some(Self::Toggle),
-            _ => None,
-        }
+        Self::NAMES
+            .iter()
+            .find_map(|(mode, n)| (*n == name).then_some(*mode))
     }
 }
 

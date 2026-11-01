@@ -1,9 +1,12 @@
 //! A typed view of one KDL node: positional arguments, properties and children, with every
 //! failure reported as a located [`ConfigError`].
 
+use std::ops::RangeInclusive;
+
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
 use crate::error::{ConfigError, Location};
+use crate::model::Rgb;
 
 /// Converts a char offset into a 1-based line/column.
 pub(crate) fn locate(text: &str, offset: usize) -> Location {
@@ -143,6 +146,41 @@ impl<'a> NodeReader<'a> {
             .ok_or_else(|| self.wrong_type("argument", "an integer"))
     }
 
+    /// Exactly one integer argument within `range`; outside it is an `InvalidValue` at the node
+    /// that quotes the integer as written (`-1 is outside 8..=64`).
+    pub(crate) fn u32_arg_in(&self, range: RangeInclusive<u32>) -> Result<u32, ConfigError> {
+        let n = self.int_arg()?;
+        u32::try_from(n)
+            .ok()
+            .filter(|n| range.contains(n))
+            .ok_or_else(|| {
+                self.invalid(
+                    "argument",
+                    format!("{n} is outside {}..={}", range.start(), range.end()),
+                )
+            })
+    }
+
+    /// Exactly one string argument naming one of `names` (a `const NAMES` table); anything else
+    /// is an `InvalidValue` at the node listing the names in table order.
+    pub(crate) fn enum_arg<T: Copy>(
+        &self,
+        label: &'static str,
+        names: &[(T, &str)],
+    ) -> Result<T, ConfigError> {
+        let s = self.string_arg(label)?;
+        names
+            .iter()
+            .find_map(|(value, name)| (*name == s).then_some(*value))
+            .ok_or_else(|| {
+                let list: Vec<&str> = names.iter().map(|(_, name)| *name).collect();
+                self.invalid(
+                    "argument",
+                    format!("`{s}` is not one of {}", list.join(", ")),
+                )
+            })
+    }
+
     /// Exactly one argument, a number: a KDL float (`1.4167`) or an integer (`2`, widened).
     pub(crate) fn float_arg(&self) -> Result<f64, ConfigError> {
         let value = self.single_arg("a number")?;
@@ -237,6 +275,40 @@ impl<'a> NodeReader<'a> {
             .map_err(|_| self.invalid_at(at, &what, format!("{n} is outside 0..={}", u32::MAX)))
     }
 
+    /// A non-negative integer property `key` within `range`, if present. A negative or oversize
+    /// value is [`NodeReader::u32_prop`]'s error at the property; a value outside `range` is an
+    /// `InvalidValue` at the **node** (where the checks it replaces always reported it).
+    pub(crate) fn u32_prop_in(
+        &self,
+        key: &str,
+        range: RangeInclusive<u32>,
+    ) -> Result<Option<u32>, ConfigError> {
+        let Some(n) = self.u32_prop(key)? else {
+            return Ok(None);
+        };
+        if !range.contains(&n) {
+            return Err(self.invalid(
+                &format!("property `{key}`"),
+                format!("{n} is outside {}..={}", range.start(), range.end()),
+            ));
+        }
+        Ok(Some(n))
+    }
+
+    /// A `"#rrggbb"` string property `key`, if present, validated.
+    pub(crate) fn hex_prop(&self, key: &str) -> Result<Option<Rgb>, ConfigError> {
+        let Some((s, at)) = self.string_prop(key, "a \"#rrggbb\" string")? else {
+            return Ok(None);
+        };
+        Rgb::from_hex(s).map(Some).ok_or_else(|| {
+            self.invalid_at(
+                at,
+                &format!("property `{key}`"),
+                format!("`{s}` is not a #rrggbb colour"),
+            )
+        })
+    }
+
     /// A string property `key`, if present, with its location; `expected` words a type error.
     pub(crate) fn string_prop(
         &self,
@@ -327,72 +399,4 @@ impl<'a> Iterator for Children<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn doc(text: &str) -> KdlDocument {
-        KdlDocument::parse_v2(text).unwrap()
-    }
-
-    #[test]
-    fn once_only_children_raise_duplicate_at_the_second_child() {
-        let text = "block {\n    a 1\n    b 2\n    a 3\n}\n";
-        let doc = doc(text);
-        let block = NodeReader::new(text, &doc.nodes()[0]);
-        let mut it = block.children(&[]).unwrap();
-        assert_eq!(it.next().unwrap().unwrap().name(), "a");
-        assert_eq!(it.next().unwrap().unwrap().name(), "b");
-        match it.next().unwrap() {
-            Err(ConfigError::Duplicate { at, name }) => {
-                assert_eq!(name, "a");
-                assert_eq!(at, Location { line: 4, column: 5 });
-            }
-            other => panic!("expected Duplicate, got {:?}", other.map(|r| r.name())),
-        }
-    }
-
-    #[test]
-    fn repeatable_children_may_repeat() {
-        let text = "block {\n    root 1\n    root 2\n}\n";
-        let doc = doc(text);
-        let block = NodeReader::new(text, &doc.nodes()[0]);
-        let names: Vec<_> = block
-            .children(&["root"])
-            .unwrap()
-            .map(|c| c.unwrap().name())
-            .collect();
-        assert_eq!(names, ["root", "root"]);
-    }
-
-    #[test]
-    fn bool_arg_type_error_message() {
-        let text = "flag \"yes\"\n";
-        let doc = doc(text);
-        let err = NodeReader::new(text, &doc.nodes()[0])
-            .bool_arg()
-            .unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "1:1: `flag` argument must be #true or #false"
-        );
-        let text = "flag #true\n";
-        let doc = self::doc(text);
-        assert!(NodeReader::new(text, &doc.nodes()[0]).bool_arg().unwrap());
-    }
-
-    #[test]
-    fn block_node_itself_takes_no_arguments_or_properties() {
-        let text = "block 1 {\n}\nother k=1 {\n}\n";
-        let doc = doc(text);
-        let err = NodeReader::new(text, &doc.nodes()[0])
-            .children(&[])
-            .err()
-            .unwrap();
-        assert!(matches!(err, ConfigError::UnexpectedArgument { .. }));
-        let err = NodeReader::new(text, &doc.nodes()[1])
-            .children(&[])
-            .err()
-            .unwrap();
-        assert!(matches!(err, ConfigError::UnknownProperty { .. }));
-    }
-}
+mod tests;

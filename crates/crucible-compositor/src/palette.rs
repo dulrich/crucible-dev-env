@@ -16,11 +16,5 @@ pub const PIP_ACTIVE_COLOR: [f32; 4] = [0.20, 0.80, 0.80, 1.0];
 /// Colour of **inactive** pips: muted grey so the position is still legible.
 pub const PIP_INACTIVE_COLOR: [f32; 4] = [0.45, 0.45, 0.45, 0.85];
 
-/// The N1 accent for the `n1-dark` and `n1-med` overlay styles (`#ff8a3d`).
-pub const N1_ACCENT: [f32; 4] = [1.0, 138.0 / 255.0, 61.0 / 255.0, 1.0];
-
-/// The N1 accent for the `n1-light` overlay style (`#f07714`).
-pub const N1_LIGHT_ACCENT: [f32; 4] = [240.0 / 255.0, 119.0 / 255.0, 20.0 / 255.0, 1.0];
-
 /// Header strip background (a dark neutral, distinct from the ring accent).
 pub const STRIP_BG: [f32; 4] = [0.09, 0.10, 0.12, 1.0];

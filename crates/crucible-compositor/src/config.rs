@@ -284,18 +284,12 @@ mod tests {
     #[test]
     fn warm_key_carries_effective_overlay_args() {
         let c = Config::default();
-        let defaults: Vec<String> = crucible_config::GHOSTTY_OVERLAY_DEFAULT_ARGS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let defaults = crucible_config::TerminalKind::Ghostty.overlay_default_args();
         assert_eq!(
             warm_key(&c, "/tmp/cde/ghostty-cde".into()).overlay_args,
             defaults
         );
-        let foot: Vec<String> = crucible_config::FOOT_OVERLAY_DEFAULT_ARGS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let foot = crucible_config::TerminalKind::Foot.overlay_default_args();
         assert_eq!(
             warm_key(&c, "foot".into()).overlay_args[..foot.len()],
             foot[..]

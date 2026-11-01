@@ -6,9 +6,7 @@ use crucible_layout::Rect;
 
 use crate::{
     layout::{WindowClass, window_rect},
-    palette::{
-        BORDER_COLOR, MARK_COLOR, N1_ACCENT, N1_LIGHT_ACCENT, PIP_ACTIVE_COLOR, PIP_INACTIVE_COLOR,
-    },
+    palette::{BORDER_COLOR, MARK_COLOR, PIP_ACTIVE_COLOR, PIP_INACTIVE_COLOR},
 };
 
 // ---------------------------------------------------------------------------
@@ -122,14 +120,12 @@ pub fn stack_pips(
 // Overlay.
 // ---------------------------------------------------------------------------
 
-/// Border colour for an overlay of `style`: the N1 accent, or [`BORDER_COLOR`] for `terminal`.
+/// Border colour for an overlay of `style`: the N1 palette accent, or [`BORDER_COLOR`] for `terminal`.
 #[must_use]
 pub fn overlay_border_color(style: OverlayStyle) -> [f32; 4] {
-    match style {
-        OverlayStyle::Terminal => BORDER_COLOR,
-        OverlayStyle::N1Dark | OverlayStyle::N1Med => N1_ACCENT,
-        OverlayStyle::N1Light => N1_LIGHT_ACCENT,
-    }
+    style
+        .palette()
+        .map_or(BORDER_COLOR, |palette| palette.accent.to_rgba_f32())
 }
 
 /// The mapped overlay's global rect plus its border settings.

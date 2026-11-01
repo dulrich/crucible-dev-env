@@ -11,11 +11,13 @@
 //! `crucible-keys` (`Bindings::with_overrides`). Hot reload is the compositor's concern.
 //! The full schema is documented in `docs/config.md`.
 //!
-//! Layout: `error` (typed errors), `model` (the parsed data), `reader` (a located view of one
-//! KDL node) and `schema` (the grammar built on the reader).
+//! Layout: `error` (typed errors), `model` (the parsed data), `overlay` (overlay style, palette
+//! and terminal defaults), `reader` (a located view of one KDL node) and `schema` (the grammar
+//! built on the reader).
 
 mod error;
 mod model;
+mod overlay;
 mod reader;
 mod schema;
 
@@ -23,10 +25,13 @@ use std::path::{Path, PathBuf};
 
 pub use error::{ConfigError, Location};
 pub use model::{
-    ClassTiling, Config, DEFAULT_DIVIDER_COLOR, DEFAULT_HEADER_FONT, FOOT_OVERLAY_DEFAULT_ARGS,
-    GHOSTTY_OVERLAY_DEFAULT_ARGS, HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX,
-    HEADER_SIZE_MIN, HeaderConfig, HeaderMode, LauncherConfig, OverlayConfig, OverlayStyle,
-    PickerConfig, Rgb, TerminalConfig, TilingConfig, clamp_ring, substitute_gap,
+    AppTiling, Config, DEFAULT_DIVIDER_COLOR, DEFAULT_HEADER_FONT, HEADER_DIVIDER_INSET_MAX,
+    HEADER_DIVIDER_MAX, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderConfig, HeaderMode, LauncherConfig,
+    PickerConfig, Rgb, TerminalConfig, TerminalTiling, TilingConfig, clamp_ring, substitute_gap,
+};
+pub use overlay::{
+    FOOT_UNBOUND_ACTIONS, GHOSTTY_OVERLAY_DEFAULT_ARGS, N1_DARK, N1_LIGHT, N1_MED, OverlayConfig,
+    OverlayStyle, Palette, TerminalKind,
 };
 pub use schema::parse;
 

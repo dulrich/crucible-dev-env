@@ -8,38 +8,7 @@
 //! background.
 
 use crucible_compositor::ipc::OVERLAY_STYLE_ENV;
-use crucible_config::OverlayStyle;
-
-/// An RGB triple.
-pub type Rgb = (u8, u8, u8);
-
-/// The four colours of one N1 palette.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Palette {
-    pub bg: Rgb,
-    pub text: Rgb,
-    pub line: Rgb,
-    pub accent: Rgb,
-}
-
-pub const N1_DARK: Palette = Palette {
-    bg: (0x0e, 0x0e, 0x10),
-    text: (0xe9, 0xe9, 0xea),
-    line: (0x37, 0x38, 0x3b),
-    accent: (0xff, 0x8a, 0x3d),
-};
-pub const N1_MED: Palette = Palette {
-    bg: (0x3a, 0x3a, 0x3b),
-    text: (0xf3, 0xf3, 0xf4),
-    line: (0x66, 0x66, 0x68),
-    accent: (0xff, 0x8a, 0x3d),
-};
-pub const N1_LIGHT: Palette = Palette {
-    bg: (0xf4, 0xf4, 0xf5),
-    text: (0x19, 0x1a, 0x1b),
-    line: (0xa5, 0xa5, 0xa8),
-    accent: (0xf0, 0x77, 0x14),
-};
+use crucible_config::{OverlayStyle, Palette, Rgb};
 
 /// The overlay style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,20 +19,15 @@ pub enum Style {
 
 impl From<OverlayStyle> for Style {
     fn from(style: OverlayStyle) -> Style {
-        match style {
-            OverlayStyle::Terminal => Style::Terminal,
-            OverlayStyle::N1Dark => Style::N1(N1_DARK),
-            OverlayStyle::N1Med => Style::N1(N1_MED),
-            OverlayStyle::N1Light => Style::N1(N1_LIGHT),
-        }
+        style.palette().map_or(Style::Terminal, Style::N1)
     }
 }
 
-fn fg((r, g, b): Rgb) -> String {
+fn fg(Rgb(r, g, b): Rgb) -> String {
     format!("\x1b[38;2;{r};{g};{b}m")
 }
 
-fn bg((r, g, b): Rgb) -> String {
+fn bg(Rgb(r, g, b): Rgb) -> String {
     format!("\x1b[48;2;{r};{g};{b}m")
 }
 
@@ -122,6 +86,7 @@ impl Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crucible_config::{N1_DARK, N1_LIGHT, N1_MED};
 
     #[test]
     fn parses_each_value_and_falls_back() {
@@ -132,23 +97,6 @@ mod tests {
         assert_eq!(Style::parse(Some("bogus")), Style::Terminal);
         assert_eq!(Style::parse(Some("")), Style::Terminal);
         assert_eq!(Style::parse(None), Style::Terminal);
-    }
-
-    #[test]
-    fn config_surround_matches_palette_bg() {
-        // crucible-config hands foot this colour as its overlay background; it must be the bg the
-        // overlay TUIs paint, or the leftover cell-grid strip shows as a gap.
-        for s in [
-            OverlayStyle::N1Dark,
-            OverlayStyle::N1Med,
-            OverlayStyle::N1Light,
-        ] {
-            let Style::N1(p) = Style::from(s) else {
-                unreachable!()
-            };
-            assert_eq!(s.surround_rgb(), Some(p.bg), "{}", s.as_str());
-        }
-        assert_eq!(OverlayStyle::Terminal.surround_rgb(), None);
     }
 
     #[test]
