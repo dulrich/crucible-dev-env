@@ -131,6 +131,17 @@ pub trait Backend {
         }
         state.apply_layout();
     }
+    /// Powers every output `on` (wake) or off (idle blanking). Called by the idle machine only on a
+    /// change, never redundantly. The default (nested `winit`) logs and does nothing; the udev
+    /// backend powers the DRM outputs (WP-3). An associated fn taking the whole state, like
+    /// [`Backend::outputs_changed`], so a backend can reach both its DRM state and the space.
+    fn set_outputs_powered(state: &mut CrucibleState<Self>, on: bool)
+    where
+        Self: Sized + 'static,
+    {
+        let _ = state;
+        tracing::info!(on, "idle: output power change ignored by this backend");
+    }
 }
 
 /// Central, backend-agnostic compositor state driven by the calloop event loop.
@@ -247,6 +258,12 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub header_text: crate::text::TextRenderer,
     /// Screen-lock state (`ext-session-lock-v1`); see [`crate::lock`].
     pub session_lock: crate::lock::SessionLock,
+    /// `ext-idle-notify-v1` global state; see [`crate::idle`].
+    pub idle_notifier_state: smithay::wayland::idle_notify::IdleNotifierState<CrucibleState<B>>,
+    /// `zwp-idle-inhibit-manager-v1` global state.
+    pub idle_inhibit_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
+    /// Idle timers' state machine and the inhibiting surfaces.
+    pub idle: crate::idle::IdleRuntime,
     /// The icon of the active pointer drag-and-drop grab, if any; composed at the pointer by
     /// [`crate::render::frame_elements`] and cleared when the drag ends.
     pub dnd_icon: Option<DndIcon>,
@@ -331,6 +348,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let session_lock = crate::lock::SessionLock::new(
             smithay::wayland::session_lock::SessionLockManagerState::new::<Self, _>(&dh, |_| true),
         );
+        let idle_notifier_state =
+            smithay::wayland::idle_notify::IdleNotifierState::new(&dh, handle.clone());
+        let idle_inhibit_state = crate::idle::new_inhibit_manager::<B>(&dh);
         let mut seat_state = SeatState::new();
 
         // Create the seat with keyboard + pointer capabilities. NB: this only *advertises* the
@@ -415,6 +435,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
             header: crate::header::HeaderState::default(),
             header_text: crate::text::TextRenderer::from_font(None),
             session_lock,
+            idle_notifier_state,
+            idle_inhibit_state,
+            idle: crate::idle::IdleRuntime::default(),
             dnd_icon: None,
             pending_keyboard_focus: PendingFocus::default(),
         }

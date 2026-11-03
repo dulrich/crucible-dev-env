@@ -50,9 +50,9 @@ Pre-alpha, but **the MVP (Phases 0–3 of [the roadmap](plans/00-mvp-roadmap.md)
 - **Visuals** — a focus ring on the focused window, the stack pips, and an optional per-output workspace header strip.
 - **Persistence** — workspaces auto-save and restore (layout, terminal directories and commands, app relaunch placeholders) through a fuzzy picker.
 - **Overlays** — the workspace picker, program launcher and settings view, with numbered workspace slots.
-- **Desktop basics** — screen lock, keyboard layout switching, fullscreen (Wayland and X11, games included), closing windows, a session launcher for tty1, and a `crucible msg` control socket.
+- **Desktop basics** — screen lock, auto-lock and screen blanking on idle, keyboard layout switching, fullscreen (Wayland and X11, games included), closing windows, a session launcher for tty1, and a `crucible msg` control socket.
 
-**Not yet:** a status bar, idle handling (auto-lock and screen blanking), screenshots and screen sharing (screencopy), and a built-in terminal (foot is the default for now).
+**Not yet:** a status bar, screenshots and screen sharing (screencopy), and a built-in terminal (foot is the default for now).
 
 ## Running
 

@@ -74,3 +74,6 @@ pub mod text;
 
 /// Screen lock (`ext-session-lock-v1`): the lock state machine and its Smithay glue.
 pub mod lock;
+
+/// Idle lock/blank timers and the idle-notify / idle-inhibit protocols.
+pub mod idle;

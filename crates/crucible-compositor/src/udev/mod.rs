@@ -197,6 +197,14 @@ impl Backend for UdevData {
         output::reflow_outputs(state);
     }
 
+    fn set_outputs_powered(_state: &mut CrucibleState<Self>, on: bool) {
+        // WP-3: DPMS off/on via the DRM compositors.
+        tracing::info!(
+            on,
+            "idle: output power change (udev power-off lands in WP-3)"
+        );
+    }
+
     fn change_vt(&mut self, vt: i32) -> bool {
         match self.session.change_vt(vt) {
             Ok(()) => true,

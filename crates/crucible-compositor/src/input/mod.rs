@@ -60,6 +60,7 @@ impl CrucibleState<WinitData> {
     /// arrive with the udev/libinput path ([`CrucibleState::process_input_event_libinput`]).
     pub fn process_input_event(&mut self, event: InputEvent<smithay::backend::winit::WinitInput>) {
         type B = smithay::backend::winit::WinitInput;
+        self.idle_activity();
         match event {
             InputEvent::Keyboard { event } => self.process_keyboard_event::<B>(event),
             InputEvent::PointerMotionAbsolute { event } => {
@@ -84,6 +85,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// motion through `process_pointer_motion_relative`. Device add/remove are surfaced to the
     /// caller (which configures libinput / tracks keyboards for LED sync) and otherwise ignored.
     pub fn process_input_event_libinput<I: InputBackend>(&mut self, event: InputEvent<I>) {
+        self.idle_activity();
         match event {
             InputEvent::Keyboard { event } => self.process_keyboard_event::<I>(event),
             InputEvent::PointerMotion { event } => self.process_pointer_motion_relative::<I>(event),

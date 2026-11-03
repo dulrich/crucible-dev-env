@@ -371,6 +371,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Err(err) = timer {
             error!(%err, "cannot arm the persistence timer; auto-save disabled");
         }
+        self.start_idle_timer();
     }
 
     /// The startup session step, called once by each backend after its initial outputs are

@@ -3,6 +3,7 @@
 //! the `picker` and `launcher` blocks (the TUIs the overlay hosts).
 
 mod header;
+mod idle;
 mod keyboard;
 mod output;
 mod overlay;
@@ -58,6 +59,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "launcher" => config.launcher = overlay::parse_launcher(node)?,
             "header" => config.header = header::parse_header(node)?,
             "keyboard" => config.keyboard = keyboard::parse_keyboard(node)?,
+            "idle" => config.idle = idle::parse_idle(node)?,
             "output" => {
                 let (name, out) = output::parse_output(node)?;
                 if config.outputs.insert(name.clone(), out).is_some() {

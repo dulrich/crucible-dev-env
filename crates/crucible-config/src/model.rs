@@ -351,6 +351,15 @@ impl KeyboardConfig {
     }
 }
 
+/// Idle timers (`idle { lock-after 300; blank-after 600 }`); `None` leaves that timer off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct IdleConfig {
+    /// Seconds of inactivity before the locker is spawned. Positive.
+    pub lock_after: Option<u32>,
+    /// Seconds of inactivity before outputs are blanked (powered off). Positive.
+    pub blank_after: Option<u32>,
+}
+
 /// The parsed CDE configuration. `Default` is CDE's behaviour with no config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -370,6 +379,8 @@ pub struct Config {
     pub header: HeaderConfig,
     /// Keyboard layouts.
     pub keyboard: KeyboardConfig,
+    /// Idle lock and blank timers (both off by default).
+    pub idle: IdleConfig,
     /// The screen locker the `lock` action spawns (`lock-command`), split on whitespace into
     /// program + arguments (no shell quoting). Default `"swaylock"`.
     pub lock_command: String,
@@ -413,6 +424,7 @@ impl Default for Config {
             overlay: OverlayConfig::default(),
             header: HeaderConfig::default(),
             keyboard: KeyboardConfig::default(),
+            idle: IdleConfig::default(),
             launcher: LauncherConfig::default(),
             binds: Vec::new(),
             outputs: BTreeMap::new(),

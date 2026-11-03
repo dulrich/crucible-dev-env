@@ -177,6 +177,26 @@ keyboard {
 - The `set-layout <name>` action switches to the layout by its position in `layouts` (not by xkb's long layout name). A name not in the list is a logged no-op. Defaults: `Super+E` is `set-layout us` and `Super+S` is `set-layout es`; with the default `layouts "us"`, `set-layout es` does nothing.
 - Chords match the keysym the active layout produces, not the physical key. Under `es`, punctuation chords (`Super+backslash`, `Super+minus`, `Super+bracketleft/right`) and the US shifted-digit `pin-slot` aliases (`Super+Shift+!` and friends) therefore follow the Spanish keys; letters and digits are unaffected. Rebind via `binds` if you want different punctuation chords under another layout.
 
+### `idle`
+
+```kdl
+idle {
+    lock-after 300
+    blank-after 600
+}
+```
+
+Built-in idle timers, both **off** unless configured. Each child is optional and may appear once; the value is a positive whole number of seconds. Zero, a negative number, a non-integer or an unknown child is a located config error (never rounded or clamped).
+
+- `lock-after` — after this many seconds without input, CDE spawns the `lock-command` (the same path as the `lock` action). It fires at most once per idle period and never while the session is already locked or locking.
+- `blank-after` — after this many seconds without input, CDE powers the monitors off. It fires once per idle period and may fire while the session is locked. `blank-after` may be shorter than `lock-after` (blank first, lock later while still blanked).
+
+Idle time does not accumulate while idle is **inhibited**: when a client holds a `zwp_idle_inhibitor_v1` on a surface that is visible (mapped on an output's active workspace, or a non-workspace surface such as a layer surface, the overlay or a lock surface), or when a fullscreen window is on the active workspace of any output (this covers XWayland games that never send an inhibitor). A fullscreen window on a background workspace does not inhibit. When inhibition ends the idle period starts over.
+
+Any input event (key, pointer, touch, gesture) restarts the idle period and wakes blanked monitors; the waking event is still delivered to the focused window as usual. A hot reload applies the new timeouts and restarts the current idle period.
+
+Blanking powers the monitors off on the TTY (DRM) backend; under the nested `winit` backend it does nothing. CDE also advertises `ext-idle-notify-v1` and `zwp-idle-inhibit-manager-v1`, so third-party idle clients and idle-inhibiting apps work whether or not an `idle` block is present.
+
 ### `output`
 
 ```kdl
@@ -290,6 +310,10 @@ header {
     start "hidden"
     font "DejaVu Sans"
     size 14
+}
+idle {
+    lock-after 300
+    blank-after 600
 }
 output "DP-1" { scale 1.4167 }
 autostart "dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"

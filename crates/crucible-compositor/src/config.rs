@@ -149,7 +149,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.reload_keyboard_layouts(&config);
         }
         crate::xwayland::note_xwayland_scale_change(delta.max_scale.0, delta.max_scale.1);
+        let idle_changed = self.config.idle != config.idle;
         self.config = config;
+        if idle_changed {
+            self.idle_config_changed();
+        }
         self.apply_output_scales();
         if old_overlay_terminal != warm_key(&self.config, self.terminal_program()) {
             self.warm_config_changed();
