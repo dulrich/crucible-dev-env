@@ -4,7 +4,7 @@ This page sets up CDE to launch from the tty1 login shell, with a release binary
 
 ## Release install
 
-Build a release binary and install it where the launcher can find it:
+Run `scripts/deploy.sh host-a` (or the other host's name, or `all` for both). It does a release build, keeps the previous binary as `crucible.prev` beside the installed one, installs to `~/.local/bin/crucible`, verifies `--build`, and prints a `RESULT:` line. Manual fallback, which builds a release binary and installs it where the launcher can find it:
 
 ```sh
 cargo build --release
@@ -47,5 +47,5 @@ See [`config.md`](config.md#autostart) for the `autostart` semantics.
 2. **To stop the auto-launch:** from another VT (Ctrl+Alt+F2) or over ssh, run `touch ~/.config/cde/no-autolaunch`, then log in on tty1 for a plain shell. To re-enable it, `rm` the file.
 3. **i3 on host-a:** use lightdm on vt7 (Ctrl+Alt+F7) while it is enabled, or `sudo systemctl enable --now lightdm` if you disabled it. Without a display manager, run `startx /usr/bin/i3` from a tty that is not running CDE.
 4. **host-b has no X fallback.** The recovery path there is a tty shell or ssh.
-5. **To roll back to a known-good binary:** reinstall from a previous commit with `git checkout <sha> && cargo build --release && install -m755 target/release/crucible ~/.local/bin/crucible`, or keep a `crucible.prev` copy beside the installed binary and copy it back.
+5. **To roll back to a known-good binary:** reinstall from a previous commit with `git checkout <sha> && cargo build --release && install -m755 target/release/crucible ~/.local/bin/crucible`, or copy back the `crucible.prev` that `scripts/deploy.sh` keeps beside the installed binary (it is refreshed only when the installed build changes).
 6. **To fully remove the setup,** delete the `.profile` block.

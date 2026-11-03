@@ -1,6 +1,7 @@
 {
   "entrypoints": [
     { "path": "scripts/cde.sh" },
+    { "path": "scripts/deploy.sh" },
     { "path": "scripts/wallpaper-rotate.sh" },
     { "path": "scripts/foot/build.sh" },
     { "path": "scripts/foot/install.sh" },
