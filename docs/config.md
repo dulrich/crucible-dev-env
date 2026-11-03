@@ -144,6 +144,7 @@ Overlay terminals are pre-started: one hidden overlay terminal (running `crucibl
 ```kdl
 header {
     mode "toggle"
+    start "hidden"
     font "DejaVu Sans"
     size 14
     divider 0
@@ -153,7 +154,8 @@ header {
 
 A clickable workspace strip at the top of every output, listing that output's workspaces in stack order with the active one highlighted in the focus-ring accent. Every child is optional and may appear once.
 
-- `mode` — `"off"`, `"always"` or `"toggle"` (default); any other value (including the old `"alt"`) is a config error. `off`: no strip and no input effect; `toggle-header` does nothing. `always`: the strip is always shown and its height is reserved at the top of each output (tiles, rings and X11 placement all shrink by exactly that height). `toggle`: the strip is hidden until the `toggle-header` action (default `Super+B`) shows it; while shown it reserves its height exactly like `always` (every window is re-configured to the reflowed rects), and `Super+B` again hides it and gives the space back. `toggle-header` acts on the focused output only; each output keeps its own shown/hidden state for the session (not persisted).
+- `mode` — `"off"`, `"always"` or `"toggle"` (default); any other value (including the old `"alt"`) is a config error. `off`: no strip and no input effect; `toggle-header` does nothing. `always`: the strip is always shown and its height is reserved at the top of each output (tiles, rings and X11 placement all shrink by exactly that height). `toggle`: the strip is hidden until the `toggle-header` action (default `Super+B`) shows it; while shown it reserves its height exactly like `always` (every window is re-configured to the reflowed rects), and `Super+B` again hides it and gives the space back. `toggle-header` acts on the focused output only; each output keeps its own shown/hidden state, remembered per connector name in `$XDG_STATE_HOME/cde/session.kdl`: it survives restarts, unplugging the monitor and config mode switches (e.g. `toggle` -> `always` -> `toggle`), and a saved state wins over `start`.
+- `start` — `"shown"` or `"hidden"` (default); any other value is a config error. The `toggle`-mode state of a monitor that has never been toggled (no saved state); `always` and `off` ignore it.
 - `font` — a font file path (a value containing `/`) or a fontconfig family name resolved with `fc-match`. Default `"DejaVu Sans"`. If no font can be loaded the strip still draws its background and highlight, without labels (one warning is logged).
 - `size` — label size in pixels, an integer from 6 to 96; default 14. The strip height is the size plus padding. The size is in logical pixels, while terminals usually size fonts in points; at scale 1 the conversion is px ≈ pt × 96/72 (14 pt ≈ 19 px).
 - `divider` — width in logical pixels of a divider drawn between adjacent workspace labels, an integer from 0 to 16; default 0 (off). It takes its own space between labels (never before the first or after the last), is drawn in the inactive label colour by default, never sits under the active highlight, and a click on it switches nothing. Negative, above 16 or non-integer values are config errors. Optional properties: `inset=<px>` (0 to 32, default 0) trims the line that many pixels from its top and bottom, and draws no line when nothing is left; `color="#rrggbb"` (default `#cdd0d6`, the label colour) sets its colour. Both are inert when the width is 0, and invalid values are config errors. Example: `divider 1 inset=6 color="#5c6370"`.
@@ -285,6 +287,7 @@ overlay {
 }
 header {
     mode "toggle"
+    start "hidden"
     font "DejaVu Sans"
     size 14
 }

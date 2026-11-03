@@ -1,9 +1,9 @@
-//! The `header { mode; font; size; divider …; slots }` block.
+//! The `header { mode; start; font; size; divider …; slots }` block.
 
 use crate::error::ConfigError;
 use crate::model::{
     HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderConfig,
-    HeaderMode,
+    HeaderMode, HeaderStart,
 };
 use crate::reader::NodeReader;
 
@@ -16,6 +16,7 @@ pub(super) fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigE
         }
         match child.name() {
             "mode" => out.mode = child.enum_arg("a mode string", &HeaderMode::NAMES)?,
+            "start" => out.start = child.enum_arg("a start string", &HeaderStart::NAMES)?,
             "font" => {
                 let s = child.string_arg("a font path or family string")?;
                 child.nonempty("font", s)?;
@@ -70,6 +71,36 @@ mod tests {
             let err = parse(&format!("header {{\n mode \"{bad}\"\n}}\n")).unwrap_err();
             assert!(err.to_string().contains("off, always, toggle"), "{err}");
         }
+    }
+
+    #[test]
+    fn header_start_default_and_parse() {
+        use crate::model::HeaderStart;
+        assert_eq!(Config::default().header.start, HeaderStart::Hidden);
+        for (name, start) in [
+            ("shown", HeaderStart::Shown),
+            ("hidden", HeaderStart::Hidden),
+        ] {
+            let c = parse(&format!("header {{\n start \"{name}\"\n}}\n")).unwrap();
+            assert_eq!(c.header.start, start);
+            assert_eq!(start.as_str(), name);
+        }
+        assert!(HeaderStart::Shown.is_shown() && !HeaderStart::Hidden.is_shown());
+    }
+
+    #[test]
+    fn header_start_rejects_other_values() {
+        for bad in ["\"sometimes\"", "\"Shown\"", "#true", "1"] {
+            assert!(
+                parse(&format!("header {{\n start {bad}\n}}\n")).is_err(),
+                "{bad}"
+            );
+        }
+        let err = parse("header {\n start \"x\"\n}\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "2:2: `start` argument: `x` is not one of shown, hidden"
+        );
     }
 
     #[test]

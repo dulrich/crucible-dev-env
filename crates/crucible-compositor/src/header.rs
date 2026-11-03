@@ -20,9 +20,9 @@
 //! vertical centring scale with them, and the label text is rasterized at `size x scale` physical pixels
 //! ([`TextRenderer::element`]), never upscaled. Hit-testing stays in logical pixels.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crucible_config::{HeaderConfig, HeaderMode, Rgb};
+use crucible_config::{HeaderConfig, HeaderMode, HeaderStart, Rgb};
 use crucible_layout::{OutputId, Rect, WorkspaceId};
 use smithay::{
     backend::renderer::{ImportAll, ImportMem, Renderer},
@@ -160,6 +160,12 @@ pub fn toggled_visible(mode: HeaderMode, visible: bool) -> bool {
     }
 }
 
+/// A newly known output's initial `toggle`-mode visibility: the saved preference, else `start`.
+#[must_use]
+pub fn seed_visible(pref: Option<bool>, start: HeaderStart) -> bool {
+    pref.unwrap_or_else(|| start.is_shown())
+}
+
 /// Physical button codes whose press the strip consumed; their paired release is swallowed
 /// (audit E8: a release must never be forwarded for a press that was not).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -184,6 +190,10 @@ impl ConsumedButtons {
 pub struct HeaderState {
     /// The `toggle`-mode state: the outputs whose strip is currently shown (absent = hidden).
     shown: BTreeSet<OutputId>,
+    /// The saved preference per connector name (shown = `true`), loaded from `session.kdl` at
+    /// startup and updated on every toggle. Holds disconnected connectors too, so an unplug,
+    /// a workspace-less output or `restore-session off` never loses it.
+    pub prefs: BTreeMap<String, bool>,
     /// Buttons whose press the strip consumed.
     pub consumed: ConsumedButtons,
     /// The font spec the text renderer was last loaded for.
@@ -206,11 +216,16 @@ impl HeaderState {
         }
     }
 
-    /// Hides every output's strip; returns whether any was shown.
-    pub fn clear_visible(&mut self) -> bool {
-        let any = !self.shown.is_empty();
-        self.shown.clear();
-        any
+    /// Seeds `id` (connector `name`) from the saved preference, else from `start`. Does not
+    /// record a preference: only a toggle does.
+    pub fn seed(&mut self, id: OutputId, name: &str, start: HeaderStart) {
+        let visible = seed_visible(self.prefs.get(name).copied(), start);
+        self.set_visible(id, visible);
+    }
+
+    /// Records `name`'s preference; returns whether the stored map changed.
+    pub fn remember(&mut self, name: &str, visible: bool) -> bool {
+        self.prefs.insert(name.to_string(), visible) != Some(visible)
     }
 }
 
@@ -333,6 +348,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Sets output `id`'s `toggle`-mode visibility. On a change the applied projection is
     /// forgotten and the layout re-applied so every window is re-configured to the reflowed rects.
     pub(crate) fn set_header_visible(&mut self, id: OutputId, visible: bool) {
+        let name = self
+            .space
+            .outputs()
+            .find(|o| model_output_id(o) == Some(id))
+            .map(|o| o.name());
+        let remembered = name.is_some_and(|n| self.header.remember(&n, visible));
+        if remembered {
+            self.write_session();
+        }
         if !self.header.set_visible(id, visible) {
             return;
         }
@@ -606,14 +630,25 @@ mod tests {
     }
 
     #[test]
-    fn header_state_clear_hides_every_output() {
+    fn seed_precedence_is_pref_then_start_then_hidden() {
+        use HeaderStart::{Hidden, Shown};
+        assert!(seed_visible(Some(true), Hidden));
+        assert!(!seed_visible(Some(false), Shown));
+        assert!(seed_visible(None, Shown));
+        assert!(!seed_visible(None, Hidden));
+    }
+
+    #[test]
+    fn seed_uses_pref_and_does_not_record_one() {
         let (a, b) = (OutputId::from_raw(1), OutputId::from_raw(2));
         let mut st = HeaderState::default();
-        st.set_visible(a, true);
-        st.set_visible(b, true);
-        assert!(st.clear_visible());
-        assert!(!st.clear_visible());
-        assert!(!st.is_visible(b));
+        st.prefs.insert("DP-1".into(), true);
+        st.seed(a, "DP-1", HeaderStart::Hidden);
+        st.seed(b, "HDMI-A-1", HeaderStart::Shown);
+        assert!(st.is_visible(a) && st.is_visible(b));
+        assert_eq!(st.prefs.len(), 1);
+        assert!(st.remember("HDMI-A-1", false));
+        assert!(!st.remember("HDMI-A-1", false));
     }
 
     #[test]

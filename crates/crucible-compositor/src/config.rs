@@ -90,8 +90,6 @@ pub struct ConfigDelta {
     /// The tiling insets or the header changed: the applied projection must be forgotten so
     /// every window is re-placed (and re-configured) with the new geometry.
     pub relayout: bool,
-    /// The header changed and its new mode is not `toggle`: the strip is hidden again.
-    pub hide_header: bool,
     /// The `keyboard` layouts changed: the keymap is recompiled (the active group resets to the
     /// first layout).
     pub keyboard: bool,
@@ -106,7 +104,6 @@ impl ConfigDelta {
         let header_changed = old.header != new.header;
         Self {
             relayout: old.tiling != new.tiling || header_changed,
-            hide_header: header_changed && new.header.mode != crucible_config::HeaderMode::Toggle,
             keyboard: old.keyboard != new.keyboard,
             max_scale: (old.max_output_scale(), new.max_output_scale()),
         }
@@ -134,10 +131,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         self.bindings = bindings;
         // Class insets or the header reservation changed: forget the applied projection so every
-        // window is re-placed (and re-configured), once. A header hide on an already-hidden
-        // strip does not force this by itself (`set_header_visible`'s early return).
-        let hid = delta.hide_header && self.header.clear_visible();
-        if delta.relayout || hid {
+        // window is re-placed (and re-configured), once. The stored `toggle` state is kept
+        // (it has no effect outside `toggle` mode), so toggle -> always -> toggle restores it.
+        if delta.relayout {
             self.invalidate_projection();
         }
         // Load lazily (also on the first apply, when the header equals the default): only when
@@ -244,38 +240,27 @@ mod tests {
         let c = Config::default();
         let d = ConfigDelta::between(&c, &c.clone());
         assert!(!d.relayout);
-        assert!(!d.hide_header);
         assert_eq!(d.max_scale, (1.0, 1.0));
     }
 
     #[test]
-    fn delta_tiling_only_relayouts_without_hiding() {
+    fn delta_tiling_only_relayouts() {
         let old = Config::default();
         let mut new = old.clone();
         new.tiling.app.gap = old.tiling.app.gap + 1;
-        let d = ConfigDelta::between(&old, &new);
-        assert!(d.relayout);
-        assert!(!d.hide_header);
+        assert!(ConfigDelta::between(&old, &new).relayout);
     }
 
     #[test]
-    fn delta_header_toggle_mode_relayouts_without_hiding() {
+    fn delta_header_mode_change_relayouts_in_both_directions() {
         use crucible_config::HeaderMode;
-        let d = ConfigDelta::between(
-            &header_mode(HeaderMode::Always),
-            &header_mode(HeaderMode::Toggle),
-        );
-        assert!(d.relayout);
-        assert!(!d.hide_header);
-    }
-
-    #[test]
-    fn delta_header_always_or_off_relayouts_and_hides() {
-        use crucible_config::HeaderMode;
-        for mode in [HeaderMode::Always, HeaderMode::Off] {
-            let d = ConfigDelta::between(&header_mode(HeaderMode::Toggle), &header_mode(mode));
-            assert!(d.relayout, "{mode:?}");
-            assert!(d.hide_header, "{mode:?}");
+        for (from, to) in [
+            (HeaderMode::Toggle, HeaderMode::Always),
+            (HeaderMode::Toggle, HeaderMode::Off),
+            (HeaderMode::Always, HeaderMode::Toggle),
+        ] {
+            let d = ConfigDelta::between(&header_mode(from), &header_mode(to));
+            assert!(d.relayout, "{from:?} -> {to:?}");
         }
     }
 
@@ -289,7 +274,7 @@ mod tests {
             .unwrap()
             .outputs;
         let d = ConfigDelta::between(&old, &new);
-        assert!(d.relayout && d.hide_header);
+        assert!(d.relayout);
         assert_eq!(d.max_scale, (1.0, 2.0));
     }
 

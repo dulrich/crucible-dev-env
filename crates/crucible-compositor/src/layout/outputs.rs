@@ -92,6 +92,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let saved = self.persist.saved_names();
         let model_id = self.layout.bind_output(&bound, rect, &saved);
         set_model_output_id(output, model_id);
+        self.header
+            .seed(model_id, &output.name(), self.config.header.start);
         self.apply_layout();
         Some(model_id)
     }

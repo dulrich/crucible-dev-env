@@ -186,6 +186,35 @@ impl HeaderMode {
     }
 }
 
+/// Whether a never-toggled output's `toggle`-mode strip starts shown or hidden (`header { start }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderStart {
+    /// The strip starts shown.
+    Shown,
+    /// The strip starts hidden (the default).
+    Hidden,
+}
+
+impl HeaderStart {
+    /// Every value with its config spelling, in the order error messages list them.
+    pub const NAMES: [(Self, &'static str); 2] = [(Self::Shown, "shown"), (Self::Hidden, "hidden")];
+
+    /// The config spelling.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shown => "shown",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    /// Whether this start state is "shown".
+    #[must_use]
+    pub fn is_shown(self) -> bool {
+        self == Self::Shown
+    }
+}
+
 /// Smallest accepted header font size, in logical pixels.
 pub const HEADER_SIZE_MIN: u32 = 6;
 /// Largest accepted header font size, in logical pixels.
@@ -204,6 +233,8 @@ pub const DEFAULT_HEADER_FONT: &str = "DejaVu Sans";
 pub struct HeaderConfig {
     /// When the strip is shown.
     pub mode: HeaderMode,
+    /// Initial `toggle`-mode state of an output with no saved preference (`start`).
+    pub start: HeaderStart,
     /// A font file path (contains `/`) or a fontconfig family name.
     pub font: String,
     /// Font size in logical pixels, within [`HEADER_SIZE_MIN`]..=[`HEADER_SIZE_MAX`].
@@ -224,6 +255,7 @@ impl Default for HeaderConfig {
     fn default() -> Self {
         Self {
             mode: HeaderMode::Toggle,
+            start: HeaderStart::Hidden,
             font: DEFAULT_HEADER_FONT.to_string(),
             size: 14,
             divider: 0,

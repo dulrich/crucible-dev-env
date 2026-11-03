@@ -16,7 +16,7 @@
 use crate::{PersistError, slots, store};
 use kdl::{KdlDocument, KdlEntry, KdlNode};
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -42,6 +42,9 @@ pub struct OutputSession {
     pub workspaces: Vec<String>,
     /// The output's active workspace.
     pub focused: Option<String>,
+    /// The output's saved header-strip preference: `Some(true)` shown, `Some(false)` hidden,
+    /// `None` unknown. Encoded as `header="shown"|"hidden"`; an unrecognised value reads as `None`.
+    pub header: Option<bool>,
 }
 
 /// The open workspaces per output plus the focused output.
@@ -71,6 +74,12 @@ impl Session {
             }
             if let Some(f) = &out.focused {
                 node.push(KdlEntry::new_prop("focused", f.as_str()));
+            }
+            if let Some(shown) = out.header {
+                node.push(KdlEntry::new_prop(
+                    "header",
+                    if shown { "shown" } else { "hidden" },
+                ));
             }
             doc.nodes_mut().push(node);
         }
@@ -131,8 +140,18 @@ impl Session {
                 }
                 "output" => {
                     let mut focused = None;
+                    let mut header = None;
                     for e in node.entries().iter() {
                         let Some(key) = e.name() else { continue };
+                        if key.value() == "header" && header.is_none() {
+                            // Lenient: an unknown or non-string value is ignored, never fatal.
+                            header = Some(match e.value().as_string() {
+                                Some("shown") => Some(true),
+                                Some("hidden") => Some(false),
+                                _ => None,
+                            });
+                            continue;
+                        }
                         if key.value() != "focused" || focused.is_some() {
                             return Err(invalid("property", "only one focused=\"<workspace>\""));
                         }
@@ -157,6 +176,7 @@ impl Session {
                         output: output.clone(),
                         workspaces: workspaces.to_vec(),
                         focused,
+                        header: header.flatten(),
                     });
                 }
                 other => {
@@ -192,6 +212,40 @@ impl Session {
         };
         store::write_atomic(dir, path, &self.to_kdl())
     }
+}
+
+/// The header preferences recorded in `record`: connector name to shown, for outputs that carry
+/// one. Read from the raw record, independent of [`plan_restore`]. Pure.
+#[must_use]
+pub fn header_prefs(record: &Session) -> BTreeMap<String, bool> {
+    record
+        .outputs
+        .iter()
+        .filter_map(|o| Some((o.output.clone(), o.header?)))
+        .collect()
+}
+
+/// Stamps each of `outputs` with its preference from `prefs`, then appends a workspace-less
+/// record for every preference whose connector is not among `outputs` (an unplugged monitor), so
+/// a write never drops it. Pure.
+#[must_use]
+pub fn with_header_prefs(
+    mut outputs: Vec<OutputSession>,
+    prefs: &BTreeMap<String, bool>,
+) -> Vec<OutputSession> {
+    for out in &mut outputs {
+        out.header = prefs.get(&out.output).copied();
+    }
+    for (name, shown) in prefs {
+        if !outputs.iter().any(|o| &o.output == name) {
+            outputs.push(OutputSession {
+                output: name.clone(),
+                header: Some(*shown),
+                ..OutputSession::default()
+            });
+        }
+    }
+    outputs
 }
 
 /// Decides the startup restore plan from `record`, the workspace names `saved` on disk and the
@@ -241,6 +295,7 @@ pub fn plan_restore(
                 output: at,
                 workspaces: names,
                 focused,
+                header: None,
             }),
         }
     }
@@ -264,6 +319,7 @@ mod tests {
             output: name.into(),
             workspaces: ws.iter().map(|s| (*s).to_string()).collect(),
             focused: focused.map(str::to_string),
+            header: None,
         }
     }
 
@@ -288,6 +344,66 @@ mod tests {
         assert!(text.contains("focused-output HDMI-A-1"), "{text}");
         assert_eq!(Session::from_kdl(&text).unwrap(), s);
         assert_eq!(Session::from_kdl("").unwrap(), Session::default());
+    }
+
+    #[test]
+    fn header_property_round_trips_and_old_records_parse() {
+        let mut shown = out("DP-1", &["a"], Some("a"));
+        shown.header = Some(true);
+        let mut hidden = out("HDMI-A-1", &[], None);
+        hidden.header = Some(false);
+        let s = Session {
+            outputs: vec![shown, hidden, out("eDP-1", &["b"], None)],
+            focused_output: None,
+        };
+        let text = s.to_kdl();
+        assert!(
+            text.contains("header=shown") || text.contains("header=\"shown\""),
+            "{text}"
+        );
+        assert_eq!(Session::from_kdl(&text).unwrap(), s);
+        // A record written before the property existed.
+        let old = Session::from_kdl("focused-output DP-1\noutput DP-1 a focused=a\n").unwrap();
+        assert_eq!(old.outputs[0].header, None);
+    }
+
+    #[test]
+    fn unknown_header_value_is_ignored_not_fatal() {
+        for bad in ["header=\"sideways\"", "header=3", "header=#true"] {
+            let s = Session::from_kdl(&format!("output DP-1 a {bad}\n")).unwrap();
+            assert_eq!(s.outputs[0].header, None, "{bad}");
+            assert_eq!(s.outputs[0].workspaces, ["a"]);
+        }
+    }
+
+    #[test]
+    fn header_prefs_survive_unplug_and_empty_outputs() {
+        let record = Session::from_kdl(
+            "output DP-1 a header=shown\noutput HDMI-A-1 header=hidden\noutput eDP-1 b\n",
+        )
+        .unwrap();
+        // Read from the raw record, even for an output with no workspaces.
+        let prefs = header_prefs(&record);
+        assert_eq!(prefs.len(), 2);
+        assert!(prefs["DP-1"]);
+        assert!(!prefs["HDMI-A-1"]);
+        // Only DP-1 connected: HDMI-A-1's preference is carried as a workspace-less record.
+        let outs = with_header_prefs(vec![out("DP-1", &["a"], None)], &prefs);
+        assert_eq!(outs.len(), 2);
+        assert_eq!(outs[0].header, Some(true));
+        assert_eq!(outs[1].output, "HDMI-A-1");
+        assert!(outs[1].workspaces.is_empty());
+        assert_eq!(outs[1].header, Some(false));
+        // The carried-forward record re-parses and plan_restore ignores it.
+        let text = Session {
+            outputs: outs,
+            focused_output: None,
+        }
+        .to_kdl();
+        let again = Session::from_kdl(&text).unwrap();
+        assert_eq!(header_prefs(&again), prefs);
+        let plan = plan_restore(&again, &names(&["a"]), &conn(&["DP-1"])).unwrap();
+        assert_eq!(plan.outputs.len(), 1);
     }
 
     #[test]

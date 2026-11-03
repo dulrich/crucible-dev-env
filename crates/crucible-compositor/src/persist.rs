@@ -351,6 +351,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(slots) => self.persist.slots = slots,
             Err(err) => warn!(%err, "cannot read the slot pins; starting with none"),
         }
+        // The header preferences come from the raw record, independent of workspace restore
+        // (and of `restore-session`); a missing or unreadable record just means none.
+        match Session::load(&session_path(&self.persist.store_dir)) {
+            Ok(Some(record)) => {
+                self.header.prefs = crucible_persist::session::header_prefs(&record)
+            }
+            Ok(None) => {}
+            Err(err) => warn!(%err, "cannot read the session record; no header preferences"),
+        }
         self.start_ipc();
         self.persist.config_mtime = config_mtime();
         let timer = self
@@ -487,7 +496,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let mut connected = self.connected_outputs();
         connected.sort_by_key(|(_, id)| *id);
         let name_of = |ws: WorkspaceId| world.workspace(ws).map(|w| w.name.clone());
-        let outputs = connected
+        let outputs: Vec<_> = connected
             .iter()
             .filter_map(|(name, id)| {
                 let o = world.output(*id)?;
@@ -495,9 +504,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     output: name.clone(),
                     workspaces: o.workspaces().iter().filter_map(|w| name_of(*w)).collect(),
                     focused: name_of(o.active_workspace()),
+                    header: None,
                 })
             })
             .collect();
+        let outputs = crucible_persist::session::with_header_prefs(outputs, &self.header.prefs);
         let focused = world.focused_output();
         Session {
             outputs,
@@ -510,7 +521,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Writes `session.kdl` when the live session differs from the last written one. A no-op
     /// before [`Self::start_session`] (the startup seed must never replace the last record).
-    fn write_session(&mut self) {
+    pub(crate) fn write_session(&mut self) {
         if !self.persist.session_started {
             return;
         }

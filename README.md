@@ -77,7 +77,7 @@ Focus follows the mouse by default: hovering a window focuses it, like clicking 
 `focus-follows-mouse #false` in `~/.config/cde/config.kdl`; see [`docs/config.md`](docs/config.md) for the
 full config schema (terminal, tiling (per-class gap and focus ring; the old `gaps` node was removed), picker roots, the `header` workspace strip, rebinding chords).
 
-**Workspace header.** Each output can show a clickable strip of its workspace names (the active one highlighted). `header { mode "toggle" }` (the default) hides it until you press **Super+B** (the `toggle-header` action); while shown it reflows the tiles like `always`, and pressing Super+B again hides it. `mode "always"` keeps it shown and reserves its height, `mode "off"` disables it. Click a name to switch to that workspace (the strip stays open); see `docs/config.md`.
+**Workspace header.** Each output can show a clickable strip of its workspace names (the active one highlighted). `header { mode "toggle" }` (the default) hides it until you press **Super+B** (the `toggle-header` action); while shown it reflows the tiles like `always`, and pressing Super+B again hides it. The shown/hidden state is remembered per monitor across restarts, and `start "shown"` makes a never-toggled monitor start shown. `mode "always"` keeps it shown and reserves its height, `mode "off"` disables it. Click a name to switch to that workspace (the strip stays open); see `docs/config.md`.
 
 Once inside, press **`Super+Shift+Return`** to spawn your first terminal, then **`Super+\`** to split. See
 the full keymap below.
