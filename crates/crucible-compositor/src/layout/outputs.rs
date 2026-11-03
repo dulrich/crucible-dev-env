@@ -35,10 +35,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// While the header strip is shown (`always`, or `toggle` while visible) each rect has its height removed from its top, so the
     /// projection, `pane_rect`, the empty-pane ring and X11 placement all agree.
     pub(crate) fn output_bindings(&self) -> Vec<(OutputId, Rect)> {
-        let reserved = crate::header::reserved_height(&self.config.header, self.header.visible);
         self.raw_output_rects()
             .into_iter()
-            .map(|(id, rect)| (id, rect.shrink_top(reserved)))
+            .map(|(id, rect)| {
+                let reserved =
+                    crate::header::reserved_height(&self.config.header, self.header.is_visible(id));
+                (id, rect.shrink_top(reserved))
+            })
             .collect()
     }
 
@@ -143,7 +146,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return;
         };
         match self.layout.release_output(model_id) {
-            Ok(()) => self.apply_layout(),
+            Ok(()) => {
+                self.header.set_visible(model_id, false);
+                self.apply_layout();
+            }
             Err(LayoutError::LastOutput) => {
                 debug!(
                     ?model_id,

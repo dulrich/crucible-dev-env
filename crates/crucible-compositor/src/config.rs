@@ -136,11 +136,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         // Class insets or the header reservation changed: forget the applied projection so every
         // window is re-placed (and re-configured), once. A header hide on an already-hidden
         // strip does not force this by itself (`set_header_visible`'s early return).
-        if delta.relayout || (delta.hide_header && self.header.visible) {
+        let hid = delta.hide_header && self.header.clear_visible();
+        if delta.relayout || hid {
             self.invalidate_projection();
-        }
-        if delta.hide_header {
-            self.header.visible = false;
         }
         // Load lazily (also on the first apply, when the header equals the default): only when
         // the strip can ever show and the font spec differs from what is loaded.

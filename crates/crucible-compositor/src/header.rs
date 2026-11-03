@@ -175,12 +175,36 @@ impl ConsumedButtons {
 /// Per-session header state, held on [`CrucibleState`].
 #[derive(Debug, Default)]
 pub struct HeaderState {
-    /// The `toggle`-mode state: whether the strip is currently shown.
-    pub visible: bool,
+    /// The `toggle`-mode state: the outputs whose strip is currently shown (absent = hidden).
+    shown: BTreeSet<OutputId>,
     /// Buttons whose press the strip consumed.
     pub consumed: ConsumedButtons,
     /// The font spec the text renderer was last loaded for.
     pub font_loaded: Option<String>,
+}
+
+impl HeaderState {
+    /// Whether `id`'s `toggle`-mode strip is shown.
+    #[must_use]
+    pub fn is_visible(&self, id: OutputId) -> bool {
+        self.shown.contains(&id)
+    }
+
+    /// Sets `id`'s `toggle`-mode visibility; returns whether it changed.
+    pub fn set_visible(&mut self, id: OutputId, visible: bool) -> bool {
+        if visible {
+            self.shown.insert(id)
+        } else {
+            self.shown.remove(&id)
+        }
+    }
+
+    /// Hides every output's strip; returns whether any was shown.
+    pub fn clear_visible(&mut self) -> bool {
+        let any = !self.shown.is_empty();
+        self.shown.clear();
+        any
+    }
 }
 
 /// One output's strip as derived from the live model.
@@ -219,9 +243,9 @@ fn badge_label(name: &str, slot: Option<u8>, glyph: bool) -> String {
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
-    /// Whether the strip is currently shown.
-    pub(crate) fn header_shown(&self) -> bool {
-        is_shown(self.config.header.mode, self.header.visible)
+    /// Whether output `id`'s strip is currently shown.
+    pub(crate) fn header_shown(&self, id: OutputId) -> bool {
+        is_shown(self.config.header.mode, self.header.is_visible(id))
     }
 
     /// Every output's strip layout; empty while the strip is hidden.
@@ -235,7 +259,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// The strip layout of model output `id` whose global rect is `rect`; `None` while the strip
     /// is hidden or when the model has no such output.
     pub(crate) fn header_layout_for(&self, id: OutputId, rect: Rect) -> Option<HeaderLayout> {
-        if !self.header_shown() {
+        if !self.header_shown(id) {
             return None;
         }
         let size = self.config.header.size;
@@ -295,21 +319,22 @@ impl<B: Backend + 'static> CrucibleState<B> {
             })
     }
 
-    /// Sets the `toggle`-mode visibility. On a change the applied projection is forgotten and the
-    /// layout re-applied so every window is re-configured to the reflowed rects.
-    pub(crate) fn set_header_visible(&mut self, visible: bool) {
-        if self.header.visible == visible {
+    /// Sets output `id`'s `toggle`-mode visibility. On a change the applied projection is
+    /// forgotten and the layout re-applied so every window is re-configured to the reflowed rects.
+    pub(crate) fn set_header_visible(&mut self, id: OutputId, visible: bool) {
+        if !self.header.set_visible(id, visible) {
             return;
         }
-        self.header.visible = visible;
         self.invalidate_projection();
         self.apply_layout();
     }
 
-    /// `toggle-header`: flips the strip in `toggle` mode; a no-op in `always` and `off`.
+    /// `toggle-header`: flips the focused output's strip in `toggle` mode; a no-op in `always`
+    /// and `off`.
     pub(crate) fn toggle_header(&mut self) {
-        let next = toggled_visible(self.config.header.mode, self.header.visible);
-        self.set_header_visible(next);
+        let id = self.layout.world.focused_output();
+        let next = toggled_visible(self.config.header.mode, self.header.is_visible(id));
+        self.set_header_visible(id, next);
     }
 
     /// Handles a consumed press on the strip: focus the output and switch to the clicked
@@ -542,6 +567,30 @@ mod tests {
         assert!(is_shown(HeaderMode::Always, false));
         assert!(is_shown(HeaderMode::Toggle, true));
         assert!(!is_shown(HeaderMode::Toggle, false));
+    }
+
+    #[test]
+    fn header_state_is_per_output() {
+        let (a, b) = (OutputId::from_raw(1), OutputId::from_raw(2));
+        let mut st = HeaderState::default();
+        assert!(!st.is_visible(a));
+        assert!(st.set_visible(a, true));
+        assert!(!st.set_visible(a, true));
+        assert!(st.is_visible(a) && !st.is_visible(b));
+        assert!(!st.set_visible(b, false));
+        assert!(st.set_visible(a, false));
+        assert!(!st.is_visible(a));
+    }
+
+    #[test]
+    fn header_state_clear_hides_every_output() {
+        let (a, b) = (OutputId::from_raw(1), OutputId::from_raw(2));
+        let mut st = HeaderState::default();
+        st.set_visible(a, true);
+        st.set_visible(b, true);
+        assert!(st.clear_visible());
+        assert!(!st.clear_visible());
+        assert!(!st.is_visible(b));
     }
 
     #[test]
