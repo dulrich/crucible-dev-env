@@ -235,4 +235,31 @@ mod tests {
         let mut suppressed = SuppressedKeys::default();
         assert!(!suppressed.consume_release(1));
     }
+
+    /// Plan 23 audit E3: chords match the keysym the active layout produces, so the physical
+    /// key that is `-` (`Super+minus`, split-down) under `us` yields `apostrophe` under `es`.
+    #[test]
+    fn punctuation_keysyms_follow_the_active_layout() {
+        use xkbcommon::xkb;
+        let sym = |layout: &str, evdev_key: u32| {
+            let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+            let keymap = xkb::Keymap::new_from_names(
+                &ctx,
+                "",
+                "",
+                layout,
+                "",
+                None,
+                xkb::KEYMAP_COMPILE_NO_FLAGS,
+            )
+            .expect("keymap compiles");
+            let state = xkb::State::new(&keymap);
+            state.key_get_one_sym(xkb::Keycode::new(evdev_key + 8))
+        };
+        // evdev KEY_MINUS = 12.
+        assert_eq!(sym("us", 12), xkb::Keysym::minus);
+        assert_eq!(sym("es", 12), xkb::Keysym::apostrophe);
+        // Letters are unaffected: evdev KEY_E = 18.
+        assert_eq!(sym("es", 18), xkb::Keysym::e);
+    }
 }

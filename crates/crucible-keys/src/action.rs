@@ -10,7 +10,7 @@
 //! ## The verb table
 //!
 //! [`Action`]'s `Display` and `FromStr` impls are the **one** verb table: `Display` prints the
-//! action grammar and `FromStr` parses it back. Verbs: `quit`, `close-pane`, `close-window`, `run-terminal`,
+//! action grammar and `FromStr` parses it back. Verbs: `quit`, `close-pane`, `close-window`, `set-layout <name>`, `run-terminal`,
 //! `run <command…>`, `run-in-terminal <command…>`, `focus|move|split|resize <left|right|up|down>`,
 //! `cycle-stack <±n>`, `cycle-workspace <±n>`, `new-workspace`, `move-window-to-workspace <±n>`,
 //! `mark-window`, `swap-marked-window`,
@@ -49,6 +49,10 @@ pub enum Action {
     /// Politely ask the focused pane's current window to close (xdg `close` / X11 `WM_DELETE_WINDOW`; an X11
     /// window without it is destroyed). `Super+Shift+C`.
     CloseWindow,
+    /// Switch the keyboard to the layout named `<name>` in config `keyboard { layouts … }`
+    /// (selected by its position in that list). A name not in the list is a logged no-op.
+    /// Defaults: `Super+E` -> `us`, `Super+S` -> `es`.
+    SetLayout(String),
     /// Spawn the configured terminal into the focused pane (the window joins the pane's stack). The
     /// compositor picks the terminal (config `terminal`, then `$TERMINAL`, then a default list).
     /// Because `World::open_window` is only called from the surface-map path, a keybind never
@@ -162,6 +166,7 @@ impl std::fmt::Display for Action {
             Self::Quit => f.write_str("quit"),
             Self::ClosePane => f.write_str("close-pane"),
             Self::CloseWindow => f.write_str("close-window"),
+            Self::SetLayout(name) => write!(f, "set-layout {name}"),
             Self::RunTerminal => f.write_str("run-terminal"),
             Self::Run(cmd) => write!(f, "run {cmd}"),
             Self::RunInTerminal(cmd) => write!(f, "run-in-terminal {cmd}"),
@@ -268,6 +273,10 @@ impl FromStr for Action {
             "quit" => nullary(Self::Quit),
             "close-pane" => nullary(Self::ClosePane),
             "close-window" => nullary(Self::CloseWindow),
+            "set-layout" => match words.get(1) {
+                Some(name) => unary(Self::SetLayout((*name).to_string())),
+                None => Err(bad("expected a layout name".into())),
+            },
             "run-terminal" => nullary(Self::RunTerminal),
             "run" => command("run").map(Self::Run),
             "run-in-terminal" => command("run-in-terminal").map(Self::RunInTerminal),
@@ -329,6 +338,7 @@ mod tests {
             Action::Quit,
             Action::ClosePane,
             Action::CloseWindow,
+            Action::SetLayout("es".into()),
             Action::RunTerminal,
             Action::Run("echo 50%:a b".into()),
             Action::RunInTerminal("htop -d 5".into()),

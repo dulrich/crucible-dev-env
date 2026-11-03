@@ -15,6 +15,8 @@
 //! | `Super+Shift+Q`       | `Quit`                         | stop compositor                   |
 //! | `Super+W`             | `ClosePane`                    | `World::close_pane()`             |
 //! | `Super+Shift+C`       | `CloseWindow`                  | close the focused window (compositor)|
+//! | `Super+E`             | `SetLayout("us")`              | switch keyboard layout (compositor)|
+//! | `Super+S`             | `SetLayout("es")`              | switch keyboard layout (compositor)|
 //! | `Super+H/J/K/L`       | `Focus(Left/Down/Up/Right)`    | `World::focus(dir)`               |
 //! | `Super+Shift+H/J/K/L` | `Move(Left/Down/Up/Right)`     | `World::move_(dir)`               |
 //! | `Super+Backslash`     | `Split(Right)`                 | `World::split(Right)`             |
@@ -429,6 +431,9 @@ mod tests {
             (true, false, Keysym::Return) => Some(Action::RunTerminal),
             // Shift+C: close the focused window (plan 23 WP-1).
             (true, false, Keysym::c | Keysym::C) => Some(Action::CloseWindow),
+            // E / S: the keyboard layout switches (plan 23 WP-2).
+            (false, false, Keysym::e | Keysym::E) => Some(Action::SetLayout("us".into())),
+            (false, false, Keysym::s | Keysym::S) => Some(Action::SetLayout("es".into())),
             // M / Shift+M: the mark toggles.
             (false, false, Keysym::m | Keysym::M) => Some(Action::MarkWindow),
             (true, false, Keysym::m | Keysym::M) => Some(Action::SwapMarkedWindow),

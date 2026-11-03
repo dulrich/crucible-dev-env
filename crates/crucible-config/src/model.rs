@@ -289,6 +289,36 @@ impl OutputConfig {
     }
 }
 
+/// Keyboard settings (`keyboard { layouts "us" "es" }`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyboardConfig {
+    /// The xkb layout names, in group order; `set-layout <name>` selects by position here.
+    /// Never empty. Default `["us"]`.
+    pub layouts: Vec<String>,
+}
+
+impl Default for KeyboardConfig {
+    fn default() -> Self {
+        Self {
+            layouts: vec!["us".to_string()],
+        }
+    }
+}
+
+impl KeyboardConfig {
+    /// The comma-joined xkb layout string (`"us,es"`).
+    #[must_use]
+    pub fn xkb_layout(&self) -> String {
+        self.layouts.join(",")
+    }
+
+    /// The group index of the layout named `name`, if configured.
+    #[must_use]
+    pub fn layout_index(&self, name: &str) -> Option<usize> {
+        self.layouts.iter().position(|l| l == name)
+    }
+}
+
 /// The parsed CDE configuration. `Default` is CDE's behaviour with no config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -306,6 +336,8 @@ pub struct Config {
     pub overlay: OverlayConfig,
     /// Workspace header strip mode, font and size.
     pub header: HeaderConfig,
+    /// Keyboard layouts.
+    pub keyboard: KeyboardConfig,
     /// The screen locker the `lock` action spawns (`lock-command`), split on whitespace into
     /// program + arguments (no shell quoting). Default `"swaylock"`.
     pub lock_command: String,
@@ -348,6 +380,7 @@ impl Default for Config {
             picker: PickerConfig::default(),
             overlay: OverlayConfig::default(),
             header: HeaderConfig::default(),
+            keyboard: KeyboardConfig::default(),
             launcher: LauncherConfig::default(),
             binds: Vec::new(),
             outputs: BTreeMap::new(),

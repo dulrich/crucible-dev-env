@@ -161,6 +161,20 @@ A clickable workspace strip at the top of every output, listing that output's wo
 
 Clicking a workspace name focuses that output and switches it to that workspace (the press and its release are consumed by the strip, never sent to the window beneath). A click never hides the strip; in `toggle` mode only `toggle-header` does. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
 
+### `keyboard`
+
+```kdl
+keyboard {
+    layouts "us" "es"
+}
+```
+
+- `layouts` — the xkb layout names, in group order. Default `layouts "us"`; a `keyboard` block without `layouts` keeps the default. Zero names, an empty name, or a name containing `,` is a located config error (list layouts as separate arguments; no variants or options).
+- The seat's keymap is built from the list at startup. A list xkb cannot compile (for example an unknown layout name) logs a warning and falls back to the default `us` keymap; startup never fails on it.
+- Hot reload recompiles the keymap when `layouts` changed (a failed compile keeps the previous keymap). The active layout resets to the first listed layout after such a reload.
+- The `set-layout <name>` action switches to the layout by its position in `layouts` (not by xkb's long layout name). A name not in the list is a logged no-op. Defaults: `Super+E` is `set-layout us` and `Super+S` is `set-layout es`; with the default `layouts "us"`, `set-layout es` does nothing.
+- Chords match the keysym the active layout produces, not the physical key. Under `es`, punctuation chords (`Super+backslash`, `Super+minus`, `Super+bracketleft/right`) and the US shifted-digit `pin-slot` aliases (`Super+Shift+!` and friends) therefore follow the Spanish keys; letters and digits are unaffected. Rebind via `binds` if you want different punctuation chords under another layout.
+
 ### `output`
 
 ```kdl
@@ -222,6 +236,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `open-picker` | Open the workspace picker (`crucible pick`) |
 | `open-launcher` | Open the program launcher (`crucible launch`) |
 | `open-settings` | Open the settings overlay (`crucible keys`): the effective keybindings; Enter runs the selected binding |
+| `set-layout <name>` | Switch the keyboard to the layout `<name>` from `keyboard { layouts … }` (by position in that list; unknown name is a logged no-op). Defaults `Super+E` = `set-layout us`, `Super+S` = `set-layout es` |
 | `toggle-header` | Show/hide the workspace header strip (`header { mode "toggle" }` only; a no-op in `always` and `off`) |
 | `rename-workspace` | Rename the active workspace (the picker in rename mode) |
 | `capture-workspace-root` | (default chord `Super+Shift+D`) Make the focused terminal's current directory the active **workspace root**, the folder new terminals and apps in this workspace start in (running windows are untouched). Fails and changes nothing if the focused window is not a terminal. Not the picker `root` config folders |

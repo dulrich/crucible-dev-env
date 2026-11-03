@@ -228,6 +228,8 @@ impl Default for Bindings {
         bind(sup, &[Keysym::bracketright], Action::CycleWorkspace(1));
         bind(sup, &[Keysym::bracketleft], Action::CycleWorkspace(-1));
         bind(sup, &[Keysym::n, Keysym::N], Action::NewWorkspace);
+        bind(sup, &[Keysym::e, Keysym::E], Action::SetLayout("us".into()));
+        bind(sup, &[Keysym::s, Keysym::S], Action::SetLayout("es".into()));
         bind(sup, &[Keysym::m, Keysym::M], Action::MarkWindow);
         bind(sup, &[Keysym::p, Keysym::P], Action::OpenPicker);
         bind(sup, &[Keysym::Escape], Action::Lock);
@@ -663,6 +665,7 @@ mod tests {
             ("quit", Action::Quit),
             ("close-pane", Action::ClosePane),
             ("close-window", Action::CloseWindow),
+            ("set-layout es", Action::SetLayout("es".into())),
             ("run-terminal", Action::RunTerminal),
             ("run firefox", Action::Run("firefox".into())),
             (

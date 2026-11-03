@@ -160,6 +160,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Action::OpenSettings => self.open_settings(),
             Action::Lock => self.spawn_locker(),
             Action::CloseWindow => self.close_focused_window(),
+            Action::SetLayout(name) => self.set_layout(&name),
             // Auto-names skip live AND saved names, so a fresh "2" never overwrites a saved "2".
             Action::NewWorkspace => {
                 let saved = crucible_persist::store::list_saved(&self.persist.store_dir)
@@ -203,6 +204,31 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Some(element) => crate::persist::close_element(element),
             None => debug!(?id, "close-window: window element not found; ignoring"),
         }
+    }
+}
+
+impl<B: Backend + 'static> CrucibleState<B> {
+    /// Switches the xkb group to the position of `name` in the configured `keyboard.layouts`
+    /// (indexing the configured list, never matching xkb's long layout names). A name that is
+    /// not configured is an info-logged no-op.
+    fn set_layout(&mut self, name: &str) {
+        let Some(idx) = self.config.keyboard.layout_index(name) else {
+            info!(
+                name,
+                "set-layout: layout is not in `keyboard.layouts`; ignoring"
+            );
+            return;
+        };
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let Ok(group) = u32::try_from(idx) else {
+            return;
+        };
+        keyboard.with_xkb_state(self, |mut ctx| {
+            ctx.set_layout(smithay::input::keyboard::Layout(group));
+        });
+        info!(name, group, "set-layout");
     }
 }
 
@@ -303,6 +329,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Option<Result<(), L
         | Action::CaptureWorkspaceRoot
         | Action::SetWorkspaceRoot
         | Action::CloseWindow
+        | Action::SetLayout(_)
         | Action::Lock
         | Action::VtSwitch(_) => return None,
     }

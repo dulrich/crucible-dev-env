@@ -193,7 +193,13 @@ pub fn run_winit() {
         dmabuf_state,
     };
 
-    let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
+    let mut state = CrucibleState::init(
+        display,
+        event_loop.handle(),
+        data,
+        true,
+        &startup_config.keyboard,
+    );
     state.apply_config(startup_config);
     // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
     state.start_persistence();

@@ -271,6 +271,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         handle: LoopHandle<'static, CrucibleState<B>>,
         backend_data: B,
         listen_on_socket: bool,
+        keyboard_config: &crucible_config::KeyboardConfig,
     ) -> CrucibleState<B> {
         let dh = display.handle();
         let clock = Clock::new();
@@ -342,8 +343,22 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let seed = crate::persist::startup_seed_name(&saved);
         let mut seat = seat_state.new_wl_seat(&dh, seat_name.clone());
         let pointer = seat.add_pointer();
+        // The configured layouts; a layout string xkb cannot compile must never fail startup, so
+        // fall back to the default (`us`) keymap.
+        let layout = keyboard_config.xkb_layout();
         let keyboard = seat
-            .add_keyboard(XkbConfig::default(), 200, 25)
+            .add_keyboard(
+                XkbConfig {
+                    layout: &layout,
+                    ..XkbConfig::default()
+                },
+                200,
+                25,
+            )
+            .or_else(|err| {
+                warn!(%err, layout, "keyboard layouts did not compile; using the default keymap");
+                seat.add_keyboard(XkbConfig::default(), 200, 25)
+            })
             .expect("Failed to initialize the keyboard");
         // Num Lock starts on (user, 2026-10-29). No client is focused yet, so there is nothing to
         // advertise; keyboards added later pick up the LED from `led_state()` (udev backend).
@@ -382,7 +397,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             xwm: None,
             xdisplay: None,
             autostart_gate: crate::autostart::AutostartGate::default(),
-            config: Config::default(),
+            // Only `keyboard` is pre-seeded (the seat was built from it above); the first
+            // `apply_config` sees no keyboard change and leaves the keymap alone.
+            config: Config {
+                keyboard: keyboard_config.clone(),
+                ..Config::default()
+            },
             bindings: Bindings::default(),
             hover_target: None,
             hover_deferred: false,

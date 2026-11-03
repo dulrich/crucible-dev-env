@@ -259,8 +259,15 @@ pub fn run_udev() {
         keyboards: Vec::new(),
         dmabuf_state: None,
     };
-    let mut state = CrucibleState::init(display, event_loop.handle(), data, true);
-    state.apply_config(crate::config::load_startup_config());
+    let startup_config = crate::config::load_startup_config();
+    let mut state = CrucibleState::init(
+        display,
+        event_loop.handle(),
+        data,
+        true,
+        &startup_config.keyboard,
+    );
+    state.apply_config(startup_config);
     // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
     state.start_persistence();
 

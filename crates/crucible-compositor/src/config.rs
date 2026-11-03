@@ -92,6 +92,9 @@ pub struct ConfigDelta {
     pub relayout: bool,
     /// The header changed and its new mode is not `toggle`: the strip is hidden again.
     pub hide_header: bool,
+    /// The `keyboard` layouts changed: the keymap is recompiled (the active group resets to the
+    /// first layout).
+    pub keyboard: bool,
     /// The `(old, new)` maximum configured output scale, for the XWayland scale note.
     pub max_scale: (f64, f64),
 }
@@ -104,6 +107,7 @@ impl ConfigDelta {
         Self {
             relayout: old.tiling != new.tiling || header_changed,
             hide_header: header_changed && new.header.mode != crucible_config::HeaderMode::Toggle,
+            keyboard: old.keyboard != new.keyboard,
             max_scale: (old.max_output_scale(), new.max_output_scale()),
         }
     }
@@ -147,6 +151,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 crate::text::TextRenderer::load(config.header.font_path(), &config.header.font);
             self.header.font_loaded = Some(config.header.font.clone());
         }
+        if delta.keyboard {
+            self.reload_keyboard_layouts(&config);
+        }
         crate::xwayland::note_xwayland_scale_change(delta.max_scale.0, delta.max_scale.1);
         self.config = config;
         self.apply_output_scales();
@@ -154,6 +161,26 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.warm_config_changed();
         }
         self.apply_layout();
+    }
+
+    /// Recompiles the keymap from `config.keyboard.layouts`. A reload resets the active layout
+    /// group to the first configured layout. A layout string xkb cannot compile is logged and
+    /// the previous keymap is kept.
+    fn reload_keyboard_layouts(&mut self, config: &Config) {
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let layout = config.keyboard.xkb_layout();
+        let xkb = smithay::input::keyboard::XkbConfig {
+            layout: &layout,
+            ..Default::default()
+        };
+        match keyboard.set_xkb_config(self, xkb) {
+            Ok(()) => info!(layout, "keyboard layouts applied"),
+            Err(err) => {
+                error!(%err, layout, "keyboard layouts did not compile; keeping the previous keymap")
+            }
+        }
     }
 
     /// Re-applies the configured scale to every mapped output; when any output's scale changed,
