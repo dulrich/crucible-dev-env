@@ -23,7 +23,7 @@ if [ "$(tty)" = /dev/tty1 ] && [ -z "$WAYLAND_DISPLAY" ] && [ ! -e "$HOME/.confi
 fi
 ```
 
-`cde.sh` picks the compositor mode from `CDE_MODE`, which defaults to `--tty-udev`, so no mode flag is passed here. With `CDE_BIN` set, it skips `cargo build` and runs that binary; it exits 1 if `CDE_BIN` is not an executable file. It still writes the ghostty wrapper, logs to `/tmp/cde/`, and sets the first wallpaper.
+`cde.sh` picks the compositor mode from `CDE_MODE`, which defaults to `--tty-udev`, so no mode flag is passed here. With `CDE_BIN` set, it skips `cargo build` and runs that binary; it exits 1 if `CDE_BIN` is not an executable file. It still writes the ghostty wrapper (the fallback `$TERMINAL`, used only when `config.kdl` sets no `terminal`; foot is the configured default), logs to `/tmp/cde/`, and sets the first wallpaper.
 
 After a crash or a failed start, read `/tmp/cde/latest.log`.
 

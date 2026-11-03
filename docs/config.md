@@ -20,7 +20,7 @@ The program spawned by `Super+Shift+Return` (the `run-terminal` action; `Super+R
 tiling {
     terminal gap=6 ring=3
     app gap=0 ring=0 fill="#737373"
-    terminal-args "--window-padding-x={gap}" "--window-padding-y={gap}" "--window-padding-color=extend-always" "--window-padding-balance=true"
+    terminal-args "-o" "pad={gap}x{gap} center"
 }
 ```
 
@@ -31,14 +31,14 @@ Tiles are edge to edge: they abut and cover the output, so no background shows b
 - `terminal` also takes `ring-inset=<px>` (default `0`): the focus ring is drawn that many pixels inside the tile edge instead of on it. `frame="#rrggbb"` (default unset) draws a frame of the same geometry (the ring position and thickness) in that colour around every **unfocused** terminal tile; the focus ring and mark ring draw over it. Both are terminal only; `app` rejects them as unknown properties.
 - A `ring` larger than its `gap` is clamped to `gap`, and then `ring-inset` is clamped to `gap - ring` (each logged as a warning).
 - `ring`, `ring-inset` and `frame` apply on hot reload. Terminal padding (`gap` through `terminal-args`) is a spawn argument, so it applies only to terminals spawned after the change.
-- `terminal-args` — zero or more strings inserted before the exec flag on terminal spawns only (`Super+Shift+Return`, `run-in-terminal`, restored terminals, and launcher TERM rows via `run-term` -- applied only when the TERM program is the configured terminal, compared by basename; not overlays, which use `overlay.terminal-args`, and not apps). `{gap}` in an argument is replaced by the terminal `gap`. As a ghostty example, the arguments above make ghostty pad `gap` pixels on each side in its own background so the compositor ring never covers a cell. Default: none, in which case the terminal ring is drawn over the terminal's outermost pixels. The ghostty config's own `window-padding` is overridden by these arguments.
+- `terminal-args` — zero or more strings inserted before the exec flag on terminal spawns only (`Super+Shift+Return`, `run-in-terminal`, restored terminals, and launcher TERM rows via `run-term` -- applied only when the TERM program is the configured terminal, compared by basename; not overlays, which use `overlay.terminal-args`, and not apps). `{gap}` in an argument is replaced by the terminal `gap`. For foot (the CDE terminal), the arguments above make foot pad `gap` pixels on each side, centred, in its own background so the compositor ring never covers a cell. The ghostty equivalent (rollback) is `"--window-padding-x={gap}" "--window-padding-y={gap}" "--window-padding-color=extend-always" "--window-padding-balance=true"`, which overrides ghostty's own `window-padding`. Default: none, in which case the terminal ring is drawn over the terminal's outermost pixels.
 
 A zellij-like look, a thin frame around each pane with the padding inside it (ring and frame sit 4px in, the text 9px in):
 
 ```kdl
 tiling {
     terminal gap=9 ring=1 ring-inset=4 frame="#3a3a3a"
-    terminal-args "--window-padding-x={gap}" "--window-padding-y={gap}" "--window-padding-color=extend-always" "--window-padding-balance=true"
+    terminal-args "-o" "pad={gap}x{gap} center"
 }
 ```
 
@@ -173,7 +173,7 @@ Per-output settings, keyed by the connector name (as in `DP-1`, `HDMI-A-1`). The
 
 - `scale` — a number (a float such as `1.4167` or an integer such as `2`) from 0.5 to 4.0 inclusive; anything outside the range is a config error, never clamped. The value is quantized to the nearest 1/120 (the unit of Wayland fractional scale), so `1.4167` becomes 170/120. An `output` block without `scale` means 1.
 
-An output with no `output` block has scale 1. Every Wayland app grows with the scale, ghostty included, so retune its `font-size` when you set one. X11 apps follow the largest scale among all configured `output` blocks (whether or not that connector is currently connected) unless `CDE_XWAYLAND_SCALE` is set, which overrides it; with no `output` blocks it is 1. XWayland's scale is fixed when XWayland starts, so a change to the largest scale reaches X11 apps after a CDE restart.
+An output with no `output` block has scale 1. Every Wayland app grows with the scale, the terminal included, so retune its font size when you set one. X11 apps follow the largest scale among all configured `output` blocks (whether or not that connector is currently connected) unless `CDE_XWAYLAND_SCALE` is set, which overrides it; with no `output` blocks it is 1. XWayland's scale is fixed when XWayland starts, so a change to the largest scale reaches X11 apps after a CDE restart.
 
 ### `binds`
 
@@ -245,9 +245,10 @@ Not a config key. When XWayland starts, CDE loads `$HOME/.Xresources` into it wi
 ## Complete example
 
 ```kdl
-terminal "/tmp/cde/ghostty-cde" exec-flag="-e"
+terminal "/home/you/.local/opt/foot/bin/foot" exec-flag="-e"
 tiling {
     terminal gap=6 ring=3
+    terminal-args "-o" "pad={gap}x{gap} center"
     app gap=0 ring=0
 }
 focus-follows-mouse #true
