@@ -14,6 +14,7 @@
 //! | `Super+B`             | `ToggleHeader`                 | show/hide the workspace header    |
 //! | `Super+Shift+Q`       | `Quit`                         | stop compositor                   |
 //! | `Super+W`             | `ClosePane`                    | `World::close_pane()`             |
+//! | `Super+Shift+C`       | `CloseWindow`                  | close the focused window (compositor)|
 //! | `Super+H/J/K/L`       | `Focus(Left/Down/Up/Right)`    | `World::focus(dir)`               |
 //! | `Super+Shift+H/J/K/L` | `Move(Left/Down/Up/Right)`     | `World::move_(dir)`               |
 //! | `Super+Backslash`     | `Split(Right)`                 | `World::split(Right)`             |
@@ -426,6 +427,8 @@ mod tests {
             // Return / Shift+Return: the launcher, and the terminal (was `Run` / `StackWindow`).
             (false, false, Keysym::Return) => Some(Action::OpenLauncher),
             (true, false, Keysym::Return) => Some(Action::RunTerminal),
+            // Shift+C: close the focused window (plan 23 WP-1).
+            (true, false, Keysym::c | Keysym::C) => Some(Action::CloseWindow),
             // M / Shift+M: the mark toggles.
             (false, false, Keysym::m | Keysym::M) => Some(Action::MarkWindow),
             (true, false, Keysym::m | Keysym::M) => Some(Action::SwapMarkedWindow),

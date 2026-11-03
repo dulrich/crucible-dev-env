@@ -200,6 +200,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 |---|---|
 | `quit` | Stop the compositor |
 | `close-pane` | Close the focused pane (only if empty and not the last) |
+| `close-window` | Politely ask the focused window to close (xdg `close` for Wayland windows; `WM_DELETE_WINDOW` for X11 windows that support it — an X11 window without it is destroyed, the standard X WM close). No-op on an empty pane. Default `Super+Shift+C` |
 | `run-terminal` | Spawn the terminal |
 | `run <command…>` | Run a command line into the focused pane, spawned via `/bin/sh -c 'exec <command…>'` (the rest of the action text, verbatim; needs a command; the first word must resolve against `PATH`, else nothing is spawned and the keybind logs a warning). `stack-window` is retired and is rejected with an error |
 | `run-in-terminal <command…>` | Run a command line in a new terminal (`crucible resume --now --cwd <dir> -- <command…>`, then an interactive shell stays open); same verbatim rule and `PATH` pre-flight as `run`. No default chord |

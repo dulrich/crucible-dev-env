@@ -278,6 +278,7 @@ impl Default for Bindings {
             Action::MoveWindowToWorkspace(-1),
         );
         bind(sup_shift, &[Keysym::w, Keysym::W], Action::CloseWorkspace);
+        bind(sup_shift, &[Keysym::c, Keysym::C], Action::CloseWindow);
 
         // ---- workspace slots: Super+<d> switches, Super+Shift+<d> pins ----
         for (d, shifted) in SHIFTED_DIGITS.iter().enumerate() {
@@ -661,6 +662,7 @@ mod tests {
         let cases: &[(&str, Action)] = &[
             ("quit", Action::Quit),
             ("close-pane", Action::ClosePane),
+            ("close-window", Action::CloseWindow),
             ("run-terminal", Action::RunTerminal),
             ("run firefox", Action::Run("firefox".into())),
             (

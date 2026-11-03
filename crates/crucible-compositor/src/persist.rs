@@ -66,7 +66,7 @@ use workspace::restore_target;
 pub const TICK: Duration = Duration::from_secs(1);
 
 /// Asks a window to close (xdg `close` or the X11 equivalent).
-fn close_element(element: &WindowElement) {
+pub(crate) fn close_element(element: &WindowElement) {
     if let Some(toplevel) = element.toplevel() {
         toplevel.send_close();
     }

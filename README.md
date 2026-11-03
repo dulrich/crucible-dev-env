@@ -111,6 +111,7 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+M` | Mark the focused window; press again in another pane (any workspace or monitor) to move it there; press again in its own pane to cancel |
 | `Super+Shift+M` | Like `Super+M`, but swaps: the marked window takes the focused pane's active window's place and that window takes the marked one's; with no mark it marks; into an empty pane it moves |
 | `Super+Shift+W` | Close the active workspace — saved first, its windows ended; refused on the last one |
+| `Super+Shift+C` | Close the focused window (polite close request; an X11 window without `WM_DELETE_WINDOW` is destroyed) |
 | `Super+1` ... `Super+0` | Switch to the workspace pinned to that slot; a closed or saved one reopens on the monitor it was last viewed on |
 | `Super+Shift+1` ... `Super+Shift+0` | Pin the active workspace to that slot |
 | `Super+Ctrl+]` / `Super+Ctrl+[` | Move the active workspace to the next / previous monitor |

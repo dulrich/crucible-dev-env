@@ -320,6 +320,7 @@ mod tests {
             Action::Slot(7),
             Action::CycleWorkspace(1),
             Action::NewWorkspace,
+            Action::CloseWindow,
             Action::CloseWorkspace,
             Action::Focus(Direction::Left),
             Action::RunTerminal,

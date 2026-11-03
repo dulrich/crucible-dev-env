@@ -159,6 +159,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Action::ToggleHeader => self.toggle_header(),
             Action::OpenSettings => self.open_settings(),
             Action::Lock => self.spawn_locker(),
+            Action::CloseWindow => self.close_focused_window(),
             // Auto-names skip live AND saved names, so a fresh "2" never overwrites a saved "2".
             Action::NewWorkspace => {
                 let saved = crucible_persist::store::list_saved(&self.persist.store_dir)
@@ -187,6 +188,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
             | Action::ClosePane => {}
         }
         Ok(())
+    }
+}
+
+impl<B: Backend + 'static> CrucibleState<B> {
+    /// Asks the focused pane's current window to close; a no-op (debug log) when the pane is empty
+    /// or the window has no element.
+    fn close_focused_window(&mut self) {
+        let Some(id) = self.layout.world.focused_window() else {
+            debug!("close-window: focused pane is empty; ignoring");
+            return;
+        };
+        match self.layout.element(id) {
+            Some(element) => crate::persist::close_element(element),
+            None => debug!(?id, "close-window: window element not found; ignoring"),
+        }
     }
 }
 
@@ -286,6 +302,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Option<Result<(), L
         | Action::RenameWorkspace
         | Action::CaptureWorkspaceRoot
         | Action::SetWorkspaceRoot
+        | Action::CloseWindow
         | Action::Lock
         | Action::VtSwitch(_) => return None,
     }
@@ -419,6 +436,7 @@ mod tests {
             Action::RunTerminal,
             Action::OpenPicker,
             Action::NewWorkspace,
+            Action::CloseWindow,
             Action::Lock,
             Action::VtSwitch(1),
         ] {
