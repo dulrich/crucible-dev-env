@@ -6,7 +6,7 @@ use crate::cli::Parsed;
 use crate::client::{Client, socket_from_env};
 
 /// Usage text for `crucible msg --help`.
-pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | save | open <name> | open-folder <path> | new <name> | rename <name> | root <path>|- | exec <action> | run <command...> | run-in-terminal <command...> | run-tui <command...> | run-term <program> | relaunch\n\n`root <path>` sets the active workspace's root (the folder its new terminals and apps start in; the path must be an absolute existing directory) and `root -` clears it.\n`exec` runs a keybinding action (the `binds` action grammar, for example `crucible msg exec focus left`); a failed action answers `err <reason>`.\n`run` and `run-in-terminal` are shorthands for `exec run <command>` and `exec run-in-terminal <command>`: they take the rest of the arguments as one command line (joined with single spaces) and encode it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. `run-tui` encodes its command the same way. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`). While the session is locked, every request but `candidates`, `bindings` and `save` answers `err session locked`.\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
+pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | save | open <name> | open-folder <path> | new <name> | rename <name> | root <path>|- | exec <action> | run <command...> | run-in-terminal <command...> | run-tui <command...> | run-term <program> | close-pid <n> | relaunch\n\n`close-pid <n>` politely asks every window of process <n> to close (an X11 window without `WM_DELETE_WINDOW` is destroyed) and answers `ok <count>`, or `err no window for pid <n>`.\n`root <path>` sets the active workspace's root (the folder its new terminals and apps start in; the path must be an absolute existing directory) and `root -` clears it.\n`exec` runs a keybinding action (the `binds` action grammar, for example `crucible msg exec focus left`); a failed action answers `err <reason>`.\n`run` and `run-in-terminal` are shorthands for `exec run <command>` and `exec run-in-terminal <command>`: they take the rest of the arguments as one command line (joined with single spaces) and encode it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. `run-tui` encodes its command the same way. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`). While the session is locked, every request but `candidates`, `bindings` and `save` answers `err session locked`.\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
 
 /// Joins the arguments into one protocol line and validates it.
 ///
@@ -157,6 +157,15 @@ mod tests {
             Ok(Request::run_in_terminal("htop 50%:x"))
         );
         assert!(build_line(&v(&["run-in-terminal"])).is_err());
+    }
+
+    #[test]
+    fn close_pid_builds_and_rejects_non_numbers() {
+        assert_eq!(
+            build_line(&v(&["close-pid", "42"])).unwrap(),
+            "close-pid 42"
+        );
+        assert!(build_line(&v(&["close-pid", "x"])).is_err());
     }
 
     #[test]

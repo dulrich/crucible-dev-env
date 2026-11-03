@@ -246,6 +246,8 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 
 `<dir>` is `left`, `right`, `up` or `down`; `<n>` is a signed integer such as `1`, `+1` or `-1`.
 
+`crucible msg close-pid <n>` politely asks every window of process `<n>` to close (an xdg toplevel gets `close`, an X11 window gets `WM_DELETE_WINDOW`; an X11 window without `WM_DELETE_WINDOW` is destroyed) and answers `ok <count>`, or `err no window for pid <n>`. It covers windows on hidden workspaces and lower in a pane stack, but not overlay windows. It sends no signal. The running compositor must be restarted onto a binary that knows the request, else it answers `err unknown request`.
+
 #### Default bindings
 
 See the table in the README.

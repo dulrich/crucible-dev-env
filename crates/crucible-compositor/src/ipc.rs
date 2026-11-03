@@ -24,6 +24,7 @@
 //! | `save`                     | `ok`                                                      |
 //! | `run <command>`            | `ok` (spawned) / `err <reason>`                           |
 //! | `relaunch`                 | `ok` (placeholder swapped for its app) / `err <reason>`   |
+//! | `close-pid <n>`            | `ok <count>` / `err no window for pid <n>`                |
 //!
 //! `relaunch` is the only request that depends on the caller: the compositor reads the peer PID
 //! (`SO_PEERCRED`) and accepts it only from an app relaunch placeholder (`crucible relaunch`).
@@ -105,6 +106,22 @@ pub enum Request {
     RunTerm(String),
     /// `relaunch` — swap the calling placeholder window (found by peer PID) for its app.
     Relaunch,
+    /// `close-pid <n>` — politely ask every managed window of process `n` to close (xdg `close` /
+    /// X11 `WM_DELETE_WINDOW`; an X11 window without it is destroyed); answers `ok <count>`.
+    ClosePid(u32),
+}
+
+/// Parses the pid argument of `close-pid`: plain decimal digits, a non-zero `u32`.
+fn parse_pid(verb: &str, arg: Option<&str>) -> Result<u32, String> {
+    let arg = arg.ok_or_else(|| format!("{verb} needs an argument"))?;
+    if arg.is_empty() || !arg.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!("{verb} needs a decimal pid, got {arg:?}"));
+    }
+    match arg.parse::<u32>() {
+        Ok(0) => Err(format!("{verb} needs a non-zero pid")),
+        Ok(n) => Ok(n),
+        Err(_) => Err(format!("{verb} pid {arg:?} is out of range")),
+    }
 }
 
 impl Request {
@@ -134,7 +151,8 @@ impl Request {
             | Request::Exec(_)
             | Request::RunTui(_)
             | Request::RunTerm(_)
-            | Request::Relaunch => true,
+            | Request::Relaunch
+            | Request::ClosePid(_) => true,
         }
     }
 
@@ -171,6 +189,7 @@ impl Request {
             "exec" => need(arg).map(Request::Exec),
             "run-tui" => need(arg).map(Request::RunTui),
             "run-term" => need(arg).map(Request::RunTerm),
+            "close-pid" => parse_pid(verb, arg).map(Request::ClosePid),
             other => Err(format!("unknown request {other:?}")),
         }
     }
@@ -193,6 +212,7 @@ impl Request {
             Request::Exec(a) => format!("exec {}", encode_field(a)),
             Request::RunTui(c) => format!("run-tui {}", encode_field(c)),
             Request::RunTerm(c) => format!("run-term {}", encode_field(c)),
+            Request::ClosePid(n) => format!("close-pid {n}"),
         }
     }
 }
@@ -530,9 +550,28 @@ mod tests {
             Request::RunTui("'/usr/bin/vim' a:b 100%".into()),
             Request::RunTerm("/opt/my term/ghostty".into()),
             Request::Exec("split-right".into()),
+            Request::ClosePid(4242),
         ];
         for r in reqs {
             assert_eq!(Request::parse(&r.to_line()), Ok(r.clone()));
+        }
+    }
+
+    #[test]
+    fn close_pid_parse_rejects_bad_input() {
+        assert_eq!(Request::parse("close-pid 42"), Ok(Request::ClosePid(42)));
+        for bad in [
+            "close-pid",
+            "close-pid ",
+            "close-pid x",
+            "close-pid 0",
+            "close-pid +5",
+            "close-pid -5",
+            "close-pid 5 6",
+            "close-pid 5x",
+            "close-pid 4294967296",
+        ] {
+            assert!(Request::parse(bad).is_err(), "{bad}");
         }
     }
 
@@ -558,6 +597,7 @@ mod tests {
             Request::RunTui("htop".into()),
             Request::RunTerm("ghostty".into()),
             Request::Relaunch,
+            Request::ClosePid(7),
         ] {
             assert!(r.acts(), "{r:?}");
         }

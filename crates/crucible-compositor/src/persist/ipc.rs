@@ -40,6 +40,19 @@ fn admit_request(locked: bool, request: &Request) -> Result<(), ActionError> {
     }
 }
 
+/// The ids (sorted) of every window in `metas` whose process is exactly `pid`.
+fn windows_of_pid<'a>(
+    metas: impl Iterator<Item = (WindowId, &'a crate::layout::WindowMeta)>,
+    pid: u32,
+) -> Vec<WindowId> {
+    let mut ids: Vec<WindowId> = metas
+        .filter(|(_, m)| m.pid == Some(pid))
+        .map(|(id, _)| id)
+        .collect();
+    ids.sort();
+    ids
+}
+
 /// Validates a workspace root: it must be an absolute path to an existing directory.
 pub(super) fn check_root(path: &Path) -> Result<(), String> {
     if !path.is_absolute() {
@@ -85,6 +98,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         let result = match request {
             Request::Relaunch => self.ipc_relaunch(peer),
+            Request::ClosePid(pid) => return self.ipc_close_pid(pid),
             Request::Candidates => {
                 return Response::Ok(crate::ipc::format_candidates(&self.candidates()));
             }
@@ -129,6 +143,23 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(()) => Response::Ok(String::new()),
             Err(reason) => Response::Err(reason),
         }
+    }
+
+    /// `close-pid`: politely closes (`close_element`) every layout-bound window of process `pid`,
+    /// including windows on hidden workspaces and lower in a pane stack. Overlay and warm-overlay
+    /// windows are outside the layout bindings (`placement.rs`) and are left alone. Answers
+    /// `ok <count>`, or `err no window for pid <pid>` when none matches.
+    fn ipc_close_pid(&mut self, pid: u32) -> Response {
+        let ids = windows_of_pid(self.layout.metas(), pid);
+        if ids.is_empty() {
+            return Response::Err(format!("no window for pid {pid}"));
+        }
+        for id in &ids {
+            if let Some(element) = self.layout.element(*id) {
+                close_element(element);
+            }
+        }
+        Response::Ok(ids.len().to_string())
     }
 
     /// Swaps the placeholder window run by `peer` for its app: spawn the saved cmdline, register
@@ -454,6 +485,7 @@ mod tests {
             Request::RunTui("htop".into()),
             Request::RunTerm("ghostty".into()),
             Request::Relaunch,
+            Request::ClosePid(7),
         ] {
             assert_eq!(admit_request(true, &r), Err(ActionError::Locked), "{r:?}");
             assert_eq!(admit_request(false, &r), Ok(()), "{r:?}");
@@ -494,6 +526,28 @@ mod tests {
         assert!(terminal_pid(Some(&meta(WindowClass::Terminal, None))).is_err());
         assert!(terminal_pid(Some(&meta(WindowClass::App, Some(7)))).is_err());
         assert!(terminal_pid(None).is_err());
+    }
+
+    #[test]
+    fn windows_of_pid_selects_exact_matches_only() {
+        use crate::layout::{WindowClass, WindowMeta};
+        let meta = |pid| WindowMeta {
+            pid,
+            class: WindowClass::App,
+            origin: None,
+        };
+        let metas = [
+            (WindowId::from_raw(1), meta(Some(10))),
+            (WindowId::from_raw(2), meta(Some(100))),
+            (WindowId::from_raw(3), meta(Some(10))),
+            (WindowId::from_raw(4), meta(None)),
+            (WindowId::from_raw(5), meta(Some(1))),
+        ];
+        let pick = |pid| windows_of_pid(metas.iter().map(|(i, m)| (*i, m)), pid);
+        assert_eq!(pick(10), vec![WindowId::from_raw(1), WindowId::from_raw(3)]);
+        assert_eq!(pick(100), vec![WindowId::from_raw(2)]);
+        assert_eq!(pick(1), vec![WindowId::from_raw(5)]);
+        assert!(pick(11).is_empty());
     }
 
     #[test]
