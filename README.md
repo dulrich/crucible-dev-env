@@ -32,8 +32,7 @@ The word *tab* is intentionally reserved for applications' own internal tabs —
 
 ## Status
 
-Pre-alpha, but **Phases 1 & 2 of [the roadmap](plans/00-mvp-roadmap.md) are implemented**: CDE is a
-working Smithay-based tiling Wayland compositor you can run today.
+Pre-alpha, but **the MVP (Phases 0–3 of [the roadmap](plans/00-mvp-roadmap.md)) is implemented** and CDE is the daily session on the author's machines: a Smithay-based tiling Wayland compositor with saved, restorable workspaces.
 
 **What works now:**
 
@@ -48,16 +47,18 @@ working Smithay-based tiling Wayland compositor you can run today.
 - **Multi-monitor** — every monitor shows its own active workspace; hot-unplugging a monitor migrates
   its windows onto a surviving output without closing them.
 - **XWayland** — X11 apps tile alongside native Wayland clients.
-- **Visuals** — a focus-ring border on the focused window plus the stack pips (theming is Phase 3).
+- **Visuals** — a focus ring on the focused window, the stack pips, and an optional per-output workspace header strip.
+- **Persistence** — workspaces auto-save and restore (layout, terminal directories and commands, app relaunch placeholders) through a fuzzy picker.
+- **Overlays** — the workspace picker, program launcher and settings view, with numbered workspace slots.
+- **Desktop basics** — screen lock, keyboard layout switching, fullscreen (Wayland and X11, games included), closing windows, a session launcher for tty1, and a `crucible msg` control socket.
 
-**Not yet:** the status bar, a built-in GPU terminal, and the remaining DE services.
+**Not yet:** a status bar, idle handling (auto-lock and screen blanking), screenshots and screen sharing (screencopy), and a built-in terminal (foot is the default for now).
 
 ## Running
 
 The TTY launcher is `scripts/cde.sh`: it rebuilds first, exports a fallback `$TERMINAL` (a ghostty wrapper that opens a separate instance — used only when `config.kdl` sets no `terminal`; foot configured there is the default and ghostty the rollback), logs to `/tmp/cde/latest.log`, and can be symlinked as `~/cde.sh`; `scripts/cde.sh --help` lists the env overrides. Set `CDE_BIN` to a prebuilt binary (e.g. a release install) to skip the rebuild and run that instead. To boot straight into CDE from tty1, see [`docs/session.md`](docs/session.md).
 
-Requires a recent stable Rust (1.85+, edition 2024) and a terminal emulator on `$PATH` (defaults to
-`foot`; set `$TERMINAL` to override — e.g. `alacritty`, `kitty`).
+Requires a recent stable Rust (1.85+, edition 2024) and a terminal emulator. CDE uses the `terminal` setting in `config.kdl` if it is set, otherwise `$TERMINAL`, otherwise `foot` from `$PATH`.
 
 CDE's terminal is foot ≥ 1.20.2, built by `scripts/foot/build.sh` (dev host; output `target/foot-build/foot-1.28.0-<arch>.tar.gz`) and installed on each host by `scripts/foot/install.sh <tarball>` to `~/.local/opt/foot` (the stable absolute path CDE's `terminal` setting should name, `~/.local/opt/foot/bin/foot`), with `foot`/`footclient` symlinked into `~/.local/bin`. The distro foot 1.16.2 crashes on CDE (upstream #1910) and must not be used; `install.sh` refuses to finish unless the installed foot is new enough.
 
@@ -148,7 +149,7 @@ The picker talks to the compositor over a Unix socket at `$XDG_RUNTIME_DIR/cde/<
 - `crucible resume [--now] --cwd <dir> [-- <command>]` — the restored-terminal banner: Enter runs the old command (then a shell), Ctrl+C or EOF gives a shell; the command never runs without Enter. `--now` (used by `run-in-terminal`) runs it immediately; a restored terminal still comes back behind the Enter banner. If the command crashes (a fatal signal or a nonzero exit code other than Ctrl+C), a crash banner keeps the pane: Enter runs it again, Ctrl+C gives a shell (or closes a `run-tui` terminal).
 - `crucible relaunch [--app-id <id>] -- <cmdline>` — the restored-app placeholder: Enter sends `relaunch` over `$CDE_SOCKET` and the compositor swaps this window for the app in the same pane slot; Ctrl+C or EOF dismisses it. It never runs the command itself.
 - `crucible mem [--pid <n>]` — real memory per app of the running CDE: one row per direct child process of the compositor (PSS, swap, process count, label such as `ghostty › htop`), largest first, then the compositor itself and a TOTAL, summed over each child's process subtree from `/proc/<pid>/smaps_rollup`. Read-only. Counts only processes CDE spawned itself (D-Bus-activated apps parented to `systemd --user` are not); an unreadable process counts zero and marks its row `*`.
-- `crucible msg <request…>` — send one request line to the compositor and print the reply (exit 0 `ok`, 1 `err`, 2 usage). Arguments are sent as typed, so percent-encode `%`, `:`, TAB, LF and CR yourself: `crucible msg open my%3Aname`. `crucible msg run <command…>` runs a command line into the focused pane and encodes it for you: `crucible msg run firefox --new-window`; `crucible msg run-in-terminal <command…>` runs it in a new terminal instead. Both refuse a command whose first word does not resolve (a builtin, an existing path, or a name on `PATH`) with `err unknown command <word>`; commands with shell syntax in the first word (quotes, `$`, `=`, ...) are not judged.
+- `crucible msg <request…>` — send one request line to the compositor and print the reply (exit 0 `ok`, 1 `err`, 2 usage). Arguments are sent as typed, so percent-encode `%`, `:`, TAB, LF and CR yourself: `crucible msg open my%3Aname`. `crucible msg run <command…>` runs a command line into the focused pane and encodes it for you: `crucible msg run firefox --new-window`; `crucible msg run-in-terminal <command…>` runs it in a new terminal instead. Both refuse a command whose first word does not resolve (a builtin, an existing path, or a name on `PATH`) with `err unknown command <word>`; commands with shell syntax in the first word (quotes, `$`, `=`, ...) are not judged. `crucible msg close-pid <pid>` politely asks every window of that process to close and replies `ok <count>`, or `err no window for pid <n>`.
 
 ## Build & test
 
@@ -157,6 +158,9 @@ cargo build
 cargo test --all    # crucible-layout's model/geometry logic is unit-tested without a compositor
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
+cargo audit
+trivy fs --scanners vuln --include-dev-deps --skip-db-update --exit-code 1 --severity CRITICAL,HIGH .
+bun <code-root>/the fleet tooling repo/scripts/help-gate.mjs .   # every entrypoint answers --help
 ```
 
 The compositor crates link native libraries (libinput, libgbm, libdrm, …); see
