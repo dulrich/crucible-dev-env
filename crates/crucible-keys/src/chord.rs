@@ -12,6 +12,7 @@
 //! | `Super+Return`        | `OpenLauncher`                 | program launcher (overlay)        |
 //! | `Super+comma`         | `OpenSettings`                 | settings overlay (`crucible keys`)|
 //! | `Super+B`             | `ToggleHeader`                 | show/hide the workspace header    |
+//! | `Super+F`             | `ToggleFullscreen`             | `World::toggle_fullscreen()`      |
 //! | `Super+Shift+Q`       | `Quit`                         | stop compositor                   |
 //! | `Super+W`             | `ClosePane`                    | `World::close_pane()`             |
 //! | `Super+Shift+C`       | `CloseWindow`                  | close the focused window (compositor)|
@@ -461,6 +462,8 @@ mod tests {
             (true, true, Keysym::d | Keysym::D) => Some(Action::SetWorkspaceRoot),
             (false, false, Keysym::comma) => Some(Action::OpenSettings),
             (false, false, Keysym::b | Keysym::B) => Some(Action::ToggleHeader),
+            // F: toggle fullscreen (plan 23 WP-4).
+            (false, false, Keysym::f | Keysym::F) => Some(Action::ToggleFullscreen),
             (false, false, Keysym::Escape) => Some(Action::Lock),
             _ => None,
         }

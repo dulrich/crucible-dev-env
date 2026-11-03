@@ -23,6 +23,11 @@ impl World {
             let Some(workspace) = self.workspaces.get(&output.active_workspace()) else {
                 continue;
             };
+            // A fullscreen window's pane alone covers the whole raw output rect.
+            if let Some((pane, _)) = self.fullscreen_pane(workspace.id) {
+                rects.push((pane, *global));
+                continue;
+            }
             let local = Rect::new(0, 0, global.width, global.height);
             rects.extend(
                 geometry_of_workspace(workspace, local, gaps)
@@ -90,6 +95,12 @@ impl World {
         let workspace = self
             .workspace_of_pane(pane)
             .ok_or(LayoutError::UnknownPane(pane))?;
+        if self
+            .fullscreen_pane(workspace)
+            .is_some_and(|(p, _)| p != pane)
+        {
+            self.exit_fullscreen(workspace);
+        }
         self.activate(workspace, Some(pane))
     }
 

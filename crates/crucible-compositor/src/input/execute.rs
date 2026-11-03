@@ -186,6 +186,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             | Action::MoveWindowToWorkspace(_)
             | Action::MarkWindow
             | Action::SwapMarkedWindow
+            | Action::ToggleFullscreen
             | Action::ClosePane => {}
         }
         Ok(())
@@ -309,6 +310,9 @@ fn apply_model_action(world: &mut World, action: &Action) -> Option<Result<(), L
         }
         Action::SwapMarkedWindow => {
             world.swap_marked_window();
+        }
+        Action::ToggleFullscreen => {
+            world.toggle_fullscreen();
         }
         Action::ClosePane => return Some(world.close_pane()),
         Action::Quit
@@ -442,6 +446,15 @@ mod tests {
             world, want,
             "{action:?} did not dispatch the expected World call"
         );
+    }
+
+    #[test]
+    fn toggle_fullscreen_dispatches_to_world_toggle_fullscreen() {
+        let mut world = World::new("1");
+        world.open_window();
+        assert_dispatches(world, Action::ToggleFullscreen, |w| {
+            w.toggle_fullscreen();
+        });
     }
 
     #[test]

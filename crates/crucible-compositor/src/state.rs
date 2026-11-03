@@ -169,6 +169,10 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// changed are reconfigured, and focus is re-pointed only when its identity moved (idempotent
     /// apply — no configure storms). See [`crucible_layout::Projection::diff`].
     pub projection: Projection,
+    /// The fullscreen windows whose shell state [`CrucibleState::apply_layout`] last reconciled
+    /// (ascending). Compared on every apply, before the projection early return, because a
+    /// fullscreen enter or exit can be geometry-identical.
+    pub fullscreen_applied: Vec<crucible_layout::WindowId>,
 
     /// `wl_compositor` / `wl_subcompositor` global state.
     pub compositor_state: CompositorState,
@@ -377,6 +381,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             popups: PopupManager::default(),
             layout: LayoutState::new(seed),
             projection: Projection::default(),
+            fullscreen_applied: Vec::new(),
             compositor_state,
             shm_state,
             output_manager_state,

@@ -81,6 +81,28 @@ pub enum KeyboardSync {
     Focus(WindowId),
 }
 
+/// The windows whose fullscreen-ness differs between the last reconciled set `prev` and `next`
+/// (both ascending): entered or left. **Pure**, so the E1 reconciliation is unit-testable.
+#[must_use]
+pub fn fullscreen_flips(prev: &[WindowId], next: &[WindowId]) -> Vec<WindowId> {
+    let mut out: Vec<WindowId> = prev
+        .iter()
+        .filter(|w| !next.contains(w))
+        .chain(next.iter().filter(|w| !prev.contains(w)))
+        .copied()
+        .collect();
+    out.sort();
+    out
+}
+
+/// Whether an apply must re-raise (and re-focus) a mapped overlay: only when fullscreen is involved
+/// (a fullscreen window is shown or just flipped), so a full-output window never covers the
+/// overlay (Locked > Overlay > Normal). Without fullscreen the apply is unchanged. **Pure**.
+#[must_use]
+pub fn overlay_restacks(fullscreen_involved: bool, overlay_mapped: bool) -> bool {
+    fullscreen_involved && overlay_mapped
+}
+
 /// Decides how to reconcile keyboard focus with the model's focused window.
 ///
 /// `keyboard_has_focus` is whether anything (managed or unmanaged) holds keyboard focus;
@@ -113,10 +135,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
         // Last-viewed outputs follow what is shown, so note them even when the diff is empty.
         self.note_last_viewed_outputs();
         let diff = self.projection.diff(&next);
-        if diff.is_empty() {
+        // Fullscreen shell state is reconciled before the early return: entering or leaving can be
+        // geometry-identical (plan 23 audit E1), so the diff alone would miss it.
+        let fullscreen = self.layout.world.fullscreen_windows();
+        let flipped = fullscreen_flips(&self.fullscreen_applied, &fullscreen);
+        let flips_seen = !flipped.is_empty();
+        self.fullscreen_applied = fullscreen;
+        if diff.is_empty() && flipped.is_empty() {
             return;
         }
 
+        let mut placed = Vec::new();
         for change in &diff.changes {
             match change {
                 LayoutChange::Place { id, rect, resized } => {
@@ -125,10 +154,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     };
                     // The projection holds the tile; the window sits inside it per its class.
                     let logical = self.placed_rect(*id, *rect);
+                    let fs = self.layout.world.is_fullscreen(*id);
                     // Configure first, then position via map_element so the element is mapped (or
                     // re-mapped, for a window returning from hidden) at the right place.
-                    configure_placement(&element, logical, *resized);
+                    configure_placement(&element, logical, *resized, fs);
                     self.space.map_element(element, logical.loc, false);
+                    placed.push(*id);
                 }
                 LayoutChange::Hide { id } => {
                     if let Some(element) = self.layout.element(*id).cloned() {
@@ -138,8 +169,36 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
         }
 
+        // A window whose fullscreen-ness flipped without a geometry change still needs its state
+        // (and size) re-sent; a hidden one only has its state flipped.
+        for id in flipped.into_iter().filter(|id| !placed.contains(id)) {
+            let Some(element) = self.layout.element(id).cloned() else {
+                continue;
+            };
+            let fs = self.layout.world.is_fullscreen(id);
+            match next.rect_of(id) {
+                Some(tile) => {
+                    let logical = self.placed_rect(id, tile);
+                    configure_placement(&element, logical, true, fs);
+                    self.space.map_element(element, logical.loc, false);
+                }
+                None => placement::set_fullscreen_state(&element, fs),
+            }
+        }
+
         if let FocusChange::To(target) = diff.focus {
             self.apply_focus(target);
+        }
+
+        // Locked > Overlay > Normal: a (re)placed fullscreen window must not cover a mapped
+        // overlay or take its keyboard focus. The lock needs nothing here: render and input
+        // resolve it before the `Space`.
+        let fullscreen_involved = !self.fullscreen_applied.is_empty() || flips_seen;
+        if let Some(overlay) = self.mapped_overlay().cloned()
+            && overlay_restacks(fullscreen_involved, true)
+        {
+            self.space.raise_element(&overlay, true);
+            self.set_keyboard_focus(Some(KeyboardFocusTarget::Window(overlay)));
         }
 
         self.projection = next;
@@ -236,6 +295,24 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(())
         });
         debug_assert!(outcome.is_ok(), "infallible model op cannot fail");
+    }
+
+    /// Routes a client fullscreen request (`on`) or unset (`!on`) for the managed window matching
+    /// `pred` into the model, then applies the layout. Returns whether the model state changed; a
+    /// window CDE does not manage is ignored (`false`). The window fullscreens on its own
+    /// workspace's output.
+    pub(crate) fn request_fullscreen(
+        &mut self,
+        pred: impl Fn(&WindowElement) -> bool,
+        on: bool,
+    ) -> bool {
+        let Binding::Managed(id) = self.layout.resolve(pred) else {
+            debug!("fullscreen request from an unmanaged window; ignoring");
+            return false;
+        };
+        let changed = self.layout.world.set_fullscreen(id, on).unwrap_or(false);
+        self.apply_layout();
+        changed
     }
 
     // ---- window lifecycle controller ---------------------------------------------------------
@@ -341,6 +418,31 @@ impl<B: Backend + 'static> CrucibleState<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_stays_above_a_fullscreen_window_and_nothing_changes_without_one() {
+        assert!(overlay_restacks(true, true));
+        assert!(
+            !overlay_restacks(false, true),
+            "no fullscreen: behaviour as before"
+        );
+        assert!(!overlay_restacks(true, false));
+    }
+
+    #[test]
+    fn fullscreen_flips_are_the_entered_and_left_windows() {
+        let (a, b, c) = (
+            WindowId::from_raw(1),
+            WindowId::from_raw(2),
+            WindowId::from_raw(3),
+        );
+        assert!(
+            fullscreen_flips(&[a], &[a]).is_empty(),
+            "unchanged: no churn"
+        );
+        assert_eq!(fullscreen_flips(&[], &[a]), vec![a]);
+        assert_eq!(fullscreen_flips(&[a, b], &[b, c]), vec![a, c]);
+    }
 
     #[test]
     fn keyboard_sync_clears_for_an_empty_pane_even_from_an_unmanaged_holder() {

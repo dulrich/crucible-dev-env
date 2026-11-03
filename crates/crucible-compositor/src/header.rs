@@ -78,6 +78,13 @@ pub fn is_shown(mode: HeaderMode, toggle_visible: bool) -> bool {
     }
 }
 
+/// Whether output's strip is drawn and hit-tested: never on a `fullscreen` output (whose stored
+/// `toggle` state is left alone), else per [`is_shown`].
+#[must_use]
+pub fn shown_on(mode: HeaderMode, toggle_visible: bool, fullscreen: bool) -> bool {
+    !fullscreen && is_shown(mode, toggle_visible)
+}
+
 /// The strip rect across the top of `output` (global coordinates).
 #[must_use]
 pub fn strip_rect(output: Rect, height: i32) -> Rect {
@@ -245,7 +252,11 @@ fn badge_label(name: &str, slot: Option<u8>, glyph: bool) -> String {
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Whether output `id`'s strip is currently shown.
     pub(crate) fn header_shown(&self, id: OutputId) -> bool {
-        is_shown(self.config.header.mode, self.header.is_visible(id))
+        shown_on(
+            self.config.header.mode,
+            self.header.is_visible(id),
+            self.layout.world.output_fullscreen(id).is_some(),
+        )
     }
 
     /// Every output's strip layout; empty while the strip is hidden.
@@ -414,6 +425,18 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fullscreen_output_draws_and_hit_tests_no_strip_in_any_mode() {
+        // `header_layout_for` (and so `header_hit` and render) gate on `shown_on`: a fullscreen
+        // output yields no layout, hence a `None` hit, while its toggle state is not consulted.
+        for mode in [HeaderMode::Off, HeaderMode::Always, HeaderMode::Toggle] {
+            for visible in [false, true] {
+                assert!(!shown_on(mode, visible, true), "{mode:?} {visible}");
+                assert_eq!(shown_on(mode, visible, false), is_shown(mode, visible));
+            }
+        }
+    }
 
     /// The divider-free layout (`segment_layout(.., 0).0`).
     fn segment_rects(widths: &[i32], strip: Rect) -> Vec<Segment> {

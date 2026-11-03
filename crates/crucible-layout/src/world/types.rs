@@ -63,6 +63,9 @@ pub struct Workspace {
     /// The pane currently focused within this workspace.
     pub focused_pane: PaneId,
     pub(crate) tree: SplitTree<PaneId>,
+    /// The window shown fullscreen on this workspace, if any (never serialized; see
+    /// `World::set_fullscreen`).
+    pub(super) fullscreen: Option<WindowId>,
 }
 
 impl Workspace {

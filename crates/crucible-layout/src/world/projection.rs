@@ -193,7 +193,15 @@ impl World {
         let windows = self
             .pane_rects(outputs, gaps)
             .into_iter()
-            .filter_map(|(pane, rect)| Some((self.panes.get(&pane)?.focused_window()?, rect)));
+            .filter_map(|(pane, rect)| {
+                let fullscreen = self
+                    .workspace_of_pane(pane)
+                    .and_then(|ws| self.fullscreen_pane(ws))
+                    .filter(|(p, _)| *p == pane)
+                    .map(|(_, w)| w);
+                let window = fullscreen.or_else(|| self.panes.get(&pane)?.focused_window())?;
+                Some((window, rect))
+            });
         Projection::new(windows, self.focused_window())
     }
 

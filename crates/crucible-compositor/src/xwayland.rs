@@ -20,10 +20,12 @@
 //! [`X11Wm::raise_window`] — see [`crate::input`] and [`crate::focus`].
 //!
 //! ## Scope
-//! CDE's tiling model owns window geometry, so interactive move/resize grabs and
-//! maximize/fullscreen are not honoured: [`XwmHandler::move_request`]/
-//! [`XwmHandler::resize_request`] are deliberate no-ops. Placement comes from the projection, never
-//! from the client.
+//! CDE's tiling model owns window geometry, so interactive move/resize grabs and maximize are not
+//! honoured: [`XwmHandler::move_request`]/[`XwmHandler::resize_request`] are deliberate no-ops.
+//! Fullscreen (`_NET_WM_STATE_FULLSCREEN`) is honoured through the model: the
+//! [`XwmHandler::fullscreen_request`]/[`XwmHandler::unfullscreen_request`] handlers set the
+//! window's workspace fullscreen, and placement sets the X state and configures the output rect.
+//! Placement comes from the projection, never from the client.
 
 use std::os::unix::{io::OwnedFd, net::UnixStream};
 use std::path::{Path, PathBuf};
@@ -337,6 +339,15 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
     fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {
         // CDE tiling owns geometry; interactive move grabs are deliberately not honoured.
         trace!("Ignoring X11 move_request (tiling owns geometry)");
+    }
+
+    fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        // Placement (`apply_layout`) sets `_NET_WM_STATE_FULLSCREEN` and configures the output rect.
+        self.request_fullscreen(|e| e.x11_surface() == Some(&window), true);
+    }
+
+    fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.request_fullscreen(|e| e.x11_surface() == Some(&window), false);
     }
 
     /// Lets every XWayland client read the bridged Wayland selection. Smithay's default (`false`)

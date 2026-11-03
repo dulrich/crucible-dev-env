@@ -121,6 +121,7 @@ impl World {
                 name,
                 focused_pane: focused,
                 tree,
+                fullscreen: None,
             },
         );
         Ok((workspace_id, root))
@@ -186,6 +187,8 @@ impl World {
         if location.workspace == target {
             return Err(LayoutError::SameWorkspace);
         }
+        self.exit_fullscreen(location.workspace);
+        self.exit_fullscreen(target);
 
         // Detach from the source pane and attach to the target workspace's focused pane.
         let target_pane_id = self.workspaces.get(&target).expect("target").focused_pane;

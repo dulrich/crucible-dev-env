@@ -217,6 +217,7 @@ impl Default for Bindings {
         bind(sup, &[Keysym::Return], Action::OpenLauncher);
         bind(sup, &[Keysym::comma], Action::OpenSettings);
         bind(sup, &[Keysym::b, Keysym::B], Action::ToggleHeader);
+        bind(sup, &[Keysym::f, Keysym::F], Action::ToggleFullscreen);
         bind(sup, &[Keysym::w, Keysym::W], Action::ClosePane);
         bind(sup, &[Keysym::h], Action::Focus(Direction::Left));
         bind(sup, &[Keysym::j], Action::Focus(Direction::Down));
@@ -690,6 +691,7 @@ mod tests {
             ("open-launcher", Action::OpenLauncher),
             ("open-settings", Action::OpenSettings),
             ("toggle-header", Action::ToggleHeader),
+            ("toggle-fullscreen", Action::ToggleFullscreen),
             ("rename-workspace", Action::RenameWorkspace),
             ("focus left", Action::Focus(Direction::Left)),
             ("move right", Action::Move(Direction::Right)),

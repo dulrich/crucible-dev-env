@@ -23,6 +23,7 @@ impl World {
     /// Returns the new [`WindowId`]. The new window becomes the focused (visible) window of its
     /// pane; the caller re-derives the [`super::Projection`] to learn what that changed.
     pub fn open_window(&mut self) -> WindowId {
+        self.exit_active_fullscreen();
         let id = WindowId::from_raw(self.window_ids.alloc());
         self.windows.insert(id, Window { id });
 
@@ -76,6 +77,7 @@ impl World {
         let location = self
             .locate_window(window)
             .ok_or(LayoutError::UnknownWindow(window))?;
+        self.exit_fullscreen_of(location.workspace, window);
         self.windows.remove(&window);
         if self.marked == Some(window) {
             self.marked = None;
@@ -106,6 +108,7 @@ impl World {
         {
             return Err(LayoutError::PaneNotEmpty);
         }
+        self.exit_fullscreen(workspace);
         let ws = self.workspaces.get_mut(&workspace).expect("workspace");
         let survivor = ws
             .tree
@@ -121,6 +124,7 @@ impl World {
     /// `split-right`/`split-down` map to [`Direction::Right`]/[`Direction::Down`]. The new pane has
     /// no windows yet; the next [`open_window`](World::open_window) lands in it.
     pub fn split(&mut self, dir: Direction) -> PaneId {
+        self.exit_active_fullscreen();
         let new_pane_id = PaneId::from_raw(self.pane_ids.alloc());
         let workspace_id = self.active_workspace_id();
         let focused_pane = self.focused_pane_id();
@@ -148,6 +152,7 @@ impl World {
     ///
     /// No-op when there is no neighbour in that direction.
     pub fn focus(&mut self, dir: Direction) {
+        self.exit_active_fullscreen();
         let workspace_id = self.active_workspace_id();
         let focused_pane = self.focused_pane_id();
         let ws = self.workspaces.get_mut(&workspace_id).expect("workspace");
@@ -166,6 +171,12 @@ impl World {
         let location = self
             .locate_window(window)
             .ok_or(LayoutError::UnknownWindow(window))?;
+        if self
+            .fullscreen_of(location.workspace)
+            .is_some_and(|f| f != window)
+        {
+            self.exit_fullscreen(location.workspace);
+        }
         self.activate(location.workspace, Some(location.pane))?;
         let pane = self.panes.get_mut(&location.pane).expect("located pane");
         let found = pane.stack.focus_item(&window);
@@ -177,6 +188,7 @@ impl World {
     ///
     /// Focus follows the moved pane. No-op when there is no neighbour in that direction.
     pub fn move_(&mut self, dir: Direction) {
+        self.exit_active_fullscreen();
         let workspace_id = self.active_workspace_id();
         let focused_pane = self.focused_pane_id();
         let ws = self.workspaces.get_mut(&workspace_id).expect("workspace");
@@ -188,6 +200,7 @@ impl World {
 
     /// Cycles the focused pane's window stack by `delta` steps (wraparound), changing visibility.
     pub fn cycle_stack(&mut self, delta: i64) {
+        self.exit_active_fullscreen();
         let pane_id = self.focused_pane_id();
         if let Some(pane) = self.panes.get_mut(&pane_id) {
             pane.stack.cycle(delta);
@@ -233,6 +246,8 @@ impl World {
             return Err(LayoutError::SamePane);
         }
 
+        self.exit_fullscreen(location.workspace);
+        self.exit_fullscreen(workspace);
         self.transfer(window, location.pane, pane);
         self.activate(workspace, Some(pane))
             .expect("a workspace in a tree is owned by an output");
@@ -273,6 +288,8 @@ impl World {
         if loc_a.pane == loc_b.pane {
             return Err(LayoutError::SamePane);
         }
+        self.exit_fullscreen(loc_a.workspace);
+        self.exit_fullscreen(loc_b.workspace);
         for (pane_id, out, incoming) in [(loc_a.pane, a, b), (loc_b.pane, b, a)] {
             let stack = &mut self.panes.get_mut(&pane_id).expect("located pane").stack;
             let focus = stack.focused_index();

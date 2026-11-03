@@ -96,6 +96,26 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
         // Popup grabs (keyboard/pointer) are not yet driven; popups render without a grab.
     }
 
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
+        // The requested output is ignored: the window fullscreens on its own workspace's output.
+        // `apply_layout` sends the configure carrying `Fullscreen` and the output size.
+        let target = surface.wl_surface().clone();
+        let changed = self.request_fullscreen(
+            |e| e.wl_surface().map(|s| *s == target).unwrap_or(false),
+            true,
+        );
+        ack_unchanged_request(&surface, changed);
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        let target = surface.wl_surface().clone();
+        let changed = self.request_fullscreen(
+            |e| e.wl_surface().map(|s| *s == target).unwrap_or(false),
+            false,
+        );
+        ack_unchanged_request(&surface, changed);
+    }
+
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         // The controller closes the model first and only then releases the binding + Space mapping,
         // so a rejected close cannot leave a half-torn-down window behind. Matching on the binding
@@ -110,6 +130,14 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
 
     fn popup_destroyed(&mut self, _surface: PopupSurface) {
         // `PopupManager::cleanup` (run each loop iteration) prunes dead popups.
+    }
+}
+
+/// Answers a fullscreen request that changed nothing (an unmanaged window, or a repeat) with a
+/// configure of the current state, as Smithay's default does, so the client is never left waiting.
+fn ack_unchanged_request(surface: &ToplevelSurface, changed: bool) {
+    if !changed && surface.is_initial_configure_sent() {
+        surface.send_configure();
     }
 }
 

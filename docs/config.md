@@ -238,6 +238,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `open-settings` | Open the settings overlay (`crucible keys`): the effective keybindings; Enter runs the selected binding |
 | `set-layout <name>` | Switch the keyboard to the layout `<name>` from `keyboard { layouts … }` (by position in that list; unknown name is a logged no-op). Defaults `Super+E` = `set-layout us`, `Super+S` = `set-layout es` |
 | `toggle-header` | Show/hide the workspace header strip on the focused output (`header { mode "toggle" }` only; a no-op in `always` and `off`) |
+| `toggle-fullscreen` | Toggle fullscreen for the focused window (see [Fullscreen](#fullscreen)). No-op on an empty pane. Default `Super+F` |
 | `rename-workspace` | Rename the active workspace (the picker in rename mode) |
 | `capture-workspace-root` | (default chord `Super+Shift+D`) Make the focused terminal's current directory the active **workspace root**, the folder new terminals and apps in this workspace start in (running windows are untouched). Fails and changes nothing if the focused window is not a terminal. Not the picker `root` config folders |
 | `set-workspace-root` | (default chord `Super+Ctrl+Shift+D`) Open the workspace-root prompt in the picker overlay, prefilled with the current root; an empty answer clears it. `crucible msg root <path>` / `root -` does the same over IPC |
@@ -255,6 +256,10 @@ See the table in the README.
 ### Window decorations
 
 Not a config key. CDE answers every Wayland app that asks over `xdg-decoration` that the compositor draws the window frame (server-side), and draws none: windows are tiled and get CDE's focus ring instead, so toolkits such as winit drop their own title bar and controls. Apps that always draw their own frame and never ask (some GTK apps) are unaffected.
+
+### Fullscreen
+
+Not a config key. A window goes fullscreen when it asks (Wayland `xdg_toplevel.set_fullscreen`, or X11 `_NET_WM_STATE_FULLSCREEN`, e.g. a video player or a game) or on `toggle-fullscreen` (default `Super+F`). At most one window per workspace is fullscreen, always on its own workspace's output (an output the client names is ignored). It covers the whole output: the header strip, gaps, focus ring and the workspace's other panes are hidden and take no input, while each output's own header shown/hidden state is kept and returns when fullscreen ends. It ends when the window asks, on `toggle-fullscreen`, when the window closes or moves to another workspace or pane, and before any verb on that workspace that changes focus, splits or moves (`focus`, `move`, `split`, `cycle-stack`, a new window opening there, the mark verbs). Switching workspaces away and back keeps it. The screen lock and overlays (picker, launcher, settings) still show above a fullscreen window and take input. Fullscreen is not persisted: a saved or restored workspace is always tiled.
 
 ### X11 apps (XWayland)
 

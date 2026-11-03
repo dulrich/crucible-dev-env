@@ -54,6 +54,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// The window rect for model window `id` placed in `tile`: its class insets applied, in Smithay
     /// logical coordinates. The one place a tile becomes a window geometry.
     pub(crate) fn placed_rect(&self, id: WindowId, tile: Rect) -> Rectangle<i32, Logical> {
+        // A fullscreen window takes its whole tile (the raw output rect): no class inset.
+        if self.layout.world.is_fullscreen(id) {
+            return to_logical(tile);
+        }
         to_logical(window_rect(
             tile,
             self.layout.window_class(id),
@@ -65,36 +69,79 @@ impl<B: Backend + 'static> CrucibleState<B> {
 /// Sends the `configure` a projected placement needs to whichever surface kind backs `element`.
 ///
 /// Wayland toplevels only learn their size (position is purely compositor-side), so they are
-/// configured only when `resized`. X11 windows also carry a position in the X server, which
-/// XWayland uses for input and for placing the client's own override-redirect menus, so they are
-/// configured with the full `rect` whenever it differs from their X geometry — a move alone counts.
-/// Kept free of `self` so it does not borrow the whole state.
+/// configured only when `resized` or their states change. A `fullscreen` toplevel carries
+/// `Fullscreen` (and no tiled state) at the placed size; every other toplevel is tiled on all four
+/// edges. X11 windows also carry a position in the X server, which XWayland uses for input and for
+/// placing the client's own override-redirect menus, so they are configured with the full `rect`
+/// whenever it differs from their X geometry — a move alone counts — and have their
+/// `_NET_WM_STATE_FULLSCREEN` set to match. Kept free of `self` so it does not borrow the whole
+/// state.
 pub(super) fn configure_placement(
     element: &WindowElement,
     rect: Rectangle<i32, Logical>,
     resized: bool,
+    fullscreen: bool,
 ) {
     if let Some(toplevel) = element.toplevel() {
         // Every managed toplevel is tiled on all four edges so the client fills its tile instead
         // of drawing floating-window chrome (shadow margins, own sizing). Never `Maximized`.
-        let had_tiled = toplevel.with_pending_state(|state| {
-            let had = has_tiled_states(&state.states);
-            for tiled in TILED_STATES {
-                state.states.set(tiled);
-            }
-            if resized {
+        let states_changed = toplevel.with_pending_state(|state| {
+            let changed = apply_shell_states(&mut state.states, fullscreen);
+            if resized || changed {
                 state.size = Some(rect.size);
             }
-            had
+            changed
         });
-        if toplevel_needs_configure(resized, had_tiled) {
+        if toplevel_needs_configure(resized, !states_changed) {
+            toplevel.send_configure();
+        }
+    } else if let Some(surface) = element.x11_surface() {
+        if surface.is_fullscreen() != fullscreen {
+            let _ = surface.set_fullscreen(fullscreen);
+        }
+        if x11_needs_configure(surface.geometry(), rect) {
+            let _ = surface.configure(Some(rect));
+        }
+    }
+}
+
+/// Flips a (hidden) window's fullscreen shell state without placing it: the xdg states are
+/// re-sent with a configure, the X11 `_NET_WM_STATE_FULLSCREEN` is updated. Its size follows on
+/// the next placement.
+pub(super) fn set_fullscreen_state(element: &WindowElement, fullscreen: bool) {
+    if let Some(toplevel) = element.toplevel() {
+        if toplevel.with_pending_state(|state| apply_shell_states(&mut state.states, fullscreen)) {
             toplevel.send_configure();
         }
     } else if let Some(surface) = element.x11_surface()
-        && x11_needs_configure(surface.geometry(), rect)
+        && surface.is_fullscreen() != fullscreen
     {
-        let _ = surface.configure(Some(rect));
+        let _ = surface.set_fullscreen(fullscreen);
     }
+}
+
+/// Sets `states` to the managed-window set: `Fullscreen` alone when `fullscreen`, else all of
+/// [`TILED_STATES`] without `Fullscreen`. Returns whether anything changed. **Pure**.
+fn apply_shell_states(
+    states: &mut smithay::wayland::shell::xdg::ToplevelStateSet,
+    fullscreen: bool,
+) -> bool {
+    let had = (
+        states.contains(XdgState::Fullscreen),
+        has_tiled_states(states),
+    );
+    if fullscreen {
+        states.set(XdgState::Fullscreen);
+        for tiled in TILED_STATES {
+            states.unset(tiled);
+        }
+    } else {
+        states.unset(XdgState::Fullscreen);
+        for tiled in TILED_STATES {
+            states.set(tiled);
+        }
+    }
+    had != (fullscreen, !fullscreen)
 }
 
 /// The xdg states every managed toplevel carries: tiled on all four edges.
@@ -112,8 +159,8 @@ fn has_tiled_states(states: &smithay::wayland::shell::xdg::ToplevelStateSet) -> 
 
 /// Whether a placement must (re)send a toplevel configure: a size change, or the tiled states
 /// being newly applied (a states-only change at the same size still needs one). **Pure**.
-fn toplevel_needs_configure(resized: bool, had_tiled: bool) -> bool {
-    resized || !had_tiled
+fn toplevel_needs_configure(resized: bool, states_current: bool) -> bool {
+    resized || !states_current
 }
 
 /// Whether an X11 window whose X geometry is `current` must be configured to reach `target`.

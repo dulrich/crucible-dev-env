@@ -16,7 +16,7 @@
 //! `mark-window`, `swap-marked-window`,
 //! `close-workspace`, `close-all-workspaces`, `slot <0-9>`, `pin-slot <0-9>`,
 //! `move-workspace-to-output <±n>`, `open-picker`, `open-launcher`, `open-settings`,
-//! `toggle-header`, `rename-workspace`, `capture-workspace-root`, `set-workspace-root` and `lock`. `vt-switch <n>` is printed but deliberately
+//! `toggle-header`, `toggle-fullscreen`, `rename-workspace`, `capture-workspace-root`, `set-workspace-root` and `lock`. `vt-switch <n>` is printed but deliberately
 //! **not** parsed: VT switches come only from libinput's `Ctrl+Alt+F<n>` keysyms, never from a
 //! bind or an IPC `exec`. The bind-only `none` (unbind) is [`crate::bindings::BindTarget`].
 
@@ -139,6 +139,9 @@ pub enum Action {
     /// Show/hide the workspace header strip (`header { mode "toggle" }` only; a no-op otherwise).
     /// `Super+B`.
     ToggleHeader,
+    /// Toggle fullscreen for the focused window (`World::toggle_fullscreen`): it covers its output
+    /// with no header, gaps or other panes. `Super+F`.
+    ToggleFullscreen,
     /// Rename the active workspace (interactive prompt). `Super+Shift+R`.
     RenameWorkspace,
     /// Spawn the configured `lock-command` (a screen locker, e.g. `swaylock`) detached. The lock
@@ -191,6 +194,7 @@ impl std::fmt::Display for Action {
             Self::OpenLauncher => f.write_str("open-launcher"),
             Self::OpenSettings => f.write_str("open-settings"),
             Self::ToggleHeader => f.write_str("toggle-header"),
+            Self::ToggleFullscreen => f.write_str("toggle-fullscreen"),
             Self::RenameWorkspace => f.write_str("rename-workspace"),
             Self::Lock => f.write_str("lock"),
             Self::VtSwitch(n) => write!(f, "vt-switch {n}"),
@@ -288,6 +292,7 @@ impl FromStr for Action {
             "open-launcher" => nullary(Self::OpenLauncher),
             "open-settings" => nullary(Self::OpenSettings),
             "toggle-header" => nullary(Self::ToggleHeader),
+            "toggle-fullscreen" => nullary(Self::ToggleFullscreen),
             "rename-workspace" => nullary(Self::RenameWorkspace),
             "focus" => unary(Self::Focus(direction(words.get(1))?)),
             "move" => unary(Self::Move(direction(words.get(1))?)),
@@ -363,6 +368,7 @@ mod tests {
             Action::OpenLauncher,
             Action::OpenSettings,
             Action::ToggleHeader,
+            Action::ToggleFullscreen,
             Action::RenameWorkspace,
             Action::Lock,
             Action::VtSwitch(3),

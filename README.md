@@ -113,6 +113,7 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+Shift+W` | Close the active workspace — saved first, its windows ended; refused on the last one |
 | `Super+Shift+C` | Close the focused window (polite close request; an X11 window without `WM_DELETE_WINDOW` is destroyed) |
 | `Super+E` / `Super+S` | Switch keyboard layout to `us` / `es` (`set-layout`; layouts come from config `keyboard { layouts … }`) |
+| `Super+F` | Toggle fullscreen for the focused window (`toggle-fullscreen`; covers the output, hides the header and other panes) |
 | `Super+1` ... `Super+0` | Switch to the workspace pinned to that slot; a closed or saved one reopens on the monitor it was last viewed on |
 | `Super+Shift+1` ... `Super+Shift+0` | Pin the active workspace to that slot |
 | `Super+Ctrl+]` / `Super+Ctrl+[` | Move the active workspace to the next / previous monitor |

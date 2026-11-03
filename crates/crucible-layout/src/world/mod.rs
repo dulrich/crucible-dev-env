@@ -9,6 +9,7 @@
 use crate::{OutputId, PaneId, WindowId, WorkspaceId, WorkspaceLayout, geometry::Rect, ids::IdGen};
 use std::collections::BTreeMap;
 
+mod fullscreen;
 mod outputs;
 mod panes;
 mod projection;
@@ -201,6 +202,14 @@ impl World {
                 "workspace name {:?} is unique",
                 w.name
             );
+        }
+        for w in self.workspaces.values() {
+            if let Some(f) = w.fullscreen {
+                assert!(
+                    self.locate_window(f).is_some_and(|l| l.workspace == w.id),
+                    "fullscreen window lives on its workspace"
+                );
+            }
         }
         if let Some(m) = self.marked {
             assert!(self.windows.contains_key(&m), "mark names a live window");

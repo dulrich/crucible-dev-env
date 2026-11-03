@@ -75,6 +75,10 @@ pub fn build_chrome_elements(
     let focus = projection.focus();
     let marked = world.marked();
     for &(id, tile) in projection.windows() {
+        // A fullscreen window covers its output edge to edge: no ring, fill or mark ring.
+        if world.is_fullscreen(id) {
+            continue;
+        }
         let class = layout.window_class(id);
         if marked == Some(id) {
             parts.mark_ring = plan_mark_ring(tile, class, tiling);
@@ -104,6 +108,9 @@ pub fn build_chrome_elements(
         let Some(workspace) = world.workspace(ws_id) else {
             continue;
         };
+        if world.fullscreen_of(ws_id).is_some() {
+            continue;
+        }
         for pane_id in workspace.panes() {
             let Some(pane) = world.pane(pane_id) else {
                 continue;
@@ -140,8 +147,12 @@ pub fn build_chrome_elements(
         .windows()
         .iter()
         .map(|&(id, tile)| {
-            window_rect(tile, layout.window_class(id), tiling)
-                .translate(-output_origin.0, -output_origin.1)
+            if world.is_fullscreen(id) {
+                tile
+            } else {
+                window_rect(tile, layout.window_class(id), tiling)
+            }
+            .translate(-output_origin.0, -output_origin.1)
         })
         .collect();
     windows.extend(overlay.map(|o| o.rect.translate(-output_origin.0, -output_origin.1)));
