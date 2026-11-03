@@ -345,11 +345,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.lock_confirm_if_presented();
     }
 
-    fn lock_confirm_if_presented(&mut self) {
+    /// Confirms a pending lock once every output presented a locked frame or is powered off (an
+    /// off output shows nothing, so nothing unlocked is visible). Re-run after idle blanking.
+    pub(crate) fn lock_confirm_if_presented(&mut self) {
         let LockPhase::Locking { progress, .. } = self.session_lock.machine.phase() else {
             return;
         };
-        let all = self.space.outputs().all(|o| progress.presented.contains(o));
+        let all = all_presented_or_off(
+            self.space.outputs(),
+            |o| progress.presented.contains(o),
+            |o| self.backend_data.output_powered_off(o),
+        );
         if all && let Some(progress) = self.session_lock.machine.all_outputs_presented() {
             info!("lock: every output presented a locked frame; session locked");
             progress.locker.lock();
@@ -435,9 +441,10 @@ impl<B: Backend + 'static> SessionLockHandler for CrucibleState<B> {
         self.close_mapped_overlay();
         self.force_keyboard_focus(None);
         self.lock_redraw_all();
-        if self.space.outputs().next().is_none() {
-            self.lock_confirm_if_presented();
-        }
+        // Confirms at once when no output exists or every output is powered off by idle
+        // blanking (an off output renders nothing, so no frame would ever confirm it later).
+        // An output that is on and has not presented a locked frame still blocks confirmation.
+        self.lock_confirm_if_presented();
     }
 
     fn unlock(&mut self) {
@@ -483,9 +490,50 @@ impl<B: Backend + 'static> SessionLockHandler for CrucibleState<B> {
     }
 }
 
+/// Whether every output either presented a locked frame or is powered off (the Smithay-free core
+/// of the lock-confirmation check).
+fn all_presented_or_off<O>(
+    mut outputs: impl Iterator<Item = O>,
+    presented: impl Fn(&O) -> bool,
+    powered_off: impl Fn(&O) -> bool,
+) -> bool {
+    outputs.all(|o| presented(&o) || powered_off(&o))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LockMachine, LockPhase};
+    use super::{LockMachine, LockPhase, all_presented_or_off};
+
+    #[test]
+    fn lock_confirms_when_every_output_presented_or_off() {
+        let outputs = [1u8, 2, 3];
+        // 1 presented, 2 powered off, 3 neither: not confirmed.
+        assert!(!all_presented_or_off(
+            outputs.iter(),
+            |o| **o == 1,
+            |o| **o == 2
+        ));
+        // 3 also off: confirmed.
+        assert!(all_presented_or_off(
+            outputs.iter(),
+            |o| **o == 1,
+            |o| **o != 1
+        ));
+        // All presented, none off: confirmed (the pre-blanking behaviour).
+        assert!(all_presented_or_off(outputs.iter(), |_| true, |_| false));
+        // An output whose power-off failed is not off, so it must still present.
+        assert!(!all_presented_or_off(
+            outputs.iter(),
+            |o| **o != 2,
+            |_| false
+        ));
+        // No outputs: vacuously confirmed (as `lock` relies on).
+        assert!(all_presented_or_off(
+            std::iter::empty::<u8>(),
+            |_| false,
+            |_| false
+        ));
+    }
 
     #[test]
     fn accept_confirm_and_valid_unlock() {

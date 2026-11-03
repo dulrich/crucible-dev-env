@@ -37,7 +37,7 @@ use crate::{
 };
 
 use super::UdevData;
-use super::output::{UdevOutputId, output_for};
+use super::output::{FlipAction, UdevOutputId, output_for};
 
 impl CrucibleState<UdevData> {
     /// Handles a completed page-flip (VBlank): delivers presentation feedback and schedules the next
@@ -91,6 +91,13 @@ impl CrucibleState<UdevData> {
             (self.clock.now(), wp_presentation_feedback::Kind::Vsync)
         };
 
+        // Powered off: the flip that was pending at `clear()` time. Nothing is shown, so a locked
+        // frame it carried is not counted (the off output is exempt from the lock handshake).
+        if surface.power.is_off() {
+            self.session_lock.take_queued(&output);
+            return;
+        }
+
         let submit_result = surface
             .drm_output
             .frame_submitted()
@@ -98,6 +105,11 @@ impl CrucibleState<UdevData> {
 
         let schedule_render = match submit_result {
             Ok(user_data) => {
+                let had_frame = user_data.is_some();
+                if surface.power.on_flip(had_frame) == FlipAction::Drop {
+                    // A stale pre-blanking flip after the wake: the wake render owns the chain.
+                    return;
+                }
                 if let Some(mut feedback) = user_data.flatten() {
                     feedback.presented(clock, Refresh::fixed(frame_duration), seq as u64, flags);
                 }
@@ -170,7 +182,12 @@ impl CrucibleState<UdevData> {
         let Some(device) = self.backend_data.backends.get(&node) else {
             return;
         };
-        if !device.surfaces.contains_key(&crtc) {
+        let Some(surface) = device.surfaces.get(&crtc) else {
+            return;
+        };
+        // Powered off by idle blanking: render, queue and reschedule nothing (no frame callbacks
+        // either, so clients pause). The wake path schedules the next render.
+        if surface.power.is_off() {
             return;
         }
         let render_node = device.render_node.unwrap_or(primary_gpu);

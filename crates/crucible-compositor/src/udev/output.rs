@@ -151,6 +151,59 @@ pub(super) struct SurfaceData {
     >,
     /// Per-output dmabuf feedback sent after each frame; `None` keeps the default feedback.
     pub dmabuf_feedback: Option<SurfaceDmabufFeedback>,
+    /// Idle power state (DPMS off via `DrmCompositor::clear`).
+    pub power: PowerMark,
+}
+
+/// What [`CrucibleState::frame_finish`] does with a page-flip completion, given the power mark.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FlipAction {
+    /// Normal: deliver feedback and schedule the next repaint.
+    Schedule,
+    /// Deliver nothing more and schedule nothing (output off, or a stale flip from before a
+    /// power-off arriving after the wake render already runs its own chain).
+    Drop,
+}
+
+/// Per-output idle power bookkeeping, kept Smithay-free so it is unit-testable.
+///
+/// `off` is set only when `clear()` succeeded. `stale_flip` covers the page-flip that may have
+/// been pending at `clear()` time: its completion can still arrive after a wake, and must not
+/// start a second render chain beside the wake render's.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PowerMark {
+    off: bool,
+    stale_flip: bool,
+}
+
+impl PowerMark {
+    /// Whether the output is powered off (render nothing).
+    pub(super) fn is_off(self) -> bool {
+        self.off
+    }
+
+    /// Records a successful `clear()` (DPMS off).
+    pub(super) fn powered_off(&mut self) {
+        self.off = true;
+        self.stale_flip = true;
+    }
+
+    /// Wakes the output; returns whether it was off (so the caller schedules exactly one render).
+    pub(super) fn wake(&mut self) -> bool {
+        std::mem::take(&mut self.off)
+    }
+
+    /// Decides a page-flip completion. `had_frame` is whether the compositor still had a pending
+    /// frame for it (`frame_submitted` returned `Some`).
+    pub(super) fn on_flip(&mut self, had_frame: bool) -> FlipAction {
+        if self.off {
+            return FlipAction::Drop;
+        }
+        if std::mem::take(&mut self.stale_flip) && !had_frame {
+            return FlipAction::Drop;
+        }
+        FlipAction::Schedule
+    }
 }
 
 impl Drop for SurfaceData {
@@ -389,6 +442,7 @@ impl CrucibleState<UdevData> {
             global: Some(global),
             drm_output,
             dmabuf_feedback,
+            power: PowerMark::default(),
         };
         device.surfaces.insert(crtc, surface);
 
@@ -396,6 +450,13 @@ impl CrucibleState<UdevData> {
         // compositor output adopts the existing `World::new()` output; subsequent connectors get
         // their own independent workspace stack via `add_output`, seeded off the live and saved names.
         self.register_output(&register_output);
+
+        // An output hot-plugged while the idle machine has the outputs blanked comes up powered
+        // off and lights up on the next wake; if its power-off fails it renders as usual.
+        if self.idle.machine.blanked() && self.backend_data.power_off_surface(node, crtc) {
+            info!(?crtc, "idle: new output comes up powered off (blanked)");
+            return;
+        }
 
         // Kick off rendering for the new output.
         self.handle
@@ -427,6 +488,44 @@ impl CrucibleState<UdevData> {
 mod tests {
     use super::*;
     use smithay::backend::allocator::{Format, Fourcc, Modifier};
+
+    #[test]
+    fn power_mark_off_drops_flips_and_wakes_once() {
+        let mut mark = PowerMark::default();
+        assert!(!mark.is_off());
+        assert_eq!(mark.on_flip(true), FlipAction::Schedule);
+        mark.powered_off();
+        assert!(mark.is_off());
+        // A flip pending at clear() time completing while off: no follow-up render.
+        assert_eq!(mark.on_flip(false), FlipAction::Drop);
+        assert!(mark.wake());
+        assert!(!mark.is_off());
+        // A second wake schedules nothing more (no double render).
+        assert!(!mark.wake());
+    }
+
+    #[test]
+    fn power_mark_stale_flip_after_wake_is_dropped_once() {
+        let mut mark = PowerMark::default();
+        mark.powered_off();
+        assert!(mark.wake());
+        // The stale flip arrives after the wake with no frame of its own: dropped.
+        assert_eq!(mark.on_flip(false), FlipAction::Drop);
+        // The wake frame's own flip then schedules normally.
+        assert_eq!(mark.on_flip(true), FlipAction::Schedule);
+        // Later frameless flips keep the pre-blanking behaviour (schedule).
+        assert_eq!(mark.on_flip(false), FlipAction::Schedule);
+    }
+
+    #[test]
+    fn power_mark_real_flip_after_wake_clears_the_stale_guard() {
+        let mut mark = PowerMark::default();
+        mark.powered_off();
+        assert!(mark.wake());
+        // No stale flip ever arrived; the wake frame's flip schedules and clears the guard.
+        assert_eq!(mark.on_flip(true), FlipAction::Schedule);
+        assert_eq!(mark.on_flip(false), FlipAction::Schedule);
+    }
 
     fn fmt(code: Fourcc) -> Format {
         Format {

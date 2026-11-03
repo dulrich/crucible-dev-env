@@ -67,6 +67,7 @@ use smithay::{
     output::Output,
     reexports::{
         calloop::EventLoop,
+        drm::control::crtc,
         input::{DeviceCapability, Libinput},
         wayland_server::{Display, protocol::wl_surface::WlSurface},
     },
@@ -124,6 +125,34 @@ pub struct UdevData {
     /// The `zwp_linux_dmabuf_v1` state and global; `None` until the primary renderer exists (or
     /// when it could not be created).
     dmabuf_state: Option<(DmabufState, DmabufGlobal)>,
+}
+
+impl UdevData {
+    /// Powers one output off (`DrmCompositor::clear`, DPMS off) and marks it off. A failure (e.g. the
+    /// session is paused) is logged and leaves the output unmarked, so it keeps rendering. Returns
+    /// whether the output is now off.
+    pub(super) fn power_off_surface(&mut self, node: DrmNode, crtc: crtc::Handle) -> bool {
+        let Some(surface) = self
+            .backends
+            .get_mut(&node)
+            .and_then(|gpu| gpu.surfaces.get_mut(&crtc))
+        else {
+            return false;
+        };
+        if surface.power.is_off() {
+            return true;
+        }
+        match surface.drm_output.with_compositor(|c| c.clear()) {
+            Ok(()) => {
+                surface.power.powered_off();
+                true
+            }
+            Err(err) => {
+                warn!(%node, ?crtc, %err, "idle: DPMS off failed; output keeps rendering");
+                false
+            }
+        }
+    }
 }
 
 impl DmabufHandler for CrucibleState<UdevData> {
@@ -197,12 +226,50 @@ impl Backend for UdevData {
         output::reflow_outputs(state);
     }
 
-    fn set_outputs_powered(_state: &mut CrucibleState<Self>, on: bool) {
-        // WP-3: DPMS off/on via the DRM compositors.
-        tracing::info!(
-            on,
-            "idle: output power change (udev power-off lands in WP-3)"
-        );
+    fn output_powered_off(&self, output: &Output) -> bool {
+        output
+            .user_data()
+            .get::<UdevOutputId>()
+            .and_then(|id| self.backends.get(&id.device_id)?.surfaces.get(&id.crtc))
+            .is_some_and(|surface| surface.power.is_off())
+    }
+
+    /// Off: `DrmCompositor::clear()` (DPMS off) on every output; a failure leaves that output
+    /// rendering. On: clears every off mark and schedules exactly one full-redraw render per
+    /// output that was off; its `queue_frame` re-enables the CRTC.
+    fn set_outputs_powered(state: &mut CrucibleState<Self>, on: bool) {
+        let crtcs: Vec<(DrmNode, crtc::Handle)> = state
+            .backend_data
+            .backends
+            .iter()
+            .flat_map(|(node, gpu)| gpu.surfaces.keys().map(move |crtc| (*node, *crtc)))
+            .collect();
+        if on {
+            for (node, crtc) in crtcs {
+                let Some(surface) = state
+                    .backend_data
+                    .backends
+                    .get_mut(&node)
+                    .and_then(|gpu| gpu.surfaces.get_mut(&crtc))
+                else {
+                    continue;
+                };
+                if surface.power.wake() {
+                    surface.drm_output.reset_buffers();
+                    state
+                        .handle
+                        .insert_idle(move |data| data.render_surface(node, crtc));
+                }
+            }
+            info!("idle: outputs powered on");
+        } else {
+            for (node, crtc) in crtcs {
+                state.backend_data.power_off_surface(node, crtc);
+            }
+            info!("idle: outputs powered off");
+            // Outputs that just went dark may complete a pending lock.
+            state.lock_confirm_if_presented();
+        }
     }
 
     fn change_vt(&mut self, vt: i32) -> bool {
@@ -339,14 +406,41 @@ pub fn run_udev() {
                     error!("Failed to resume libinput context: {:?}", err);
                 }
                 let nodes: Vec<DrmNode> = data.backend_data.backends.keys().copied().collect();
-                for node in nodes {
-                    if let Some(backend) = data.backend_data.backends.get_mut(&node) {
+                let was_off: Vec<(DrmNode, crtc::Handle)> = data
+                    .backend_data
+                    .backends
+                    .iter()
+                    .flat_map(|(node, gpu)| {
+                        gpu.surfaces
+                            .iter()
+                            .filter(|(_, surface)| surface.power.is_off())
+                            .map(move |(crtc, _)| (*node, *crtc))
+                    })
+                    .collect();
+                for node in &nodes {
+                    if let Some(backend) = data.backend_data.backends.get_mut(node) {
                         if let Err(err) = backend.drm_output_manager.lock().activate(false) {
                             error!(%err, "Failed to re-activate drm device on session resume");
                         }
                     }
-                    // Re-kick rendering for every output on this device.
-                    data.handle.insert_idle(move |data| data.render(node, None));
+                }
+                // Returning to the VT is user activity: restart the idle period and, if blanked,
+                // wake. The wake path schedules the render of every output that was off, so only
+                // the outputs that stayed on are re-kicked here (never two renders per CRTC).
+                data.idle_activity();
+                for node in nodes {
+                    let crtcs: Vec<crtc::Handle> = data
+                        .backend_data
+                        .backends
+                        .get(&node)
+                        .map(|gpu| gpu.surfaces.keys().copied().collect())
+                        .unwrap_or_default();
+                    for crtc in crtcs {
+                        if !was_off.contains(&(node, crtc)) {
+                            data.handle
+                                .insert_idle(move |data| data.render_surface(node, crtc));
+                        }
+                    }
                 }
             }
         })

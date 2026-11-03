@@ -131,6 +131,12 @@ pub trait Backend {
         }
         state.apply_layout();
     }
+    /// Whether `output` is currently powered off by idle blanking (its DPMS-off succeeded). An off
+    /// output shows nothing, so the session-lock handshake counts it as having presented a locked
+    /// frame. The default (nested `winit`) never powers outputs off.
+    fn output_powered_off(&self, _output: &Output) -> bool {
+        false
+    }
     /// Powers every output `on` (wake) or off (idle blanking). Called by the idle machine only on a
     /// change, never redundantly. The default (nested `winit`) logs and does nothing; the udev
     /// backend powers the DRM outputs (WP-3). An associated fn taking the whole state, like
