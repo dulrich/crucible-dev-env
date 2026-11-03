@@ -4,7 +4,7 @@
     { "path": "scripts/wallpaper-rotate.sh" },
     { "path": "scripts/foot/build.sh" },
     { "path": "scripts/foot/install.sh" },
-    { "path": "crates/crucible/src/main.rs", "subcommands": ["pick", "launch", "keys", "resume", "relaunch", "mem", "msg", "overlay-host"] }
+    { "path": "crates/crucible/src/main.rs", "version": "semver", "subcommands": ["pick", "launch", "keys", "resume", "relaunch", "mem", "msg", "overlay-host"] }
   ],
   "exclude": []
 }

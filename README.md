@@ -32,6 +32,8 @@ The word *tab* is intentionally reserved for applications' own internal tabs —
 
 ## Status
 
+Current version: **0.4.0** — see [`CHANGELOG.md`](CHANGELOG.md).
+
 Pre-alpha, but **the MVP (Phases 0–3 of [the roadmap](plans/00-mvp-roadmap.md)) is implemented** and CDE is the daily session on the author's machines: a Smithay-based tiling Wayland compositor with saved, restorable workspaces.
 
 **What works now:**
