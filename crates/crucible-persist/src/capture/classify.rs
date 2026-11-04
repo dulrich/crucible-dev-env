@@ -80,9 +80,10 @@ pub struct WindowRecordInput<'a> {
 ///   argv decoded as a wrapper ([`CdeWrapper::decode`]); else an idle terminal in the terminal
 ///   process's cwd (empty when unreadable). Never an app unless an origin or a relaunch wrapper
 ///   says so.
-/// - **App:** the client's argv — a CDE wrapper in it is decoded before joining; otherwise the
-///   app id and the joined argv. An app whose argv yields no cmdline but whose origin is an app
-///   (a relaunched app) records the origin's cmdline.
+/// - **App:** (1) a CDE wrapper in the client's argv is decoded; (2) else an origin that is an
+///   app with a cmdline (a CDE-spawned or relaunched app — the spawn command beats a live helper
+///   argv such as `steamwebhelper`) records that cmdline, the element app id filling a missing
+///   origin id; (3) else the app id and the joined argv (no cmdline when the argv is empty).
 #[must_use]
 pub fn window_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowRecord {
     match input.class {
@@ -150,32 +151,28 @@ fn app_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowRecord {
     let argv = pid
         .map(|p| read_cmdline(&env.proc_root, p))
         .unwrap_or_default();
-    if argv.is_empty() {
-        if let Some(WindowRecord::App {
-            app_id: origin_id,
-            cmdline: Some(cmdline),
-        }) = origin
-        {
-            return WindowRecord::App {
-                app_id: origin_id.clone().or(app_id),
-                cmdline: Some(cmdline.clone()),
-            };
-        }
-        return WindowRecord::App {
-            app_id,
-            cmdline: None,
+    if let Some(wrapper) = CdeWrapper::decode(&argv, exec_flag) {
+        return match wrapper {
+            CdeWrapper::App(cap) => WindowRecord::App {
+                app_id: cap.app_id.or(app_id),
+                cmdline: Some(cap.cmdline),
+            },
+            wrapper => wrapper_record(wrapper),
         };
     }
-    match CdeWrapper::decode(&argv, exec_flag) {
-        Some(CdeWrapper::App(cap)) => WindowRecord::App {
-            app_id: cap.app_id.or(app_id),
-            cmdline: Some(cap.cmdline),
-        },
-        Some(wrapper) => wrapper_record(wrapper),
-        None => WindowRecord::App {
-            app_id,
-            cmdline: Some(join_command(&argv)),
-        },
+    if let Some(WindowRecord::App {
+        app_id: origin_id,
+        cmdline: Some(cmdline),
+    }) = origin
+    {
+        return WindowRecord::App {
+            app_id: origin_id.clone().or(app_id),
+            cmdline: Some(cmdline.clone()),
+        };
+    }
+    WindowRecord::App {
+        app_id,
+        cmdline: (!argv.is_empty()).then(|| join_command(&argv)),
     }
 }
 
@@ -502,8 +499,8 @@ mod tests {
         assert_eq!(terminal_record(&p, 101, Some(&origin)), origin);
     }
 
-    /// Licensed change 2: a relaunched app whose argv is unreadable keeps its origin's cmdline;
-    /// any readable argv still wins, and a non-app origin never makes an app cmdline.
+    /// An app whose argv is unreadable keeps its origin's cmdline; an app origin with a cmdline
+    /// also beats a readable plain argv (plan 27), and a non-app origin never makes an app cmdline.
     #[test]
     fn app_with_unreadable_argv_records_its_app_origin() {
         let p = FakeProc::new("app-origin");
@@ -522,9 +519,60 @@ mod tests {
         let t = term("/saved", None);
         assert_eq!(rec(100, Some(&t), Some("elem")), app(Some("elem"), None));
         p.add((101, "gimp", 1), 0, "/", &["gimp", "b.png"], &[]);
+        // Plan 27: the origin now beats a readable plain argv (was: argv won).
+        assert_eq!(rec(101, Some(&origin), Some("elem")), origin);
         assert_eq!(
-            rec(101, Some(&origin), Some("elem")),
+            rec(101, Some(&t), Some("elem")),
             app(Some("elem"), Some("gimp b.png"))
+        );
+    }
+
+    /// Plan 27: the spawn command recorded as origin beats a live helper argv, and the element
+    /// app id fills a missing origin id.
+    #[test]
+    fn app_origin_cmdline_beats_a_live_helper_argv() {
+        let p = FakeProc::new("app-origin-helper");
+        p.add(
+            (100, "steamwebhelper", 1),
+            0,
+            "/",
+            &["./steamwebhelper", "-x"],
+            &[],
+        );
+        let origin = app(None, Some("steam"));
+        assert_eq!(
+            classify(&p, Some(100), SpawnClass::App, Some(&origin), Some("steam")),
+            app(Some("steam"), Some("steam"))
+        );
+        // No origin: the argv is joined as before.
+        assert_eq!(
+            classify(&p, Some(100), SpawnClass::App, None, Some("steam")),
+            app(Some("steam"), Some("./steamwebhelper -x"))
+        );
+    }
+
+    /// Plan 27: a CDE wrapper in the argv still wins over an app origin.
+    #[test]
+    fn app_wrapper_argv_wins_over_the_origin() {
+        let p = FakeProc::new("app-origin-wrapper");
+        p.add(
+            (100, "ghostty", 1),
+            0,
+            "/",
+            &[
+                "ghostty",
+                "-e",
+                "/x/crucible",
+                "relaunch",
+                "--",
+                "firefox -p",
+            ],
+            &[],
+        );
+        let origin = app(Some("o"), Some("steam"));
+        assert_eq!(
+            classify(&p, Some(100), SpawnClass::App, Some(&origin), Some("elem")),
+            app(Some("elem"), Some("firefox -p"))
         );
     }
 

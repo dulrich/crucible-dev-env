@@ -80,11 +80,15 @@ impl SpawnRequest {
     }
 
     /// `cmd` (a shell command line) via `/bin/sh -c 'exec <cmd>'` (kind `App`), so the window's
-    /// client PID is the app itself.
+    /// client PID is the app itself. The origin records `cmd` (without the `exec ` prefix) as an
+    /// app with no app id, so the window's saved record is the command that started it.
     #[must_use]
     pub fn shell_app(cmd: &str) -> Self {
         let args = vec![OsString::from("-c"), OsString::from(format!("exec {cmd}"))];
-        Self::new("/bin/sh", args, SpawnKind::App)
+        Self::new("/bin/sh", args, SpawnKind::App).with_origin(Some(WindowRecord::App {
+            app_id: None,
+            cmdline: Some(cmd.to_string()),
+        }))
     }
 
     /// The same request, run in `cwd`.
@@ -425,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_app_is_sh_exec_with_no_cwd_or_origin() {
+    fn shell_app_is_sh_exec_with_no_cwd_and_an_app_origin() {
         let req = SpawnRequest::shell_app("firefox --new-window");
         assert_eq!(req.program, "/bin/sh");
         assert_eq!(
@@ -437,7 +441,14 @@ mod tests {
         );
         assert_eq!(
             (req.cwd, req.kind, req.origin),
-            (None, SpawnKind::App, None)
+            (
+                None,
+                SpawnKind::App,
+                Some(WindowRecord::App {
+                    app_id: None,
+                    cmdline: Some("firefox --new-window".to_string())
+                })
+            )
         );
     }
 }
