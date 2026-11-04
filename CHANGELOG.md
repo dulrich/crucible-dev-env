@@ -4,6 +4,13 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.2 — 2026-11-04
+
+### Fixed
+
+- Restored apps relaunch under a renamed binary: CDE recognises its own placeholder and terminal wrappers by the running executable's name as well as `crucible` (for example a distro-suffixed `crucible-noble`), so Enter on a placeholder no longer fails with "not a relaunch placeholder", saves no longer record CDE's own wrappers as commands, and `crucible mem` finds the compositor.
+- An app with an empty app id is saved without one, and its placeholder names the program instead of reading "CDE restored .".
+
 ## 0.4.1 — 2026-11-03
 
 ### Fixed
