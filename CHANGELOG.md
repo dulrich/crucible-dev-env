@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.4 — 2026-11-04
+
+### Added
+
+- Fullscreen pointer confine: while a fullscreen window (Wayland or X11) has keyboard focus, the pointer stays on its monitor once it is there, so a fullscreen game such as Witcher 3 under Proton no longer loses the mouse to the next output. Moving focus with a Super chord, switching workspace, opening an overlay or locking the screen frees it. On by default; turn it off with the new top-level `confine-pointer-to-fullscreen #false` (TTY backend only). Writing that key into `config.kdl` makes 0.4.3 and older reject the config as an unknown node, so remove it before rolling back to `crucible.prev`.
+
 ## 0.4.3 — 2026-11-04
 
 ### Added
