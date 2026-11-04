@@ -132,6 +132,40 @@ pub fn constraint_eligible(
     relative_motion && !modal && keyboard_on_surface && pointer_in_region
 }
 
+/// The rectangle a keyboard-focused fullscreen window confines the pointer to (pure decision).
+///
+/// `fullscreen_output` is the full global rect of the output showing the focused fullscreen
+/// window, `None` when the keyboard focus is not a shown, mapped fullscreen window. Returns the
+/// rect only on a relative-motion backend, with no modal, and the config toggle on.
+pub fn fullscreen_confine_rect(
+    relative_motion: bool,
+    modal: bool,
+    toggle: bool,
+    fullscreen_output: Option<Rectangle<i32, Logical>>,
+) -> Option<Rectangle<i32, Logical>> {
+    if relative_motion && !modal && toggle {
+        fullscreen_output
+    } else {
+        None
+    }
+}
+
+/// Clamps `proposed` into `rect` (far edges exclusive) when the pre-motion `current` location is
+/// inside it; otherwise returns `proposed` unchanged (a pointer outside is never moved).
+pub fn clamp_to_fullscreen(
+    rect: Rectangle<i32, Logical>,
+    current: Point<f64, Logical>,
+    proposed: Point<f64, Logical>,
+) -> Point<f64, Logical> {
+    let (lo, hi) = (rect.loc.to_f64(), (rect.loc + rect.size).to_f64());
+    let inside = current.x >= lo.x && current.x < hi.x && current.y >= lo.y && current.y < hi.y;
+    if inside {
+        clamp_into(proposed, rect)
+    } else {
+        proposed
+    }
+}
+
 /// The eligibility conditions that fail, named for the diagnostic log (empty: eligible).
 pub fn failed_gates(
     relative_motion: bool,
@@ -168,6 +202,8 @@ pub struct PointerLockState {
     active: Option<(WlSurface, Point<f64, Logical>)>,
     /// The last reconcile outcome logged, so repeated identical outcomes log once.
     last_logged: Option<String>,
+    /// The fullscreen confinement rectangle last logged (`None`: off), so only changes log.
+    last_fullscreen_confine: Option<Rectangle<i32, Logical>>,
 }
 
 impl PointerLockState {
@@ -179,6 +215,7 @@ impl PointerLockState {
             hints: HashMap::new(),
             active: None,
             last_logged: None,
+            last_fullscreen_confine: None,
         }
     }
 }
@@ -200,6 +237,46 @@ fn kind_of(constraint: &PointerConstraint) -> ConstraintKind {
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
+    /// The full global rect of the output showing the keyboard-focused fullscreen window, or
+    /// `None` when the focus is not a mapped window that is its output's shown fullscreen window.
+    /// Deliberately the output's rect, never the element's client-backed geometry.
+    fn focused_fullscreen_output_rect(&self) -> Option<Rectangle<i32, Logical>> {
+        let focus = self.seat.get_keyboard()?.current_focus()?;
+        let crate::focus::KeyboardFocusTarget::Window(element) = focus else {
+            return None;
+        };
+        let id = element.window_id()?;
+        if !self.layout.world.is_fullscreen(id) {
+            return None;
+        }
+        self.space.element_location(&element)?;
+        self.raw_output_rects()
+            .into_iter()
+            .find(|(o, _)| self.layout.world.output_fullscreen(*o) == Some(id))
+            .map(|(_, r)| Rectangle::new((r.x, r.y).into(), (r.width, r.height).into()))
+    }
+
+    /// Where a relative motion is confined by a focused fullscreen window (see
+    /// [`fullscreen_confine_rect`]); logs (debug, deduplicated) when confinement switches.
+    pub(crate) fn fullscreen_confine(&mut self) -> Option<Rectangle<i32, Logical>> {
+        let mode = self.input_mode();
+        let modal = mode.is_locked() || mode.has_overlay();
+        let rect = fullscreen_confine_rect(
+            B::HAS_RELATIVE_MOTION,
+            modal,
+            self.config.confine_pointer_to_fullscreen,
+            self.focused_fullscreen_output_rect(),
+        );
+        if rect != self.pointer_lock.last_fullscreen_confine {
+            match rect {
+                Some(r) => debug!(rect = ?r, "fullscreen pointer confinement on"),
+                None => debug!("fullscreen pointer confinement off"),
+            }
+            self.pointer_lock.last_fullscreen_confine = rect;
+        }
+        rect
+    }
+
     /// The active constraint on the pointer surface at `under`: kind, region and surface rectangle.
     pub(crate) fn active_constraint(
         &self,
@@ -459,6 +536,78 @@ mod tests {
 
     fn p(x: f64, y: f64) -> Point<f64, Logical> {
         Point::from((x, y))
+    }
+
+    fn out0() -> Rectangle<i32, Logical> {
+        Rectangle::new((0, 0).into(), (3840, 2160).into())
+    }
+
+    #[test]
+    fn fullscreen_confine_eligible() {
+        assert_eq!(
+            fullscreen_confine_rect(true, false, true, Some(out0())),
+            Some(out0())
+        );
+    }
+
+    #[test]
+    fn fullscreen_confine_each_failing_condition() {
+        assert_eq!(
+            fullscreen_confine_rect(false, false, true, Some(out0())),
+            None
+        );
+        assert_eq!(
+            fullscreen_confine_rect(true, true, true, Some(out0())),
+            None
+        );
+        assert_eq!(
+            fullscreen_confine_rect(true, false, false, Some(out0())),
+            None
+        );
+        assert_eq!(fullscreen_confine_rect(true, false, true, None), None);
+    }
+
+    #[test]
+    fn fullscreen_clamp_inside_stays_put() {
+        assert_eq!(
+            clamp_to_fullscreen(out0(), p(100.0, 100.0), p(150.5, 90.25)),
+            p(150.5, 90.25)
+        );
+    }
+
+    #[test]
+    fn fullscreen_clamp_right_edge_is_exclusive() {
+        let r = clamp_to_fullscreen(out0(), p(3800.0, 10.0), p(4000.0, 10.0));
+        assert!(r.x < 3840.0 && r.x > 3839.0);
+        assert_eq!(r.y, 10.0);
+    }
+
+    #[test]
+    fn fullscreen_clamp_left_edge() {
+        let r = clamp_to_fullscreen(out0(), p(5.0, 10.0), p(-40.0, 10.0));
+        assert_eq!(r, p(0.0, 10.0));
+    }
+
+    #[test]
+    fn fullscreen_clamp_from_outside_passes_through() {
+        assert_eq!(
+            clamp_to_fullscreen(out0(), p(4000.0, 100.0), p(-50.0, 100.0)),
+            p(-50.0, 100.0)
+        );
+    }
+
+    #[test]
+    fn fullscreen_clamp_two_outputs_stays_on_first() {
+        // Outputs at (0,0) and (3840,0), both 3840x2160; the fullscreen window is on the first.
+        let r = clamp_to_fullscreen(out0(), p(3830.0, 100.0), p(3880.0, 100.0));
+        assert!(r.x < 3840.0, "stayed on the first output: {r:?}");
+    }
+
+    #[test]
+    fn fullscreen_clamp_second_output_rect_blocks_left_crossing() {
+        let second = Rectangle::new((3840, 0).into(), (3840, 2160).into());
+        let r = clamp_to_fullscreen(second, p(3845.0, 100.0), p(3800.0, 100.0));
+        assert_eq!(r, p(3840.0, 100.0));
     }
 
     #[test]

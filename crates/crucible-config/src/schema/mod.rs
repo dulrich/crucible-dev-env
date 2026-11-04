@@ -50,6 +50,10 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
                 node.no_properties()?;
                 config.focus_follows_mouse = node.bool_arg()?;
             }
+            "confine-pointer-to-fullscreen" => {
+                node.no_properties()?;
+                config.confine_pointer_to_fullscreen = node.bool_arg()?;
+            }
             "restore-session" => {
                 node.no_properties()?;
                 config.restore_session = node.bool_arg()?;
@@ -146,6 +150,7 @@ tiling {
     terminal-args "--window-padding-x={gap}" "--b"
 }
 focus-follows-mouse #false
+confine-pointer-to-fullscreen #false
 picker {
     root "<code-root>"
     root "/srv/work"
@@ -211,6 +216,7 @@ binds {
             vec!["--window-padding-x=4".to_string(), "--b".to_string()]
         );
         assert!(!c.focus_follows_mouse);
+        assert!(!c.confine_pointer_to_fullscreen);
         assert_eq!(
             c.picker.roots,
             vec![
@@ -225,6 +231,16 @@ binds {
                 ("Super+Backslash".to_string(), "split right".to_string()),
                 ("Super+Shift+Q".to_string(), "none".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn confine_pointer_to_fullscreen_defaults_on_and_parses_off() {
+        assert!(parse("").unwrap().confine_pointer_to_fullscreen);
+        assert!(
+            !parse("confine-pointer-to-fullscreen #false\n")
+                .unwrap()
+                .confine_pointer_to_fullscreen
         );
     }
 
@@ -277,6 +293,8 @@ binds {
         assert!(matches!(&err, ConfigError::WrongType { expected, .. } if *expected == "a string"));
         let (err, _) = err_at("focus-follows-mouse \"yes\"\n");
         assert!(matches!(&err, ConfigError::WrongType { .. }));
+        let (err, _) = err_at("confine-pointer-to-fullscreen \"yes\"\n");
+        assert!(matches!(&err, ConfigError::WrongType { .. }));
         let (err, _) = err_at("terminal \"foot\" exec-flag=1\n");
         assert!(matches!(&err, ConfigError::WrongType { what, .. } if what.contains("exec-flag")));
         let (err, _) = err_at("binds {\n    bind \"Super+P\" 3\n}\n");
@@ -300,6 +318,8 @@ binds {
         let (err, _) = err_at("terminal\n");
         assert!(matches!(err, ConfigError::MissingArgument { .. }));
         let (err, _) = err_at("focus-follows-mouse\n");
+        assert!(matches!(err, ConfigError::MissingArgument { .. }));
+        let (err, _) = err_at("confine-pointer-to-fullscreen\n");
         assert!(matches!(err, ConfigError::MissingArgument { .. }));
         let (err, _) = err_at("binds {\n    bind \"Super+P\"\n}\n");
         assert!(matches!(err, ConfigError::MissingArgument { .. }));

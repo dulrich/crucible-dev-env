@@ -52,6 +52,14 @@ focus-follows-mouse #false
 
 `#true` (default) or `#false`. When on, moving the pointer into a window or pane focuses it; when off, only clicking does. While an overlay is open, hovering does not move focus off it; when the pointer has moved into another pane or output meanwhile, the next overlay you open (or re-open) first moves focus there, so it opens on the monitor under the pointer. This replaces the old `--no-focus-follows-mouse` flag and `CDE_FOCUS_FOLLOWS_MOUSE` variable, which are gone.
 
+### `confine-pointer-to-fullscreen`
+
+```kdl
+confine-pointer-to-fullscreen #false
+```
+
+`#true` (default) or `#false`. When on, a keyboard-focused fullscreen window (Wayland or X11) keeps the pointer on its monitor once the pointer is on it, so games cannot lose the mouse to another output. Moving focus away (the Super focus or workspace chords), opening an overlay, or locking the screen frees the pointer; a pointer already outside the monitor is never moved. It only applies on the TTY (udev) backend, not the nested winit one.
+
 ### `restore-session`
 
 ```kdl
@@ -297,6 +305,7 @@ tiling {
     app gap=0 ring=0
 }
 focus-follows-mouse #true
+confine-pointer-to-fullscreen #true
 restore-session #true
 picker {
     root "<code-root>"

@@ -23,7 +23,7 @@ use super::modal::{
 };
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
-use crate::pointer_lock::{MotionOutcome, constrained_motion};
+use crate::pointer_lock::{MotionOutcome, clamp_to_fullscreen, constrained_motion};
 use crate::state::{Backend, CrucibleState};
 use smithay::wayland::seat::WaylandFocus;
 
@@ -126,6 +126,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     location = next;
                 }
             }
+        }
+        if let Some(rect) = self.fullscreen_confine() {
+            location = clamp_to_fullscreen(rect, current, location);
         }
         let under = self.surface_under(&mode, location);
         pointer.relative_motion(

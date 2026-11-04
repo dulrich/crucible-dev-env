@@ -369,6 +369,9 @@ pub struct Config {
     pub tiling: TilingConfig,
     /// Whether pointer motion moves focus.
     pub focus_follows_mouse: bool,
+    /// Whether a keyboard-focused fullscreen window confines the pointer to its output
+    /// (`confine-pointer-to-fullscreen`, TTY backend only). Default on.
+    pub confine_pointer_to_fullscreen: bool,
     /// Whether startup reopens the workspaces open at the last exit (`restore-session`).
     pub restore_session: bool,
     /// Workspace-picker roots and badge setting.
@@ -419,6 +422,7 @@ impl Default for Config {
             terminal: TerminalConfig::default(),
             tiling: TilingConfig::default(),
             focus_follows_mouse: true,
+            confine_pointer_to_fullscreen: true,
             restore_session: true,
             picker: PickerConfig::default(),
             overlay: OverlayConfig::default(),
@@ -459,6 +463,7 @@ mod tests {
         assert_eq!(c.tiling.app.fill, Rgb(0x73, 0x73, 0x73));
         assert!(c.tiling.terminal_args.is_empty());
         assert!(c.focus_follows_mouse);
+        assert!(c.confine_pointer_to_fullscreen);
         assert!(c.picker.roots.is_empty());
         assert!(!c.picker.slots);
         assert!(c.launcher.tui.is_empty());
