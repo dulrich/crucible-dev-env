@@ -144,6 +144,10 @@ impl<B: Backend + 'static> SeatHandler for CrucibleState<B> {
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
         self.sync_activation(clears_activation(target));
+        // Keyboard focus never moves pointer focus: a pointer lock the user left by keyboard
+        // (Super chord, workspace switch, overlay, lock screen) is released here.
+        let keyboard = target.and_then(|t| t.wl_surface().map(|s| s.into_owned()));
+        self.reconcile_pointer_constraint(keyboard);
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {

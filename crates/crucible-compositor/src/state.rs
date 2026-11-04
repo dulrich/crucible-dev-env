@@ -216,6 +216,9 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// `wp_viewporter` global state: lets fractional-scale clients map a native-resolution buffer
     /// onto their logical size.
     pub viewporter_state: ViewporterState,
+    /// `zwp_relative_pointer_manager_v1` + `zwp_pointer_constraints_v1` globals and CDE's
+    /// constraint activation state; see [`crate::pointer_lock`].
+    pub pointer_lock: crate::pointer_lock::PointerLockState,
     /// `wl_seat` state managing seats and their capabilities.
     pub seat_state: SeatState<CrucibleState<B>>,
 
@@ -351,6 +354,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<Self>(&dh);
         let fractional_scale_state = FractionalScaleManagerState::new::<Self>(&dh);
         let viewporter_state = ViewporterState::new::<Self>(&dh);
+        let pointer_lock = crate::pointer_lock::PointerLockState::new::<B>(&dh);
         let session_lock = crate::lock::SessionLock::new(
             smithay::wayland::session_lock::SessionLockManagerState::new::<Self, _>(&dh, |_| true),
         );
@@ -419,6 +423,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             xdg_decoration_state,
             fractional_scale_state,
             viewporter_state,
+            pointer_lock,
             seat_state,
             seat,
             pointer,

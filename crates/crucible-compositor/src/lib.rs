@@ -77,3 +77,6 @@ pub mod lock;
 
 /// Idle lock/blank timers and the idle-notify / idle-inhibit protocols.
 pub mod idle;
+
+/// Relative pointer and pointer constraints (pointer lock for games).
+pub mod pointer_lock;

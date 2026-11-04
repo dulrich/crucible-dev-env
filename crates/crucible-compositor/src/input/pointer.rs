@@ -23,7 +23,9 @@ use super::modal::{
 };
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
+use crate::pointer_lock::{MotionOutcome, constrained_motion};
 use crate::state::{Backend, CrucibleState};
+use smithay::wayland::seat::WaylandFocus;
 
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Maps absolute winit pointer motion into the output and delivers it to the seat.
@@ -82,10 +84,37 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let serial = SERIAL_COUNTER.next_serial();
         let pointer = self.pointer.clone();
 
-        let mut location = pointer.current_location() + evt.delta();
-        location = self.clamp_coords(location);
+        let current = pointer.current_location();
+        let mut location = self.clamp_coords(current + evt.delta());
 
         let mode = self.input_mode();
+        // An active pointer constraint (only ever activated on relative-motion backends, see
+        // `crate::pointer_lock`) on the surface under the pointer locks or confines the motion.
+        let under_current = self.surface_under(&mode, current);
+        let constraint = under_current.as_ref().and_then(|(target, origin)| {
+            let surface = target.wl_surface()?.into_owned();
+            self.note_constraint_origin(&surface, *origin);
+            self.active_constraint(&surface, *origin)
+        });
+        if let Some((kind, region, rect)) = constraint {
+            match constrained_motion(Some(kind), region.as_ref(), rect, current, location) {
+                MotionOutcome::Suppress => {
+                    // Locked: relative motion only; no absolute motion, no hover focus change.
+                    pointer.relative_motion(
+                        self,
+                        under_current,
+                        &RelativeMotionEvent {
+                            delta: evt.delta(),
+                            delta_unaccel: evt.delta_unaccel(),
+                            utime: evt.time(),
+                        },
+                    );
+                    pointer.frame(self);
+                    return;
+                }
+                MotionOutcome::Move(next) => location = next,
+            }
+        }
         let under = self.surface_under(&mode, location);
         pointer.relative_motion(
             self,
@@ -107,6 +136,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
         );
         pointer.frame(self);
         self.focus_follows_pointer(&mode);
+        let keyboard = self
+            .seat
+            .get_keyboard()
+            .and_then(|k| k.current_focus())
+            .and_then(|f| f.wl_surface().map(|s| s.into_owned()));
+        self.reconcile_pointer_constraint(keyboard);
     }
 
     /// Confines a pointer location to the union of all mapped outputs; see [`confine_to_outputs`].
