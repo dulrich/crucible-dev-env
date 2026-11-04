@@ -16,6 +16,10 @@
 //! by keyboard (Super chords, workspace switch, overlay, lock screen). On every deactivation CDE
 //! performs, and on `remove_constraint`, the client's last cursor-position hint is applied with a
 //! silent location update (no synthetic motion).
+//!
+//! Every constraint lifecycle step (created, activated, deactivated, refused, forgotten, removed)
+//! is logged at `debug` under this module's target, deduplicated so steady motion does not repeat
+//! a line; per-motion clamping is logged at `trace`.
 
 use std::collections::HashMap;
 
@@ -34,6 +38,7 @@ use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::wayland::seat::WaylandFocus;
 
 use crate::state::{Backend, CrucibleState};
+use tracing::debug;
 
 /// The kind of an active constraint, as seen by [`constrained_motion`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +132,24 @@ pub fn constraint_eligible(
     relative_motion && !modal && keyboard_on_surface && pointer_in_region
 }
 
+/// The eligibility conditions that fail, named for the diagnostic log (empty: eligible).
+pub fn failed_gates(
+    relative_motion: bool,
+    modal: bool,
+    keyboard_on_surface: bool,
+    pointer_in_region: bool,
+) -> Vec<&'static str> {
+    [
+        (!relative_motion, "no-relative-motion"),
+        (modal, "modal"),
+        (!keyboard_on_surface, "keyboard-elsewhere"),
+        (!pointer_in_region, "pointer-outside-region"),
+    ]
+    .into_iter()
+    .filter_map(|(failed, name)| failed.then_some(name))
+    .collect()
+}
+
 /// Whether `hint` (surface-local) lies inside a surface of `size`, i.e. may be applied on unlock.
 pub fn hint_applies(hint: Point<f64, Logical>, size: smithay::utils::Size<i32, Logical>) -> bool {
     Rectangle::from_size(size).contains(hint.to_i32_floor())
@@ -143,6 +166,8 @@ pub struct PointerLockState {
     hints: HashMap<ObjectId, (WlSurface, Point<f64, Logical>)>,
     /// The surface whose constraint CDE activated, with its last known global origin.
     active: Option<(WlSurface, Point<f64, Logical>)>,
+    /// The last reconcile outcome logged, so repeated identical outcomes log once.
+    last_logged: Option<String>,
 }
 
 impl PointerLockState {
@@ -153,6 +178,7 @@ impl PointerLockState {
             constraints: PointerConstraintsState::new::<CrucibleState<B>>(dh),
             hints: HashMap::new(),
             active: None,
+            last_logged: None,
         }
     }
 }
@@ -214,7 +240,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some((active, _)) = &self.pointer_lock.active
             && (!active.is_alive() || focus.as_ref() != Some(active))
         {
+            debug!(
+                surface = ?active.id(),
+                alive = active.is_alive(),
+                focus = ?focus.as_ref().map(Resource::id),
+                location = ?location,
+                "pointer constraint forgotten: pointer focus left the constrained surface"
+            );
             self.pointer_lock.active = None;
+            self.pointer_lock.last_logged = None;
         }
         let Some(surface) = focus else { return };
 
@@ -242,14 +276,22 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
         let mut deactivated = false;
         let mut activated = false;
+        let mut seen: Option<(ConstraintKind, Option<RegionAttributes>, Vec<&'static str>)> = None;
         with_pointer_constraint(&surface, &pointer, |c| {
             let Some(c) = c else { return };
-            let eligible = constraint_eligible(
+            let pointer_in_region = c.is_active() || in_region(c.region());
+            let gates = (
                 B::HAS_RELATIVE_MOTION,
                 modal,
                 keyboard_on_surface,
-                c.is_active() || in_region(c.region()),
+                pointer_in_region,
             );
+            let eligible = constraint_eligible(gates.0, gates.1, gates.2, gates.3);
+            seen = Some((
+                kind_of(&c),
+                c.region().cloned(),
+                failed_gates(gates.0, gates.1, gates.2, gates.3),
+            ));
             if eligible {
                 c.activate();
                 activated = true;
@@ -258,6 +300,27 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 deactivated = true;
             }
         });
+        if let Some((kind, region, failed)) = seen
+            && tracing::enabled!(tracing::Level::DEBUG)
+        {
+            let id = surface.id();
+            let line = if activated {
+                format!(
+                    "pointer constraint active: {kind:?} on {id:?}, origin {origin:?}, region {region:?}"
+                )
+            } else {
+                let verb = if deactivated {
+                    "deactivated"
+                } else {
+                    "refused"
+                };
+                format!(
+                    "pointer constraint {verb}: {kind:?} on {id:?}, failed {failed:?}, origin {origin:?}, keyboard {:?}",
+                    keyboard.as_ref().map(Resource::id)
+                )
+            };
+            self.log_constraint_once(line);
+        }
         if activated {
             if let Some(o) = origin {
                 self.pointer_lock.active = Some((surface, o));
@@ -265,6 +328,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         } else if deactivated {
             self.apply_unlock_hint(&surface);
             self.pointer_lock.active = None;
+        }
+    }
+
+    /// Logs a reconcile outcome at `debug` unless it repeats the last one logged.
+    fn log_constraint_once(&mut self, line: String) {
+        if self.pointer_lock.last_logged.as_deref() != Some(line.as_str()) {
+            debug!("{line}");
+            self.pointer_lock.last_logged = Some(line);
         }
     }
 
@@ -318,7 +389,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
 }
 
 impl<B: Backend + 'static> PointerConstraintsHandler for CrucibleState<B> {
-    fn new_constraint(&mut self, _surface: &WlSurface, _pointer: &PointerHandle<Self>) {
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        let detail = with_pointer_constraint(surface, pointer, |c| {
+            c.map(|c| (kind_of(&c), c.region().cloned()))
+        });
+        let focus = pointer
+            .current_focus()
+            .and_then(|f| f.wl_surface().map(|s| s.id()));
+        debug!(
+            surface = ?surface.id(),
+            constraint = ?detail,
+            pointer_focus = ?focus,
+            location = ?pointer.current_location(),
+            "pointer constraint created"
+        );
+        self.pointer_lock.last_logged = None;
         let keyboard = self
             .seat
             .get_keyboard()
@@ -328,6 +413,16 @@ impl<B: Backend + 'static> PointerConstraintsHandler for CrucibleState<B> {
     }
 
     fn remove_constraint(&mut self, surface: &WlSurface, _pointer: &PointerHandle<Self>) {
+        debug!(
+            surface = ?surface.id(),
+            was_active = self
+                .pointer_lock
+                .active
+                .as_ref()
+                .is_some_and(|(s, _)| s == surface),
+            "pointer constraint removed"
+        );
+        self.pointer_lock.last_logged = None;
         // Smithay already dropped the constraint; CDE's own record says whether it was active.
         if self
             .pointer_lock
@@ -483,6 +578,24 @@ mod tests {
         assert!(
             !constraint_eligible(true, false, true, false),
             "outside region"
+        );
+    }
+
+    #[test]
+    fn failed_gates_names_each_failing_condition() {
+        assert!(failed_gates(true, false, true, true).is_empty());
+        assert_eq!(
+            failed_gates(false, true, false, false),
+            vec![
+                "no-relative-motion",
+                "modal",
+                "keyboard-elsewhere",
+                "pointer-outside-region"
+            ]
+        );
+        assert_eq!(
+            failed_gates(true, false, false, true),
+            vec!["keyboard-elsewhere"]
         );
     }
 

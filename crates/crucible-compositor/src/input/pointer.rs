@@ -112,7 +112,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     pointer.frame(self);
                     return;
                 }
-                MotionOutcome::Move(next) => location = next,
+                MotionOutcome::Move(next) => {
+                    if next != location {
+                        tracing::trace!(
+                            target: "crucible_compositor::pointer_lock",
+                            ?kind,
+                            ?rect,
+                            proposed = ?location,
+                            clamped = ?next,
+                            "confined motion clamped"
+                        );
+                    }
+                    location = next;
+                }
             }
         }
         let under = self.surface_under(&mode, location);
