@@ -13,6 +13,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::field::{decode_field, encode_field};
+use crate::program::own_exe_name;
 
 /// One `crucible <sub> <args…>` invocation CDE builds (and the binary parses).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -211,7 +212,13 @@ impl ResumeWrapper {
     /// Decodes a whole argv `[<…/crucible>, "resume", …]`; anything else is `None`.
     #[must_use]
     pub fn from_argv(argv: &[String]) -> Option<Self> {
-        Self::parse(subcommand_args(argv, "resume")?).ok()
+        Self::from_argv_as(argv, &own_exe_name())
+    }
+
+    /// [`Self::from_argv`] with the running binary's basename `own` given explicitly.
+    #[must_use]
+    pub fn from_argv_as(argv: &[String], own: &str) -> Option<Self> {
+        Self::parse(subcommand_args(argv, "resume", own)?).ok()
     }
 }
 
@@ -274,31 +281,69 @@ impl RelaunchWrapper {
     /// Decodes a whole argv `[<…/crucible>, "relaunch", …]`; anything else is `None`.
     #[must_use]
     pub fn from_argv(argv: &[String]) -> Option<Self> {
-        Self::parse(subcommand_args(argv, "relaunch")?).ok()
+        Self::from_argv_as(argv, &own_exe_name())
+    }
+
+    /// [`Self::from_argv`] with the running binary's basename `own` given explicitly.
+    #[must_use]
+    pub fn from_argv_as(argv: &[String], own: &str) -> Option<Self> {
+        Self::parse(subcommand_args(argv, "relaunch", own)?).ok()
     }
 }
 
-/// The args after `sub` when `argv` is `[<…/crucible>, sub, …]`.
-fn subcommand_args<'a>(argv: &'a [String], sub: &str) -> Option<&'a [String]> {
-    (crucible_subcommand(argv)? == sub).then(|| &argv[2..])
+/// The args after `sub` when `argv` is `[<…/crucible>, sub, …]` (`crucible` or `own`).
+fn subcommand_args<'a>(argv: &'a [String], sub: &str, own: &str) -> Option<&'a [String]> {
+    (crucible_subcommand_as(argv, own)? == sub).then(|| &argv[2..])
 }
 
-/// `argv[1]` when `argv[0]`'s basename is `crucible`: the CDE subcommand the process runs.
+/// `argv[1]` when `argv[0]`'s basename is `crucible` or the running binary's basename: the CDE
+/// subcommand the process runs. The own name is resolved now, never cached.
 #[must_use]
 pub fn crucible_subcommand(argv: &[String]) -> Option<&str> {
-    let exe = Path::new(argv.first()?).file_name()?;
-    (exe == "crucible").then_some(())?;
+    crucible_subcommand_as(argv, &own_exe_name())
+}
+
+/// [`crucible_subcommand`] with the running binary's basename `own` given explicitly.
+#[must_use]
+pub fn crucible_subcommand_as<'a>(argv: &'a [String], own: &str) -> Option<&'a str> {
+    is_own_name(Path::new(argv.first()?).file_name()?, own).then_some(())?;
     argv.get(1).map(String::as_str)
 }
 
-/// Whether a process is one of CDE's own `crucible` processes: `argv[0]`'s basename is
-/// `crucible`, or (argv unreadable or empty) its `comm` is.
+/// `name` is `crucible` or `own`.
+fn is_own_name(name: &std::ffi::OsStr, own: &str) -> bool {
+    name == "crucible" || name == own
+}
+
+/// Whether a process is one of CDE's own processes: `argv[0]`'s basename is `crucible` or the
+/// running binary's basename, or (argv unreadable or empty) its `comm` is one of them. The own
+/// name is resolved now, never cached.
 #[must_use]
 pub fn is_cde_process(argv: &[String], comm: &str) -> bool {
+    is_cde_process_as(argv, comm, &own_exe_name())
+}
+
+/// [`is_cde_process`] with the running binary's basename `own` given explicitly. The `comm`
+/// fallback compares each name truncated to 15 bytes (the kernel's `TASK_COMM_LEN - 1`).
+#[must_use]
+pub fn is_cde_process_as(argv: &[String], comm: &str, own: &str) -> bool {
     match argv.first() {
-        Some(a) => Path::new(a).file_name().is_some_and(|n| n == "crucible"),
-        None => comm == "crucible",
+        Some(a) => Path::new(a)
+            .file_name()
+            .is_some_and(|n| is_own_name(n, own)),
+        None => ["crucible", own]
+            .iter()
+            .any(|name| comm == truncate_comm(name)),
     }
+}
+
+/// `name` cut to the kernel's 15-byte `comm` limit (on a char boundary).
+fn truncate_comm(name: &str) -> &str {
+    let mut end = name.len().min(15);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    &name[..end]
 }
 
 /// What a CDE restore wrapper found in a window's own argv stands for.
@@ -317,24 +362,33 @@ impl CdeWrapper {
     /// anything the shared grammar rejects. Decodes one level only.
     #[must_use]
     pub fn decode(argv: &[String], exec_flag: &str) -> Option<Self> {
-        let start = if is_wrapper_start(argv) {
+        Self::decode_as(argv, exec_flag, &own_exe_name())
+    }
+
+    /// [`Self::decode`] with the running binary's basename `own` given explicitly.
+    #[must_use]
+    pub fn decode_as(argv: &[String], exec_flag: &str, own: &str) -> Option<Self> {
+        let start = if is_wrapper_start_as(argv, own) {
             0
         } else {
             argv.iter().position(|a| a == exec_flag)? + 1
         };
         let wrapper = argv.get(start..)?;
-        if !is_wrapper_start(wrapper) {
+        if !is_wrapper_start_as(wrapper, own) {
             return None;
         }
         match wrapper.get(1).map(String::as_str) {
-            Some("relaunch") => RelaunchWrapper::from_argv(wrapper).map(Self::App),
-            _ => ResumeWrapper::from_argv(wrapper).map(Self::Terminal),
+            Some("relaunch") => RelaunchWrapper::from_argv_as(wrapper, own).map(Self::App),
+            _ => ResumeWrapper::from_argv_as(wrapper, own).map(Self::Terminal),
         }
     }
 }
 
-fn is_wrapper_start(argv: &[String]) -> bool {
-    matches!(crucible_subcommand(argv), Some("relaunch" | "resume"))
+fn is_wrapper_start_as(argv: &[String], own: &str) -> bool {
+    matches!(
+        crucible_subcommand_as(argv, own),
+        Some("relaunch" | "resume")
+    )
 }
 
 /// What `crucible pick` is asked to do: `--rename` and `--root` are alternatives, so both cannot
@@ -964,5 +1018,73 @@ mod tests {
         ] {
             assert_eq!(RelaunchWrapper::from_argv(&v(bad)), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn own_name_predicates() {
+        let own = "crucible-trixie";
+        assert_eq!(
+            crucible_subcommand_as(&v(&["/x/crucible-trixie", "relaunch"]), own),
+            Some("relaunch")
+        );
+        assert_eq!(
+            crucible_subcommand_as(&v(&["/x/crucible", "mem"]), own),
+            Some("mem")
+        );
+        assert_eq!(
+            crucible_subcommand_as(&v(&["/x/crucible.prev", "mem"]), "crucible.prev"),
+            Some("mem")
+        );
+        // A look-alike is not CDE's own.
+        assert_eq!(
+            crucible_subcommand_as(&v(&["/x/crucible-foo", "mem"]), "crucible"),
+            None
+        );
+        assert!(!is_cde_process_as(
+            &v(&["/x/crucible-foo"]),
+            "x",
+            "crucible"
+        ));
+        assert!(is_cde_process_as(&v(&["/x/crucible-trixie"]), "x", own));
+        // comm fallback: each name truncated to 15 bytes.
+        assert!(is_cde_process_as(&[], "crucible-trixie", own));
+        assert!(is_cde_process_as(&[], "crucible", own));
+        // A longer own name (17 bytes) shows as its first 15 bytes.
+        let long = "crucible-bookworm";
+        assert!(is_cde_process_as(&[], "crucible-bookwo", long));
+        assert!(!is_cde_process_as(&[], long, long));
+        assert!(!is_cde_process_as(&[], "bash", own));
+    }
+
+    #[test]
+    fn wrappers_decode_under_a_non_default_own_name() {
+        let own = "crucible-trixie";
+        let relaunch = v(&[
+            "/x/crucible-trixie",
+            "relaunch",
+            "--app-id",
+            "a",
+            "--",
+            "gimp",
+        ]);
+        let resume = v(&["/x/crucible-trixie", "resume", "--cwd", "/p"]);
+        assert!(RelaunchWrapper::from_argv_as(&relaunch, own).is_some());
+        assert!(RelaunchWrapper::from_argv_as(&relaunch, "crucible").is_none());
+        assert!(ResumeWrapper::from_argv_as(&resume, own).is_some());
+        assert!(matches!(
+            CdeWrapper::decode_as(&relaunch, "-e", own),
+            Some(CdeWrapper::App(_))
+        ));
+        assert!(matches!(
+            CdeWrapper::decode_as(&resume, "-e", own),
+            Some(CdeWrapper::Terminal(_))
+        ));
+        let mut wrapped = v(&["ghostty", "-e"]);
+        wrapped.extend(relaunch.clone());
+        assert!(matches!(
+            CdeWrapper::decode_as(&wrapped, "-e", own),
+            Some(CdeWrapper::App(_))
+        ));
+        assert_eq!(CdeWrapper::decode_as(&wrapped, "-e", "crucible"), None);
     }
 }

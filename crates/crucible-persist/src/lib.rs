@@ -44,12 +44,12 @@ pub use error::PersistError;
 pub use format::FORMAT_VERSION;
 pub use invocation::{
     CdeWrapper, Invocation, PickTarget, RelaunchWrapper, ResumeMode, ResumeWrapper,
-    crucible_subcommand, is_cde_process,
+    crucible_subcommand, crucible_subcommand_as, is_cde_process, is_cde_process_as,
 };
 pub use policy::should_save;
 pub use program::{
-    CrucibleExeError, ExeRemoved, child_path, crucible_exe, is_executable_file, preflight_command,
-    reinstalled_exe, resolve_program, same_program,
+    CrucibleExeError, ExeRemoved, child_path, crucible_exe, is_executable_file, own_exe_name,
+    preflight_command, reinstalled_exe, resolve_program, same_program,
 };
 pub use record::{PaneRecord, RecordNode, WindowRecord, WorkspaceRecord};
 pub use restore::{SpawnJob, prepare_restore, resolve_cwd};

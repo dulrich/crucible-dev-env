@@ -15,7 +15,7 @@ use crate::record::WindowRecord;
 fn wrapper_record(wrapper: CdeWrapper) -> WindowRecord {
     match wrapper {
         CdeWrapper::App(cap) => WindowRecord::App {
-            app_id: cap.app_id,
+            app_id: non_empty(cap.app_id),
             cmdline: Some(cap.cmdline),
         },
         CdeWrapper::Terminal(cap) => WindowRecord::Terminal {
@@ -85,11 +85,24 @@ pub struct WindowRecordInput<'a> {
 ///   argv such as `steamwebhelper`) records that cmdline, the element app id filling a missing
 ///   origin id; (3) else the app id and the joined argv (no cmdline when the argv is empty).
 #[must_use]
-pub fn window_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowRecord {
-    match input.class {
+pub fn window_record(env: &CaptureEnv, mut input: WindowRecordInput<'_>) -> WindowRecord {
+    input.app_id = non_empty(input.app_id);
+    let record = match input.class {
         SpawnClass::Terminal => terminal_record(env, input),
         SpawnClass::App => app_record(env, input),
+    };
+    match record {
+        WindowRecord::App { app_id, cmdline } => WindowRecord::App {
+            app_id: non_empty(app_id),
+            cmdline,
+        },
+        other => other,
     }
+}
+
+/// An empty app id carries no information: `None`.
+fn non_empty(app_id: Option<String>) -> Option<String> {
+    app_id.filter(|id| !id.is_empty())
 }
 
 /// The [`SpawnClass::Terminal`] arm of [`window_record`].
@@ -154,7 +167,7 @@ fn app_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowRecord {
     if let Some(wrapper) = CdeWrapper::decode(&argv, exec_flag) {
         return match wrapper {
             CdeWrapper::App(cap) => WindowRecord::App {
-                app_id: cap.app_id.or(app_id),
+                app_id: non_empty(cap.app_id).or(app_id),
                 cmdline: Some(cap.cmdline),
             },
             wrapper => wrapper_record(wrapper),
@@ -166,7 +179,7 @@ fn app_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowRecord {
     }) = origin
     {
         return WindowRecord::App {
-            app_id: origin_id.clone().or(app_id),
+            app_id: non_empty(origin_id.clone()).or(app_id),
             cmdline: Some(cmdline.clone()),
         };
     }
@@ -652,6 +665,52 @@ mod tests {
         assert_eq!(
             terminal_record(&d, 117_833, Some(&claude_origin())),
             claude_origin()
+        );
+    }
+
+    /// An empty app id never reaches a record: live id, decoded wrapper, saved origin and a
+    /// terminal-class placeholder all yield `app_id: None`.
+    #[test]
+    fn empty_app_id_is_none_in_every_path() {
+        let p = FakeProc::new("empty-app-id");
+        p.add((200, "x", 1), 0, "/w", &["gimp"], &[]);
+        assert_eq!(
+            classify(&p, Some(200), SpawnClass::App, None, Some("")),
+            app(None, Some("gimp"))
+        );
+        p.add(
+            (201, "crucible", 1),
+            0,
+            "/w",
+            &["/x/crucible", "relaunch", "--app-id", "", "--", "gimp"],
+            &[],
+        );
+        assert_eq!(
+            classify(&p, Some(201), SpawnClass::App, None, Some("")),
+            app(None, Some("gimp"))
+        );
+        let origin = app(Some(""), Some("gimp"));
+        assert_eq!(
+            classify(&p, Some(200), SpawnClass::App, Some(&origin), Some("")),
+            app(None, Some("gimp"))
+        );
+        assert_eq!(
+            classify(&p, Some(200), SpawnClass::App, Some(&origin), Some("g")),
+            app(Some("g"), Some("gimp"))
+        );
+        // A terminal-class placeholder: the terminal's child is the relaunch wrapper.
+        p.add((300, "ghostty", 1), 0, "/w", &["ghostty"], &[301]);
+        p.add(
+            (301, "crucible", 300),
+            0,
+            "/w",
+            &["/x/crucible", "relaunch", "--app-id", "", "--", "gimp"],
+            &[],
+        );
+        assert_eq!(terminal_record(&p, 300, None), app(None, Some("gimp")));
+        assert_eq!(
+            terminal_record(&p, 300, Some(&origin)),
+            app(None, Some("gimp"))
         );
     }
 }

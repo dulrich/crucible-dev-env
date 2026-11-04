@@ -36,6 +36,7 @@ pub fn banner(args: &RelaunchWrapper) -> String {
     let what = args
         .app_id
         .clone()
+        .filter(|id| !id.is_empty())
         .unwrap_or_else(|| program_of(&args.cmdline));
     format!("CDE restored {what}. Press Enter to relaunch it, or Ctrl+C to dismiss.")
 }
@@ -180,6 +181,18 @@ mod tests {
         assert_eq!(
             banner(&without),
             "CDE restored firefox-esr. Press Enter to relaunch it, or Ctrl+C to dismiss."
+        );
+    }
+
+    #[test]
+    fn banner_with_empty_app_id_names_the_program() {
+        let empty = RelaunchWrapper {
+            app_id: Some(String::new()),
+            cmdline: "/usr/bin/gimp --new".into(),
+        };
+        assert_eq!(
+            banner(&empty),
+            "CDE restored gimp. Press Enter to relaunch it, or Ctrl+C to dismiss."
         );
     }
 }

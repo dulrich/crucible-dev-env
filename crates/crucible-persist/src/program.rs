@@ -53,6 +53,22 @@ pub fn crucible_exe() -> Result<PathBuf, CrucibleExeError> {
     Ok(reinstalled_exe(raw, is_executable_file)?)
 }
 
+/// The running binary's basename (e.g. `crucible`, or `crucible-trixie` when installed under a
+/// distro-suffixed name), taken from [`crucible_exe`] on every call (never cached) so it follows
+/// a reinstall. Any resolution failure yields `crucible`.
+#[must_use]
+pub fn own_exe_name() -> String {
+    crucible_exe()
+        .ok()
+        .and_then(|p| exe_basename(&p))
+        .unwrap_or_else(|| "crucible".to_string())
+}
+
+/// The final path component of `exe` as a string, if it has a UTF-8 one.
+fn exe_basename(exe: &Path) -> Option<String> {
+    exe.file_name().and_then(|n| n.to_str()).map(str::to_string)
+}
+
 /// Why [`crucible_exe`] failed.
 #[derive(Debug, thiserror::Error)]
 pub enum CrucibleExeError {
@@ -342,5 +358,15 @@ mod tests {
         ] {
             assert_eq!(preflight_command(cmd, cwd, None), Ok(()), "{cmd:?}");
         }
+    }
+
+    #[test]
+    fn own_name_follows_a_reinstalled_exe() {
+        let raw = PathBuf::from("/home/u/.local/bin/crucible-trixie (deleted)");
+        let exe = reinstalled_exe(raw, |_| true).unwrap();
+        assert_eq!(exe_basename(&exe).as_deref(), Some("crucible-trixie"));
+        assert_eq!(exe_basename(Path::new("/")), None);
+        // Whatever the test binary is called, the resolver yields its basename.
+        assert!(!own_exe_name().is_empty());
     }
 }
