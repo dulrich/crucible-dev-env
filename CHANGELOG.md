@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.3 — 2026-11-04
+
+### Added
+
+- Pointer-constraint diagnostics: with `RUST_LOG=info,crucible_compositor::pointer_lock=debug`, CDE logs each pointer lock/confine as it is created, activated, refused or deactivated (naming the failed condition), dropped when pointer focus leaves, and removed. At `trace` it also logs each confine clamp. This is for finding out why a fullscreen game's pointer can leave its monitor.
+
 ## 0.4.2 — 2026-11-04
 
 ### Fixed
