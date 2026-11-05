@@ -25,11 +25,13 @@ use smithay::{
             current_data_device_selection_userdata, request_data_device_client_selection,
             set_data_device_selection,
         },
+        ext_data_control,
         primary_selection::{
             PrimarySelectionHandler, PrimarySelectionState, clear_primary_selection,
             current_primary_selection_userdata, request_primary_client_selection,
             set_primary_selection,
         },
+        wlr_data_control,
     },
     xwayland::X11Wm,
 };
@@ -228,5 +230,21 @@ impl<B: Backend + 'static> DndGrabHandler for CrucibleState<B> {
 impl<B: Backend + 'static> PrimarySelectionHandler for CrucibleState<B> {
     fn primary_selection_state(&mut self) -> &mut PrimarySelectionState {
         &mut self.primary_selection_state
+    }
+}
+
+// Data control (ext + wlr): clipboard tools such as `wl-copy`/`wl-paste` set and read the seat
+// selection directly. Without it wl-clipboard falls back to mapping a surface to get keyboard
+// focus, which CDE tiles as a window in the focused pane and which steals focus from the terminal.
+// Selections set this way reach X11 through the same `SelectionHandler::new_selection` bridge.
+impl<B: Backend + 'static> ext_data_control::DataControlHandler for CrucibleState<B> {
+    fn data_control_state(&mut self) -> &mut ext_data_control::DataControlState {
+        &mut self.ext_data_control_state
+    }
+}
+
+impl<B: Backend + 'static> wlr_data_control::DataControlHandler for CrucibleState<B> {
+    fn data_control_state(&mut self) -> &mut wlr_data_control::DataControlState {
+        &mut self.wlr_data_control_state
     }
 }

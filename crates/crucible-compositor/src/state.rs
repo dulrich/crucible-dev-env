@@ -15,6 +15,7 @@
 //! - **wl_data_device** ([`DataDeviceState`]) + **primary selection** ([`PrimarySelectionState`]) —
 //!   clipboard plumbing with minimal handlers, plus Wayland-client pointer drag-and-drop grabs
 //!   (touch and XWayland-initiated DnD are not driven).
+//! - **data control** (ext + wlr) — clipboard tools read and set the selection without a surface.
 //!
 //! The structure mirrors anvil's `AnvilState`/`Backend` split (a state struct generic over a
 //! backend trait, with backend specifics isolated in `winit.rs`/`udev.rs`) so anvil-derived code
@@ -205,6 +206,12 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub data_device_state: DataDeviceState,
     /// `zwp_primary_selection_device_manager_v1` global state.
     pub primary_selection_state: PrimarySelectionState,
+    /// `ext_data_control_manager_v1` global state: lets clipboard tools (`wl-copy`/`wl-paste`,
+    /// clipboard managers) read and set the selection without mapping a surface for focus.
+    pub ext_data_control_state: smithay::wayland::selection::ext_data_control::DataControlState,
+    /// `zwlr_data_control_manager_v1` global state: the wlr predecessor of the ext protocol, still
+    /// the one older `wl-clipboard` builds bind.
+    pub wlr_data_control_state: smithay::wayland::selection::wlr_data_control::DataControlState,
     /// `xwayland_shell_v1` global state (lets XWayland associate `wl_surface`s with X11 windows).
     pub xwayland_shell_state: XWaylandShellState,
     /// `zxdg_decoration_manager_v1` global state: CDE answers server-side for every toplevel (and
@@ -349,6 +356,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let layer_shell_state = WlrLayerShellState::new::<Self>(&dh);
         let data_device_state = DataDeviceState::new::<Self>(&dh);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&dh);
+        // Data control serves every client (as session-lock does): CDE has no sandboxed clients.
+        let ext_data_control_state =
+            smithay::wayland::selection::ext_data_control::DataControlState::new::<Self, _>(
+                &dh,
+                Some(&primary_selection_state),
+                |_| true,
+            );
+        let wlr_data_control_state =
+            smithay::wayland::selection::wlr_data_control::DataControlState::new::<Self, _>(
+                &dh,
+                Some(&primary_selection_state),
+                |_| true,
+            );
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
         let xdg_decoration_state =
             smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<Self>(&dh);
@@ -419,6 +439,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             layer_shell_state,
             data_device_state,
             primary_selection_state,
+            ext_data_control_state,
+            wlr_data_control_state,
             xwayland_shell_state,
             xdg_decoration_state,
             fractional_scale_state,
