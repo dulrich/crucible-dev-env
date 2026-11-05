@@ -57,8 +57,8 @@ mod placement;
 
 pub use bindings::{Binding, LayoutState, Payload, Teardown, WindowMeta};
 pub use outputs::{model_output_id, set_model_output_id};
-use placement::configure_placement;
 pub use placement::{NO_GAPS, WindowClass, clamped_gap, window_rect};
+use placement::{configure_placement, suspend_toplevel};
 
 use crucible_layout::{
     FocusChange, LayoutChange, LayoutError, PaneId, Projection, Rect, WindowId, WorkspaceId, World,
@@ -164,6 +164,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 LayoutChange::Hide { id } => {
                     if let Some(element) = self.layout.element(*id).cloned() {
                         self.space.unmap_elem(&element);
+                        // After the unmap: tell the client it is no longer visible.
+                        suspend_toplevel(&element);
                     }
                 }
             }

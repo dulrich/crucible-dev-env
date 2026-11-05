@@ -86,7 +86,9 @@ pub(super) fn configure_placement(
         // Every managed toplevel is tiled on all four edges so the client fills its tile instead
         // of drawing floating-window chrome (shadow margins, own sizing). Never `Maximized`.
         let states_changed = toplevel.with_pending_state(|state| {
-            let changed = apply_shell_states(&mut state.states, fullscreen);
+            // A placed window is visible: clear any `Suspended` set while it was hidden.
+            let changed = apply_shell_states(&mut state.states, fullscreen)
+                | apply_suspended(&mut state.states, false);
             if resized || changed {
                 state.size = Some(rect.size);
             }
@@ -103,6 +105,30 @@ pub(super) fn configure_placement(
             let _ = surface.configure(Some(rect));
         }
     }
+}
+
+/// Marks a window being hidden (unmapped, kept alive) as `xdg_toplevel` `Suspended` and sends the
+/// configure, only when the state actually changes. X11 windows are untouched.
+pub(super) fn suspend_toplevel(element: &WindowElement) {
+    if let Some(toplevel) = element.toplevel()
+        && toplevel.with_pending_state(|state| apply_suspended(&mut state.states, true))
+    {
+        toplevel.send_configure();
+    }
+}
+
+/// Sets or clears `Suspended` in `states`. Returns whether anything changed. **Pure**.
+fn apply_suspended(
+    states: &mut smithay::wayland::shell::xdg::ToplevelStateSet,
+    suspended: bool,
+) -> bool {
+    let had = states.contains(XdgState::Suspended);
+    if suspended {
+        states.set(XdgState::Suspended);
+    } else {
+        states.unset(XdgState::Suspended);
+    }
+    had != suspended
 }
 
 /// Flips a (hidden) window's fullscreen shell state without placing it: the xdg states are
@@ -234,5 +260,21 @@ mod tests {
         assert!(has_tiled_states(&set));
         assert!(!set.contains(XdgState::Maximized));
         assert!(!TILED_STATES.contains(&XdgState::Maximized));
+    }
+
+    #[test]
+    fn suspended_set_on_hide_cleared_on_place_and_never_added_otherwise() {
+        use smithay::wayland::shell::xdg::ToplevelStateSet;
+        let mut set = ToplevelStateSet::default();
+        // Never hidden: placing changes nothing (no extra configure).
+        assert!(!apply_suspended(&mut set, false));
+        assert!(!set.contains(XdgState::Suspended));
+        // Hidden: Suspended appears, once.
+        assert!(apply_suspended(&mut set, true));
+        assert!(set.contains(XdgState::Suspended));
+        assert!(!apply_suspended(&mut set, true), "already suspended");
+        // Placed after hidden: cleared, and that counts as a change.
+        assert!(apply_suspended(&mut set, false));
+        assert!(!set.contains(XdgState::Suspended));
     }
 }
