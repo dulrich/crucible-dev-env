@@ -6,7 +6,7 @@
 //! parameter so the core is tested on a fixture tree.
 
 use std::cmp::Reverse;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
@@ -19,7 +19,7 @@ use crate::cli::{Parsed, help_requested};
 use crate::table::{self, Col};
 
 /// Usage text for `crucible mem --help`.
-pub const USAGE: &str = "usage: crucible mem [--pid <n>]\n\nReal memory per logical app of a running CDE: one row per direct child process of the compositor\n(PSS, swap, process count, label), largest PSS first, then the compositor itself and a TOTAL.\nPSS and swap are summed over the child's whole process subtree from /proc/<pid>/smaps_rollup. The\nlabel is the child's name plus the deepest process under it that is not a shell and\nnot one of CDE's own `crucible` processes (ties: largest PSS), e.g. `ghostty › htop`. A child whose\nsubtree holds the overlay host gets ` (overlay)` appended.\n\n  --pid <n>    the compositor's pid. Without it, the compositor is the process owned by you whose\n               command is `crucible` with `--winit` or `--tty-udev`; with several, the one that is an\n               ancestor of this command, else the lowest pid. None found: message on stderr, exit 1.\n  -h, --help   print this usage and exit 0\n\nOnly processes CDE spawned itself are counted: D-Bus-activated apps parented to `systemd --user`\nare not. A process that is unreadable or vanished counts as zero and its row is marked `*`.\n";
+pub const USAGE: &str = "usage: crucible mem [--pid <n>]\n\nReal memory per logical app of a running CDE: one row per direct child process of the compositor\n(PSS, swap, process count, label), largest PSS first, then the compositor itself and a TOTAL.\nPSS and swap are summed over the child's whole process subtree from /proc/<pid>/smaps_rollup. The\nlabel is the child's name plus the deepest process under it that is not a shell and\nnot one of CDE's own `crucible` processes (ties: largest PSS), e.g. `ghostty › htop`. A child whose\nsubtree holds the overlay host gets ` (overlay)` appended. A cterm daemon serving this compositor (same\nWAYLAND_DISPLAY, owned by you) gets its own row, `cterm daemon (N windows) › …`, with its window count.\n\n  --pid <n>    the compositor's pid. Without it, the compositor is the process owned by you whose\n               command is `crucible` with `--winit` or `--tty-udev`; with several, the one that is an\n               ancestor of this command, else the lowest pid. None found: message on stderr, exit 1.\n  -h, --help   print this usage and exit 0\n\nOnly processes CDE spawned itself are counted: D-Bus-activated apps parented to `systemd --user`\nare not. A process that is unreadable or vanished counts as zero and its row is marked `*`.\n";
 
 /// Parsed arguments.
 #[derive(Debug, PartialEq, Eq)]
@@ -136,6 +136,84 @@ fn skipped_in_label(p: &ProcInfo) -> bool {
         || (p.argv.is_empty() && is_shell_program(&p.comm))
 }
 
+/// Whether `argv` is a resident cterm daemon: argv[0] basename `cterm`, argv[1] `daemon`.
+fn is_cterm_daemon(argv: &[String]) -> bool {
+    argv.first()
+        .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "cterm"))
+        && argv.get(1).is_some_and(|a| a == "daemon")
+}
+
+/// The raw value of `key` in `/proc/<pid>/environ` (compared byte-for-byte by the caller).
+fn environ_var(proc_root: &Path, pid: u32, key: &[u8]) -> Option<Vec<u8>> {
+    let env = fs::read(proc_root.join(pid.to_string()).join("environ")).ok()?;
+    env.split(|&b| b == 0).find_map(|kv| {
+        kv.strip_prefix(key)
+            .and_then(|r| r.strip_prefix(b"="))
+            .map(<[u8]>::to_vec)
+    })
+}
+
+/// The subtree of `root` with depths; a visited set guards against cycles.
+fn subtree(kids: &HashMap<u32, Vec<u32>>, root: u32) -> Vec<(u32, usize)> {
+    let mut tree = vec![(root, 0usize)];
+    let mut seen = HashSet::from([root]);
+    let mut i = 0;
+    while i < tree.len() {
+        let (p, d) = tree[i];
+        for &k in kids.get(&p).map_or(&[][..], Vec::as_slice) {
+            if seen.insert(k) {
+                tree.push((k, d + 1));
+            }
+        }
+        i += 1;
+    }
+    tree
+}
+
+/// Sums a subtree into a row labelled `label`, plus ` › <deepest non-skipped process>` and the
+/// ` (overlay)` suffix when the subtree holds the overlay host.
+fn subtree_row(
+    proc_root: &Path,
+    procs: &ProcSnapshot,
+    tree: &[(u32, usize)],
+    mut label: String,
+) -> Row {
+    let (mut pss, mut swap, mut unreadable) = (0, 0, false);
+    let mut best: Option<(usize, u64, Reverse<u32>)> = None;
+    let mut overlay = false;
+    for &(p, d) in tree {
+        let mem = read_rollup(proc_root, p);
+        unreadable |= mem.is_none();
+        let (a, b) = mem.unwrap_or((0, 0));
+        pss += a;
+        swap += b;
+        let Some(info) = procs.get(p) else {
+            continue;
+        };
+        overlay |= crucible_subcommand(&info.argv) == Some("overlay-host");
+        if d > 0 && !skipped_in_label(info) {
+            // Deepest first, then largest PSS, then lowest pid (deterministic).
+            best = best.max(Some((d, a, Reverse(p))));
+        }
+    }
+    if let Some((_, _, Reverse(p))) = best {
+        let n = procs
+            .get(p)
+            .map_or_else(|| format!("[{p}]"), |i| i.comm.clone());
+        let _ = write!(label, " › {n}");
+    }
+    if overlay {
+        label.push_str(" (overlay)");
+    }
+    Row {
+        pss_kb: pss,
+        swap_kb: swap,
+        procs: tree.len(),
+        label,
+        unreadable,
+    }
+}
+
 /// Builds the report for the compositor `pid` from a `/proc`-shaped tree.
 #[must_use]
 pub fn build_report(proc_root: &Path, pid: u32) -> Report {
@@ -152,52 +230,39 @@ pub fn build_report(proc_root: &Path, pid: u32) -> Report {
     };
 
     let mut children: Vec<Row> = Vec::new();
-    for &child in kids.get(&pid).map_or(&[][..], Vec::as_slice) {
-        // Subtree with depths; a visited set guards against cycles.
-        let mut tree = vec![(child, 0usize)];
-        let mut seen = HashSet::from([child]);
-        let mut i = 0;
-        while i < tree.len() {
-            let (p, d) = tree[i];
-            for &k in kids.get(&p).map_or(&[][..], Vec::as_slice) {
-                if seen.insert(k) {
-                    tree.push((k, d + 1));
-                }
-            }
-            i += 1;
+    let mut counted: HashSet<u32> = HashSet::new();
+    let top: &[u32] = kids.get(&pid).map_or(&[][..], Vec::as_slice);
+    for &child in top {
+        let tree = subtree(&kids, child);
+        counted.extend(tree.iter().map(|&(p, _)| p));
+        children.push(subtree_row(proc_root, &procs, &tree, name(child)));
+    }
+    // cterm daemons serving this compositor: detached into their own session, so they are not
+    // descendants; matched by the WAYLAND_DISPLAY of the first readable compositor child.
+    let display = top
+        .iter()
+        .find_map(|&c| environ_var(proc_root, c, b"WAYLAND_DISPLAY"));
+    if let Some(display) = display {
+        let uid = rustix::process::getuid().as_raw();
+        let mut daemons: Vec<u32> = procs
+            .iter()
+            .filter(|&(p, info)| {
+                p != pid
+                    && !counted.contains(&p)
+                    && is_cterm_daemon(&info.argv)
+                    && fs::metadata(proc_root.join(p.to_string())).is_ok_and(|m| m.uid() == uid)
+                    && environ_var(proc_root, p, b"WAYLAND_DISPLAY").as_deref()
+                        == Some(&display[..])
+            })
+            .map(|(p, _)| p)
+            .collect();
+        daemons.sort_unstable();
+        for d in daemons {
+            let tree = subtree(&kids, d);
+            let n = kids.get(&d).map_or(0, Vec::len);
+            let label = format!("cterm daemon ({n} window{})", if n == 1 { "" } else { "s" });
+            children.push(subtree_row(proc_root, &procs, &tree, label));
         }
-        let (mut pss, mut swap, mut unreadable) = (0, 0, false);
-        let mut best: Option<(usize, u64, Reverse<u32>)> = None;
-        let mut overlay = false;
-        for &(p, d) in &tree {
-            let mem = read_rollup(proc_root, p);
-            unreadable |= mem.is_none();
-            let (a, b) = mem.unwrap_or((0, 0));
-            pss += a;
-            swap += b;
-            let Some(info) = procs.get(p) else {
-                continue;
-            };
-            overlay |= crucible_subcommand(&info.argv) == Some("overlay-host");
-            if d > 0 && !skipped_in_label(info) {
-                // Deepest first, then largest PSS, then lowest pid (deterministic).
-                best = best.max(Some((d, a, Reverse(p))));
-            }
-        }
-        let mut label = name(child);
-        if let Some((_, _, Reverse(p))) = best {
-            let _ = write!(label, " › {}", name(p));
-        }
-        if overlay {
-            label.push_str(" (overlay)");
-        }
-        children.push(Row {
-            pss_kb: pss,
-            swap_kb: swap,
-            procs: tree.len(),
-            label,
-            unreadable,
-        });
     }
     children.sort_by(|a, b| b.pss_kb.cmp(&a.pss_kb).then_with(|| a.label.cmp(&b.label)));
 
@@ -320,6 +385,11 @@ mod tests {
                 )
                 .unwrap();
             }
+        }
+        /// Writes `/proc/<pid>/environ` as NUL-separated `K=V`.
+        fn environ(&self, pid: u32, vars: &[(&str, &str)]) {
+            let env: String = vars.iter().map(|(k, v)| format!("{k}={v}\0")).collect();
+            fs::write(self.0.join(pid.to_string()).join("environ"), env).unwrap();
         }
     }
     impl Drop for Fixture {
@@ -466,5 +536,79 @@ mod tests {
         assert!(parse_args(&s(&["--pid"])).is_err());
         assert!(parse_args(&s(&["--pid", "0"])).is_err());
         assert!(parse_args(&s(&["--bogus"])).is_err());
+    }
+
+    /// Compositor 10 (child cterm 20 on wayland-1) plus the given daemon-side processes.
+    fn daemon_fixture(tag: &str) -> Fixture {
+        let f = Fixture::new(tag);
+        f.proc(
+            10,
+            1,
+            "crucible",
+            &["/x/crucible", "--winit"],
+            Some((100, 0)),
+        );
+        f.proc(20, 10, "cterm", &["/x/cterm"], Some((300, 0)));
+        f.environ(20, &[("HOME", "/h"), ("WAYLAND_DISPLAY", "wayland-1")]);
+        // resident daemon on wayland-1: two windows, one running htop
+        f.proc(60, 1, "cterm", &["/x/cterm", "daemon"], Some((500, 7)));
+        f.environ(60, &[("WAYLAND_DISPLAY", "wayland-1")]);
+        f.proc(61, 60, "bash", &["-bash"], Some((20, 0)));
+        f.proc(62, 61, "htop", &["htop"], Some((30, 1)));
+        f.proc(63, 60, "zsh", &["zsh"], Some((10, 0)));
+        f
+    }
+
+    #[test]
+    fn matching_cterm_daemon_gets_one_row_with_its_window_count() {
+        let f = daemon_fixture("daemon");
+        let r = build_report(&f.0, 10);
+        let d: Vec<_> = r
+            .children
+            .iter()
+            .filter(|c| c.label.starts_with("cterm daemon"))
+            .collect();
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].label, "cterm daemon (2 windows) › htop");
+        assert_eq!((d[0].pss_kb, d[0].swap_kb, d[0].procs), (560, 8, 4));
+        assert!(format_report(10, &r).contains("  cterm daemon (2 windows) › htop\n"));
+    }
+
+    #[test]
+    fn total_includes_the_daemon_row() {
+        let f = daemon_fixture("daemontotal");
+        let r = build_report(&f.0, 10);
+        assert_eq!(r.children.len(), 2);
+        assert_eq!(r.total.pss_kb, 100 + 300 + 560);
+        assert_eq!(r.total.procs, 1 + 1 + 4);
+    }
+
+    #[test]
+    fn daemon_on_another_display_is_excluded() {
+        let f = daemon_fixture("daemonother");
+        f.proc(70, 1, "cterm", &["/y/cterm", "daemon"], Some((900, 0)));
+        f.environ(70, &[("WAYLAND_DISPLAY", "wayland-10")]);
+        f.proc(71, 70, "bash", &["bash"], Some((10, 0)));
+        let r = build_report(&f.0, 10);
+        assert_eq!(r.children.len(), 2);
+        assert!(r.children.iter().all(|c| c.pss_kb != 910));
+    }
+
+    #[test]
+    fn cterm_without_daemon_argument_outside_the_tree_is_excluded() {
+        let f = daemon_fixture("daemonplain");
+        f.proc(
+            80,
+            1,
+            "cterm",
+            &["/x/cterm", "-e", "daemon"],
+            Some((900, 0)),
+        );
+        f.environ(80, &[("WAYLAND_DISPLAY", "wayland-1")]);
+        f.proc(81, 1, "cterm", &["/x/cterm"], Some((900, 0)));
+        f.environ(81, &[("WAYLAND_DISPLAY", "wayland-1")]);
+        let r = build_report(&f.0, 10);
+        let labels: Vec<_> = r.children.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["cterm daemon (2 windows) › htop", "cterm"]);
     }
 }
