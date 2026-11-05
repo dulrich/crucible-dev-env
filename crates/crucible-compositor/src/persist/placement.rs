@@ -208,6 +208,35 @@ pub fn match_pending(pid: u32, ancestors: &[u32], has: impl Fn(u32) -> bool) -> 
         .find(|p| has(*p))
 }
 
+/// The pid a new toplevel is placed, classified and recorded by: a bound surface's `spawn_pid`
+/// (its thin client, never the shared daemon client), else the client pid.
+#[must_use]
+pub fn placement_pid(client_pid: Option<u32>, identity: Option<WindowIdentity>) -> Option<u32> {
+    identity.map_or(client_pid, |i| Some(i.spawn_pid))
+}
+
+/// The window pid (`meta.pid`) a `crucible relaunch` peer stands for, over `windows` as
+/// `(meta.pid, identity root_pid)` pairs. First the peer or its nearest ancestor that is a bound
+/// window's root resolves to that window's `meta.pid`; only then today's match of the peer or an
+/// ancestor against a `meta.pid`. A shared daemon (an ancestor of every root) is never a root nor
+/// a `meta.pid`, so it never matches.
+#[must_use]
+pub fn relaunch_window_pid(
+    peer: u32,
+    ancestors: &[u32],
+    windows: &[(Option<u32>, Option<u32>)],
+) -> Option<u32> {
+    match_pending(peer, ancestors, |p| {
+        windows.iter().any(|(_, r)| *r == Some(p))
+    })
+    .and_then(|root| windows.iter().find(|(_, r)| *r == Some(root))?.0)
+    .or_else(|| {
+        match_pending(peer, ancestors, |p| {
+            windows.iter().any(|(m, _)| *m == Some(p))
+        })
+    })
+}
+
 /// The stack index a restored window takes: the number of already-placed windows in its pane
 /// whose saved index is smaller, so saved order survives any map order.
 #[must_use]
@@ -269,7 +298,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         pid: Option<u32>,
         identity: Option<WindowIdentity>,
     ) {
-        let pid = identity.map_or(pid, |i| Some(i.spawn_pid));
+        let pid = placement_pid(pid, identity);
         let ancestors = pid
             .map(|p| crucible_persist::ancestors(proc_root(), p, ANCESTOR_DEPTH))
             .unwrap_or_default();
@@ -746,5 +775,88 @@ mod tests {
             select_siblings(cands, own, "firefox", |_| false),
             vec![placeholder]
         );
+    }
+
+    /// The thin clients C1, C2 of one daemon D, their roots R1, R2 (children of D).
+    const D: u32 = 600;
+    const C1: u32 = 500;
+    const C2: u32 = 501;
+    const R1: u32 = 601;
+    const R2: u32 = 602;
+
+    fn bound(spawn_pid: u32, root_pid: u32) -> WindowIdentity {
+        WindowIdentity {
+            id: u64::from(spawn_pid),
+            spawn_pid,
+            root_pid,
+        }
+    }
+
+    /// custom.md §4 reversed arrival, through the pure decision `map_new_window` makes (it needs a
+    /// compositor itself): two bound `crucible resume` spawns with pending targets in distinct
+    /// panes map in reverse spawn order, both from the daemon's client pid. Each is keyed by its
+    /// `spawn_pid`, lands in its own pane and is a terminal (exact-pid terminal spawn).
+    #[test]
+    fn reversed_arrival_places_each_bound_window_in_its_own_slot() {
+        let mut w = World::new("1");
+        let p1 = w.focused_pane_id();
+        let p2 = w.split(crucible_layout::Direction::Right);
+        let target = |pane| Target::Pane {
+            pane,
+            saved_index: 0,
+            focused: true,
+        };
+        let mut pending: HashMap<u32, Target> = [(C1, target(p1)), (C2, target(p2))].into();
+        let terminal_spawns: HashSet<u32> = [C1, C2].into();
+        // The daemon's own client pid matches nothing.
+        assert_eq!(match_pending(D, &[1], |k| pending.contains_key(&k)), None);
+        for (identity, want) in [(bound(C2, R2), p2), (bound(C1, R1), p1)] {
+            let pid = placement_pid(Some(D), Some(identity)).unwrap();
+            assert_eq!(pid, identity.spawn_pid);
+            let key = match_pending(pid, &[1], |k| pending.contains_key(&k)).unwrap();
+            assert_eq!(pending.remove(&key), Some(target(want)));
+            let class = if terminal_spawns.contains(&pid) {
+                WindowClass::Terminal
+            } else {
+                WindowClass::App
+            };
+            assert_eq!(class, WindowClass::Terminal);
+        }
+        assert!(pending.is_empty());
+        // Unbound: the client pid, as today.
+        assert_eq!(placement_pid(Some(7), None), Some(7));
+        assert_eq!(placement_pid(None, None), None);
+    }
+
+    /// The `crucible relaunch` pair: each root is its window's wrapper. A relaunch from R1, R2 or
+    /// a child of R1 resolves to its own window's `meta.pid`, never through the shared daemon;
+    /// unbound windows still match by `meta.pid`; placeholder termination roots at the identity.
+    #[test]
+    fn relaunch_resolves_each_bound_wrapper_to_its_own_window() {
+        let windows = [(Some(C1), Some(R1)), (Some(C2), Some(R2)), (Some(99), None)];
+        assert_eq!(relaunch_window_pid(R2, &[D, 1], &windows), Some(C2));
+        assert_eq!(relaunch_window_pid(R1, &[D, 1], &windows), Some(C1));
+        assert_eq!(relaunch_window_pid(700, &[R1, D, 1], &windows), Some(C1));
+        assert_eq!(relaunch_window_pid(99, &[1], &windows), Some(99));
+        assert_eq!(relaunch_window_pid(800, &[99, 1], &windows), Some(99));
+        assert_eq!(relaunch_window_pid(D, &[1], &windows), None);
+        assert_eq!(relaunch_window_pid(801, &[D, 1], &windows), None);
+
+        let meta = |pid, identity| WindowMeta {
+            pid,
+            class: WindowClass::Terminal,
+            origin: None,
+            identity,
+        };
+        assert_eq!(
+            super::super::proc_root_pid(&meta(Some(C1), Some(bound(C1, R1)))),
+            Some(R1)
+        );
+        assert_eq!(
+            super::super::proc_root_pid(&meta(Some(C2), Some(bound(C2, R2)))),
+            Some(R2)
+        );
+        assert_eq!(super::super::proc_root_pid(&meta(Some(99), None)), Some(99));
+        assert_eq!(super::super::proc_root_pid(&meta(None, None)), None);
     }
 }

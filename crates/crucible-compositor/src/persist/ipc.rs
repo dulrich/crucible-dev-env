@@ -11,7 +11,8 @@ use crucible_persist::{WorkspaceRecord, store};
 use tracing::info;
 
 use super::placement::{
-    ANCESTOR_DEPTH, Pending, SlotEntry, Target, match_pending, placeholder_cmdline, select_siblings,
+    ANCESTOR_DEPTH, Pending, SlotEntry, Target, placeholder_cmdline, relaunch_window_pid,
+    select_siblings,
 };
 use super::spawn::{DirPolicy, SpawnRequest};
 use super::workspace::folder_workspace_name;
@@ -149,6 +150,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// including windows on hidden workspaces and lower in a pane stack. Overlay and warm-overlay
     /// windows are outside the layout bindings (`placement.rs`) and are left alone. Answers
     /// `ok <count>`, or `err no window for pid <pid>` when none matches.
+    /// A bound cterm window's `meta.pid` is its thin client's pid, so `close-pid <cterm client pid>`
+    /// closes exactly that window (never the shared daemon's other windows).
     fn ipc_close_pid(&mut self, pid: u32) -> Response {
         let ids = windows_of_pid(self.layout.metas(), pid);
         if ids.is_empty() {
@@ -171,10 +174,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .ok_or_else(|| "not a relaunch placeholder".to_string())?;
         let ancestors = crucible_persist::ancestors(proc_root(), peer, ANCESTOR_DEPTH);
         let layout = &self.layout;
-        let pid = match_pending(peer, &ancestors, |p| {
-            layout.metas().any(|(_, m)| m.pid == Some(p))
-        })
-        .ok_or_else(|| "no placeholder window".to_string())?;
+        let windows: Vec<(Option<u32>, Option<u32>)> = layout
+            .metas()
+            .map(|(_, m)| (m.pid, m.identity.map(|i| i.root_pid)))
+            .collect();
+        let pid = relaunch_window_pid(peer, &ancestors, &windows)
+            .ok_or_else(|| "no placeholder window".to_string())?;
         let mut ids: Vec<WindowId> = layout
             .metas()
             .filter(|(_, m)| m.pid == Some(pid))
@@ -369,10 +374,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .world
             .focused_window()
             .ok_or_else(|| "no focused window".to_string())?;
-        let pid = terminal_pid(self.layout.meta(id))?;
-        let cwd = crucible_persist::capture_terminal(&capture_env(), pid)
-            .ok_or_else(|| "cannot read the terminal's working directory".to_string())?
-            .cwd;
+        let meta = self.layout.meta(id);
+        let pid = terminal_pid(meta)?;
+        // A bound cterm window's terminal is the shared daemon: capture from its root shell.
+        let cwd = match meta.and_then(|m| m.identity) {
+            Some(identity) => crucible_persist::capture_shell(&capture_env(), identity.root_pid),
+            None => crucible_persist::capture_terminal(&capture_env(), pid),
+        }
+        .ok_or_else(|| "cannot read the terminal's working directory".to_string())?
+        .cwd;
         self.ipc_set_root(Some(cwd))
     }
 

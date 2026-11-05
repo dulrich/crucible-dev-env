@@ -285,6 +285,12 @@ fn proc_root() -> &'static Path {
     Path::new("/proc")
 }
 
+/// Where `/proc` reads for a window start: a bound cterm window's identity root (its shell or CDE
+/// wrapper under the shared daemon), else its client pid (unbound: unchanged).
+pub(super) fn proc_root_pid(meta: &crate::layout::WindowMeta) -> Option<u32> {
+    meta.identity.map(|i| i.root_pid).or(meta.pid)
+}
+
 /// What capture reads: `/proc` and the claude home, where claude keeps its per-pid session
 /// records (`<claude-home>/sessions`). The home is `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`.
 /// Read per capture (cheap); a missing home yields a relative path that simply reads nothing.
@@ -335,12 +341,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// waiting for Enter, so asking the terminal window to close would make the terminal confirm
     /// killing a running process (ghostty's "Close window?" dialog). End the wrapper instead
     /// (found by one direct-child lookup from the terminal pid); its terminal then closes on its
-    /// own. Only when no wrapper is found is the window asked to close.
+    /// own. Only when no wrapper is found is the window asked to close. A bound cterm window is
+    /// looked up from its identity's root (see [`proc_root_pid`]).
     fn end_placeholder(&mut self, id: WindowId) {
         let wrapper = self
             .layout
             .meta(id)
-            .and_then(|m| m.pid)
+            .and_then(proc_root_pid)
             .and_then(|pid| crucible_persist::relaunch_wrapper_of(proc_root(), pid));
         let ended = wrapper.is_some_and(|(pid, _)| placement::terminate(pid));
         if !ended && let Some(element) = self.layout.element(id) {
@@ -687,6 +694,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 origin: meta.and_then(|m| m.origin.as_ref()),
                 app_id: self.layout.element(id).and_then(element_app_id),
                 exec_flag: &self.config.terminal.exec_flag,
+                root_pid: meta.and_then(|m| m.identity.map(|i| i.root_pid)),
             },
         )
     }

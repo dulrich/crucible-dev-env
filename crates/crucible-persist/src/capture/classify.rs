@@ -6,7 +6,7 @@ use super::{
     CaptureEnv, claude,
     procfs::{children_of, read_cmdline, read_cwd},
     shell::join_command,
-    terminal::capture_terminal,
+    terminal::{capture_shell, capture_terminal},
 };
 use crate::invocation::{CdeWrapper, RelaunchWrapper, ResumeWrapper};
 use crate::record::WindowRecord;
@@ -65,6 +65,10 @@ pub struct WindowRecordInput<'a> {
     pub app_id: Option<String>,
     /// The terminal's exec flag.
     pub exec_flag: &'a str,
+    /// A bound cterm window's root process (its shell or CDE wrapper under the shared daemon),
+    /// from its `WindowIdentity`. With it, every `/proc` read is rooted there instead of at `pid`
+    /// (which is only the thin client). `None` for unbound windows: unchanged behaviour.
+    pub root_pid: Option<u32>,
 }
 
 /// Classifies one managed window into the record to save. Pure over `env` (normally the real
@@ -84,6 +88,10 @@ pub struct WindowRecordInput<'a> {
 ///   app with a cmdline (a CDE-spawned or relaunched app — the spawn command beats a live helper
 ///   argv such as `steamwebhelper`) records that cmdline, the element app id filling a missing
 ///   origin id; (3) else the app id and the joined argv (no cmdline when the argv is empty).
+///
+/// **Rooted (bound cterm window, `root_pid` set):** the terminal arm reads the root instead of the
+/// client: wrapper candidates are the root itself then its children, the live capture is
+/// [`capture_shell`] on the root, and the decode / cwd fallbacks read the root.
 #[must_use]
 pub fn window_record(env: &CaptureEnv, mut input: WindowRecordInput<'_>) -> WindowRecord {
     input.app_id = non_empty(input.app_id);
@@ -111,16 +119,24 @@ fn terminal_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowReco
         pid,
         origin,
         exec_flag,
+        root_pid,
         ..
     } = input;
     let proc_root = env.proc_root.as_path();
-    let Some(pid) = pid else {
+    let Some(pid) = root_pid.or(pid) else {
         return origin.cloned().unwrap_or(WindowRecord::Terminal {
             cwd: PathBuf::new(),
             command: None,
         });
     };
-    if let Some((wrapper_pid, wrapper)) = children_of(proc_root, pid)
+    let candidates = if root_pid.is_some() {
+        std::iter::once(pid)
+            .chain(children_of(proc_root, pid))
+            .collect()
+    } else {
+        children_of(proc_root, pid)
+    };
+    if let Some((wrapper_pid, wrapper)) = candidates
         .into_iter()
         .find_map(|c| wrapper_process(proc_root, c).map(|w| (c, w)))
     {
@@ -134,7 +150,12 @@ fn terminal_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowReco
         }
         return origin.cloned().unwrap_or_else(|| wrapper_record(wrapper));
     }
-    if let Some(cap) = capture_terminal(env, pid) {
+    let cap = if root_pid.is_some() {
+        capture_shell(env, pid)
+    } else {
+        capture_terminal(env, pid)
+    };
+    if let Some(cap) = cap {
         return WindowRecord::Terminal {
             cwd: cap.cwd,
             command: cap.command,
@@ -224,6 +245,7 @@ mod tests {
                 origin,
                 app_id: app_id.map(str::to_string),
                 exec_flag: "-e",
+                root_pid: None,
             },
         )
     }
@@ -712,5 +734,91 @@ mod tests {
             terminal_record(&p, 300, Some(&origin)),
             app(None, Some("gimp"))
         );
+    }
+
+    /// Classifies bound terminal window `pid` rooted at `root` (exec flag `-e`, no origin).
+    fn rooted_record(p: &FakeProc, pid: u32, root: u32) -> WindowRecord {
+        window_record(
+            &p.env(),
+            WindowRecordInput {
+                pid: Some(pid),
+                class: SpawnClass::Terminal,
+                origin: None,
+                app_id: None,
+                exec_flag: "-e",
+                root_pid: Some(root),
+            },
+        )
+    }
+
+    /// Two thin clients C1, C2 share daemon D; their roots R1, R2 (children of D) run their own
+    /// `crucible resume` wrappers. Classified in reverse order, each window records its own
+    /// wrapper command as a terminal; the unrooted client alone captures nothing of it.
+    #[test]
+    fn rooted_windows_sharing_a_daemon_capture_their_own_wrapper() {
+        let p = FakeProc::new("rooted-resume");
+        p.add((500, "cterm", 1), 0, "/c1", &["cterm"], &[]);
+        p.add((501, "cterm", 1), 0, "/c2", &["cterm"], &[]);
+        p.add((600, "cterm", 1), 0, "/", &["cterm", "daemon"], &[601, 602]);
+        p.add(
+            (601, "crucible", 600),
+            601,
+            "/e",
+            &["crucible", "resume", "--cwd", "/a", "--", "vim a"],
+            &[],
+        );
+        p.add(
+            (602, "crucible", 600),
+            602,
+            "/e",
+            &["crucible", "resume", "--cwd", "/b", "--", "cargo test"],
+            &[],
+        );
+        assert_eq!(rooted_record(&p, 501, 602), term("/b", Some("cargo test")));
+        assert_eq!(rooted_record(&p, 500, 601), term("/a", Some("vim a")));
+        // Unbound (no root): today's behaviour, the client's own idle cwd.
+        assert_eq!(terminal_record(&p, 500, None), term("/c1", None));
+    }
+
+    /// A rooted idle shell under the daemon captures the root shell's cwd, never the daemon's;
+    /// a rooted foreground command is captured from the root shell's `tpgid`.
+    #[test]
+    fn rooted_idle_shell_captures_the_root_cwd() {
+        let p = FakeProc::new("rooted-idle");
+        p.add((500, "cterm", 1), 0, "/c1", &["cterm"], &[]);
+        p.add(
+            (600, "cterm", 1),
+            0,
+            "/daemon",
+            &["cterm", "daemon"],
+            &[603, 604],
+        );
+        p.add((603, "bash", 600), 603, "/home/x", &["bash"], &[]);
+        p.add((604, "bash", 600), 605, "/home/y", &["bash"], &[605]);
+        p.add((605, "vim", 604), 605, "/home/y/src", &["vim", "f.rs"], &[]);
+        assert_eq!(rooted_record(&p, 500, 603), term("/home/x", None));
+        assert_eq!(
+            rooted_record(&p, 501, 604),
+            term("/home/y/src", Some("vim f.rs"))
+        );
+    }
+
+    /// `relaunch_wrapper_of` on a root that is itself the `crucible relaunch` wrapper finds it.
+    #[test]
+    fn relaunch_wrapper_of_finds_a_wrapper_root() {
+        let p = FakeProc::new("rooted-relaunch");
+        p.add((600, "cterm", 1), 0, "/", &["cterm", "daemon"], &[601, 602]);
+        for (pid, cmd) in [(601, "gimp a.png"), (602, "firefox")] {
+            p.add(
+                (pid, "crucible", 600),
+                pid.into(),
+                "/",
+                &["crucible", "relaunch", "--", cmd],
+                &[],
+            );
+        }
+        let wrapper = |root| relaunch_wrapper_of(&p.proc_root(), root).map(|(pid, _)| pid);
+        assert_eq!(wrapper(602), Some(602));
+        assert_eq!(wrapper(601), Some(601));
     }
 }

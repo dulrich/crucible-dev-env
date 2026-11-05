@@ -26,7 +26,7 @@ pub use procfs::{
     parse_stat, read_cmdline,
 };
 pub use shell::{is_shell_program, join_command, shell_quote};
-pub use terminal::{TerminalCapture, capture_terminal};
+pub use terminal::{TerminalCapture, capture_shell, capture_terminal};
 
 /// Where capture reads from: the `/proc` tree and the claude home.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -103,6 +103,14 @@ pub fn capture_terminal(env: &CaptureEnv, terminal_pid: u32) -> Option<TerminalC
             .find(|c| read_stat(proc_root, **c).is_some_and(|s| s.tpgid > 0))
             .or(children.first())?
     };
+    capture_shell(env, shell)
+}
+
+/// [`capture_terminal`] after shell selection: captures from `shell` directly (a bound cterm
+/// window's root process, whose terminal is a shared daemon). Same rules as [`capture_terminal`].
+#[must_use]
+pub fn capture_shell(env: &CaptureEnv, shell: u32) -> Option<TerminalCapture> {
+    let proc_root = env.proc_root.as_path();
     let shell_cwd = read_cwd(proc_root, shell)?;
     let idle = TerminalCapture {
         cwd: shell_cwd,

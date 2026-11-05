@@ -38,7 +38,7 @@ pub mod store;
 
 pub use capture::{
     CaptureEnv, ProcInfo, ProcSnapshot, SpawnClass, TerminalCapture, WindowRecordInput, ancestors,
-    capture_terminal, children_of, relaunch_wrapper_of, window_record,
+    capture_shell, capture_terminal, children_of, relaunch_wrapper_of, window_record,
 };
 pub use error::PersistError;
 pub use format::FORMAT_VERSION;
