@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.5 — 2026-11-05
+
+### Fixed
+
+- Clipboard tools: CDE now advertises the ext and wlr data-control protocols, so `wl-copy`, `wl-paste` and clipboard managers set and read the clipboard and primary selection directly. Before, each `wl-copy`/`wl-paste` briefly mapped as a window in the focused pane and took keyboard focus away from the terminal (which also made foot refuse OSC 52 copies as "unfocused").
+
 ## 0.4.4 — 2026-11-04
 
 ### Added
