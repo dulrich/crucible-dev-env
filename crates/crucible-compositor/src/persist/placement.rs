@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crucible_layout::{PaneId, WindowId, WorkspaceId};
 use tracing::{info, warn};
 
-use super::proc_root;
+use super::{WindowIdentity, proc_root};
 use crate::element::WindowElement;
 use crate::layout::{WindowClass, WindowMeta};
 use crate::state::{Backend, CrucibleState};
@@ -261,8 +261,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Maps a new toplevel (xdg or X11 managed) from client `pid`: into its pending restore
     /// placement, as the picker overlay, or through the normal focused-pane path. Records whether
-    /// it is a CDE-spawned terminal.
-    pub fn map_new_window(&mut self, element: WindowElement, pid: Option<u32>) {
+    /// it is a CDE-spawned terminal. A surface bound on the identity protocol (`identity`) is
+    /// placed and classified by its `spawn_pid` instead of the (shared daemon) client pid.
+    pub fn map_new_window(
+        &mut self,
+        element: WindowElement,
+        pid: Option<u32>,
+        identity: Option<WindowIdentity>,
+    ) {
+        let pid = identity.map_or(pid, |i| Some(i.spawn_pid));
         let ancestors = pid
             .map(|p| crucible_persist::ancestors(proc_root(), p, ANCESTOR_DEPTH))
             .unwrap_or_default();
@@ -299,7 +306,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
         } else {
             WindowClass::App
         };
-        let meta = WindowMeta { pid, class, origin };
+        let meta = WindowMeta {
+            pid,
+            class,
+            origin,
+            identity,
+        };
         match target {
             Some(Target::Overlay) => self.overlay_arrived(element, pid),
             Some(Target::WarmOverlay) => self.store_warm(element, pid),
@@ -716,6 +728,7 @@ mod tests {
             pid: Some(1),
             class,
             origin,
+            identity: None,
         };
         let metas = [
             (own, meta(WindowClass::Terminal, app())),

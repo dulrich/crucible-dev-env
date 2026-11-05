@@ -248,7 +248,7 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
             return;
         }
         let pid = window.pid();
-        self.map_new_window(WindowElement::new_x11_window(window), pid);
+        self.map_new_window(WindowElement::new_x11_window(window), pid, None);
     }
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {

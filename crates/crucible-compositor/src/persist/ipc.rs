@@ -518,6 +518,7 @@ mod tests {
             pid,
             class,
             origin: None,
+            identity: None,
         };
         assert_eq!(
             terminal_pid(Some(&meta(WindowClass::Terminal, Some(7)))),
@@ -535,6 +536,7 @@ mod tests {
             pid,
             class: WindowClass::App,
             origin: None,
+            identity: None,
         };
         let metas = [
             (WindowId::from_raw(1), meta(Some(10))),

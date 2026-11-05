@@ -25,6 +25,11 @@ thiserror.workspace = true
 # Glyph rasterization for compositor-drawn text (`text.rs`, plan 06 WP-5).
 fontdue.workspace = true
 
+# The `crucible-window-identity-v1` protocol server (`identity_protocol.rs`).
+wayland-scanner.workspace = true
+wayland-server.workspace = true
+wayland-backend.workspace = true
+
 # X11 bindings for the XWayland window-manager connection (WS-5). Paired with
 # Smithay's `x11rb_event_source` feature below, mirroring anvil's xwayland set.
 x11rb.workspace = true
@@ -64,3 +69,7 @@ features = [
 [dependencies.smithay-drm-extras]
 git = "https://github.com/Smithay/smithay"
 rev = "66fc28b98e03c6530e886e6e6e4836ae98cbabf4"
+
+[dev-dependencies]
+# Asserts the identity protocol XML sha256 (`identity_protocol.rs` tests).
+sha2.workspace = true

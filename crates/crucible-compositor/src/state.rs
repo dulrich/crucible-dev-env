@@ -381,6 +381,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let idle_notifier_state =
             smithay::wayland::idle_notify::IdleNotifierState::new(&dh, handle.clone());
         let idle_inhibit_state = crate::idle::new_inhibit_manager::<B>(&dh);
+        crate::identity_protocol::create_global::<B>(&dh);
         let mut seat_state = SeatState::new();
 
         // Create the seat with keyboard + pointer capabilities. NB: this only *advertises* the

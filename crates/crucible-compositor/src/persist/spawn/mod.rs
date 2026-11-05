@@ -191,10 +191,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
             cmd.env(OVERLAY_STYLE_ENV, self.config.overlay.style.as_str());
             cmd.env(LAUNCHER_TUI_ENV, self.config.launcher.tui.join(":"));
         }
-        let record = SpawnRecord {
+        let mut record = SpawnRecord {
             origin,
             ..SpawnRecord::now(kind, program)
         };
+        if super::identity::wants_grant(kind, program) {
+            match (Self::grant_exe(program, cwd), super::identity::mint_grant()) {
+                (Some(exe), Some(grant)) => {
+                    cmd.env(super::identity::GRANT_ENV, &grant);
+                    record.grant = Some(grant);
+                    record.exe = Some(exe);
+                }
+                _ => warn_no_grant(program),
+            }
+        }
         if kind == SpawnKind::Overlay {
             cmd.env(SPAWN_EPOCH_ENV, record.epoch_ms.to_string());
         }
@@ -222,6 +232,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// CDE-spawned **terminal**. Overlays use `overlay.terminal-args` only; apps get none.
     pub(super) fn with_tiling_args(&self, args: Vec<OsString>) -> Vec<OsString> {
         with_terminal_args(&self.config.tiling.substituted_terminal_args(), args)
+    }
+
+    /// The canonical executable `program` resolves to on the child's `PATH` (relative to `cwd`,
+    /// else the compositor's cwd), recorded at grant mint.
+    fn grant_exe(program: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+        let here = std::env::current_dir().ok();
+        let dir = cwd.or(here.as_deref())?;
+        let hit = resolve_program(program, dir, Self::spawn_path().as_deref()).ok()?;
+        std::fs::canonicalize(hit).ok()
     }
 
     /// The `PATH` every spawned child gets: this binary's directory (so `crucible` resolves) in
@@ -344,6 +363,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 .in_dir(dir.run_in),
         )
         .ok_or_else(|| "spawn failed".to_string())
+    }
+}
+
+/// Warns, once per compositor run, that a `cterm` spawn got no grant (its exe did not resolve or
+/// `/dev/urandom` was unreadable); the spawn still runs, its windows stay unbound.
+fn warn_no_grant(program: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        warn!(
+            program,
+            "cannot mint a window-identity grant; its windows stay unbound"
+        );
     }
 }
 

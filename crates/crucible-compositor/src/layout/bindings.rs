@@ -22,6 +22,9 @@ pub struct WindowMeta {
     /// The saved record the window's spawn stands for (a restored window or a relaunched app),
     /// copied from the matched CDE spawn at map time; capture prefers it over `/proc` decoding.
     pub origin: Option<crucible_persist::WindowRecord>,
+    /// The authenticated window identity, when the client bound the surface on
+    /// `crucible-window-identity-v1` (then `pid` is its `spawn_pid`).
+    pub identity: Option<crate::persist::WindowIdentity>,
 }
 
 /// One managed binding: the payload plus its metadata.
@@ -353,6 +356,7 @@ mod tests {
             pid: None,
             class: WindowClass::App,
             origin: None,
+            identity: None,
         }
     }
 
@@ -361,6 +365,7 @@ mod tests {
             pid: Some(pid),
             class: WindowClass::Terminal,
             origin: None,
+            identity: None,
         }
     }
 

@@ -2,6 +2,7 @@
 //! ([`SpawnKind`], program, spawn time, origin), reaped through its own handle.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Child;
 use std::time::{Instant, SystemTime};
 
@@ -69,6 +70,26 @@ impl SpawnRegistry {
     }
 }
 
+/// Grant lookup scans the live records (a handful of spawns; no second index to keep in sync with
+/// reap): a reaped spawn's grant is gone with its record, a used one is `None`.
+impl crate::persist::identity::Grants for SpawnRegistry {
+    fn lookup(&self, grant: &str) -> Option<(u32, PathBuf)> {
+        self.by_pid.iter().find_map(|(pid, s)| {
+            (s.record.grant.as_deref() == Some(grant))
+                .then(|| s.record.exe.clone().map(|exe| (*pid, exe)))
+                .flatten()
+        })
+    }
+
+    fn consume(&mut self, grant: &str) {
+        for s in self.by_pid.values_mut() {
+            if s.record.grant.as_deref() == Some(grant) {
+                s.record.grant = None;
+            }
+        }
+    }
+}
+
 /// What a CDE-spawned process is, remembered per PID so a mapped window can be classified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnKind {
@@ -94,6 +115,11 @@ pub struct SpawnRecord {
     /// The saved record this spawn stands for (a restored window, or a relaunched app), carried
     /// to map time so capture records it instead of reverse-engineering CDE's own wrappers.
     pub origin: Option<WindowRecord>,
+    /// The single-use window-identity grant (`CRUCIBLE_WINDOW_GRANT`) of a `cterm` terminal spawn;
+    /// `None` once a bind consumed it, and gone with the record on reap.
+    pub grant: Option<String>,
+    /// The canonical executable resolved at mint, which a binding peer must run.
+    pub exe: Option<PathBuf>,
 }
 
 impl SpawnRecord {
@@ -106,6 +132,8 @@ impl SpawnRecord {
             at: Instant::now(),
             epoch_ms: epoch_ms_now(),
             origin: None,
+            grant: None,
+            exe: None,
         }
     }
 

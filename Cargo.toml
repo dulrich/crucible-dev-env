@@ -52,6 +52,14 @@ xkeysym = { version = "0.2", default-features = false }
 # header row). Pure Rust; pulls ttf-parser (RUSTSEC-2026-0192 unmaintained — allowed warning).
 fontdue = "0.9"
 
+# Server code for CDE's own `crucible-window-identity-v1` protocol (`protocols/`, crucible-term
+# plan 02 WP-4). All three are already in `Cargo.lock` via Smithay at these versions.
+wayland-scanner = "0.31.11"
+wayland-server = "0.31.13"
+wayland-backend = "0.3.15"
+# Test-only: asserts the identity protocol XML sha256. Already in `Cargo.lock` at 0.10.9.
+sha2 = "0.10.9"
+
 # Lints are defined once here and inherited by every crate with `[lints]
 # workspace = true`. CI runs `cargo clippy -- -D warnings`.
 [workspace.lints.clippy]

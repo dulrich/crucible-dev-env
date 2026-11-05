@@ -179,6 +179,9 @@ pub enum TerminalKind {
     Ghostty,
     /// `foot`.
     Foot,
+    /// `cterm` (crucible-term): no overlay defaults (as [`Self::Other`]); its terminal spawns get a
+    /// window-identity grant.
+    Cterm,
     /// Anything else (including `footclient`, `ghostty-foo`, an empty program): no defaults.
     Other,
 }
@@ -190,6 +193,7 @@ impl TerminalKind {
         match Path::new(program).file_name().and_then(|n| n.to_str()) {
             Some("ghostty" | "ghostty-cde") => Self::Ghostty,
             Some("foot") => Self::Foot,
+            Some("cterm") => Self::Cterm,
             _ => Self::Other,
         }
     }
@@ -206,7 +210,7 @@ impl TerminalKind {
                 .iter()
                 .flat_map(|action| ["-o".to_string(), format!("key-bindings.{action}=none")])
                 .collect(),
-            Self::Other => Vec::new(),
+            Self::Cterm | Self::Other => Vec::new(),
         }
     }
 

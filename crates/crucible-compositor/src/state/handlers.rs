@@ -55,6 +55,10 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
         panic!("Unknown client data type")
     }
 
+    fn destroyed(&mut self, surface: &WlSurface) {
+        self.forget_surface_identity(surface);
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         // Register the committed buffer with Smithay's bookkeeping, then let the backend import it.
         on_commit_buffer_handler::<Self>(surface);

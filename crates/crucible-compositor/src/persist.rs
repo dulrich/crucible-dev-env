@@ -29,6 +29,7 @@
 //! so saved records never nest `crucible resume|relaunch`, and an uncaptured terminal is never an
 //! app.
 
+pub(crate) mod identity;
 mod ipc;
 mod overlay;
 mod placement;
@@ -36,6 +37,7 @@ mod spawn;
 mod warm_slot;
 mod workspace;
 
+pub use identity::{GRANT_ENV, WindowIdentity};
 pub use spawn::{SpawnKind, SpawnRecord, SpawnRequest};
 pub use workspace::{new_workspace_name, startup_seed_name};
 
@@ -103,6 +105,8 @@ pub struct PersistState {
     session_written: Option<Session>,
     /// Whether the startup session step ran (the record is written only afterwards).
     session_started: bool,
+    /// Surface-keyed window identities (see [`identity`]); dropped on surface destroy.
+    identities: identity::SurfaceIdentities,
 }
 
 impl PersistState {
@@ -118,6 +122,7 @@ impl PersistState {
             placement: placement::PlacementState::default(),
             workspace: workspace::WorkspaceState::default(),
             saved: HashMap::new(),
+            identities: identity::SurfaceIdentities::default(),
             picker_roots: SavedRootCache::default(),
             config_mtime: None,
             session_written: None,

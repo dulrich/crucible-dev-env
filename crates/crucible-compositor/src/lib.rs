@@ -80,3 +80,6 @@ pub mod idle;
 
 /// Relative pointer and pointer constraints (pointer lock for games).
 pub mod pointer_lock;
+
+/// The `crucible-window-identity-v1` protocol server (authenticated per-window identity).
+pub mod identity_protocol;
