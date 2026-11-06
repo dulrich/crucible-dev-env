@@ -288,7 +288,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `pin-slot <n>` | Pin the active workspace to slot `n` (0-9); pins persist in `$XDG_STATE_HOME/cde/slots.kdl` |
 | `open-picker` | Open the workspace picker (`crucible pick`) |
 | `open-launcher` | Open the program launcher (`crucible launch`) |
-| `open-settings` | Open the settings overlay (`crucible keys`): the effective keybindings; Enter runs the selected binding |
+| `open-settings` | Open the settings overlay (`crucible keys`): the effective keybindings, grouped under area headings (panes & windows, stacks, workspaces, outputs, launch & overlays, session & system) until you type, then one flat filtered list; Enter runs the selected binding |
 | `set-layout <name>` | Switch the keyboard to the layout `<name>` from `keyboard { layouts … }` (by position in that list; unknown name is a logged no-op). Defaults `Super+E` = `set-layout us`, `Super+S` = `set-layout es` |
 | `toggle-header` | Show/hide the workspace header strip on the focused output (`header { mode "toggle" }` only; a no-op in `always` and `off`) |
 | `toggle-fullscreen` | Toggle fullscreen for the focused window (see [Fullscreen](#fullscreen)). No-op on an empty pane. Default `Super+F` |

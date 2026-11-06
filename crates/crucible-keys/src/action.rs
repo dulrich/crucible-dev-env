@@ -211,7 +211,90 @@ impl std::fmt::Display for Action {
     }
 }
 
+/// The functional area a verb belongs to; the settings overlay groups its rows by it. The
+/// declaration order is the fixed display order (`Ord` follows it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Area {
+    /// Pane focus, movement, splitting, resizing, window close/mark, fullscreen.
+    PanesAndWindows,
+    /// Cycling a pane's window stack.
+    Stacks,
+    /// Creating, switching, reordering, closing and naming workspaces; slots; workspace roots.
+    Workspaces,
+    /// Per-output verbs.
+    Outputs,
+    /// Spawning terminals and programs, opening the picker, launcher and settings.
+    LaunchAndOverlays,
+    /// Quit, lock, keyboard layout, VT switching.
+    SessionAndSystem,
+}
+
+impl Area {
+    /// Every area in display order.
+    pub const ALL: [Area; 6] = [
+        Area::PanesAndWindows,
+        Area::Stacks,
+        Area::Workspaces,
+        Area::Outputs,
+        Area::LaunchAndOverlays,
+        Area::SessionAndSystem,
+    ];
+
+    /// The heading shown for this area.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Area::PanesAndWindows => "Panes & windows",
+            Area::Stacks => "Stacks",
+            Area::Workspaces => "Workspaces",
+            Area::Outputs => "Outputs",
+            Area::LaunchAndOverlays => "Launch & overlays",
+            Area::SessionAndSystem => "Session & system",
+        }
+    }
+}
+
 impl Action {
+    /// The functional area of this verb. Exhaustive (no wildcard arm): a new verb does not
+    /// compile until it is classified.
+    #[must_use]
+    pub fn area(&self) -> Area {
+        match self {
+            Self::ClosePane
+            | Self::CloseWindow
+            | Self::Focus(_)
+            | Self::Move(_)
+            | Self::Split(_)
+            | Self::Resize(_)
+            | Self::MarkWindow
+            | Self::SwapMarkedWindow
+            | Self::ToggleFullscreen => Area::PanesAndWindows,
+            Self::CycleStack(_) => Area::Stacks,
+            Self::CycleWorkspace(_)
+            | Self::ReorderWorkspace(_)
+            | Self::NewWorkspace
+            | Self::MoveWindowToWorkspace(_)
+            | Self::CaptureWorkspaceRoot
+            | Self::SetWorkspaceRoot
+            | Self::CloseWorkspace
+            | Self::DeleteWorkspace
+            | Self::CloseAllWorkspaces
+            | Self::Slot(_)
+            | Self::PinSlot(_)
+            | Self::RenameWorkspace => Area::Workspaces,
+            Self::MoveWorkspaceToOutput(_) | Self::ToggleHeader => Area::Outputs,
+            Self::RunTerminal
+            | Self::Run(_)
+            | Self::RunInTerminal(_)
+            | Self::OpenPicker
+            | Self::OpenLauncher
+            | Self::OpenSettings => Area::LaunchAndOverlays,
+            Self::Quit | Self::Lock | Self::SetLayout(_) | Self::VtSwitch(_) => {
+                Area::SessionAndSystem
+            }
+        }
+    }
+
     /// The lock rule: whether this action may run while the session is locked. Only VT switching
     /// does; every other key goes to the locker and every acting IPC request is refused. The
     /// compositor's keyboard filter and its action gate share this one predicate.
@@ -409,6 +492,38 @@ mod tests {
             "vt-switch 3".parse::<Action>(),
             Err(ActionParseError("unknown action `vt-switch`".into()))
         );
+    }
+
+    #[test]
+    fn areas_cover_one_representative_per_area_in_a_stable_order() {
+        let reps = [
+            (Action::Split(Direction::Right), Area::PanesAndWindows),
+            (Action::CycleStack(1), Area::Stacks),
+            (Action::DeleteWorkspace, Area::Workspaces),
+            (Action::ReorderWorkspace(1), Area::Workspaces),
+            (Action::MoveWorkspaceToOutput(1), Area::Outputs),
+            (Action::OpenSettings, Area::LaunchAndOverlays),
+            (Action::Lock, Area::SessionAndSystem),
+        ];
+        for (action, area) in reps {
+            assert_eq!(action.area(), area, "{action}");
+        }
+        assert!(Area::ALL.windows(2).all(|w| w[0] < w[1]));
+        let labels: Vec<_> = Area::ALL.iter().map(|a| a.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Panes & windows",
+                "Stacks",
+                "Workspaces",
+                "Outputs",
+                "Launch & overlays",
+                "Session & system"
+            ]
+        );
+        for action in every_variant() {
+            assert!(Area::ALL.contains(&action.area()), "{action}");
+        }
     }
 
     #[test]

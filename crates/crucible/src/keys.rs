@@ -4,18 +4,19 @@
 //! state machine and rendering are pure.
 
 use crucible_compositor::ipc::{Request, Response, parse_bindings};
+use crucible_keys::{Action, Area};
 
 use crate::cli::{Parsed, help_requested};
 use crate::client::{Client, ClientError};
 use crate::fuzzy;
-use crate::overlay::list::{Body, Frame, ListState};
+use crate::overlay::list::{Applied, Body, Frame, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
 use crate::table::{self, Col};
 
 /// Usage text for `crucible keys --help`.
-pub const USAGE: &str = "usage: crucible keys\n\nThe CDE settings overlay (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Comma).\nLists the effective keybindings. Type to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter runs the\nselected binding; Esc or Ctrl+C closes. Edit binds in config.kdl (docs/config.md).\n";
+pub const USAGE: &str = "usage: crucible keys\n\nThe CDE settings overlay (needs $CDE_SOCKET; CDE runs it in an overlay on Super+Comma).\nLists the effective keybindings, grouped by area until you type. Type to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter runs the\nselected binding; Esc or Ctrl+C closes. Edit binds in config.kdl (docs/config.md).\n";
 
 /// Status line shown under the rows.
 const STATUS: &str = "Enter runs the selected binding — edit binds in config.kdl (docs/config.md)";
@@ -41,10 +42,30 @@ fn fetch_bindings(client: &mut Client) -> Result<Vec<(String, String)>, String> 
     }
 }
 
+/// The heading of the trailing group for actions that do not parse back to an [`Action`].
+const OTHER_LABEL: &str = "Other";
+
+/// The area of an action display string, derived by parsing it back through `Action::from_str`
+/// (no wire change: the `bindings` reply is unchanged). `None` when it does not parse.
+#[must_use]
+pub fn area_of(action: &str) -> Option<Area> {
+    action.parse::<Action>().ok().map(|a| a.area())
+}
+
+/// One line of the empty-query view: a non-selectable heading or a binding row (index into rows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    Heading(&'static str),
+    Row(usize),
+}
+
 /// Settings-overlay state.
 #[derive(Debug)]
 pub struct Keys {
     rows: Vec<(String, String)>,
+    /// Display-order row indices (area order; rows inside an area keep list order) paired with
+    /// their group label.
+    grouped: Vec<(&'static str, usize)>,
     list: ListState,
 }
 
@@ -52,9 +73,74 @@ impl Keys {
     /// A viewer over `rows` (`(chord, action)` display pairs).
     #[must_use]
     pub fn new(rows: Vec<(String, String)>) -> Keys {
-        Keys {
+        // Stable sort by area position; unparseable actions (`None`) go last as "Other".
+        let mut grouped: Vec<(usize, &'static str, usize)> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (_, a))| match area_of(a) {
+                Some(area) => (area as usize, area.label(), i),
+                None => (usize::MAX, OTHER_LABEL, i),
+            })
+            .collect();
+        grouped.sort_by_key(|&(order, _, _)| order);
+        let grouped = grouped.into_iter().map(|(_, l, i)| (l, i)).collect();
+        let mut keys = Keys {
             rows,
+            grouped,
             list: ListState::new(),
+        };
+        keys.snap_to_row();
+        keys
+    }
+
+    /// What is on screen now: headings and rows under area headings with an empty query, else
+    /// the flat fuzzy matches best first.
+    fn entries(&self) -> Vec<Entry> {
+        if !self.list.query.is_empty() {
+            return self.matches().into_iter().map(Entry::Row).collect();
+        }
+        let mut out = Vec::new();
+        let mut current = None;
+        for &(label, idx) in &self.grouped {
+            if current != Some(label) {
+                out.push(Entry::Heading(label));
+                current = Some(label);
+            }
+            out.push(Entry::Row(idx));
+        }
+        out
+    }
+
+    /// Moves the selection off a heading to the next row (the first real row after a reset).
+    fn snap_to_row(&mut self) {
+        let entries = self.entries();
+        while matches!(entries.get(self.list.selected), Some(Entry::Heading(_))) {
+            self.list.selected += 1;
+        }
+    }
+
+    /// Moves the selection one selectable row `down` or up, skipping headings; stays put at the
+    /// ends.
+    fn move_over_headings(&mut self, down: bool) {
+        let entries = self.entries();
+        let mut i = self.list.selected;
+        loop {
+            let next = if down {
+                i + 1
+            } else {
+                match i.checked_sub(1) {
+                    Some(n) => n,
+                    None => return,
+                }
+            };
+            match entries.get(next) {
+                None => return,
+                Some(Entry::Heading(_)) => i = next,
+                Some(Entry::Row(_)) => {
+                    self.list.selected = next;
+                    return;
+                }
+            }
         }
     }
 
@@ -73,7 +159,27 @@ impl Overlay for Keys {
     }
 
     fn row_count(&self) -> usize {
-        self.matches().len()
+        self.entries().len()
+    }
+
+    /// As the shared step, but with an empty query Up/Down/Ctrl+P/Ctrl+N skip the headings, and
+    /// clearing the query lands on the first real row.
+    fn step(&mut self, key: Key) -> Outcome {
+        let grouped = self.list.query.is_empty();
+        let count = self.row_count();
+        if grouped && matches!(key, Key::Up | Key::CtrlP | Key::Down | Key::CtrlN) {
+            self.move_over_headings(matches!(key, Key::Down | Key::CtrlN));
+            return Outcome::Continue;
+        }
+        match self.list.apply(key, count) {
+            Applied::Exit => Outcome::Exit,
+            Applied::Edited => {
+                self.snap_to_row();
+                Outcome::Continue
+            }
+            Applied::Moved | Applied::Ignored => Outcome::Continue,
+            Applied::Enter(k) => self.enter(k),
+        }
     }
 
     /// Typing keeps a refusal visible (it clears only when Enter runs a binding).
@@ -83,7 +189,7 @@ impl Overlay for Keys {
 
     /// Enter sends the selected row's action for execution.
     fn enter(&mut self, _key: Key) -> Outcome {
-        if let Some(&idx) = self.matches().get(self.list.selected) {
+        if let Some(&Entry::Row(idx)) = self.entries().get(self.list.selected) {
             self.list.status = None;
             return Outcome::Send(Request::Exec(self.rows[idx].1.clone()));
         }
@@ -100,9 +206,12 @@ impl Overlay for Keys {
             .collect();
         let (_, lines) = table::layout(&[Col::left(""), Col::left("")], &cells);
         let texts: Vec<String> = self
-            .matches()
+            .entries()
             .iter()
-            .map(|&idx| lines[idx].clone())
+            .map(|e| match e {
+                Entry::Heading(label) => (*label).to_string(),
+                Entry::Row(idx) => lines[*idx].clone(),
+            })
             .collect();
         let frame = Frame {
             prompt: "keys> ",
@@ -176,16 +285,98 @@ mod tests {
     }
 
     #[test]
-    fn selection_moves_and_clamps() {
+    fn selection_moves_over_headings_and_clamps() {
+        // Entries: [H Panes, close-pane, H Launch, open-launcher, H Session, quit].
         let mut k = Keys::new(rows());
+        assert_eq!(k.list.selected, 1, "starts on the first real row");
         k.step(Key::Up);
-        assert_eq!(k.list.selected, 0);
-        k.step(Key::Down);
-        k.step(Key::CtrlN);
-        k.step(Key::Down);
-        assert_eq!(k.list.selected, 2);
-        k.step(Key::CtrlP);
         assert_eq!(k.list.selected, 1);
+        k.step(Key::Down);
+        assert_eq!(k.list.selected, 3);
+        k.step(Key::CtrlN);
+        assert_eq!(k.list.selected, 5);
+        k.step(Key::Down);
+        assert_eq!(k.list.selected, 5);
+        k.step(Key::CtrlP);
+        assert_eq!(k.list.selected, 3);
+        k.step(Key::Up);
+        assert_eq!(k.list.selected, 1);
+    }
+
+    #[test]
+    fn empty_query_groups_rows_under_headings_in_area_order() {
+        let mut r = rows();
+        r.push(("Super+Z".into(), "frobnicate".into()));
+        r.push(("Super+H".into(), "focus left".into()));
+        let k = Keys::new(r);
+        let heads: Vec<_> = k
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                Entry::Heading(h) => Some(*h),
+                Entry::Row(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            heads,
+            [
+                "Panes & windows",
+                "Launch & overlays",
+                "Session & system",
+                "Other"
+            ]
+        );
+        // Inside Panes & windows, list order is kept: close-pane (2) before focus left (4).
+        assert_eq!(
+            &k.entries()[..3],
+            [
+                Entry::Heading("Panes & windows"),
+                Entry::Row(2),
+                Entry::Row(4)
+            ]
+        );
+        let out = k.render(80, 20);
+        assert!(
+            out.contains("Panes & windows") && out.contains("Other"),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn a_query_flattens_to_the_ranked_list_without_headings() {
+        let mut k = Keys::new(rows());
+        for c in "quit".chars() {
+            k.step(Key::Char(c));
+        }
+        assert_eq!(k.entries(), [Entry::Row(1)]);
+        assert_eq!(k.list.selected, 0);
+        assert!(!k.render(80, 10).contains("Session & system"));
+        for _ in 0..4 {
+            k.step(Key::Backspace);
+        }
+        assert_eq!(k.list.selected, 1, "clearing the query lands on a real row");
+    }
+
+    #[test]
+    fn area_is_derived_by_parsing_the_action_display_back() {
+        let reply = |line: &str| parse_reply(&Response::parse(line).unwrap()).unwrap();
+        let rows = reply("ok Super+W:close-pane\tSuper+F2:run x%3Ay\tSuper+X:bogus verb");
+        let areas: Vec<_> = rows.iter().map(|(_, a)| area_of(a)).collect();
+        assert_eq!(
+            areas,
+            [
+                Some(Area::PanesAndWindows),
+                Some(Area::LaunchAndOverlays),
+                None
+            ]
+        );
+        for action in [
+            Action::DeleteWorkspace,
+            Action::ReorderWorkspace(-1),
+            Action::CycleStack(1),
+        ] {
+            assert_eq!(area_of(&action.to_string()), Some(action.area()));
+        }
     }
 
     #[test]
@@ -193,21 +384,20 @@ mod tests {
         let mut k = Keys::new(rows());
         assert_eq!(
             k.step(Key::Enter),
-            Outcome::Send(Request::Exec("open-launcher".into()))
+            Outcome::Send(Request::Exec("close-pane".into()))
         );
         k.step(Key::Down);
         assert_eq!(
             k.step(Key::AltEnter),
-            Outcome::Send(Request::Exec("quit".into()))
+            Outcome::Send(Request::Exec("open-launcher".into()))
         );
-        assert_eq!(k.list.selected, 1);
+        assert_eq!(k.list.selected, 3);
         assert_eq!(k.step(Key::Esc), Outcome::Exit);
         assert_eq!(k.step(Key::CtrlC), Outcome::Exit);
         assert_eq!(k.step(Key::CtrlD), Outcome::Exit);
         k.step(Key::Char('x'));
         assert_eq!(k.step(Key::CtrlD), Outcome::Continue);
     }
-
     #[test]
     fn enter_with_no_match_does_nothing() {
         let mut k = Keys::new(rows());

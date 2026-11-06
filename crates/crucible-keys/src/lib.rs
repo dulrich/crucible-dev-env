@@ -20,6 +20,6 @@ pub mod action;
 pub mod bindings;
 pub mod chord;
 
-pub use action::{Action, ActionParseError, terminal_command};
+pub use action::{Action, ActionParseError, Area, terminal_command};
 pub use bindings::{BindError, BindTarget, Bindings, Chord};
 pub use chord::{Keysym, Modifiers, resolve};
