@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.8 — 2026-11-06
+
+### Changed
+
+- `crucible mem`: a cterm daemon's row is now `cterm daemon (+N windows)` and holds only the daemon and its thin clients (which no longer get a row each). What runs in its windows counts toward its app, one row per app name (`claude`, `htop`, a bare shell as `bash`, an unconfirmed restore banner as `crucible resume`). Before, the daemon row summed everything in its windows.
+
 ## 0.4.7 — 2026-11-05
 
 ### Added
