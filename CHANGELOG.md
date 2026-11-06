@@ -4,6 +4,14 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.6 — 2026-11-05
+
+### Added
+
+- Window identity for crucible-term's daemon mode: a new compositor global `crucible_window_identity_manager_v1` (protocol `crucible-window-identity-v1`, `protocols/crucible-window-identity-v1.xml`). When the terminal program's basename is `cterm`, each terminal spawn gets a single-use `CRUCIBLE_WINDOW_GRANT`; a client that binds it before the surface's xdg role (checked against the peer's UID, executable and parentage) has its window placed, classified, captured, relaunched and closed by that spawn's own shell (`WindowIdentity`) rather than by the connection's PID. Windows without a bound identity behave as before. See `docs/config.md`.
+- `crucible mem` lists a running cterm daemon as `cterm daemon (N windows) › …`.
+- Hidden Wayland windows (e.g. stacked behind another in a pane) get the standard xdg_toplevel `suspended` state, so clients that honour it (cterm 0.3.0) free their buffers; it is cleared when the window is placed again.
+
 ## 0.4.5 — 2026-11-05
 
 ### Fixed
