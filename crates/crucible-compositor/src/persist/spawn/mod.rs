@@ -202,7 +202,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let mut cmd = Command::new(program);
         cmd.args(&args)
             .envs(session_env())
-            .env("WAYLAND_DISPLAY", &socket);
+            .env("WAYLAND_DISPLAY", &socket)
+            .env("DISPLAY", crate::xwayland::child_display(self.xdisplay));
         if let Some(path) = &self.persist.ipc_path {
             cmd.env(SOCKET_ENV, path);
         }

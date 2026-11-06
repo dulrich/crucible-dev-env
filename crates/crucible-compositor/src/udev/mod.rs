@@ -500,11 +500,6 @@ pub fn run_udev() {
         Err(err) => warn!(%err, "No primary renderer; running without linux-dmabuf"),
     }
 
-    // The initial connectors registered their outputs synchronously above (`device_added` ->
-    // `device_changed` -> `connector_connected` -> `register_output`): restore the last session or
-    // open the cold-start picker now, before hotplug is driven.
-    state.start_session();
-
     // Advertise the primary GPU's SHM formats to clients.
     if let Ok(renderer) = state.backend_data.gpus.single_renderer(&primary_gpu) {
         state.shm_state.update_formats(renderer.shm_formats());
@@ -536,6 +531,8 @@ pub fn run_udev() {
         .unwrap();
 
     // Bring up XWayland so X11 apps run alongside Wayland clients.
+    // The session (restore / cold-start picker / warm overlay host) starts at the first XWayland
+    // outcome so its X11 spawns get a real `DISPLAY`; see `CrucibleState::on_xwayland_outcome`.
     state.start_xwayland();
 
     info!("Initialization completed, starting the main loop.");

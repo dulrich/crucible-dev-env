@@ -266,6 +266,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub xdisplay: Option<u32>,
     /// Once-only latch for the `autostart` commands (see [`crate::autostart`]).
     pub autostart_gate: crate::autostart::AutostartGate,
+    /// Latch for the session start at the first XWayland outcome (see [`crate::autostart`]).
+    pub session_start_gate: crate::autostart::AutostartGate,
     /// The active configuration (defaults until a config file is applied); see
     /// [`Self::apply_config`].
     pub config: Config,
@@ -470,6 +472,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             xwm: None,
             xdisplay: None,
             autostart_gate: crate::autostart::AutostartGate::default(),
+            session_start_gate: crate::autostart::AutostartGate::default(),
             // Only `keyboard` is pre-seeded (the seat was built from it above); the first
             // `apply_config` sees no keyboard change and leaves the keymap alone.
             config: Config {

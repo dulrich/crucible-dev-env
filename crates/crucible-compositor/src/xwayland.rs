@@ -30,7 +30,9 @@
 use std::os::unix::{io::OwnedFd, net::UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::{
     reexports::wayland_server::Client,
     utils::{Logical, Rectangle},
@@ -43,6 +45,7 @@ use smithay::{
 use tracing::{debug, error, info, trace, warn};
 
 use crate::{
+    autostart::OutcomeSite,
     element::WindowElement,
     layout::{Binding, Teardown},
     selection::{
@@ -50,6 +53,20 @@ use crate::{
     },
     state::{Backend, CrucibleState},
 };
+
+/// How long the session start waits for the first XWayland outcome before starting anyway. A
+/// healthy XWayland answers in well under a second; 5 s is long enough not to race a slow cold
+/// start (the session then restores with a real `DISPLAY`) yet short enough that a hung server
+/// delays the restored session by an unnoticeable moment rather than leaving it empty.
+pub(crate) const SESSION_START_FALLBACK: Duration = Duration::from_secs(5);
+
+/// The `DISPLAY` CDE's children get: XWayland's once it is serving, else the **empty string**.
+/// Unset is not enough (`env -u DISPLAY urxvt` falls back to `:0`, the live desktop; an empty
+/// `DISPLAY` aborts "can't open display"). **Pure** so the spawn seam is unit-testable.
+#[must_use]
+pub(crate) fn child_display(xdisplay: Option<u32>) -> String {
+    xdisplay.map_or_else(String::new, |n| format!(":{n}"))
+}
 
 /// Environment variable that overrides the scale applied to XWayland clients.
 const XWAYLAND_SCALE_ENV: &str = "CDE_XWAYLAND_SCALE";
@@ -129,6 +146,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// [`X11Wm`], sets the per-client scale, records the `DISPLAY` number, and exports `DISPLAY`
     /// into the compositor's own environment so any X11 children CDE spawns find the server.
     pub fn start_xwayland(&mut self) {
+        // No outcome in `SESSION_START_FALLBACK` starts the session anyway (children keep the
+        // empty `DISPLAY`); a later outcome still runs autostart.
+        let fallback = self.handle.insert_source(
+            Timer::from_duration(SESSION_START_FALLBACK),
+            |_, _, data| {
+                data.on_xwayland_outcome(OutcomeSite::Timer);
+                TimeoutAction::Drop
+            },
+        );
+        if let Err(err) = fallback {
+            error!(%err, "cannot arm the session-start fallback timer");
+        }
         // The server (and so its X clients' defaults) sees the configured cursor theme and size.
         let env = crate::cursor::child_env(&self.config.cursor);
         let (xwayland, client) = match XWayland::spawn(
@@ -143,7 +172,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(ret) => ret,
             Err(err) => {
                 error!(%err, "Failed to start XWayland");
-                self.run_autostart();
+                self.on_xwayland_outcome(OutcomeSite::StartFailed);
                 return;
             }
         };
@@ -156,17 +185,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     display_number,
                 } => {
                     data.on_xwayland_ready(&client, x11_socket, display_number);
-                    // Success or WM-attach failure alike: autostart runs exactly once.
-                    data.run_autostart();
+                    // Success or WM-attach failure alike: the session starts, then autostart
+                    // runs, each exactly once.
+                    data.on_xwayland_outcome(OutcomeSite::Ready);
                 }
                 XWaylandEvent::Error => {
                     warn!("XWayland crashed on startup");
-                    data.run_autostart();
+                    data.on_xwayland_outcome(OutcomeSite::Crashed);
                 }
             });
         if let Err(err) = ret {
             error!(%err, "Failed to insert the XWayland source into the event loop");
-            self.run_autostart();
+            self.on_xwayland_outcome(OutcomeSite::StartFailed);
         }
     }
 
@@ -511,5 +541,17 @@ mod configure_tests {
         let last = r(5, 6, 70, 80);
         let got = x11_configure_geometry(X11Placement::Unmanaged, Some(400), None, last);
         assert_eq!(got, r(5, 6, 400, 80));
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::child_display;
+
+    #[test]
+    fn child_display_is_empty_until_xwayland_serves() {
+        // Before readiness and after a failed start: the empty string, never unset or inherited.
+        assert_eq!(child_display(None), "");
+        assert_eq!(child_display(Some(3)), ":3");
     }
 }

@@ -210,11 +210,10 @@ pub fn run_winit() {
     // Adopt the model's initial output for this single winit output and size it to its logical
     // size (the window's pixels divided by the configured scale).
     state.register_output(&output);
-    // The output exists now: restore the last session or open the cold-start picker.
-    state.start_session();
-
     // Bring up XWayland so X11 apps run alongside Wayland clients. On readiness this exports
     // `DISPLAY` and attaches the X11 window manager; see `crate::xwayland`.
+    // The session (restore / cold-start picker / warm overlay host) starts at the first XWayland
+    // outcome so its X11 spawns get a real `DISPLAY`; see `CrucibleState::on_xwayland_outcome`.
     state.start_xwayland();
 
     let start_time = Instant::now();

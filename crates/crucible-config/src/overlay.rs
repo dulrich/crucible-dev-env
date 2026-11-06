@@ -183,6 +183,9 @@ pub enum TerminalKind {
     /// as its background plus zero centred padding (see [`Self::overlay_args`]); its terminal
     /// spawns get a window-identity grant.
     Cterm,
+    /// `urxvt` or `rxvt-unicode`: no default-binding args, but with an N1 style the opaque surround
+    /// as its background (`-bg #rrggbb`) and a zero internal border (`-b 0`).
+    Urxvt,
     /// Anything else (including `footclient`, `ghostty-foo`, an empty program): no defaults.
     Other,
 }
@@ -195,6 +198,7 @@ impl TerminalKind {
             Some("ghostty" | "ghostty-cde") => Self::Ghostty,
             Some("foot") => Self::Foot,
             Some("cterm") => Self::Cterm,
+            Some("urxvt" | "rxvt-unicode") => Self::Urxvt,
             _ => Self::Other,
         }
     }
@@ -211,7 +215,7 @@ impl TerminalKind {
                 .iter()
                 .flat_map(|action| ["-o".to_string(), format!("key-bindings.{action}=none")])
                 .collect(),
-            Self::Cterm | Self::Other => Vec::new(),
+            Self::Cterm | Self::Urxvt | Self::Other => Vec::new(),
         }
     }
 
@@ -240,6 +244,14 @@ impl TerminalKind {
                     "colors.alpha=1.0".to_string(),
                     "-o".to_string(),
                     "pad=0x0 center".to_string(),
+                ]),
+                // urxvt's internal border and the strip the cell grid leaves show its own
+                // background, so the opaque surround closes the gap; `-b 0` drops the border.
+                Self::Urxvt => args.extend([
+                    "-bg".to_string(),
+                    format!("#{r:02x}{g:02x}{b:02x}"),
+                    "-b".to_string(),
+                    "0".to_string(),
                 ]),
                 Self::Ghostty | Self::Other => {}
             }
@@ -295,11 +307,19 @@ mod tests {
         for p in ["foot", "/x/foot", "/home/u/.local/opt/foot/bin/foot"] {
             assert_eq!(unset.effective_terminal_args(p), foot_med, "{p}");
         }
+        for p in ["urxvt", "/usr/bin/urxvt", "rxvt-unicode"] {
+            assert_eq!(
+                unset.effective_terminal_args(p),
+                ["-bg", "#3a3a3b", "-b", "0"].map(String::from),
+                "{p}"
+            );
+        }
         let term_style = OverlayConfig {
             style: OverlayStyle::Terminal,
             ..OverlayConfig::default()
         };
         assert_eq!(term_style.effective_terminal_args("foot"), foot);
+        assert!(term_style.effective_terminal_args("urxvt").is_empty());
         assert_eq!(term_style.effective_terminal_args("ghostty"), defaults);
         let dark = OverlayConfig {
             style: OverlayStyle::N1Dark,
