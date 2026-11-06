@@ -319,6 +319,7 @@ mod tests {
         for action in [
             Action::Slot(7),
             Action::CycleWorkspace(1),
+            Action::ReorderWorkspace(1),
             Action::NewWorkspace,
             Action::CloseWindow,
             Action::CloseWorkspace,

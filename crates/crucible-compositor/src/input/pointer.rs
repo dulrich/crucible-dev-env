@@ -23,6 +23,7 @@ use super::modal::{
 };
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
+use crate::header::{HeaderPress, ReleaseAction, release_decision};
 use crate::pointer_lock::{MotionOutcome, clamp_to_fullscreen, constrained_motion};
 use crate::state::{Backend, CrucibleState};
 use smithay::wayland::seat::WaylandFocus;
@@ -194,9 +195,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             if route.click_focus {
                 self.update_keyboard_focus_under_pointer(element_under);
             }
-        } else if self.header.consumed.consume_release(button) {
+        } else if let Some(press) = self.header.consumed.consume_release(button) {
             // The paired release of a press the header strip consumed: never forward a release
-            // whose press the client did not see (audit E8).
+            // whose press the client did not see (audit E8). It also decides the click or reorder.
+            self.finish_header_press(press);
             return;
         }
 
@@ -223,9 +225,36 @@ impl<B: Backend + 'static> CrucibleState<B> {
         else {
             return false;
         };
-        self.header.consumed.consume_press(button);
-        self.header_click(output, workspace);
+        self.header
+            .consumed
+            .consume_press(button, HeaderPress { output, workspace });
         true
+    }
+
+    /// Applies a consumed header press at its release: a click, a reorder or nothing, per
+    /// [`release_decision`]. Re-checks the input mode (a lock or overlay may have opened since
+    /// the press).
+    fn finish_header_press(&mut self, press: HeaderPress) {
+        let at = self.pointer.current_location();
+        let release = self.header_hit(at.x.floor() as i32, at.y.floor() as i32);
+        let normal = matches!(self.input_mode(), InputMode::Normal);
+        let order = self
+            .layout
+            .world
+            .output(press.output)
+            .map(|o| o.workspaces().to_vec())
+            .unwrap_or_default();
+        match release_decision(press, release, normal, &order) {
+            ReleaseAction::None => {}
+            ReleaseAction::Click(p) => self.header_click(p.output, p.workspace),
+            ReleaseAction::Reorder { workspace, to } => {
+                if let Err(err) =
+                    self.with_model(|world| world.reorder_workspace(workspace, to).map(|_| ()))
+                {
+                    tracing::warn!(%err, "header drag: workspace reorder failed");
+                }
+            }
+        }
     }
 
     /// Delivers a scroll axis frame to the seat.

@@ -12,7 +12,7 @@
 //! [`Action`]'s `Display` and `FromStr` impls are the **one** verb table: `Display` prints the
 //! action grammar and `FromStr` parses it back. Verbs: `quit`, `close-pane`, `close-window`, `set-layout <name>`, `run-terminal`,
 //! `run <command…>`, `run-in-terminal <command…>`, `focus|move|split|resize <left|right|up|down>`,
-//! `cycle-stack <±n>`, `cycle-workspace <±n>`, `new-workspace`, `move-window-to-workspace <±n>`,
+//! `cycle-stack <±n>`, `cycle-workspace <±n>`, `reorder-workspace <±n>`, `new-workspace`, `move-window-to-workspace <±n>`,
 //! `mark-window`, `swap-marked-window`,
 //! `close-workspace`, `delete-workspace`, `close-all-workspaces`, `slot <0-9>`, `pin-slot <0-9>`,
 //! `move-workspace-to-output <±n>`, `open-picker`, `open-launcher`, `open-settings`,
@@ -86,6 +86,9 @@ pub enum Action {
     /// Switch the focused output's active workspace by `delta` (wraparound). `Super+]` (`1`) /
     /// `Super+[` (`-1`).
     CycleWorkspace(i64),
+    /// Move the focused output's active workspace by `delta` places within its stack, clamped at
+    /// the ends (a no-op there, not a wrap). Unbound by default.
+    ReorderWorkspace(i64),
     /// Create a new workspace on the focused output with an auto-generated name and switch to it.
     /// `Super+N`.
     ///
@@ -183,6 +186,7 @@ impl std::fmt::Display for Action {
             Self::Resize(d) => write!(f, "resize {}", dir(d)),
             Self::CycleStack(n) => write!(f, "cycle-stack {n}"),
             Self::CycleWorkspace(n) => write!(f, "cycle-workspace {n}"),
+            Self::ReorderWorkspace(n) => write!(f, "reorder-workspace {n}"),
             Self::NewWorkspace => f.write_str("new-workspace"),
             Self::MoveWindowToWorkspace(n) => write!(f, "move-window-to-workspace {n}"),
             Self::MarkWindow => f.write_str("mark-window"),
@@ -305,6 +309,7 @@ impl FromStr for Action {
             "resize" => unary(Self::Resize(direction(words.get(1))?)),
             "cycle-stack" => unary(Self::CycleStack(delta(words.get(1))?)),
             "cycle-workspace" => unary(Self::CycleWorkspace(delta(words.get(1))?)),
+            "reorder-workspace" => unary(Self::ReorderWorkspace(delta(words.get(1))?)),
             "move-window-to-workspace" => unary(Self::MoveWindowToWorkspace(delta(words.get(1))?)),
             "mark-window" => nullary(Self::MarkWindow),
             "swap-marked-window" => nullary(Self::SwapMarkedWindow),
@@ -359,6 +364,7 @@ mod tests {
             Action::Resize(Direction::Down),
             Action::CycleStack(-1),
             Action::CycleWorkspace(1),
+            Action::ReorderWorkspace(-1),
             Action::NewWorkspace,
             Action::MoveWindowToWorkspace(2),
             Action::MarkWindow,

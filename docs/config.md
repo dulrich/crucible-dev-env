@@ -177,7 +177,7 @@ A clickable workspace strip at the top of every output, listing that output's wo
 - `divider` — width in logical pixels of a divider drawn between adjacent workspace labels, an integer from 0 to 16; default 0 (off). It takes its own space between labels (never before the first or after the last), is drawn in the inactive label colour by default, never sits under the active highlight, and a click on it switches nothing. Negative, above 16 or non-integer values are config errors. Optional properties: `inset=<px>` (0 to 32, default 0) trims the line that many pixels from its top and bottom, and draws no line when nothing is left; `color="#rrggbb"` (default `#cdd0d6`, the label colour) sets its colour. Both are inert when the width is 0, and invalid values are config errors. Example: `divider 1 inset=6 color="#5c6370"`.
 - `slots` — `#true` or `#false` (default `#false`). When on, the label of a workspace pinned to a slot shows the slot digit with a Super glyph (`⌘` + digit, e.g. `⌘3 name`); if the header font lacks the glyph the badge falls back to `S-3 name`. Unpinned labels are unchanged.
 
-Clicking a workspace name focuses that output and switches it to that workspace (the press and its release are consumed by the strip, never sent to the window beneath). A click never hides the strip; in `toggle` mode only `toggle-header` does. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
+Clicking a workspace name focuses that output and switches it to that workspace; the click acts on release (the press and its release are consumed by the strip, never sent to the window beneath). Dragging a name and releasing on another name on the same output moves that workspace to the other's position and reorders the stack (`session.kdl` records the new order); releasing anywhere else, or after a lock or overlay opened, does nothing. A click never hides the strip; in `toggle` mode only `toggle-header` does. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
 
 ### `keyboard`
 
@@ -275,6 +275,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `resize <dir>` | Shift the split divider |
 | `cycle-stack <n>` | Cycle the pane's window stack by `n` (wraps; negative goes back) |
 | `cycle-workspace <n>` | Switch workspace by `n` (wraps) |
+| `reorder-workspace <n>` | Move the active workspace `n` places within its output's stack (clamped at the ends, no wrap; unbound by default) |
 | `new-workspace` | Create and switch to a new workspace |
 | `move-window-to-workspace <n>` | Send the focused window `n` workspaces over |
 | `mark-window` | (default chord `Super+M`) Mark the focused window; the next press elsewhere moves it into the focused pane (any workspace or output); a press in its own pane clears the mark |

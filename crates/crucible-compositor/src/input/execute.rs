@@ -184,6 +184,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             | Action::Resize(_)
             | Action::CycleStack(_)
             | Action::CycleWorkspace(_)
+            | Action::ReorderWorkspace(_)
             | Action::MoveWindowToWorkspace(_)
             | Action::MarkWindow
             | Action::SwapMarkedWindow
@@ -302,6 +303,10 @@ fn apply_model_action(world: &mut World, action: &Action) -> Option<Result<(), L
         }
         Action::CycleWorkspace(delta) => {
             world.cycle_workspace(*delta);
+        }
+        Action::ReorderWorkspace(delta) => {
+            let active = world.active_workspace_id();
+            return Some(world.reorder_workspace_by(active, *delta).map(|_| ()));
         }
         Action::MoveWindowToWorkspace(delta) => {
             return Some(move_window_to_adjacent_workspace(world, *delta));
@@ -548,6 +553,17 @@ mod tests {
         world.new_workspace("ws2").unwrap();
         assert_dispatches(world, Action::CycleWorkspace(-1), |w| {
             w.cycle_workspace(-1);
+        });
+    }
+
+    #[test]
+    fn reorder_workspace_dispatches_to_world_reorder_workspace_by() {
+        let mut world = World::new("1");
+        world.new_workspace("ws2").unwrap();
+        world.new_workspace("ws3").unwrap();
+        assert_dispatches(world, Action::ReorderWorkspace(-1), |w| {
+            let active = w.active_workspace_id();
+            w.reorder_workspace_by(active, -1).unwrap();
         });
     }
 

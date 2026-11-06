@@ -524,19 +524,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let world = &self.layout.world;
         let mut connected = self.connected_outputs();
         connected.sort_by_key(|(_, id)| *id);
-        let name_of = |ws: WorkspaceId| world.workspace(ws).map(|w| w.name.clone());
-        let outputs: Vec<_> = connected
-            .iter()
-            .filter_map(|(name, id)| {
-                let o = world.output(*id)?;
-                Some(crucible_persist::session::OutputSession {
-                    output: name.clone(),
-                    workspaces: o.workspaces().iter().filter_map(|w| name_of(*w)).collect(),
-                    focused: name_of(o.active_workspace()),
-                    header: None,
-                })
-            })
-            .collect();
+        let outputs = session_outputs(world, &connected);
         let outputs = crucible_persist::session::with_header_prefs(outputs, &self.header.prefs);
         let focused = world.focused_output();
         Session {
@@ -986,6 +974,28 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 }
 
+/// The session's `output` records for the connected `(connector, id)` pairs: each output's
+/// workspace names in stack order and its active workspace. Pure over the world, so the
+/// recorded order is unit-tested without a compositor.
+fn session_outputs(
+    world: &crucible_layout::World,
+    connected: &[(String, OutputId)],
+) -> Vec<crucible_persist::session::OutputSession> {
+    let name_of = |ws: WorkspaceId| world.workspace(ws).map(|w| w.name.clone());
+    connected
+        .iter()
+        .filter_map(|(name, id)| {
+            let o = world.output(*id)?;
+            Some(crucible_persist::session::OutputSession {
+                output: name.clone(),
+                workspaces: o.workspaces().iter().filter_map(|w| name_of(*w)).collect(),
+                focused: name_of(o.active_workspace()),
+                header: None,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1006,6 +1016,26 @@ mod tests {
             focused: 0,
             windows,
         })
+    }
+
+    #[test]
+    fn reordered_world_produces_the_reordered_output_node() {
+        let mut world = crucible_layout::World::new("one");
+        let one = world.active_workspace_id();
+        world.new_workspace("two").unwrap();
+        let out = world.focused_output();
+        let connected = vec![("DP-1".to_string(), out)];
+        let names =
+            |w: &crucible_layout::World| session_outputs(w, &connected)[0].workspaces.clone();
+        assert_eq!(names(&world), ["one", "two"]);
+        world.reorder_workspace(one, 1).unwrap();
+        let rec = session_outputs(&world, &connected);
+        assert_eq!(rec[0].workspaces, ["two", "one"]);
+        assert_eq!(
+            rec[0].focused.as_deref(),
+            Some("two"),
+            "active is unchanged"
+        );
     }
 
     #[test]

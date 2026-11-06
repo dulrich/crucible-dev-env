@@ -142,6 +142,35 @@ impl World {
         output.stack.cycle(delta);
     }
 
+    /// Moves workspace `ws` to `index` within its owning output's stack (clamped to the last
+    /// index) and returns its final index. The active workspace, the focused output and focus are
+    /// unchanged. Errors with [`LayoutError::UnknownWorkspace`] (mutating nothing) for an unknown id.
+    pub fn reorder_workspace(
+        &mut self,
+        ws: WorkspaceId,
+        index: usize,
+    ) -> Result<usize, LayoutError> {
+        let owner = self.owner_of(ws)?;
+        let stack = &mut self.outputs.get_mut(&owner).expect("owner output").stack;
+        let from = stack.position(&ws).expect("owner holds ws");
+        Ok(stack.move_to(from, index).expect("from in range"))
+    }
+
+    /// Moves workspace `ws` by `delta` places within its output's stack, clamped at the ends (a
+    /// no-op there, never a wrap). Returns its final index; errors as [`World::reorder_workspace`].
+    pub fn reorder_workspace_by(
+        &mut self,
+        ws: WorkspaceId,
+        delta: i64,
+    ) -> Result<usize, LayoutError> {
+        let owner = self.owner_of(ws)?;
+        let stack = &self.outputs[&owner].stack;
+        let from = stack.position(&ws).expect("owner holds ws");
+        let last = stack.as_slice().len() as i64 - 1;
+        let to = (from as i64).saturating_add(delta).clamp(0, last) as usize;
+        self.reorder_workspace(ws, to)
+    }
+
     /// The single activation primitive: focuses the output owning `ws`, makes `ws` its active
     /// workspace, and (if given) makes `pane` the workspace's focused pane. Errors with
     /// [`LayoutError::UnknownWorkspace`] (mutating nothing) when no output owns `ws`.
@@ -289,6 +318,64 @@ mod tests {
         let a = w.new_workspace("a").unwrap();
         let b = w.new_workspace("b").unwrap();
         (w, first, a, b)
+    }
+
+    fn order(w: &World) -> Vec<WorkspaceId> {
+        w.output(w.focused_output).unwrap().workspaces().to_vec()
+    }
+
+    #[test]
+    fn reorder_moves_left_and_right_keeping_active() {
+        let (mut w, first, a, b) = world3();
+        assert_eq!(w.active_workspace_id(), b);
+        assert_eq!(w.reorder_workspace_by(b, -1), Ok(1));
+        assert_eq!(order(&w), vec![first, b, a]);
+        assert_eq!(w.active_workspace_id(), b, "active follows the item");
+        assert_eq!(w.reorder_workspace_by(first, 2), Ok(2));
+        assert_eq!(order(&w), vec![b, a, first]);
+        assert_eq!(w.active_workspace_id(), b, "active workspace preserved");
+        w.check_invariants();
+    }
+
+    #[test]
+    fn reorder_clamps_at_both_ends() {
+        let (mut w, first, a, b) = world3();
+        assert_eq!(w.reorder_workspace_by(first, -5), Ok(0));
+        assert_eq!(order(&w), vec![first, a, b], "no wrap at the left end");
+        assert_eq!(w.reorder_workspace_by(b, 9), Ok(2));
+        assert_eq!(order(&w), vec![first, a, b], "no wrap at the right end");
+        assert_eq!(w.reorder_workspace(first, 99), Ok(2));
+        assert_eq!(order(&w), vec![a, b, first]);
+        assert_eq!(w.reorder_workspace_by(a, i64::MIN), Ok(0));
+        assert_eq!(w.reorder_workspace_by(a, i64::MAX), Ok(2));
+        assert_eq!(w.active_workspace_id(), b);
+        w.check_invariants();
+    }
+
+    #[test]
+    fn reorder_unknown_workspace_errors_without_mutation() {
+        let (mut w, ..) = world3();
+        let before = w.clone();
+        let foreign = WorkspaceId::from_raw(u64::MAX);
+        assert_eq!(
+            w.reorder_workspace(foreign, 0),
+            Err(LayoutError::UnknownWorkspace(foreign))
+        );
+        assert_eq!(
+            w.reorder_workspace_by(foreign, 1),
+            Err(LayoutError::UnknownWorkspace(foreign))
+        );
+        assert_eq!(w, before);
+    }
+
+    #[test]
+    fn reorder_single_workspace_is_a_noop() {
+        let mut w = World::new("1");
+        let only = w.active_workspace_id();
+        let before = w.clone();
+        assert_eq!(w.reorder_workspace_by(only, 1), Ok(0));
+        assert_eq!(w.reorder_workspace(only, 3), Ok(0));
+        assert_eq!(w, before);
     }
 
     #[test]

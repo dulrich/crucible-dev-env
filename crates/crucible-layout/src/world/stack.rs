@@ -100,6 +100,26 @@ impl<T> Stack<T> {
         self.focused = (self.focused as i64 + delta).rem_euclid(len_i) as usize;
     }
 
+    /// Moves the item at `from` to index `to` (clamped to the last index), keeping the same item
+    /// focused. Returns the final index, or `None` when `from` is out of range.
+    pub(crate) fn move_to(&mut self, from: usize, to: usize) -> Option<usize> {
+        let len = self.items.len();
+        if from >= len {
+            return None;
+        }
+        let to = to.min(len - 1);
+        let item = self.items.remove(from);
+        self.items.insert(to, item);
+        if self.focused == from {
+            self.focused = to;
+        } else if from < self.focused && self.focused <= to {
+            self.focused -= 1;
+        } else if to <= self.focused && self.focused < from {
+            self.focused += 1;
+        }
+        Some(to)
+    }
+
     /// The focused item, or `None` for an empty stack.
     #[must_use]
     pub fn focused(&self) -> Option<&T> {

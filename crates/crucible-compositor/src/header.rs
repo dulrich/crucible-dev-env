@@ -166,20 +166,85 @@ pub fn seed_visible(pref: Option<bool>, start: HeaderStart) -> bool {
     pref.unwrap_or_else(|| start.is_shown())
 }
 
-/// Physical button codes whose press the strip consumed; their paired release is swallowed
-/// (audit E8: a release must never be forwarded for a press that was not).
+/// Where a consumed header press landed: the output and, on a label, its workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderPress {
+    /// The output whose strip was pressed.
+    pub output: OutputId,
+    /// The workspace label under the press (`None` on the strip outside every label).
+    pub workspace: Option<WorkspaceId>,
+}
+
+/// Physical button codes whose press the strip consumed, with where it landed; their paired
+/// release is swallowed (audit E8: a release must never be forwarded for a press that was not)
+/// and decides the click or reorder ([`release_decision`]).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ConsumedButtons(BTreeSet<u32>);
+pub struct ConsumedButtons(BTreeMap<u32, HeaderPress>);
 
 impl ConsumedButtons {
-    /// Records `button`'s press as consumed.
-    pub fn consume_press(&mut self, button: u32) {
-        self.0.insert(button);
+    /// Records `button`'s press as consumed, at `press`.
+    pub fn consume_press(&mut self, button: u32, press: HeaderPress) {
+        self.0.insert(button, press);
     }
 
-    /// Whether `button`'s release is swallowed (its press was consumed); clears the record.
-    pub fn consume_release(&mut self, button: u32) -> bool {
+    /// The press recorded for `button` if its press was consumed (so its release is swallowed);
+    /// clears the record.
+    pub fn consume_release(&mut self, button: u32) -> Option<HeaderPress> {
         self.0.remove(&button)
+    }
+}
+
+/// What a consumed header release does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseAction {
+    /// Nothing (the release is still swallowed).
+    None,
+    /// The existing click: focus the output and switch to the workspace.
+    Click(HeaderPress),
+    /// Move `workspace` to stack index `to` on its output.
+    Reorder {
+        /// The pressed workspace.
+        workspace: WorkspaceId,
+        /// The released segment's index in the output's stack.
+        to: usize,
+    },
+}
+
+/// Decides a consumed header release. `release` is the strip hit under the release point
+/// (`None` off every strip or with the strip hidden); `normal` is whether the input mode is
+/// still `Normal` (a lock or overlay opened since the press cancels); `order` is the pressed
+/// output's workspace stack in order. Same place as the press is a click; a different segment
+/// of the same output is a reorder to that segment's index; anything else does nothing.
+#[must_use]
+pub fn release_decision(
+    press: HeaderPress,
+    release: Option<(OutputId, Option<WorkspaceId>)>,
+    normal: bool,
+    order: &[WorkspaceId],
+) -> ReleaseAction {
+    if !normal {
+        return ReleaseAction::None;
+    }
+    let Some((output, workspace)) = release else {
+        return ReleaseAction::None;
+    };
+    if output != press.output {
+        return ReleaseAction::None;
+    }
+    if workspace == press.workspace {
+        return ReleaseAction::Click(press);
+    }
+    match (press.workspace, workspace) {
+        (Some(pressed), Some(target)) => {
+            order
+                .iter()
+                .position(|w| *w == target)
+                .map_or(ReleaseAction::None, |to| ReleaseAction::Reorder {
+                    workspace: pressed,
+                    to,
+                })
+        }
+        _ => ReleaseAction::None,
     }
 }
 
@@ -578,14 +643,100 @@ mod tests {
     fn consumed_press_swallows_exactly_its_release() {
         const LEFT: u32 = 0x110;
         const RIGHT: u32 = 0x111;
+        let press = HeaderPress {
+            output: OutputId::from_raw(1),
+            workspace: None,
+        };
         let mut c = ConsumedButtons::default();
         // A release whose press was forwarded is forwarded.
-        assert!(!c.consume_release(RIGHT));
-        c.consume_press(LEFT);
-        assert!(!c.consume_release(RIGHT)); // unrelated button forwarded
+        assert!(c.consume_release(RIGHT).is_none());
+        c.consume_press(LEFT, press);
+        assert!(c.consume_release(RIGHT).is_none()); // unrelated button forwarded
         // Swallowed even if the strip was hidden in between (the record is independent of it).
-        assert!(c.consume_release(LEFT));
-        assert!(!c.consume_release(LEFT)); // cleared
+        assert_eq!(c.consume_release(LEFT), Some(press));
+        assert!(c.consume_release(LEFT).is_none()); // cleared
+    }
+
+    fn ws(n: u64) -> WorkspaceId {
+        WorkspaceId::from_raw(n)
+    }
+
+    #[test]
+    fn release_decision_table() {
+        let out = OutputId::from_raw(1);
+        let other = OutputId::from_raw(2);
+        let order = [ws(1), ws(2), ws(3)];
+        let press = HeaderPress {
+            output: out,
+            workspace: Some(ws(1)),
+        };
+        let decide = |release, normal| release_decision(press, release, normal, &order);
+        // Same segment: the existing click.
+        assert_eq!(
+            decide(Some((out, Some(ws(1)))), true),
+            ReleaseAction::Click(press)
+        );
+        // A different segment of the same output: reorder to that segment's index.
+        assert_eq!(
+            decide(Some((out, Some(ws(3)))), true),
+            ReleaseAction::Reorder {
+                workspace: ws(1),
+                to: 2
+            }
+        );
+        // Off the labels of the same output, a different output, off every strip: nothing.
+        assert_eq!(decide(Some((out, None)), true), ReleaseAction::None);
+        assert_eq!(
+            decide(Some((other, Some(ws(2)))), true),
+            ReleaseAction::None
+        );
+        assert_eq!(
+            decide(Some((other, Some(ws(1)))), true),
+            ReleaseAction::None
+        );
+        assert_eq!(decide(None, true), ReleaseAction::None);
+        // A target missing from the stack order: nothing.
+        assert_eq!(decide(Some((out, Some(ws(9)))), true), ReleaseAction::None);
+    }
+
+    #[test]
+    fn release_decision_label_less_press_clicks_in_place_only() {
+        let out = OutputId::from_raw(1);
+        let order = [ws(1), ws(2)];
+        let press = HeaderPress {
+            output: out,
+            workspace: None,
+        };
+        assert_eq!(
+            release_decision(press, Some((out, None)), true, &order),
+            ReleaseAction::Click(press)
+        );
+        assert_eq!(
+            release_decision(press, Some((out, Some(ws(2)))), true, &order),
+            ReleaseAction::None
+        );
+    }
+
+    #[test]
+    fn a_mode_change_between_press_and_release_cancels_but_the_release_is_consumed() {
+        let out = OutputId::from_raw(1);
+        let order = [ws(1), ws(2)];
+        let press = HeaderPress {
+            output: out,
+            workspace: Some(ws(1)),
+        };
+        let mut c = ConsumedButtons::default();
+        c.consume_press(0x110, press);
+        // The mode is no longer Normal at release (a lock or overlay opened): no action...
+        let recorded = c.consume_release(0x110).expect("release is consumed");
+        for hit in [Some((out, Some(ws(1)))), Some((out, Some(ws(2))))] {
+            assert_eq!(
+                release_decision(recorded, hit, false, &order),
+                ReleaseAction::None
+            );
+        }
+        // ...and the record is cleared, so it is not consumed twice.
+        assert!(c.consume_release(0x110).is_none());
     }
 
     #[test]
