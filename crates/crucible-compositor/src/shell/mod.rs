@@ -40,6 +40,8 @@ use tracing::warn;
 
 use crate::{
     element::WindowElement,
+    layout::{Binding, Teardown},
+    persist::identity::{Destruction, classify_destruction},
     state::{Backend, CrucibleState},
 };
 
@@ -128,7 +130,20 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
         if self.warm_toplevel_destroyed(&target) {
             return;
         }
-        self.unmap_matching(|element| element.wl_surface().map(|s| *s == target).unwrap_or(false));
+        let matches =
+            |element: &WindowElement| element.wl_surface().map(|s| *s == target).unwrap_or(false);
+        // A bound window whose client disconnected is lost (crucible-term plan 03): a placeholder
+        // keeps its slot. Everything else is today's close.
+        if let Binding::Managed(id) = self.layout.resolve(matches)
+            && classify_destruction(self.layout.meta(id).and_then(|m| m.identity.as_ref()))
+                == Destruction::Lost
+        {
+            self.window_lost(id, matches);
+            return;
+        }
+        if let Teardown::Managed(id) = self.unmap_matching(matches) {
+            self.forget_recovery(id);
+        }
     }
 
     fn popup_destroyed(&mut self, _surface: PopupSurface) {

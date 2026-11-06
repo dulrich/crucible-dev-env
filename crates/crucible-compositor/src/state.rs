@@ -85,11 +85,17 @@ use crate::{
 pub struct ClientState {
     /// Compositor-specific per-client state required by [`CompositorHandler`].
     pub compositor_state: CompositorClientState,
+    /// Set when the client disconnects; shared with every window identity the client binds, so
+    /// the window's destruction can tell a lost client from a close (crucible-term plan 03). The
+    /// rs backend runs `disconnected` before the client's object destructors.
+    pub link: crate::persist::ClientLink,
 }
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {
+        self.link.mark_disconnected();
+    }
 }
 
 /// Backend abstraction implemented by each rendering backend (`winit` now, `udev` later).

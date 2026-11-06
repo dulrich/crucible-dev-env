@@ -28,11 +28,24 @@ use crate::cli::{Parsed, help_requested};
 use crate::tty::RawGuard;
 
 /// Usage text for `crucible resume --help`.
-pub const USAGE: &str = "usage: crucible resume [--now [--exit]] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). With --now, --exit exits with the command's exit code instead of starting a shell afterwards (--exit without --now is a usage error). If the command exits abnormally (a crash signal or a nonzero exit code other than a Ctrl+C), a crash banner offers Enter to run it again or Ctrl+C for a shell (or to close the terminal with --exit). Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
+pub const USAGE: &str = "usage: crucible resume [--now [--exit] | --lost] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). With --now, --exit exits with the command's exit code instead of starting a shell afterwards (--exit without --now is a usage error). If the command exits abnormally (a crash signal or a nonzero exit code other than a Ctrl+C), a crash banner offers Enter to run it again or Ctrl+C for a shell (or to close the terminal with --exit). --lost (CDE's placeholder for a terminal whose window was lost when its terminal process died) adds a line to the banner saying so; Enter re-runs the command as usual, and with no command the shell starts at once. --lost excludes --now. Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
 
 /// The banner shown before waiting (or before the immediate shell).
 #[must_use]
 pub fn banner(args: &ResumeWrapper) -> String {
+    if args.mode == crucible_persist::ResumeMode::Lost {
+        let line = match &args.command {
+            Some(_) => {
+                "This terminal was lost (its terminal process died). Enter re-runs the command."
+            }
+            None => "This terminal was lost (its terminal process died). A new shell starts here.",
+        };
+        let base = ResumeWrapper {
+            mode: crucible_persist::ResumeMode::Banner,
+            ..args.clone()
+        };
+        return format!("{line}\n{}", banner(&base));
+    }
     match &args.command {
         Some(cmd) if args.mode.runs_now() => format!("CDE is running: {cmd}"),
         Some(cmd) => format!(
@@ -419,6 +432,27 @@ mod tests {
             mode: ResumeMode::Banner,
         };
         assert_eq!(banner(&without), "CDE restored this terminal in /p.");
+    }
+
+    #[test]
+    fn lost_banner_and_parsing() {
+        let a = ResumeWrapper::parse(&v(&["--lost", "--cwd", "/p", "--", "cargo test"])).unwrap();
+        assert_eq!(a.mode, ResumeMode::Lost);
+        assert!(!a.mode.runs_now() && !a.mode.exits());
+        assert_eq!(
+            banner(&a),
+            "This terminal was lost (its terminal process died). Enter re-runs the command.\nCDE restored this terminal. Last command: cargo test. Press Enter to run it, or Ctrl+C for a shell."
+        );
+        let idle = ResumeWrapper::parse(&v(&["--cwd", "/p", "--lost", "--lost"])).unwrap();
+        assert_eq!(
+            banner(&idle),
+            "This terminal was lost (its terminal process died). A new shell starts here.\nCDE restored this terminal in /p."
+        );
+        assert!(ResumeWrapper::parse(&v(&["--lost", "--now", "--cwd", "/p"])).is_err());
+        assert!(matches!(
+            parse_args(&v(&["--lost", "--help"])),
+            Ok(Parsed::Help)
+        ));
     }
 
     #[test]

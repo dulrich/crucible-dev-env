@@ -18,6 +18,8 @@ When the terminal program's basename is `cterm` (crucible-term), each CDE termin
 
 A granted `cterm` spawn also gets `CRUCIBLE_TERM_SESSION`, a CDE-minted 32-hex session key (CDE → cterm client; the client strips it before the child); it is saved in the terminal's workspace record (`session=`) and re-exported when that record is restored.
 
+Loss recovery: when a bound window disappears because its Wayland client disconnected (the cterm daemon died) rather than because it was closed, CDE treats the window as lost and keeps its slot. It spawns a placeholder from the window's last recorded state (kept in memory, refreshed every second; never read from `/proc` at loss time): a terminal becomes `crucible resume --lost --cwd <dir> [-- <command>]`, which shows the restore banner with a line saying the terminal was lost (Enter re-runs the command; with no command a shell starts at once), under the same session key; a lost `crucible relaunch` placeholder comes back as the same relaunch placeholder. Each placeholder takes the lost window's position in its pane stack, whatever order they map in. While a placeholder is pending (until it maps, or 30 s), that workspace is not auto-saved, so the saved commands are never overwritten by the half-replaced pane; the next save after it maps writes the placeholder in the lost window's place. A user close, `crucible msg close` or an app's own exit is never a loss, and unbound windows (foot, other apps) close as before.
+
 ### `tiling`
 
 ```kdl

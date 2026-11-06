@@ -96,7 +96,7 @@ impl Invocation {
 }
 
 /// When `crucible resume` runs its command: on the wire `Banner` is no flag, `Run` is `--now`,
-/// `RunThenExit` is `--now --exit` (in that order).
+/// `RunThenExit` is `--now --exit` (in that order), `Lost` is `--lost`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResumeMode {
     /// Show the banner and wait for Enter (a restored terminal).
@@ -106,13 +106,16 @@ pub enum ResumeMode {
     /// `--now --exit`: run immediately and exit with the command's status instead of starting a
     /// shell (`run-tui`).
     RunThenExit,
+    /// `--lost`: `Banner`, plus a line saying the terminal was lost (a loss placeholder: the
+    /// window's terminal process died under it). Enter re-runs the command.
+    Lost,
 }
 
 impl ResumeMode {
     /// Whether the command runs without waiting for Enter.
     #[must_use]
     pub fn runs_now(self) -> bool {
-        self != Self::Banner
+        matches!(self, Self::Run | Self::RunThenExit)
     }
 
     /// Whether `resume` exits with the command's status instead of starting a shell.
@@ -122,10 +125,10 @@ impl ResumeMode {
     }
 }
 
-/// `crucible resume [--now [--exit]] --cwd <dir> [-- <command>]`.
+/// `crucible resume [--now [--exit] | --lost] --cwd <dir> [-- <command>]`.
 ///
-/// Grammar: `--cwd <dir>`, `--now`, `--exit` in any order; repeated `--now`/`--exit` are
-/// idempotent, a repeated `--cwd` is rejected, `--exit` needs `--now`, `--cwd` is required. An
+/// Grammar: `--cwd <dir>`, `--now`, `--exit`, `--lost` in any order; repeated flags are
+/// idempotent, a repeated `--cwd` is rejected, `--exit` needs `--now`, `--lost` excludes `--now`, `--cwd` is required. An
 /// optional `--` is followed by at most one element (the command, one shell string); an empty one
 /// means no command.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +142,7 @@ pub struct ResumeWrapper {
 }
 
 impl ResumeWrapper {
-    /// The arguments after `resume`: `[--now] [--exit] --cwd <dir> [-- <command>]`.
+    /// The arguments after `resume`: `[--now] [--exit] [--lost] --cwd <dir> [-- <command>]`.
     #[must_use]
     pub fn to_args(&self) -> Vec<OsString> {
         let mut args: Vec<OsString> = Vec::new();
@@ -148,6 +151,9 @@ impl ResumeWrapper {
         }
         if self.mode.exits() {
             args.push("--exit".into());
+        }
+        if self.mode == ResumeMode::Lost {
+            args.push("--lost".into());
         }
         args.push("--cwd".into());
         args.push(self.cwd.clone().into_os_string());
@@ -166,6 +172,7 @@ impl ResumeWrapper {
         let mut cwd = None;
         let mut now = false;
         let mut exit = false;
+        let mut lost = false;
         let mut i = 0;
         let mut command = None;
         while i < args.len() {
@@ -185,6 +192,10 @@ impl ResumeWrapper {
                     exit = true;
                     i += 1;
                 }
+                "--lost" => {
+                    lost = true;
+                    i += 1;
+                }
                 "--" => {
                     match &args[i + 1..] {
                         [] => {}
@@ -196,11 +207,13 @@ impl ResumeWrapper {
                 other => return Err(format!("unexpected argument {other:?}")),
             }
         }
-        let mode = match (now, exit) {
-            (false, false) => ResumeMode::Banner,
-            (true, false) => ResumeMode::Run,
-            (true, true) => ResumeMode::RunThenExit,
-            (false, true) => return Err("--exit requires --now".into()),
+        let mode = match (now, exit, lost) {
+            (false, false, false) => ResumeMode::Banner,
+            (false, false, true) => ResumeMode::Lost,
+            (true, false, false) => ResumeMode::Run,
+            (true, true, false) => ResumeMode::RunThenExit,
+            (false, true, _) => return Err("--exit requires --now".into()),
+            (true, _, true) => return Err("--lost excludes --now".into()),
         };
         Ok(Self {
             cwd: cwd.ok_or("--cwd <dir> is required")?,
@@ -487,7 +500,12 @@ mod tests {
 
     // --- Round trip ---
 
-    const MODES: [ResumeMode; 3] = [ResumeMode::Banner, ResumeMode::Run, ResumeMode::RunThenExit];
+    const MODES: [ResumeMode; 4] = [
+        ResumeMode::Banner,
+        ResumeMode::Run,
+        ResumeMode::RunThenExit,
+        ResumeMode::Lost,
+    ];
 
     fn resume_grid() -> Vec<ResumeWrapper> {
         let cwds = ["/p", "/with space/dir", "/ünïcødé/路径", "relative"];

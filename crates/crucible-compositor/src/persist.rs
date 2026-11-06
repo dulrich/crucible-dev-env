@@ -37,7 +37,7 @@ mod spawn;
 mod warm_slot;
 mod workspace;
 
-pub use identity::{GRANT_ENV, WindowIdentity};
+pub use identity::{ClientLink, GRANT_ENV, WindowIdentity};
 pub use spawn::{SpawnKind, SpawnRecord, SpawnRequest};
 pub use workspace::{new_workspace_name, startup_seed_name};
 
@@ -61,7 +61,7 @@ use crate::ipc::{Candidate, CandidateKind};
 use crate::state::{Backend, CrucibleState};
 use overlay::Overlay;
 pub(crate) use overlay::PickerMode;
-use placement::{PENDING_TTL, Pending, Target};
+use placement::{LostSlot, PENDING_TTL, Pending, Target};
 use workspace::restore_target;
 
 /// Auto-save / config-poll cadence.
@@ -107,6 +107,10 @@ pub struct PersistState {
     session_started: bool,
     /// Surface-keyed window identities (see [`identity`]); dropped on surface destroy.
     identities: identity::SurfaceIdentities,
+    /// The recovery set (crucible-term plan 03): the last record of every bound window, set at map
+    /// and refreshed every tick whatever the save gate says; a lost window's placeholder is built
+    /// from it. Dropped when the window closes.
+    recovery: HashMap<WindowId, WindowRecord>,
 }
 
 impl PersistState {
@@ -123,6 +127,7 @@ impl PersistState {
             workspace: workspace::WorkspaceState::default(),
             saved: HashMap::new(),
             identities: identity::SurfaceIdentities::default(),
+            recovery: HashMap::new(),
             picker_roots: SavedRootCache::default(),
             config_mtime: None,
             session_written: None,
@@ -319,6 +324,17 @@ fn element_app_id(element: &WindowElement) -> Option<String> {
         .x11_surface()
         .map(|x| x.class())
         .filter(|c| !c.is_empty())
+}
+
+/// `record` with a bound identity's session key (a terminal's key wins over the origin's).
+#[must_use]
+pub(super) fn with_session(mut record: WindowRecord, key: Option<String>) -> WindowRecord {
+    if let WindowRecord::Terminal { session, .. } = &mut record
+        && key.is_some()
+    {
+        *session = key;
+    }
+    record
 }
 
 fn config_mtime() -> Option<SystemTime> {
@@ -571,6 +587,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             debug!(?reaped, "reaped exited children");
         }
         self.warm_reaped(&reaped);
+        self.refresh_recovery();
+        self.prune_reservations();
         self.save_dirty(now, TICK);
         self.write_session();
         self.poll_config();
@@ -706,6 +724,149 @@ impl<B: Backend + 'static> CrucibleState<B> {
             *slot = session;
         }
         record
+    }
+
+    // ---- loss recovery (crucible-term plan 03) -------------------------------------------------
+
+    /// Sets the recovery record of a just-mapped window `id` when it is bound: its spawn origin
+    /// (with the identity's session key) when there is one, else a capture. Unbound: nothing.
+    pub(super) fn init_recovery(&mut self, id: WindowId) {
+        let Some(meta) = self.layout.meta(id) else {
+            return;
+        };
+        let Some(identity) = &meta.identity else {
+            return;
+        };
+        let record = match &meta.origin {
+            Some(origin) => with_session(origin.clone(), identity.session.clone()),
+            None => self.window_record(&capture_env(), id),
+        };
+        self.persist.recovery.insert(id, record);
+    }
+
+    /// Refreshes the recovery record of every bound window (each tick, before and independent of
+    /// the save gate) and drops the records of closed windows. A window whose client has already
+    /// disconnected keeps its last record (its shell may be dying).
+    fn refresh_recovery(&mut self) {
+        let env = capture_env();
+        let bound: Vec<(WindowId, bool)> = self
+            .layout
+            .metas()
+            .filter_map(|(id, m)| Some((id, m.identity.as_ref()?.client.is_disconnected())))
+            .collect();
+        let mut fresh = HashMap::with_capacity(bound.len());
+        for (id, gone) in bound {
+            let kept = gone
+                .then(|| self.persist.recovery.get(&id).cloned())
+                .flatten();
+            fresh.insert(id, kept.unwrap_or_else(|| self.window_record(&env, id)));
+        }
+        self.persist.recovery = fresh;
+    }
+
+    /// Drops a pane's loss reservation once no loss placeholder for it is pending.
+    fn prune_reservations(&mut self) {
+        let placement = &mut self.persist.placement;
+        let waiting: HashSet<PaneId> = placement
+            .pending
+            .values()
+            .filter_map(|p| match p.target {
+                Target::Lost(LostSlot { pane, .. }) => Some(pane),
+                _ => None,
+            })
+            .collect();
+        placement.reserved.retain(|pane, _| waiting.contains(pane));
+    }
+
+    /// Drops window `id`'s recovery record (a normal close).
+    pub(crate) fn forget_recovery(&mut self, id: WindowId) {
+        self.persist.recovery.remove(&id);
+    }
+
+    /// The workspace holding `pane`.
+    fn workspace_of_pane(&self, pane: PaneId) -> Option<WorkspaceId> {
+        self.live_workspaces().into_iter().find_map(|(_, ws)| {
+            let w = self.layout.world.workspace(ws)?;
+            w.panes().contains(&pane).then_some(ws)
+        })
+    }
+
+    /// Handles a lost window `id` (its bound client disconnected; plan 03): plans its placeholder
+    /// from its recovery record (never `/proc`), reserves its slot against the live stack, closes
+    /// it in the model through `close` and spawns the placeholder into the slot with a pending
+    /// entry, which holds the workspace's saves until it maps or expires.
+    pub(crate) fn window_lost(&mut self, id: WindowId, close: impl Fn(&WindowElement) -> bool) {
+        let record = self
+            .persist
+            .recovery
+            .remove(&id)
+            .or_else(|| self.layout.meta(id).and_then(|m| m.origin.clone()));
+        let slot = self.placeholder_slot(id);
+        let root = slot
+            .and_then(|s| self.workspace_of_pane(s.pane))
+            .and_then(|ws| self.persist.workspace.root(ws).cloned());
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let job = match &record {
+            Some(record) => crucible_persist::prepare_lost(
+                record,
+                root.as_deref(),
+                Self::crucible_exe("loss placeholder")
+                    .ok_or_else(|| std::io::Error::other("crucible binary unavailable")),
+                home.as_deref(),
+                &self.config.terminal.exec_flag,
+                Path::is_dir,
+            ),
+            None => Err("no recovery record".to_string()),
+        };
+        let (slot, job) = match (slot, job) {
+            (Some(slot), Ok(Some(job))) => (slot, job),
+            (slot, job) => {
+                warn!(
+                    ?id,
+                    ?slot,
+                    ?job,
+                    "window lost; no placeholder can stand in, closing it"
+                );
+                self.unmap_matching(close);
+                return;
+            }
+        };
+        let live: Vec<WindowId> = self
+            .layout
+            .world
+            .pane(slot.pane)
+            .map(|p| p.windows().to_vec())
+            .unwrap_or_default();
+        let order = placement::reserve(
+            self.persist
+                .placement
+                .reserved
+                .get(&slot.pane)
+                .map(Vec::as_slice),
+            &live,
+        );
+        self.persist.placement.reserved.insert(slot.pane, order);
+        self.unmap_matching(close);
+        let target = Target::Lost(LostSlot {
+            pane: slot.pane,
+            lost: id,
+            focused: slot.focused,
+            saved_index: slot.saved_index,
+        });
+        let args = self.with_tiling_args(job.args);
+        let req = SpawnRequest::new(self.terminal_program(), args, SpawnKind::Terminal)
+            .in_dir(Some(job.dir))
+            .with_origin(Some(job.origin));
+        match self.spawn(req) {
+            Some(pid) => {
+                info!(?id, pid, pane = ?slot.pane, "window lost; placeholder spawned into its slot");
+                self.persist
+                    .placement
+                    .pending
+                    .insert(pid, Pending::new(target, Instant::now()));
+            }
+            None => warn!(?id, "window lost; its placeholder could not be spawned"),
+        }
     }
 
     fn candidates(&mut self) -> Vec<Candidate> {

@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crucible_config::TerminalKind;
 use smithay::reexports::wayland_server::Resource;
@@ -36,6 +38,53 @@ pub struct WindowIdentity {
     pub root_pid: u32,
     /// The session key (`CRUCIBLE_TERM_SESSION`) minted for the spawn, if it carried one.
     pub session: Option<String>,
+    /// The binding client's disconnect flag (shared with its `ClientState`).
+    pub client: ClientLink,
+}
+
+/// A Wayland client's disconnect flag, shared between its `ClientState` and the identities it
+/// binds. Two links are equal when they are the same flag.
+#[derive(Debug, Clone, Default)]
+pub struct ClientLink(Arc<AtomicBool>);
+
+impl ClientLink {
+    /// Records that the client disconnected.
+    pub fn mark_disconnected(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    /// Whether the client has disconnected.
+    #[must_use]
+    pub fn is_disconnected(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl PartialEq for ClientLink {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for ClientLink {}
+
+/// How a window's destruction is handled (crucible-term plan 03).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Destruction {
+    /// A bound window whose client disconnected: kept in its slot by a loss placeholder.
+    Lost,
+    /// Anything else (unbound, or the client is still connected): today's close.
+    Close,
+}
+
+/// Classifies a window's destruction from its identity: lost only when bound and its client
+/// has disconnected.
+#[must_use]
+pub fn classify_destruction(identity: Option<&WindowIdentity>) -> Destruction {
+    match identity {
+        Some(i) if i.client.is_disconnected() => Destruction::Lost,
+        _ => Destruction::Close,
+    }
 }
 
 /// The `/proc` facts the checks need, injectable so they unit-test without a real process.
@@ -153,6 +202,7 @@ impl<K: Eq + Hash> IdentityTable<K> {
         spawn_pid: u32,
         root_pid: u32,
         session: Option<String>,
+        client: ClientLink,
     ) -> WindowIdentity {
         let id = self.next_id;
         self.next_id = self.next_id.checked_add(1).unwrap_or(1);
@@ -161,6 +211,7 @@ impl<K: Eq + Hash> IdentityTable<K> {
             spawn_pid,
             root_pid,
             session,
+            client,
         };
         self.by_surface.insert(key, identity.clone());
         identity
@@ -223,10 +274,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .spawn
             .get(spawn_pid)
             .and_then(|r| r.session.clone());
-        let identity = self
-            .persist
-            .identities
-            .insert(surface.id(), spawn_pid, root_pid, session);
+        // The binding client's disconnect flag (XWayland clients never bind, so a missing
+        // `ClientState` only yields an unshared flag that is never set).
+        let client = surface
+            .client()
+            .and_then(|c| {
+                c.get_data::<crate::state::ClientState>()
+                    .map(|d| d.link.clone())
+            })
+            .unwrap_or_default();
+        let identity =
+            self.persist
+                .identities
+                .insert(surface.id(), spawn_pid, root_pid, session, client);
         tracing::info!(
             id = identity.id,
             spawn_pid,
@@ -321,10 +381,15 @@ mod tests {
         let (mut g, p) = fixture();
         assert_eq!(bind(&mut g, &p, false, "g1", PEER), Ok(SPAWN));
         let mut table = IdentityTable::<u8>::default();
-        let id = table.insert(7, SPAWN, SHELL, None);
+        let id = table.insert(7, SPAWN, SHELL, None, ClientLink::default());
         assert_eq!(id.id, 1);
         assert_eq!(table.get(&7), Some(id));
-        assert_eq!(table.insert(8, SPAWN, SHELL, None).id, 2);
+        assert_eq!(
+            table
+                .insert(8, SPAWN, SHELL, None, ClientLink::default())
+                .id,
+            2
+        );
         table.remove(&7);
         assert_eq!(table.get(&7), None);
     }

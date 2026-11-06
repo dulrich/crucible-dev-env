@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::invocation::{Invocation, RelaunchWrapper, ResumeMode, ResumeWrapper};
-use crate::record::{WindowRecord, WorkspaceRecord};
+use crate::record::{PaneRecord, RecordNode, WindowRecord, WorkspaceRecord};
 
 /// A restored terminal's working directory: the saved cwd, else the workspace root, else `$HOME`,
 /// else `/`.
@@ -55,6 +55,20 @@ pub fn plan_spawns(
     exec_flag: &str,
     is_dir: impl Fn(&Path) -> bool,
 ) -> Vec<SpawnJob> {
+    plan_spawns_as(record, home, crucible, exec_flag, is_dir, false)
+}
+
+/// [`plan_spawns`], or with `lost` the loss placeholders (plan 03): every terminal, an idle one
+/// too, gets `crucible resume --lost --cwd <dir> [-- <command>]`; an app gets the same relaunch
+/// placeholder as a restore.
+fn plan_spawns_as(
+    record: &WorkspaceRecord,
+    home: Option<&Path>,
+    crucible: &Path,
+    exec_flag: &str,
+    is_dir: impl Fn(&Path) -> bool,
+    lost: bool,
+) -> Vec<SpawnJob> {
     let root = record.root.as_deref();
     let mut jobs = Vec::new();
     for (pane_index, pane) in record.panes().into_iter().enumerate() {
@@ -65,6 +79,12 @@ pub fn plan_spawns(
                     // `<exec-flag> <crucible> resume --cwd <dir> -- <command>` (the command is ONE
                     // element), or no arguments at all for an idle shell.
                     let args = match command {
+                        _ if lost => Invocation::Resume(ResumeWrapper {
+                            cwd: dir.clone(),
+                            command: command.clone(),
+                            mode: ResumeMode::Lost,
+                        })
+                        .terminal_argv(exec_flag, crucible),
                         Some(command) => Invocation::Resume(ResumeWrapper {
                             cwd: dir.clone(),
                             command: Some(command.clone()),
@@ -125,10 +145,40 @@ pub fn prepare_restore(
     Ok(plan_spawns(record, home, &crucible, exec_flag, is_dir))
 }
 
+/// [`prepare_restore`] for one lost window (plan 03): its loss placeholder, planned as a
+/// one-window record under `root`. `None` for an app with no saved command line.
+///
+/// # Errors
+/// The `crucible` path error.
+pub fn prepare_lost(
+    window: &WindowRecord,
+    root: Option<&Path>,
+    crucible: std::io::Result<PathBuf>,
+    home: Option<&Path>,
+    exec_flag: &str,
+    is_dir: impl Fn(&Path) -> bool,
+) -> Result<Option<SpawnJob>, String> {
+    let crucible = crucible.map_err(|e| e.to_string())?;
+    let record = WorkspaceRecord {
+        name: String::new(),
+        root: root.map(Path::to_path_buf),
+        focused_pane: 0,
+        output: None,
+        tree: RecordNode::Pane(PaneRecord {
+            focused: 0,
+            windows: vec![window.clone()],
+        }),
+    };
+    Ok(
+        plan_spawns_as(&record, home, &crucible, exec_flag, is_dir, true)
+            .into_iter()
+            .next(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::record::{PaneRecord, RecordNode};
 
     fn rec(root: Option<&str>, tree: RecordNode) -> WorkspaceRecord {
         WorkspaceRecord {

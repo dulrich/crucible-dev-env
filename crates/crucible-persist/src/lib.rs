@@ -52,4 +52,4 @@ pub use program::{
     preflight_command, reinstalled_exe, resolve_program, same_program,
 };
 pub use record::{PaneRecord, RecordNode, WindowRecord, WorkspaceRecord};
-pub use restore::{SpawnJob, prepare_restore, resolve_cwd};
+pub use restore::{SpawnJob, prepare_lost, prepare_restore, resolve_cwd};
