@@ -171,10 +171,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let output_geo = self.space.output_geometry(output);
         let pointer = self.pointer.current_location();
         let cursor = output_geo.and_then(|geo| cursor_on_output(geo, pointer, scale));
+        let preview = self.header_drag_preview();
         let header = crate::layout::model_output_id(output)
             .zip(output_geo)
             .and_then(|(id, geo)| {
-                self.header_layout_for(id, Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h))
+                self.header_layout_ordered(
+                    id,
+                    Rect::new(geo.loc.x, geo.loc.y, geo.size.w, geo.size.h),
+                    preview.as_ref(),
+                )
             });
         FrameInputs {
             scale,

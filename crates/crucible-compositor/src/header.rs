@@ -278,6 +278,170 @@ pub fn release_decision(
     }
 }
 
+/// A strip hit: the output and, on a label, its workspace (see `CrucibleState::header_hit`).
+pub type StripHit = (OutputId, Option<WorkspaceId>);
+
+/// Every output's workspace stack in order, as the committed model holds it.
+pub type StackOrders = Vec<(OutputId, Vec<WorkspaceId>)>;
+
+/// Pointer travel (logical px, Euclidean from the press point) past which a header press becomes
+/// a drag (cvault's `THRESHOLD`).
+pub const DRAG_THRESHOLD: f64 = 5.0;
+
+/// A consumed header press that may become a drag: armed only by a press on a label, live once
+/// the pointer travels past [`DRAG_THRESHOLD`]. While live it holds the current drop target,
+/// computed against the **committed** model layout (never the previewed one, or the reflowed
+/// segment would move under the pointer and the target would oscillate).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeaderDrag {
+    /// The physical button that pressed.
+    pub button: u32,
+    /// The press.
+    pub press: HeaderPress,
+    origin: (f64, f64),
+    live: bool,
+    target: Option<StripHit>,
+}
+
+impl HeaderDrag {
+    /// Arms a drag from a press at `at`; `None` for a label-less press (it never drags).
+    #[must_use]
+    pub fn arm(button: u32, press: HeaderPress, at: (f64, f64)) -> Option<Self> {
+        press.workspace.map(|_| Self {
+            button,
+            press,
+            origin: at,
+            live: false,
+            target: None,
+        })
+    }
+
+    /// Whether the pointer has travelled past the threshold.
+    #[must_use]
+    pub fn is_live(&self) -> bool {
+        self.live
+    }
+
+    /// The current drop target (`None` when not live, off every strip, or not in `Normal` mode).
+    #[must_use]
+    pub fn target(&self) -> Option<StripHit> {
+        self.target
+    }
+
+    /// Feeds pointer motion to `at`; `hit` is the committed-layout strip hit under it and `normal`
+    /// whether the input mode is `Normal`. Returns whether the drag's visible state changed (it
+    /// went live or the target changed), i.e. whether the header must be redrawn.
+    pub fn motion(&mut self, at: (f64, f64), hit: Option<StripHit>, normal: bool) -> bool {
+        if !self.live {
+            let (dx, dy) = (at.0 - self.origin.0, at.1 - self.origin.1);
+            if dx.hypot(dy) <= DRAG_THRESHOLD {
+                return false;
+            }
+            self.live = true;
+        }
+        let target = if normal { hit } else { None };
+        let changed = target != self.target;
+        self.target = target;
+        changed
+    }
+}
+
+/// What a consumed header release does, given the committed stack `orders`. `dragged` is whether
+/// the press went past the threshold: such a release over its own slot is nothing (never a
+/// click). Otherwise [`release_decision`] unchanged, except that a move of an output's last
+/// workspace to another output is refused here (the model refuses it too), so the preview and
+/// the commit agree.
+#[must_use]
+pub fn drag_action(
+    press: HeaderPress,
+    release: Option<StripHit>,
+    normal: bool,
+    dragged: bool,
+    orders: &[(OutputId, Vec<WorkspaceId>)],
+) -> ReleaseAction {
+    let order_of = |o: OutputId| -> &[WorkspaceId] {
+        orders
+            .iter()
+            .find(|(id, _)| *id == o)
+            .map_or(&[][..], |(_, v)| v.as_slice())
+    };
+    let target_output = release.map_or(press.output, |(o, _)| o);
+    let action = release_decision(
+        press,
+        release,
+        normal,
+        order_of(press.output),
+        order_of(target_output),
+    );
+    match action {
+        ReleaseAction::Click(_) if dragged => ReleaseAction::None,
+        ReleaseAction::MoveToOutput { .. } if order_of(press.output).len() <= 1 => {
+            ReleaseAction::None
+        }
+        other => other,
+    }
+}
+
+/// The strip orders to draw while a drag is live, and the dragged workspace (which keeps the
+/// active highlight on whichever strip it is previewed on).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DragPreview {
+    /// Per output, the order to draw.
+    pub orders: StackOrders,
+    /// The dragged workspace.
+    pub dragged: WorkspaceId,
+}
+
+/// The preview of `action` over the committed `orders`: exactly the stack orders the model holds
+/// after committing `action` (`Reorder` moves within the output, `MoveToOutput` removes from the
+/// source and inserts, index clamped). `None` for an action that moves nothing.
+#[must_use]
+pub fn preview_orders(
+    action: ReleaseAction,
+    orders: &[(OutputId, Vec<WorkspaceId>)],
+) -> Option<DragPreview> {
+    let mut next = orders.to_vec();
+    let (workspace, output, to) = match action {
+        ReleaseAction::Reorder { workspace, to } => (workspace, None, to),
+        ReleaseAction::MoveToOutput {
+            workspace,
+            output,
+            to,
+        } => (workspace, Some(output), to),
+        ReleaseAction::None | ReleaseAction::Click(_) => return None,
+    };
+    let source = next.iter().position(|(_, v)| v.contains(&workspace))?;
+    let from = next[source].1.iter().position(|w| *w == workspace)?;
+    next[source].1.remove(from);
+    let dest = match output {
+        Some(o) => next.iter().position(|(id, _)| *id == o)?,
+        None => source,
+    };
+    let stack = &mut next[dest].1;
+    stack.insert(to.min(stack.len()), workspace);
+    Some(DragPreview {
+        orders: next,
+        dragged: workspace,
+    })
+}
+
+/// The live drag's preview (`None` when not live or the target moves nothing): derived from the
+/// same [`drag_action`] the release commits, so preview and commit cannot diverge.
+#[must_use]
+pub fn drag_preview(
+    drag: &HeaderDrag,
+    normal: bool,
+    orders: &[(OutputId, Vec<WorkspaceId>)],
+) -> Option<DragPreview> {
+    if !drag.is_live() {
+        return None;
+    }
+    preview_orders(
+        drag_action(drag.press, drag.target(), normal, true, orders),
+        orders,
+    )
+}
+
 // ---- compositor glue -------------------------------------------------------------------------
 
 /// Per-session header state, held on [`CrucibleState`].
@@ -291,6 +455,8 @@ pub struct HeaderState {
     pub prefs: BTreeMap<String, bool>,
     /// Buttons whose press the strip consumed.
     pub consumed: ConsumedButtons,
+    /// The label press being tracked as a possible drag.
+    pub drag: Option<HeaderDrag>,
     /// The font spec the text renderer was last loaded for.
     pub font_loaded: Option<String>,
 }
@@ -316,6 +482,27 @@ impl HeaderState {
     pub fn seed(&mut self, id: OutputId, name: &str, start: HeaderStart) {
         let visible = seed_visible(self.prefs.get(name).copied(), start);
         self.set_visible(id, visible);
+    }
+
+    /// Records a consumed press of `button` at `at`, arming a drag when it landed on a label.
+    pub fn press(&mut self, button: u32, press: HeaderPress, at: (f64, f64)) {
+        self.consumed.consume_press(button, press);
+        if self.drag.is_none() {
+            self.drag = HeaderDrag::arm(button, press, at);
+        }
+    }
+
+    /// The paired release of `button`: its press and whether it had become a drag. Ends the drag.
+    pub fn release(&mut self, button: u32) -> Option<(HeaderPress, bool)> {
+        let press = self.consumed.consume_release(button)?;
+        let dragged = match self.drag {
+            Some(d) if d.button == button => {
+                self.drag = None;
+                d.is_live()
+            }
+            _ => false,
+        };
+        Some((press, dragged))
     }
 
     /// Records `name`'s preference; returns whether the stored map changed.
@@ -380,6 +567,45 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// The strip layout of model output `id` whose global rect is `rect`; `None` while the strip
     /// is hidden or when the model has no such output.
     pub(crate) fn header_layout_for(&self, id: OutputId, rect: Rect) -> Option<HeaderLayout> {
+        self.header_layout_ordered(id, rect, None)
+    }
+
+    /// Every output's committed workspace stack order.
+    pub(crate) fn header_orders(&self) -> StackOrders {
+        self.raw_output_rects()
+            .into_iter()
+            .filter_map(|(id, _)| Some((id, self.layout.world.output(id)?.workspaces().to_vec())))
+            .collect()
+    }
+
+    /// The live drag's preview, if any. Only drawing consults it; hit-testing never does.
+    pub(crate) fn header_drag_preview(&self) -> Option<DragPreview> {
+        let drag = self.header.drag.as_ref()?;
+        let normal = self.input_is_normal();
+        drag_preview(drag, normal, &self.header_orders())
+    }
+
+    /// Feeds pointer motion to the armed drag (if any): recomputes the drop target against the
+    /// committed layout. The header redraws through the per-frame element diff (the drawn layout
+    /// is built from the preview), so a changed target needs no further damage call.
+    pub(crate) fn header_drag_motion(&mut self) {
+        let Some(mut drag) = self.header.drag else {
+            return;
+        };
+        let at = self.pointer.current_location();
+        let hit = self.header_hit(at.x.floor() as i32, at.y.floor() as i32);
+        let normal = self.input_is_normal();
+        drag.motion((at.x, at.y), hit, normal);
+        self.header.drag = Some(drag);
+    }
+
+    /// [`Self::header_layout_for`] drawn from `preview`'s order for this output, when given.
+    pub(crate) fn header_layout_ordered(
+        &self,
+        id: OutputId,
+        rect: Rect,
+        preview: Option<&DragPreview>,
+    ) -> Option<HeaderLayout> {
         if !self.header_shown(id) {
             return None;
         }
@@ -393,7 +619,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let output = self.layout.world.output(id)?;
         let strip = strip_rect(rect, height);
         let (mut names, mut workspaces) = (Vec::new(), Vec::new());
-        for ws in output.workspaces() {
+        let previewed = preview.and_then(|p| p.orders.iter().find(|(o, _)| *o == id));
+        let order = previewed.map_or(output.workspaces(), |(_, v)| v.as_slice());
+        for ws in order {
             let name = &self.layout.world.workspace(*ws)?.name;
             let slot = if badges {
                 self.persist.slots.slot_of(name)
@@ -416,12 +644,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .into_iter()
             .filter_map(|d| inset_divider(d, inset))
             .collect();
+        let active = active_index(
+            output.active_workspace(),
+            output.active_index(),
+            &workspaces,
+            preview,
+        );
         Some(HeaderLayout {
             output: id,
             strip,
             names,
             workspaces,
-            active: output.active_index(),
+            active,
             segments,
             dividers,
             divider_color,
@@ -484,6 +718,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
         }
     }
+}
+
+/// The highlighted index in the drawn `order`: the dragged workspace when it is on this strip,
+/// else the committed active workspace's new place (or its old index, clamped, if it left).
+fn active_index(
+    active: WorkspaceId,
+    committed: usize,
+    order: &[WorkspaceId],
+    preview: Option<&DragPreview>,
+) -> usize {
+    let find = |w: WorkspaceId| order.iter().position(|x| *x == w);
+    preview
+        .and_then(|p| find(p.dragged))
+        .or_else(|| find(active))
+        .unwrap_or_else(|| committed.min(order.len().saturating_sub(1)))
 }
 
 /// Width estimate used when no font is loaded.
@@ -805,6 +1054,145 @@ mod tests {
         }
         // ...and the record is cleared, so it is not consumed twice.
         assert!(c.consume_release(0x110).is_none());
+    }
+
+    fn press_on(output: OutputId, w: u64) -> HeaderPress {
+        HeaderPress {
+            output,
+            workspace: Some(ws(w)),
+        }
+    }
+
+    fn two_outputs() -> StackOrders {
+        vec![
+            (OutputId::from_raw(1), vec![ws(1), ws(2), ws(3)]),
+            (OutputId::from_raw(2), vec![ws(7), ws(8)]),
+        ]
+    }
+
+    #[test]
+    fn drag_goes_live_only_past_the_threshold_and_a_label_less_press_never_arms() {
+        let out = OutputId::from_raw(1);
+        let hit = Some((out, Some(ws(2))));
+        let mut d = HeaderDrag::arm(1, press_on(out, 1), (100.0, 10.0)).expect("label press arms");
+        assert!(!d.motion((104.9, 10.0), hit, true) && !d.is_live());
+        assert_eq!(d.target(), None);
+        assert!(d.motion((105.1, 10.0), hit, true) && d.is_live());
+        assert_eq!(d.target(), hit);
+        // Same target again: no change (no redraw); travelling back keeps it live.
+        assert!(!d.motion((101.0, 10.0), hit, true) && d.is_live());
+        let none = HeaderPress {
+            output: out,
+            workspace: None,
+        };
+        assert!(HeaderDrag::arm(1, none, (0.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn preview_reorders_within_and_across_outputs() {
+        let (a, b) = (OutputId::from_raw(1), OutputId::from_raw(2));
+        let orders = two_outputs();
+        let orders_after = |press, target| {
+            let act = drag_action(press, Some(target), true, true, &orders);
+            preview_orders(act, &orders).map(|p| p.orders)
+        };
+        let get = |o: &StackOrders, id| o.iter().find(|(i, _)| *i == id).unwrap().1.clone();
+        // Forward and backward within one output; the empty area appends.
+        let fwd = orders_after(press_on(a, 1), (a, Some(ws(3)))).unwrap();
+        assert_eq!(get(&fwd, a), [ws(2), ws(3), ws(1)]);
+        let back = orders_after(press_on(a, 3), (a, Some(ws(1)))).unwrap();
+        assert_eq!(get(&back, a), [ws(3), ws(1), ws(2)]);
+        let end = orders_after(press_on(a, 1), (a, None)).unwrap();
+        assert_eq!(get(&end, a), [ws(2), ws(3), ws(1)]);
+        // Across outputs: at a label's index, and at the end.
+        let at = orders_after(press_on(a, 2), (b, Some(ws(8)))).unwrap();
+        assert_eq!(get(&at, a), [ws(1), ws(3)]);
+        assert_eq!(get(&at, b), [ws(7), ws(2), ws(8)]);
+        let app = orders_after(press_on(a, 2), (b, None)).unwrap();
+        assert_eq!(get(&app, b), [ws(7), ws(8), ws(2)]);
+    }
+
+    #[test]
+    fn preview_refuses_what_the_release_refuses() {
+        let (a, b) = (OutputId::from_raw(1), OutputId::from_raw(2));
+        let mut orders = two_outputs();
+        orders[1].1 = vec![ws(7)]; // output 2 holds a single workspace
+        let preview = |press, target, normal| {
+            let mut d = HeaderDrag::arm(1, press, (0.0, 0.0)).unwrap();
+            d.motion((50.0, 0.0), target, normal);
+            drag_preview(&d, normal, &orders)
+        };
+        let act =
+            |press, target, normal, dragged| drag_action(press, target, normal, dragged, &orders);
+        // The last workspace never leaves its output: no preview, no move.
+        assert_eq!(preview(press_on(b, 7), Some((a, None)), true), None);
+        assert_eq!(
+            act(press_on(b, 7), Some((a, None)), true, true),
+            ReleaseAction::None
+        );
+        // Own slot, off every strip, a non-Normal mode: original orders and a no-op release.
+        assert_eq!(preview(press_on(a, 2), Some((a, Some(ws(2)))), true), None);
+        assert_eq!(
+            act(press_on(a, 2), Some((a, Some(ws(2)))), true, true),
+            ReleaseAction::None
+        );
+        assert_eq!(preview(press_on(a, 2), None, true), None);
+        assert_eq!(preview(press_on(a, 2), Some((a, Some(ws(3)))), false), None);
+        assert_eq!(
+            act(press_on(a, 2), Some((a, Some(ws(3)))), false, true),
+            ReleaseAction::None
+        );
+        // Before the threshold the existing click path is unchanged.
+        assert_eq!(
+            act(press_on(a, 2), Some((a, Some(ws(2)))), true, false),
+            ReleaseAction::Click(press_on(a, 2))
+        );
+    }
+
+    #[test]
+    fn preview_equals_commit_for_a_table_of_targets() {
+        let (a, b) = (OutputId::from_raw(1), OutputId::from_raw(2));
+        let orders = two_outputs();
+        // Applies a release action to the orders the way the model ops do.
+        let commit = |act: ReleaseAction| -> StackOrders {
+            let mut o = orders.clone();
+            match act {
+                ReleaseAction::Reorder { workspace, to } => {
+                    let v = &mut o[0].1;
+                    v.retain(|w| *w != workspace);
+                    v.insert(to.min(v.len()), workspace);
+                }
+                ReleaseAction::MoveToOutput {
+                    workspace,
+                    output,
+                    to,
+                } => {
+                    o[0].1.retain(|w| *w != workspace);
+                    let i = o.iter().position(|(id, _)| *id == output).unwrap();
+                    let v = &mut o[i].1;
+                    v.insert(to.min(v.len()), workspace);
+                }
+                ReleaseAction::None | ReleaseAction::Click(_) => {}
+            }
+            o
+        };
+        let targets = [
+            None,
+            Some((a, None)),
+            Some((a, Some(ws(1)))),
+            Some((a, Some(ws(3)))),
+            Some((b, None)),
+            Some((b, Some(ws(7)))),
+            Some((b, Some(ws(8)))),
+        ];
+        for w in [1, 2, 3] {
+            for t in targets {
+                let act = drag_action(press_on(a, w), t, true, true, &orders);
+                let shown =
+                    preview_orders(act, &orders).map_or_else(|| orders.clone(), |p| p.orders);
+                assert_eq!(shown, commit(act), "ws {w} -> {t:?}");
+            }
+        }
     }
 
     #[test]

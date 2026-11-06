@@ -23,7 +23,7 @@ use super::modal::{
 };
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
-use crate::header::{HeaderPress, ReleaseAction, release_decision};
+use crate::header::{HeaderPress, ReleaseAction, drag_action};
 use crate::pointer_lock::{MotionOutcome, clamp_to_fullscreen, constrained_motion};
 use crate::state::{Backend, CrucibleState};
 use smithay::wayland::seat::WaylandFocus;
@@ -63,6 +63,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             },
         );
         pointer.frame(self);
+        self.header_drag_motion();
         self.focus_follows_pointer(&mode);
     }
 
@@ -151,6 +152,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             },
         );
         pointer.frame(self);
+        self.header_drag_motion();
         self.focus_follows_pointer(&mode);
         let keyboard = self
             .seat
@@ -195,10 +197,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             if route.click_focus {
                 self.update_keyboard_focus_under_pointer(element_under);
             }
-        } else if let Some(press) = self.header.consumed.consume_release(button) {
+        } else if let Some((press, dragged)) = self.header.release(button) {
             // The paired release of a press the header strip consumed: never forward a release
             // whose press the client did not see (audit E8). It also decides the click or reorder.
-            self.finish_header_press(press);
+            self.finish_header_press(press, dragged);
             return;
         }
 
@@ -226,34 +228,24 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return false;
         };
         self.header
-            .consumed
-            .consume_press(button, HeaderPress { output, workspace });
+            .press(button, HeaderPress { output, workspace }, (at.x, at.y));
         true
     }
 
+    /// Whether the input mode is `Normal` (no lock or overlay).
+    pub(crate) fn input_is_normal(&self) -> bool {
+        matches!(self.input_mode(), InputMode::Normal)
+    }
+
     /// Applies a consumed header press at its release: a click, a reorder or nothing, per
-    /// [`release_decision`]. Re-checks the input mode (a lock or overlay may have opened since
+    /// [`drag_action`]. Re-checks the input mode (a lock or overlay may have opened since
     /// the press).
-    fn finish_header_press(&mut self, press: HeaderPress) {
+    fn finish_header_press(&mut self, press: HeaderPress, dragged: bool) {
         let at = self.pointer.current_location();
         let release = self.header_hit(at.x.floor() as i32, at.y.floor() as i32);
         let normal = matches!(self.input_mode(), InputMode::Normal);
-        let order = self
-            .layout
-            .world
-            .output(press.output)
-            .map(|o| o.workspaces().to_vec())
-            .unwrap_or_default();
-        let target_order = match release {
-            Some((o, _)) if o != press.output => self
-                .layout
-                .world
-                .output(o)
-                .map(|o| o.workspaces().to_vec())
-                .unwrap_or_default(),
-            _ => order.clone(),
-        };
-        match release_decision(press, release, normal, &order, &target_order) {
+        let orders = self.header_orders();
+        match drag_action(press, release, normal, dragged, &orders) {
             ReleaseAction::None => {}
             ReleaseAction::Click(p) => self.header_click(p.output, p.workspace),
             ReleaseAction::Reorder { workspace, to } => {
