@@ -4,6 +4,18 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.9 — 2026-11-06
+
+### Added
+
+- The pointer cursor comes from the installed XCursor theme. A new optional `cursor { theme "…"; size N }` config block picks the theme and size; otherwise CDE uses `XCURSOR_THEME`/`XCURSOR_SIZE`, then the system `default` theme at 24 px. Each shape falls back through its alternate names, then `default` and `left_ptr`. When a theme or size is configured, CDE also exports it to the apps it spawns and to XWayland. See `docs/config.md`.
+- The compositor offers `wp_cursor_shape_manager_v1` (version 2), so clients such as foot can ask for a cursor by name instead of loading a theme themselves.
+
+### Changed
+
+- When no cursor theme can be loaded, the fallback cursor is a built-in arrow instead of the white square.
+- Writing a `cursor` block into `config.kdl` makes it fail to parse on 0.4.8 and earlier, so a rollback to `crucible.prev` needs the block removed first.
+
 ## 0.4.8 — 2026-11-06
 
 ### Changed
