@@ -4,6 +4,13 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.7 — 2026-11-05
+
+### Added
+
+- cterm session keys (crucible-term plan 03): a granted `cterm` spawn also gets `CRUCIBLE_TERM_SESSION`, a CDE-minted session key. It is saved in the terminal's workspace record as an optional `session=` field (older `session.kdl` files load unchanged) and re-exported when the record is restored, so cterm 0.4.0 reattaches the still-live shell after a compositor restart.
+- Loss recovery: when a bound window disappears because its Wayland client disconnected (the cterm daemon died) rather than because it was closed, CDE keeps its slot and spawns a placeholder there from the window's last recorded state. A terminal becomes `crucible resume --lost`, which shows the restore banner with a line saying the terminal was lost (with no command, a shell starts at once). Auto-save is held off for that workspace while a placeholder is pending. User closes and unbound windows behave as before. See `docs/config.md`.
+
 ## 0.4.6 — 2026-11-05
 
 ### Added
