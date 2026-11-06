@@ -208,6 +208,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         cmd.env(TERMINAL_ENV, self.terminal_program())
             .env(TERMINAL_EXEC_FLAG_ENV, &self.config.terminal.exec_flag);
+        // Only what the config sets; otherwise the child inherits the session env unchanged.
+        cmd.envs(crate::cursor::child_env(&self.config.cursor));
         if kind == SpawnKind::Overlay {
             cmd.env(OVERLAY_STYLE_ENV, self.config.overlay.style.as_str());
             cmd.env(LAUNCHER_TUI_ENV, self.config.launcher.tui.join(":"));

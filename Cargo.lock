@@ -315,6 +315,7 @@ dependencies = [
  "wayland-scanner",
  "wayland-server",
  "x11rb",
+ "xcursor",
  "xkbcommon",
 ]
 

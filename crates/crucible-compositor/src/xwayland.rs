@@ -129,10 +129,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// [`X11Wm`], sets the per-client scale, records the `DISPLAY` number, and exports `DISPLAY`
     /// into the compositor's own environment so any X11 children CDE spawns find the server.
     pub fn start_xwayland(&mut self) {
+        // The server (and so its X clients' defaults) sees the configured cursor theme and size.
+        let env = crate::cursor::child_env(&self.config.cursor);
         let (xwayland, client) = match XWayland::spawn(
             &self.display_handle,
             None,
-            std::iter::empty::<(String, String)>(),
+            env,
             true,
             Stdio::null(),
             Stdio::null(),

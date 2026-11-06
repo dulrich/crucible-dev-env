@@ -211,6 +211,19 @@ Any input event (key, pointer, touch, gesture) restarts the idle period and wake
 
 Blanking powers the monitors off on the TTY (DRM) backend; under the nested `winit` backend it does nothing. CDE also advertises `ext-idle-notify-v1` and `zwp-idle-inhibit-manager-v1`, so third-party idle clients and idle-inhibiting apps work whether or not an `idle` block is present.
 
+### `cursor`
+
+```kdl
+cursor {
+    theme "Adwaita"
+    size 24
+}
+```
+
+The pointer cursor theme and size, both optional (each child may appear once). Without a child, CDE uses the `XCURSOR_THEME` / `XCURSOR_SIZE` environment variables, then `default` and 24. `theme` is the name of an installed XCursor theme (a non-empty string); `size` is a whole number of logical pixels from 1 to 256. An empty theme, a non-string theme, a zero, negative, fractional or too large size, a repeated child or an unknown child is a located config error (never coerced or clamped).
+
+CDE reads the theme from the installed cursor themes (`XCURSOR_PATH`, the XDG data dirs, `~/.icons`, following `Inherits=`), picks the image nearest `size × output scale` and draws it 1:1. When no theme can be loaded it draws a built-in arrow. It also advertises `wp_cursor_shape_manager_v1`, so clients can ask for a named shape. When `theme` or `size` is set, CDE exports `XCURSOR_THEME` / `XCURSOR_SIZE` to the programs it spawns (including XWayland); a hot reload rebuilds CDE's own cursor and applies the new values to later spawns only.
+
 ### `output`
 
 ```kdl
@@ -329,6 +342,10 @@ header {
 idle {
     lock-after 300
     blank-after 600
+}
+cursor {
+    theme "Adwaita"
+    size 24
 }
 output "DP-1" { scale 1.4167 }
 autostart "dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"

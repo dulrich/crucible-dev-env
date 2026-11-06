@@ -230,6 +230,14 @@ impl<B: Backend + 'static> smithay::wayland::shell::xdg::decoration::XdgDecorati
     }
 }
 
+// `wp_cursor_shape_device_v1` dispatch requires `TabletSeatHandler` (smithay `cursor_shape.rs`
+// binds its tablet-tool shapes to it). CDE has no tablet support and registers no tablet-manager
+// global, so the empty impl (every method has a default) is never called.
+impl<B: Backend + 'static> smithay::wayland::tablet_manager::TabletSeatHandler
+    for CrucibleState<B>
+{
+}
+
 // This Smithay rev replaces the per-protocol `delegate_*!` macros with a single
 // `delegate_dispatch2!` that provides `Dispatch`/`GlobalDispatch` for *every* protocol whose
 // per-resource user data implements `Dispatch2`/`GlobalDispatch2` (i.e. every global initialized

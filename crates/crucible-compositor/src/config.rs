@@ -150,6 +150,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         crate::xwayland::note_xwayland_scale_change(delta.max_scale.0, delta.max_scale.1);
         let idle_changed = self.config.idle != config.idle;
+        // Build (startup: nothing loaded yet) or rebuild (reload) the cursor theme when what it
+        // resolves to differs from what is loaded; this clears the image cache.
+        let (theme, size) =
+            crate::cursor::theme::resolve(&config.cursor, |k| std::env::var(k).ok());
+        if self.cursor.loaded() != Some((theme.as_str(), size)) {
+            self.cursor.set_theme(&theme, size);
+        }
         self.config = config;
         if idle_changed {
             self.idle_config_changed();

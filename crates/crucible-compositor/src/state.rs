@@ -16,6 +16,9 @@
 //!   clipboard plumbing with minimal handlers, plus Wayland-client pointer drag-and-drop grabs
 //!   (touch and XWayland-initiated DnD are not driven).
 //! - **data control** (ext + wlr) — clipboard tools read and set the selection without a surface.
+//! - **cursor shape** (`wp_cursor_shape_manager_v1`, [`CursorShapeManagerState`]) — clients ask for
+//!   a named pointer shape instead of loading a theme; it reaches `cursor_image` as
+//!   `CursorImageStatus::Named` and is drawn by [`crate::cursor`].
 //!
 //! The structure mirrors anvil's `AnvilState`/`Backend` split (a state struct generic over a
 //! backend trait, with backend specifics isolated in `winit.rs`/`udev.rs`) so anvil-derived code
@@ -218,6 +221,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// `zwlr_data_control_manager_v1` global state: the wlr predecessor of the ext protocol, still
     /// the one older `wl-clipboard` builds bind.
     pub wlr_data_control_state: smithay::wayland::selection::wlr_data_control::DataControlState,
+    /// The `wp_cursor_shape_manager_v1` global (held so it stays registered).
+    pub cursor_shape_state: smithay::wayland::cursor_shape::CursorShapeManagerState,
     /// `xwayland_shell_v1` global state (lets XWayland associate `wl_surface`s with X11 windows).
     pub xwayland_shell_state: XWaylandShellState,
     /// `zxdg_decoration_manager_v1` global state: CDE answers server-side for every toplevel (and
@@ -375,6 +380,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 Some(&primary_selection_state),
                 |_| true,
             );
+        let cursor_shape_state =
+            smithay::wayland::cursor_shape::CursorShapeManagerState::new::<Self>(&dh);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&dh);
         let xdg_decoration_state =
             smithay::wayland::shell::xdg::decoration::XdgDecorationState::new::<Self>(&dh);
@@ -448,6 +455,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             primary_selection_state,
             ext_data_control_state,
             wlr_data_control_state,
+            cursor_shape_state,
             xwayland_shell_state,
             xdg_decoration_state,
             fractional_scale_state,

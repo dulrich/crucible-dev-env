@@ -360,6 +360,16 @@ pub struct IdleConfig {
     pub blank_after: Option<u32>,
 }
 
+/// Pointer cursor theme and size (`cursor { theme "Adwaita"; size 24 }`); `None` defers to the
+/// `XCURSOR_THEME`/`XCURSOR_SIZE` environment, then to `default`/24.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CursorConfig {
+    /// XCursor theme name. Never empty when set.
+    pub theme: Option<String>,
+    /// Nominal size in logical pixels, 1..=256.
+    pub size: Option<u32>,
+}
+
 /// The parsed CDE configuration. `Default` is CDE's behaviour with no config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -384,6 +394,8 @@ pub struct Config {
     pub keyboard: KeyboardConfig,
     /// Idle lock and blank timers (both off by default).
     pub idle: IdleConfig,
+    /// Pointer cursor theme and size (both unset by default).
+    pub cursor: CursorConfig,
     /// The screen locker the `lock` action spawns (`lock-command`), split on whitespace into
     /// program + arguments (no shell quoting). Default `"swaylock"`.
     pub lock_command: String,
@@ -429,6 +441,7 @@ impl Default for Config {
             header: HeaderConfig::default(),
             keyboard: KeyboardConfig::default(),
             idle: IdleConfig::default(),
+            cursor: CursorConfig::default(),
             launcher: LauncherConfig::default(),
             binds: Vec::new(),
             outputs: BTreeMap::new(),

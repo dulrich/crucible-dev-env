@@ -16,6 +16,9 @@ crucible-keys = { path = "../crucible-keys" }
 crucible-config = { path = "../crucible-config" }
 crucible-persist = { path = "../crucible-persist" }
 tracing.workspace = true
+# XCursor theme lookup and image parsing for the themed pointer cursor (plan 30); already in the
+# lock through smithay.
+xcursor.workspace = true
 # SO_PEERCRED on IPC connections (the `relaunch` request identifies its placeholder by peer PID).
 rustix.workspace = true
 
