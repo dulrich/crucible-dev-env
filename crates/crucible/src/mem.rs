@@ -19,7 +19,7 @@ use crate::cli::{Parsed, help_requested};
 use crate::table::{self, Col};
 
 /// Usage text for `crucible mem --help`.
-pub const USAGE: &str = "usage: crucible mem [--pid <n>]\n\nReal memory per logical app of a running CDE: one row per direct child process of the compositor\n(PSS, swap, process count, label), largest PSS first, then the compositor itself and a TOTAL.\nPSS and swap are summed over the child's whole process subtree from /proc/<pid>/smaps_rollup. The\nlabel is the child's name plus the deepest process under it that is not a shell and\nnot one of CDE's own `crucible` processes (ties: largest PSS), e.g. `ghostty › htop`. A child whose\nsubtree holds the overlay host gets ` (overlay)` appended. A cterm daemon serving this compositor (same\nWAYLAND_DISPLAY, owned by you) gets its own row, `cterm daemon (N windows) › …`, with its window count.\n\n  --pid <n>    the compositor's pid. Without it, the compositor is the process owned by you whose\n               command is `crucible` with `--winit` or `--tty-udev`; with several, the one that is an\n               ancestor of this command, else the lowest pid. None found: message on stderr, exit 1.\n  -h, --help   print this usage and exit 0\n\nOnly processes CDE spawned itself are counted: D-Bus-activated apps parented to `systemd --user`\nare not. A process that is unreadable or vanished counts as zero and its row is marked `*`.\n";
+pub const USAGE: &str = "usage: crucible mem [--pid <n>]\n\nReal memory per logical app of a running CDE: one row per direct child process of the compositor\n(PSS, swap, process count, label), largest PSS first, then the compositor itself and a TOTAL.\nPSS and swap are summed over the child's whole process subtree from /proc/<pid>/smaps_rollup. The\nlabel is the child's name plus the deepest process under it that is not a shell and\nnot one of CDE's own `crucible` processes (ties: largest PSS), e.g. `ghostty › htop`. A child whose\nsubtree holds the overlay host gets ` (overlay)` appended. A cterm daemon serving this compositor (same\nWAYLAND_DISPLAY, owned by you) gets one row, `cterm daemon (+N windows)`: the daemon plus its thin clients\n(compositor children named cterm with no child process). What runs in its windows is not in that row:\neach window counts toward its app (the deepest process that is not a shell or one of CDE's own, else\nthe shell), and windows running the same app share one row, e.g. `claude`, `htop`.\n\n  --pid <n>    the compositor's pid. Without it, the compositor is the process owned by you whose\n               command is `crucible` with `--winit` or `--tty-udev`; with several, the one that is an\n               ancestor of this command, else the lowest pid. None found: message on stderr, exit 1.\n  -h, --help   print this usage and exit 0\n\nOnly processes CDE spawned itself are counted: D-Bus-activated apps parented to `systemd --user`\nare not. A process that is unreadable or vanished counts as zero and its row is marked `*`.\n";
 
 /// Parsed arguments.
 #[derive(Debug, PartialEq, Eq)]
@@ -214,6 +214,33 @@ fn subtree_row(
     }
 }
 
+/// The app a daemon window runs: the deepest process that is neither a shell nor one of CDE's
+/// own (ties: lowest pid), else the deepest shell, else the window's root (`crucible resume` for a restore banner not yet confirmed).
+fn window_app(procs: &ProcSnapshot, tree: &[(u32, usize)]) -> String {
+    let pick = |skip_shells: bool| {
+        tree.iter()
+            .filter_map(|&(p, d)| procs.get(p).map(|i| (p, d, i)))
+            .filter(|(_, _, i)| {
+                if skip_shells {
+                    !skipped_in_label(i)
+                } else {
+                    !is_cde_process(&i.argv, &i.comm)
+                }
+            })
+            .max_by_key(|&(p, d, _)| (d, Reverse(p)))
+            .map(|(_, _, i)| i.comm.clone())
+    };
+    pick(true)
+        .or_else(|| pick(false))
+        .or_else(|| {
+            tree.first().and_then(|&(p, _)| procs.get(p)).map(|i| {
+                crucible_subcommand(&i.argv)
+                    .map_or_else(|| i.comm.clone(), |s| format!("crucible {s}"))
+            })
+        })
+        .unwrap_or_else(|| "?".into())
+}
+
 /// Builds the report for the compositor `pid` from a `/proc`-shaped tree.
 #[must_use]
 pub fn build_report(proc_root: &Path, pid: u32) -> Report {
@@ -230,12 +257,13 @@ pub fn build_report(proc_root: &Path, pid: u32) -> Report {
     };
 
     let mut children: Vec<Row> = Vec::new();
+    let mut top_rows: Vec<(u32, Row)> = Vec::new();
     let mut counted: HashSet<u32> = HashSet::new();
     let top: &[u32] = kids.get(&pid).map_or(&[][..], Vec::as_slice);
     for &child in top {
         let tree = subtree(&kids, child);
         counted.extend(tree.iter().map(|&(p, _)| p));
-        children.push(subtree_row(proc_root, &procs, &tree, name(child)));
+        top_rows.push((child, subtree_row(proc_root, &procs, &tree, name(child))));
     }
     // cterm daemons serving this compositor: detached into their own session, so they are not
     // descendants; matched by the WAYLAND_DISPLAY of the first readable compositor child.
@@ -257,13 +285,58 @@ pub fn build_report(proc_root: &Path, pid: u32) -> Report {
             .map(|(p, _)| p)
             .collect();
         daemons.sort_unstable();
-        for d in daemons {
-            let tree = subtree(&kids, d);
-            let n = kids.get(&d).map_or(0, Vec::len);
-            let label = format!("cterm daemon ({n} window{})", if n == 1 { "" } else { "s" });
-            children.push(subtree_row(proc_root, &procs, &tree, label));
+        // Thin clients (a `cterm` child of the compositor with no child of its own) belong to
+        // the daemon row, not their own rows; with several daemons, to the first.
+        let thin: Vec<u32> = if daemons.is_empty() {
+            Vec::new()
+        } else {
+            top.iter()
+                .copied()
+                .filter(|c| {
+                    kids.get(c).is_none_or(Vec::is_empty)
+                        && procs.get(*c).is_some_and(|i| {
+                            !is_cterm_daemon(&i.argv)
+                                && i.argv.first().is_some_and(|a| {
+                                    Path::new(a).file_name().is_some_and(|n| n == "cterm")
+                                })
+                        })
+                })
+                .collect()
+        };
+        top_rows.retain(|(p, _)| !thin.contains(p));
+        let mut apps: Vec<Row> = Vec::new();
+        for (i, d) in daemons.into_iter().enumerate() {
+            let windows: &[u32] = kids.get(&d).map_or(&[][..], Vec::as_slice);
+            let mut own: Vec<(u32, usize)> = vec![(d, 0)];
+            if i == 0 {
+                own.extend(thin.iter().map(|&c| (c, 0)));
+            }
+            let mut row = subtree_row(proc_root, &procs, &own, String::new());
+            row.label = format!(
+                "cterm daemon (+{} window{})",
+                windows.len(),
+                if windows.len() == 1 { "" } else { "s" }
+            );
+            children.push(row);
+            // Each window's subtree counts toward its app, summed by app name.
+            for &w in windows {
+                let tree = subtree(&kids, w);
+                let label = window_app(&procs, &tree);
+                let r = subtree_row(proc_root, &procs, &tree, String::new());
+                match apps.iter_mut().find(|a| a.label == label) {
+                    Some(a) => {
+                        a.pss_kb += r.pss_kb;
+                        a.swap_kb += r.swap_kb;
+                        a.procs += r.procs;
+                        a.unreadable |= r.unreadable;
+                    }
+                    None => apps.push(Row { label, ..r }),
+                }
+            }
         }
+        children.extend(apps);
     }
+    children.extend(top_rows.into_iter().map(|(_, r)| r));
     children.sort_by(|a, b| b.pss_kb.cmp(&a.pss_kb).then_with(|| a.label.cmp(&b.label)));
 
     let mem = read_rollup(proc_root, pid);
@@ -569,16 +642,34 @@ mod tests {
             .filter(|c| c.label.starts_with("cterm daemon"))
             .collect();
         assert_eq!(d.len(), 1);
-        assert_eq!(d[0].label, "cterm daemon (2 windows) › htop");
-        assert_eq!((d[0].pss_kb, d[0].swap_kb, d[0].procs), (560, 8, 4));
-        assert!(format_report(10, &r).contains("  cterm daemon (2 windows) › htop\n"));
+        assert_eq!(d[0].label, "cterm daemon (+2 windows)");
+        // the daemon itself plus thin client 20; the windows' apps are not counted here
+        assert_eq!((d[0].pss_kb, d[0].swap_kb, d[0].procs), (800, 7, 2));
+        assert!(format_report(10, &r).contains("  cterm daemon (+2 windows)\n"));
+        let row = |l: &str| {
+            r.children
+                .iter()
+                .find(|c| c.label == l)
+                .map(|c| (c.pss_kb, c.swap_kb, c.procs))
+        };
+        assert_eq!(
+            row("htop"),
+            Some((50, 1, 2)),
+            "bash + htop, labelled by the app"
+        );
+        assert_eq!(
+            row("zsh"),
+            Some((10, 0, 1)),
+            "a bare shell window is the shell"
+        );
+        assert_eq!(row("cterm"), None, "the thin client has no row of its own");
     }
 
     #[test]
     fn total_includes_the_daemon_row() {
         let f = daemon_fixture("daemontotal");
         let r = build_report(&f.0, 10);
-        assert_eq!(r.children.len(), 2);
+        assert_eq!(r.children.len(), 3);
         assert_eq!(r.total.pss_kb, 100 + 300 + 560);
         assert_eq!(r.total.procs, 1 + 1 + 4);
     }
@@ -590,7 +681,7 @@ mod tests {
         f.environ(70, &[("WAYLAND_DISPLAY", "wayland-10")]);
         f.proc(71, 70, "bash", &["bash"], Some((10, 0)));
         let r = build_report(&f.0, 10);
-        assert_eq!(r.children.len(), 2);
+        assert_eq!(r.children.len(), 3);
         assert!(r.children.iter().all(|c| c.pss_kb != 910));
     }
 
@@ -609,6 +700,45 @@ mod tests {
         f.environ(81, &[("WAYLAND_DISPLAY", "wayland-1")]);
         let r = build_report(&f.0, 10);
         let labels: Vec<_> = r.children.iter().map(|c| c.label.as_str()).collect();
-        assert_eq!(labels, ["cterm daemon (2 windows) › htop", "cterm"]);
+        assert_eq!(labels, ["cterm daemon (+2 windows)", "htop", "zsh"]);
+    }
+
+    #[test]
+    fn windows_of_one_app_share_a_row_and_a_standalone_cterm_keeps_its_own() {
+        let f = daemon_fixture("daemonapps");
+        f.proc(
+            64,
+            60,
+            "crucible",
+            &["/x/crucible", "resume", "--cwd", "/", "--", "htop"],
+            Some((5, 0)),
+        );
+        f.proc(65, 64, "htop", &["htop"], Some((40, 0)));
+        f.proc(30, 10, "cterm", &["/x/cterm"], Some((900, 0)));
+        f.proc(31, 30, "bash", &["bash"], Some((10, 0)));
+        // a restore banner not yet confirmed: only the wrapper runs
+        f.proc(
+            66,
+            60,
+            "crucible",
+            &["/x/crucible", "resume", "--cwd", "/", "--", "vim"],
+            Some((3, 0)),
+        );
+        let r = build_report(&f.0, 10);
+        let labels: Vec<_> = r
+            .children
+            .iter()
+            .map(|c| (c.label.as_str(), c.pss_kb, c.procs))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("cterm", 910, 2),
+                ("cterm daemon (+4 windows)", 800, 2),
+                ("htop", 95, 4),
+                ("zsh", 10, 1),
+                ("crucible resume", 3, 1),
+            ]
+        );
     }
 }
