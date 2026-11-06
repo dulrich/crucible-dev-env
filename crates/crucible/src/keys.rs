@@ -205,18 +205,18 @@ impl Overlay for Keys {
             .map(|(c, a)| vec![sanitize(c), sanitize(a)])
             .collect();
         let (_, lines) = table::layout(&[Col::left(""), Col::left("")], &cells);
-        let texts: Vec<String> = self
+        let texts: Vec<(bool, String)> = self
             .entries()
             .iter()
             .map(|e| match e {
-                Entry::Heading(label) => (*label).to_string(),
-                Entry::Row(idx) => lines[*idx].clone(),
+                Entry::Heading(label) => (true, (*label).to_string()),
+                Entry::Row(idx) => (false, lines[*idx].clone()),
             })
             .collect();
         let frame = Frame {
             prompt: "keys> ",
             header: None,
-            body: Body::Rows(&texts),
+            body: Body::Sectioned(&texts),
             idle_status: STATUS,
         };
         self.list.render(frame, cols, rows, style)
@@ -339,6 +339,34 @@ mod tests {
         assert!(
             out.contains("Panes & windows") && out.contains("Other"),
             "{out:?}"
+        );
+    }
+
+    #[test]
+    fn headings_sit_at_prompt_level_and_rows_two_columns_in() {
+        let out = Keys::new(rows()).render(40, 10);
+        let plain = out.replace("\x1b[7m", "").replace("\x1b[0m", "");
+        let lines: Vec<&str> = plain
+            .strip_prefix("\x1b[H\x1b[2J")
+            .unwrap()
+            .split("\r\n")
+            .collect();
+        assert_eq!(
+            &lines[..8],
+            [
+                "",
+                " keys> _",
+                " Panes & windows",
+                "   Super+W        close-pane",
+                " Launch & overlays",
+                "   Super+Return   open-launcher",
+                " Session & system",
+                "   Super+Shift+Q  quit",
+            ]
+        );
+        assert!(
+            !out.contains("\x1b[7m Panes"),
+            "headings are never highlighted"
         );
     }
 

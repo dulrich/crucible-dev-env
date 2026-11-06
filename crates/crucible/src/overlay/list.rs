@@ -32,6 +32,10 @@ pub enum Body<'a> {
     Rows(&'a [String]),
     /// One highlighted line that is not a selectable row (display text, sanitised).
     Highlighted(&'a str),
+    /// Rows mixed with headings: `(is_heading, text)`. A heading is flush with the prompt (no
+    /// indent), never highlighted; other rows get the two-space indent and the selection
+    /// highlight. `selected` indexes this slice.
+    Sectioned(&'a [(bool, String)]),
 }
 
 /// One frame's content: everything [`ListState::render`] needs besides the terminal size and style.
@@ -117,8 +121,11 @@ impl ListState {
         }
     }
 
-    /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings): the
-    /// `prompt` + query line, the optional column `header` (display text, sanitised, without the
+    /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings) inside a
+    /// one-cell blank margin (first and last lines blank, one leading space, one free column on
+    /// the right; the highlight covers the fitted text only). Never more than `rows` lines nor a
+    /// line wider than `cols`; on tiny sizes the prompt wins, then the status line, then the rows.
+    /// Inside: the `prompt` + query line, the optional column `header` (display text, sanitised, without the
     /// indent; dimmed, never highlighted, and it costs the rows window one row so selection indices
     /// stay row indices), the body, blank padding, then the status line (`idle_status` when none is
     /// set).
@@ -130,39 +137,81 @@ impl ListState {
             body,
             idle_status,
         } = frame;
-        let width = usize::from(cols).max(10);
-        let height = usize::from(rows).max(4);
-        let mut lines: Vec<String> =
-            vec![fit(&format!("{prompt}{}_", sanitize(&self.query)), width)];
-        if let Some(h) = header {
-            lines.push(style.dim(&fit(&format!("  {h}"), width)));
-        }
-        match body {
-            Body::Highlighted(text) => {
-                lines.push(style.highlight(&fit(&format!("  {text}"), width)));
+        // One blank cell of margin on every side; the interior saturates to nothing on tiny sizes.
+        let width = usize::from(cols).saturating_sub(2);
+        let rows = usize::from(rows);
+        let inner = rows.saturating_sub(2);
+        let text_line = |text: &str, wrap: &dyn Fn(&str) -> String| -> String {
+            if cols == 0 || text.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", wrap(&fit(text, width)))
             }
+        };
+        let plain = |t: &str| t.to_string();
+        let mut lines: Vec<String> = Vec::new();
+        if inner >= 1 {
+            lines.push(text_line(
+                &format!("{prompt}{}_", sanitize(&self.query)),
+                &plain,
+            ));
+        }
+        // Slots between the prompt and the status line (the status needs inner >= 2).
+        let middle = inner.saturating_sub(2);
+        let show_header = header.is_some() && middle >= 1;
+        if let (Some(h), true) = (header, show_header) {
+            lines.push(text_line(&format!("  {h}"), &|t| style.dim(t)));
+        }
+        let body_h = middle - usize::from(show_header);
+        match body {
+            Body::Highlighted(text) if body_h >= 1 => {
+                lines.push(text_line(&format!("  {text}"), &|t| style.highlight(t)));
+            }
+            Body::Highlighted(_) => {}
             Body::Rows(all) => {
-                let (start, end) = window(
-                    self.selected,
-                    all.len(),
-                    height - 2 - usize::from(header.is_some()),
-                );
+                let (start, end) = window(self.selected, all.len(), body_h);
                 for (i, row) in all.iter().enumerate().take(end).skip(start) {
-                    let text = fit(&format!("  {row}"), width);
+                    let text = format!("  {row}");
                     lines.push(if i == self.selected {
-                        style.highlight(&text)
+                        text_line(&text, &|t| style.highlight(t))
                     } else {
-                        text
+                        text_line(&text, &plain)
+                    });
+                }
+            }
+            Body::Sectioned(all) => {
+                let (start, end) = window(self.selected, all.len(), body_h);
+                for (i, (heading, row)) in all.iter().enumerate().take(end).skip(start) {
+                    lines.push(if *heading {
+                        text_line(row, &plain)
+                    } else if i == self.selected {
+                        text_line(&format!("  {row}"), &|t| style.highlight(t))
+                    } else {
+                        text_line(&format!("  {row}"), &plain)
                     });
                 }
             }
         }
-        while lines.len() < height - 1 {
-            lines.push(String::new());
+        lines.truncate(inner);
+        if inner >= 2 {
+            while lines.len() < inner - 1 {
+                lines.push(String::new());
+            }
+            lines.push(text_line(
+                self.status.as_deref().unwrap_or(idle_status),
+                &plain,
+            ));
         }
-        lines.push(fit(self.status.as_deref().unwrap_or(idle_status), width));
+        let mut all_lines = Vec::with_capacity(rows);
+        if rows >= 1 {
+            all_lines.push(String::new());
+        }
+        all_lines.extend(lines);
+        while all_lines.len() < rows {
+            all_lines.push(String::new());
+        }
         let mut out = style.frame_start();
-        out.push_str(&lines.join("\r\n"));
+        out.push_str(&all_lines.join("\r\n"));
         out
     }
 }
@@ -272,22 +321,22 @@ mod tests {
         let out = l.render(
             frame("p> ", None, Body::Rows(&rows), "idle"),
             20,
-            6,
+            8,
             &Style::Terminal,
         );
         assert_eq!(
             out,
-            "\x1b[H\x1b[2Jp> a_\r\n  one\r\n\x1b[7m  two\x1b[0m\r\n\r\n\r\nidle"
+            "\x1b[H\x1b[2J\r\n p> a_\r\n   one\r\n \x1b[7m  two\x1b[0m\r\n\r\n\r\n idle\r\n"
         );
         l.status = Some("shown".into());
         assert!(
             l.render(
                 frame("p> ", None, Body::Rows(&rows), "idle"),
                 20,
-                6,
+                8,
                 &Style::Terminal
             )
-            .ends_with("shown")
+            .ends_with(" shown\r\n")
         );
     }
 
@@ -298,12 +347,12 @@ mod tests {
         let out = l.render(
             frame("p> ", Some("H"), Body::Rows(&rows), "idle"),
             20,
-            6,
+            8,
             &Style::Terminal,
         );
         assert_eq!(
             out,
-            "\x1b[H\x1b[2Jp> _\r\n\x1b[2m  H\x1b[22m\r\n\x1b[7m  r0\x1b[0m\r\n  r1\r\n  r2\r\nidle"
+            "\x1b[H\x1b[2J\r\n p> _\r\n \x1b[2m  H\x1b[22m\r\n \x1b[7m  r0\x1b[0m\r\n   r1\r\n   r2\r\n idle\r\n"
         );
     }
 
@@ -312,11 +361,11 @@ mod tests {
         let st = Style::parse(Some("n1-dark"));
         let rows = vec!["one".to_string()];
         let out =
-            ListState::new().render(frame("p> ", Some("H"), Body::Rows(&rows), ""), 20, 6, &st);
-        let line = out.split("\r\n").nth(1).unwrap();
-        assert_eq!(line, st.dim("  H"));
+            ListState::new().render(frame("p> ", Some("H"), Body::Rows(&rows), ""), 20, 8, &st);
+        let line = out.split("\r\n").nth(2).unwrap();
+        assert_eq!(line, format!(" {}", st.dim("  H")));
         assert!(
-            line.starts_with("\x1b[38;2;123;123;125m") && line.ends_with("\x1b[38;2;233;233;234m")
+            line.starts_with(" \x1b[38;2;123;123;125m") && line.ends_with("\x1b[38;2;233;233;234m")
         );
         assert!(!line.contains("\x1b[0m"));
     }
@@ -332,5 +381,142 @@ mod tests {
         );
         assert!(out.contains("p> ?_"));
         assert!(out.contains("\x1b[7m  SH  x\x1b[0m"));
+    }
+
+    /// The rendered frame split into lines, ANSI-free.
+    fn lines_of(out: &str) -> Vec<String> {
+        let body = out.strip_prefix("\x1b[H\x1b[2J").unwrap_or(out);
+        body.split("\r\n").map(str::to_string).collect()
+    }
+
+    #[test]
+    fn margin_blank_first_and_last_leading_space_and_free_right_column() {
+        let rows = vec!["a-very-long-row-text-indeed".to_string()];
+        let out = ListState::new().render(
+            frame(
+                "p> ",
+                None,
+                Body::Rows(&rows),
+                "a-very-long-status-line-here",
+            ),
+            12,
+            6,
+            &Style::Terminal,
+        );
+        let lines = lines_of(&out);
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[0], "");
+        assert_eq!(lines[5], "");
+        for l in &lines[1..5] {
+            assert!(l.is_empty() || l.starts_with(' '), "{l:?}");
+        }
+        let plain: Vec<String> = lines
+            .iter()
+            .map(|l| l.replace("\x1b[7m", "").replace("\x1b[0m", ""))
+            .collect();
+        assert!(plain.iter().all(|l| l.chars().count() <= 11), "{plain:?}");
+        assert_eq!(
+            plain[4], " a-very-lon",
+            "status fitted to cols - 2 with the margin"
+        );
+    }
+
+    #[test]
+    fn sectioned_headings_sit_at_prompt_level_and_rows_are_indented() {
+        let body = vec![
+            (true, "Head".to_string()),
+            (false, "row".to_string()),
+            (true, "Head2".to_string()),
+            (false, "row2".to_string()),
+        ];
+        let mut l = ListState::new();
+        l.selected = 1;
+        let out = l.render(
+            frame("keys> ", None, Body::Sectioned(&body), "idle"),
+            40,
+            10,
+            &Style::Terminal,
+        );
+        let lines = lines_of(&out);
+        assert_eq!(
+            &lines[1..6],
+            [
+                " keys> _",
+                " Head",
+                " \x1b[7m  row\x1b[0m",
+                " Head2",
+                "   row2"
+            ]
+        );
+        assert!(!out.contains("\x1b[7m Head"));
+    }
+
+    #[test]
+    fn selection_scrolls_within_the_reduced_interior_height() {
+        let rows: Vec<String> = (0..9).map(|i| format!("r{i}")).collect();
+        let mut l = ListState::new();
+        l.selected = 8;
+        // 7 rows: interior 5 = prompt + 3 body rows + status.
+        let out = l.render(
+            frame("p> ", None, Body::Rows(&rows), "idle"),
+            20,
+            7,
+            &Style::Terminal,
+        );
+        assert!(out.contains("\x1b[7m  r8\x1b[0m") && out.contains("  r6") && !out.contains("r5"));
+    }
+
+    #[test]
+    fn tiny_terminals_never_exceed_rows_lines_or_cols_cells() {
+        let rows: Vec<String> = (0..5).map(|i| format!("row{i}")).collect();
+        let sect = vec![(true, "H".to_string()), (false, "row".to_string())];
+        for cols in 0..=12u16 {
+            for nrows in 0..=8u16 {
+                for header in [None, Some("HDR")] {
+                    for body in [
+                        Body::Rows(&rows),
+                        Body::Highlighted("hl"),
+                        Body::Sectioned(&sect),
+                    ] {
+                        let out = ListState::new().render(
+                            frame("p> ", header, body, "status"),
+                            cols,
+                            nrows,
+                            &Style::Terminal,
+                        );
+                        let text = out.strip_prefix("\x1b[H\x1b[2J").unwrap();
+                        let lines: Vec<&str> = if nrows == 0 {
+                            vec![]
+                        } else {
+                            text.split("\r\n").collect()
+                        };
+                        assert!(lines.len() <= usize::from(nrows), "{cols}x{nrows}");
+                        for l in lines {
+                            let plain = l
+                                .replace("\x1b[7m", "")
+                                .replace("\x1b[0m", "")
+                                .replace("\x1b[2m", "")
+                                .replace("\x1b[22m", "");
+                            assert!(
+                                plain.chars().count() <= usize::from(cols),
+                                "{cols}x{nrows} {l:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_three_row_terminal_keeps_the_prompt_between_blank_margins() {
+        let rows = vec!["x".to_string()];
+        let out = ListState::new().render(
+            frame("p> ", None, Body::Rows(&rows), "idle"),
+            20,
+            3,
+            &Style::Terminal,
+        );
+        assert_eq!(lines_of(&out), ["", " p> _", ""]);
     }
 }
