@@ -176,7 +176,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let layout = &self.layout;
         let windows: Vec<(Option<u32>, Option<u32>)> = layout
             .metas()
-            .map(|(_, m)| (m.pid, m.identity.map(|i| i.root_pid)))
+            .map(|(_, m)| (m.pid, m.identity.as_ref().map(|i| i.root_pid)))
             .collect();
         let pid = relaunch_window_pid(peer, &ancestors, &windows)
             .ok_or_else(|| "no placeholder window".to_string())?;
@@ -377,7 +377,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let meta = self.layout.meta(id);
         let pid = terminal_pid(meta)?;
         // A bound cterm window's terminal is the shared daemon: capture from its root shell.
-        let cwd = match meta.and_then(|m| m.identity) {
+        let cwd = match meta.and_then(|m| m.identity.as_ref()) {
             Some(identity) => crucible_persist::capture_shell(&capture_env(), identity.root_pid),
             None => crucible_persist::capture_terminal(&capture_env(), pid),
         }

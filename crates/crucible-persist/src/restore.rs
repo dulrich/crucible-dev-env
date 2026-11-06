@@ -60,7 +60,7 @@ pub fn plan_spawns(
     for (pane_index, pane) in record.panes().into_iter().enumerate() {
         for (saved_index, window) in pane.windows.iter().enumerate() {
             let (dir, args) = match window {
-                WindowRecord::Terminal { cwd, command } => {
+                WindowRecord::Terminal { cwd, command, .. } => {
                     let dir = resolve_cwd(cwd, root, home, &is_dir);
                     // `<exec-flag> <crucible> resume --cwd <dir> -- <command>` (the command is ONE
                     // element), or no arguments at all for an idle shell.
@@ -144,6 +144,7 @@ mod tests {
         WindowRecord::Terminal {
             cwd: cwd.into(),
             command: command.map(str::to_string),
+            session: None,
         }
     }
 
@@ -187,6 +188,29 @@ mod tests {
         // An idle shell (no saved command) gets no arguments at all.
         let idle = rec(None, pane_node(0, vec![term("/r", None)]));
         assert!(plan(&idle, None, &["/r"])[0].args.is_empty());
+    }
+
+    #[test]
+    fn restore_job_carries_the_saved_session_key() {
+        let key = "0123456789abcdef0123456789abcdef";
+        let keyed = WindowRecord::Terminal {
+            cwd: "/r".into(),
+            command: Some("vim".into()),
+            session: Some(key.into()),
+        };
+        let idle = WindowRecord::Terminal {
+            cwd: "/r".into(),
+            command: None,
+            session: Some(key.into()),
+        };
+        let r = rec(Some("/r"), pane_node(0, vec![keyed.clone(), idle.clone()]));
+        let jobs = plan(&r, None, &["/r"]);
+        assert_eq!(jobs[0].origin, keyed);
+        assert_eq!(jobs[1].origin, idle);
+        assert!(jobs.iter().all(|j| matches!(
+            &j.origin,
+            WindowRecord::Terminal { session: Some(k), .. } if k == key
+        )));
     }
 
     #[test]

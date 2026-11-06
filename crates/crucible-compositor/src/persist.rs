@@ -288,7 +288,7 @@ fn proc_root() -> &'static Path {
 /// Where `/proc` reads for a window start: a bound cterm window's identity root (its shell or CDE
 /// wrapper under the shared daemon), else its client pid (unbound: unchanged).
 pub(super) fn proc_root_pid(meta: &crate::layout::WindowMeta) -> Option<u32> {
-    meta.identity.map(|i| i.root_pid).or(meta.pid)
+    meta.identity.as_ref().map(|i| i.root_pid).or(meta.pid)
 }
 
 /// What capture reads: `/proc` and the claude home, where claude keeps its per-pid session
@@ -686,7 +686,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         } else {
             SpawnClass::App
         };
-        crucible_persist::window_record(
+        let session = meta.and_then(|m| m.identity.as_ref()?.session.clone());
+        let mut record = crucible_persist::window_record(
             env,
             WindowRecordInput {
                 pid: meta.and_then(|m| m.pid),
@@ -694,9 +695,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 origin: meta.and_then(|m| m.origin.as_ref()),
                 app_id: self.layout.element(id).and_then(element_app_id),
                 exec_flag: &self.config.terminal.exec_flag,
-                root_pid: meta.and_then(|m| m.identity.map(|i| i.root_pid)),
+                root_pid: meta.and_then(|m| m.identity.as_ref().map(|i| i.root_pid)),
             },
-        )
+        );
+        // The bound identity's key wins over whatever the origin carried (they are the same key
+        // unless the window was re-bound).
+        if let WindowRecord::Terminal { session: slot, .. } = &mut record
+            && session.is_some()
+        {
+            *slot = session;
+        }
+        record
     }
 
     fn candidates(&mut self) -> Vec<Candidate> {
@@ -845,6 +854,7 @@ mod tests {
         let term = WindowRecord::Terminal {
             cwd: "/".into(),
             command: None,
+            session: None,
         };
         assert!(!skip_record(&record(None, pane(vec![term]))));
         let split = RecordNode::Split {
@@ -861,6 +871,7 @@ mod tests {
         let term = WindowRecord::Terminal {
             cwd: "/".into(),
             command: None,
+            session: None,
         };
         let with_window = record(None, pane(vec![term]));
         let emptied = record(None, pane(vec![]));

@@ -211,7 +211,7 @@ pub fn match_pending(pid: u32, ancestors: &[u32], has: impl Fn(u32) -> bool) -> 
 /// The pid a new toplevel is placed, classified and recorded by: a bound surface's `spawn_pid`
 /// (its thin client, never the shared daemon client), else the client pid.
 #[must_use]
-pub fn placement_pid(client_pid: Option<u32>, identity: Option<WindowIdentity>) -> Option<u32> {
+pub fn placement_pid(client_pid: Option<u32>, identity: Option<&WindowIdentity>) -> Option<u32> {
     identity.map_or(client_pid, |i| Some(i.spawn_pid))
 }
 
@@ -298,7 +298,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         pid: Option<u32>,
         identity: Option<WindowIdentity>,
     ) {
-        let pid = placement_pid(pid, identity);
+        let pid = placement_pid(pid, identity.as_ref());
         let ancestors = pid
             .map(|p| crucible_persist::ancestors(proc_root(), p, ANCESTOR_DEPTH))
             .unwrap_or_default();
@@ -789,6 +789,7 @@ mod tests {
             id: u64::from(spawn_pid),
             spawn_pid,
             root_pid,
+            session: None,
         }
     }
 
@@ -811,7 +812,7 @@ mod tests {
         // The daemon's own client pid matches nothing.
         assert_eq!(match_pending(D, &[1], |k| pending.contains_key(&k)), None);
         for (identity, want) in [(bound(C2, R2), p2), (bound(C1, R1), p1)] {
-            let pid = placement_pid(Some(D), Some(identity)).unwrap();
+            let pid = placement_pid(Some(D), Some(&identity)).unwrap();
             assert_eq!(pid, identity.spawn_pid);
             let key = match_pending(pid, &[1], |k| pending.contains_key(&k)).unwrap();
             assert_eq!(pending.remove(&key), Some(target(want)));

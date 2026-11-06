@@ -53,11 +53,18 @@ fn axis_name(axis: Axis) -> &'static str {
 
 fn window_node(w: &WindowRecord) -> Result<KdlNode> {
     Ok(match w {
-        WindowRecord::Terminal { cwd, command } => {
+        WindowRecord::Terminal {
+            cwd,
+            command,
+            session,
+        } => {
             let mut n = KdlNode::new("terminal");
             prop(&mut n, "cwd", path_str(cwd)?);
             if let Some(c) = command {
                 prop(&mut n, "command", c.as_str());
+            }
+            if let Some(k) = session {
+                prop(&mut n, "session", k.as_str());
             }
             n
         }
@@ -422,13 +429,18 @@ impl Reader<'_> {
     fn window(&self, n: &KdlNode) -> Result<WindowRecord> {
         match n.name().value() {
             "terminal" => {
-                self.check_entries(n, &["cwd", "command"], 0)?;
+                self.check_entries(n, &["cwd", "command", "session"], 0)?;
                 let cwd = self
                     .string_prop(n, "cwd")?
                     .ok_or_else(|| self.missing(n, "cwd"))?;
                 Ok(WindowRecord::Terminal {
                     cwd: PathBuf::from(cwd),
                     command: self.string_prop(n, "command")?,
+                    // A malformed key (hand-edited file) loads as `None`, never an error, so it
+                    // cannot block a restore; the window then restores as a key-less terminal.
+                    session: self
+                        .string_prop(n, "session")?
+                        .filter(|k| is_session_key(k)),
                 })
             }
             "app" => {
@@ -441,4 +453,13 @@ impl Reader<'_> {
             _ => Err(self.unknown_node(n)),
         }
     }
+}
+
+/// Whether `key` is a well-formed session key: 32 lowercase hex chars (128 bits).
+#[must_use]
+pub fn is_session_key(key: &str) -> bool {
+    key.len() == 32
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }

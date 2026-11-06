@@ -12,6 +12,7 @@ fn term(cwd: &str, command: Option<&str>) -> WindowRecord {
     WindowRecord::Terminal {
         cwd: cwd.into(),
         command: command.map(String::from),
+        session: None,
     }
 }
 
@@ -336,4 +337,47 @@ fn old_format_without_output_loads_with_none() {
     let rec = WorkspaceRecord::from_kdl(old).unwrap();
     assert_eq!(rec.output, None);
     assert_eq!(rec.root, Some(PathBuf::from("/r")));
+}
+
+const KEY: &str = "0123456789abcdef0123456789abcdef";
+
+fn keyed_record(session: Option<&str>) -> WorkspaceRecord {
+    let mut rec = golden_record();
+    rec.focused_pane = 0;
+    rec.tree = pane(vec![WindowRecord::Terminal {
+        cwd: "/a".into(),
+        command: Some("vim".into()),
+        session: session.map(String::from),
+    }]);
+    rec
+}
+
+#[test]
+fn session_key_round_trips_when_present_and_old_files_load_as_none() {
+    let with = keyed_record(Some(KEY));
+    let text = with.to_kdl().unwrap();
+    assert!(text.contains(&format!("session=\"{KEY}\"")), "{text}");
+    assert_eq!(WorkspaceRecord::from_kdl(&text).unwrap(), with);
+    // Absent key is omitted entirely, and the old-format golden file loads key-less.
+    assert!(!keyed_record(None).to_kdl().unwrap().contains("session"));
+    assert_eq!(
+        WorkspaceRecord::from_kdl(&keyed_record(None).to_kdl().unwrap()).unwrap(),
+        keyed_record(None)
+    );
+    assert!(!GOLDEN.contains("session"));
+    assert_eq!(WorkspaceRecord::from_kdl(GOLDEN).unwrap(), golden_record());
+}
+
+#[test]
+fn malformed_session_key_loads_as_none_without_error() {
+    for bad in [
+        "short",
+        "0123456789ABCDEF0123456789ABCDEF",
+        &KEY.replace('0', "g"),
+        &format!("{KEY}0"),
+    ] {
+        let text = keyed_record(Some(KEY)).to_kdl().unwrap().replace(KEY, bad);
+        let rec = WorkspaceRecord::from_kdl(&text).unwrap_or_else(|e| panic!("{bad}: {e}"));
+        assert_eq!(rec, keyed_record(None), "{bad}");
+    }
 }

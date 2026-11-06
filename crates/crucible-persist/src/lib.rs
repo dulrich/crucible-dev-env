@@ -41,7 +41,7 @@ pub use capture::{
     capture_shell, capture_terminal, children_of, relaunch_wrapper_of, window_record,
 };
 pub use error::PersistError;
-pub use format::FORMAT_VERSION;
+pub use format::{FORMAT_VERSION, is_session_key};
 pub use invocation::{
     CdeWrapper, Invocation, PickTarget, RelaunchWrapper, ResumeMode, ResumeWrapper,
     crucible_subcommand, crucible_subcommand_as, is_cde_process, is_cde_process_as,

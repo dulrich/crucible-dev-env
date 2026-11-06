@@ -21,6 +21,7 @@ fn wrapper_record(wrapper: CdeWrapper) -> WindowRecord {
         CdeWrapper::Terminal(cap) => WindowRecord::Terminal {
             cwd: cap.cwd,
             command: cap.command,
+            session: None,
         },
     }
 }
@@ -127,6 +128,7 @@ fn terminal_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowReco
         return origin.cloned().unwrap_or(WindowRecord::Terminal {
             cwd: PathBuf::new(),
             command: None,
+            session: None,
         });
     };
     let candidates = if root_pid.is_some() {
@@ -146,6 +148,7 @@ fn terminal_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowReco
             return WindowRecord::Terminal {
                 cwd,
                 command: Some(command),
+                session: None,
             };
         }
         return origin.cloned().unwrap_or_else(|| wrapper_record(wrapper));
@@ -159,6 +162,7 @@ fn terminal_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowReco
         return WindowRecord::Terminal {
             cwd: cap.cwd,
             command: cap.command,
+            session: None,
         };
     }
     if let Some(origin) = origin {
@@ -169,6 +173,7 @@ fn terminal_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowReco
         None => WindowRecord::Terminal {
             cwd: read_cwd(proc_root, pid).unwrap_or_default(),
             command: None,
+            session: None,
         },
     }
 }
@@ -219,6 +224,7 @@ mod tests {
         WindowRecord::Terminal {
             cwd: cwd.into(),
             command: command.map(str::to_string),
+            session: None,
         }
     }
 
@@ -274,7 +280,8 @@ mod tests {
             terminal_record(&p, 101, None),
             WindowRecord::Terminal {
                 cwd: PathBuf::new(),
-                command: None
+                command: None,
+                session: None,
             }
         );
         // A pending restore banner in its own argv still decodes to its command.
@@ -309,7 +316,8 @@ mod tests {
             classify(&p, None, SpawnClass::Terminal, None, None),
             WindowRecord::Terminal {
                 cwd: PathBuf::new(),
-                command: None
+                command: None,
+                session: None,
             }
         );
     }

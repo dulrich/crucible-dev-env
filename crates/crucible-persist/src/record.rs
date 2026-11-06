@@ -13,6 +13,9 @@ pub enum WindowRecord {
         cwd: PathBuf,
         /// Foreground command, if any.
         command: Option<String>,
+        /// The CDE-minted `CRUCIBLE_TERM_SESSION` key (32 lowercase hex chars) of a `cterm`
+        /// terminal, re-exported on restore so the daemon can reattach the live shell.
+        session: Option<String>,
     },
     /// A non-terminal application.
     App {
@@ -103,6 +106,7 @@ mod tests {
         WindowRecord::Terminal {
             cwd: PathBuf::from(format!("/w/{n}")),
             command: None,
+            session: None,
         }
     }
 

@@ -20,9 +20,13 @@ use crate::state::{Backend, CrucibleState};
 /// The env var a granted spawn carries its grant in.
 pub const GRANT_ENV: &str = "CRUCIBLE_WINDOW_GRANT";
 
+/// The env var a granted `cterm` spawn carries its session key in (CDE -> cterm client; the
+/// client strips it before the child).
+pub const SESSION_ENV: &str = "CRUCIBLE_TERM_SESSION";
+
 /// A bound window's identity: `spawn_pid` is the CDE-spawned thin client (in the spawn
 /// registry), `root_pid` the shell or wrapper the daemon forked for this window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowIdentity {
     /// Compositor-assigned id (from 1; kept within `u32`, the wire type of `bound`).
     pub id: u64,
@@ -30,6 +34,8 @@ pub struct WindowIdentity {
     pub spawn_pid: u32,
     /// The process the binding client forked for this window.
     pub root_pid: u32,
+    /// The session key (`CRUCIBLE_TERM_SESSION`) minted for the spawn, if it carried one.
+    pub session: Option<String>,
 }
 
 /// The `/proc` facts the checks need, injectable so they unit-test without a real process.
@@ -141,22 +147,29 @@ impl<K> Default for IdentityTable<K> {
 
 impl<K: Eq + Hash> IdentityTable<K> {
     /// Records a new identity for `key` and returns it (ids from 1, wrapping within `u32`, never 0).
-    pub fn insert(&mut self, key: K, spawn_pid: u32, root_pid: u32) -> WindowIdentity {
+    pub fn insert(
+        &mut self,
+        key: K,
+        spawn_pid: u32,
+        root_pid: u32,
+        session: Option<String>,
+    ) -> WindowIdentity {
         let id = self.next_id;
         self.next_id = self.next_id.checked_add(1).unwrap_or(1);
         let identity = WindowIdentity {
             id: u64::from(id),
             spawn_pid,
             root_pid,
+            session,
         };
-        self.by_surface.insert(key, identity);
+        self.by_surface.insert(key, identity.clone());
         identity
     }
 
     /// The identity bound to `key`.
     #[must_use]
     pub fn get(&self, key: &K) -> Option<WindowIdentity> {
-        self.by_surface.get(key).copied()
+        self.by_surface.get(key).cloned()
     }
 
     /// Drops `key`'s identity (surface destroyed).
@@ -205,10 +218,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
             &mut self.persist.spawn,
             &RealProc,
         )?;
+        let session = self
+            .persist
+            .spawn
+            .get(spawn_pid)
+            .and_then(|r| r.session.clone());
         let identity = self
             .persist
             .identities
-            .insert(surface.id(), spawn_pid, root_pid);
+            .insert(surface.id(), spawn_pid, root_pid, session);
         tracing::info!(
             id = identity.id,
             spawn_pid,
@@ -303,10 +321,10 @@ mod tests {
         let (mut g, p) = fixture();
         assert_eq!(bind(&mut g, &p, false, "g1", PEER), Ok(SPAWN));
         let mut table = IdentityTable::<u8>::default();
-        let id = table.insert(7, SPAWN, SHELL);
+        let id = table.insert(7, SPAWN, SHELL, None);
         assert_eq!(id.id, 1);
         assert_eq!(table.get(&7), Some(id));
-        assert_eq!(table.insert(8, SPAWN, SHELL).id, 2);
+        assert_eq!(table.insert(8, SPAWN, SHELL, None).id, 2);
         table.remove(&7);
         assert_eq!(table.get(&7), None);
     }

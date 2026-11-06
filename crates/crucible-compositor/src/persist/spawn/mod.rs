@@ -39,6 +39,27 @@ pub(crate) fn session_env() -> [(&'static str, &'static str); 2] {
     ]
 }
 
+/// The `CRUCIBLE_TERM_SESSION` key for a spawn of `kind` running `program`: `None` unless it is a
+/// granted `cterm` terminal spawn; otherwise the key of its restored origin terminal record, else
+/// a fresh one from `mint`.
+#[must_use]
+fn session_for_spawn(
+    kind: SpawnKind,
+    program: &str,
+    origin: Option<&WindowRecord>,
+    mint: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    if !super::identity::wants_grant(kind, program) {
+        return None;
+    }
+    match origin {
+        Some(WindowRecord::Terminal {
+            session: Some(key), ..
+        }) => Some(key.clone()),
+        _ => mint(),
+    }
+}
+
 /// Prepends the configured overlay `terminal-args` to the overlay terminal arguments, i.e. before
 /// the exec flag: `[terminal-args…, exec-flag, crucible, sub…]`.
 #[must_use]
@@ -201,6 +222,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     cmd.env(super::identity::GRANT_ENV, &grant);
                     record.grant = Some(grant);
                     record.exe = Some(exe);
+                    // A restore of a keyed terminal re-exports its saved key; any other granted
+                    // spawn gets a fresh one. Without randomness the spawn simply has no key.
+                    let session = session_for_spawn(
+                        kind,
+                        program,
+                        record.origin.as_ref(),
+                        super::identity::mint_grant,
+                    );
+                    if let Some(key) = &session {
+                        cmd.env(super::identity::SESSION_ENV, key);
+                    }
+                    record.session = session;
                 }
                 _ => warn_no_grant(program),
             }
@@ -388,6 +421,53 @@ mod tests {
         let env = session_env();
         assert!(env.contains(&("XDG_CURRENT_DESKTOP", "CDE")));
         assert!(env.contains(&("XDG_SESSION_TYPE", "wayland")));
+    }
+
+    fn keyed(key: Option<&str>) -> WindowRecord {
+        WindowRecord::Terminal {
+            cwd: "/".into(),
+            command: None,
+            session: key.map(String::from),
+        }
+    }
+
+    #[test]
+    fn fresh_granted_spawns_get_distinct_32_hex_keys() {
+        let mint = || super::super::identity::mint_grant();
+        let a = session_for_spawn(SpawnKind::Terminal, "cterm", None, mint).expect("key");
+        let b = session_for_spawn(SpawnKind::Terminal, "/usr/bin/cterm", None, mint).expect("key");
+        assert!(crucible_persist::is_session_key(&a));
+        assert!(crucible_persist::is_session_key(&b));
+        assert_ne!(a, b);
+        // A restore of a key-less terminal record is a fresh spawn too.
+        let c = session_for_spawn(SpawnKind::Terminal, "cterm", Some(&keyed(None)), mint);
+        assert!(c.is_some_and(|k| crucible_persist::is_session_key(&k)));
+    }
+
+    #[test]
+    fn restore_of_a_keyed_terminal_reexports_its_key() {
+        let key = "0123456789abcdef0123456789abcdef";
+        let got = session_for_spawn(
+            SpawnKind::Terminal,
+            "cterm",
+            Some(&keyed(Some(key))),
+            || panic!("must not mint"),
+        );
+        assert_eq!(got.as_deref(), Some(key));
+    }
+
+    #[test]
+    fn non_cterm_terminals_and_apps_never_get_a_key() {
+        let key = Some("0123456789abcdef0123456789abcdef");
+        for (kind, program) in [
+            (SpawnKind::Terminal, "foot"),
+            (SpawnKind::Terminal, "/usr/bin/alacritty"),
+            (SpawnKind::App, "cterm"),
+            (SpawnKind::Overlay, "cterm"),
+        ] {
+            let got = session_for_spawn(kind, program, Some(&keyed(key)), || Some("x".into()));
+            assert_eq!(got, None, "{kind:?} {program}");
+        }
     }
 
     #[test]

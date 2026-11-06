@@ -120,6 +120,9 @@ pub struct SpawnRecord {
     pub grant: Option<String>,
     /// The canonical executable resolved at mint, which a binding peer must run.
     pub exe: Option<PathBuf>,
+    /// The `CRUCIBLE_TERM_SESSION` key exported with the grant (32 lowercase hex chars), copied
+    /// into the window's identity at bind. Only a granted `cterm` spawn carries one.
+    pub session: Option<String>,
 }
 
 impl SpawnRecord {
@@ -134,6 +137,7 @@ impl SpawnRecord {
             origin: None,
             grant: None,
             exe: None,
+            session: None,
         }
     }
 

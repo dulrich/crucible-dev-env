@@ -16,6 +16,8 @@ The program spawned by `Super+Shift+Return` (the `run-terminal` action; `Super+R
 
 When the terminal program's basename is `cterm` (crucible-term), each CDE terminal spawn (not overlays, apps, foot or any other terminal) also gets `CRUCIBLE_WINDOW_GRANT`: a single-use 32-hex grant, valid while that spawn lives. A client hosting that spawn's window presents it on the compositor global `crucible_window_identity_manager_v1` (protocol `crucible-window-identity-v1`, `protocols/crucible-window-identity-v1.xml`) with `bind_surface` before the surface gets its xdg role; CDE checks the grant, the peer's UID and executable, and that `root_pid` is the peer's child, then places and classifies the window by its spawn rather than by the connection's PID. Without a bound identity a window is placed by its client PID as before.
 
+A granted `cterm` spawn also gets `CRUCIBLE_TERM_SESSION`, a CDE-minted 32-hex session key (CDE → cterm client; the client strips it before the child); it is saved in the terminal's workspace record (`session=`) and re-exported when that record is restored.
+
 ### `tiling`
 
 ```kdl
