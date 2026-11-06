@@ -143,6 +143,8 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
         }
         if let Teardown::Managed(id) = self.unmap_matching(matches) {
             self.forget_recovery(id);
+            // An ephemeral `run-on` workspace goes with its last window.
+            self.prune_ephemeral();
         }
     }
 

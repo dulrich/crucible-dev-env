@@ -15,12 +15,13 @@ use super::placement::{
     select_siblings,
 };
 use super::spawn::{DirPolicy, SpawnRequest};
-use super::workspace::folder_workspace_name;
+use super::workspace::{folder_workspace_name, run_on_target};
 use super::{capture_env, close_element, proc_root};
 use crate::input::{ActionError, Origin};
 use crate::ipc::{Request, Response};
 use crate::state::{Backend, CrucibleState};
 use crucible_keys::{Action, BindTarget};
+use crucible_layout::WorkspaceLayout;
 
 /// The IPC response for a checked spawn: `ok` once spawned, else the refusal reason.
 fn run_response(spawned: Result<u32, String>) -> Response {
@@ -113,6 +114,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Request::Exec(text) => {
                 return match parse_exec(&text) {
                     Err(reason) => Response::Err(reason),
+                    // `run-on` answers `ok <pid>`. The lock was admitted above, and it is exempt
+                    // from IPC overlay dismissal (`closes_overlay`), so nothing else in the action
+                    // gate applies to it.
+                    Ok(Action::RunOn { workspace, command }) => {
+                        match self.run_on_checked(&workspace, &command) {
+                            Ok(pid) => Response::Ok(pid.to_string()),
+                            Err(reason) => Response::Err(reason),
+                        }
+                    }
                     Ok(action) => match self.handle_key_action(action, Origin::Ipc) {
                         Ok(()) => Response::Ok(String::new()),
                         Err(err) => Response::Err(err.to_string()),
@@ -402,6 +412,61 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.ipc_set_root(Some(cwd))
     }
 
+    /// `run-on <name> <cmd>`: resolves the target ([`run_on_target`]), creating a missing one on
+    /// the focused output (appended, not activated, ephemeral), then spawns `cmd` as `run` does
+    /// (verbatim, `PATH` pre-flight) and registers a pid-keyed [`Target::Workspace`] placement.
+    /// No output's active workspace and no focus changes here. Returns the spawned pid.
+    ///
+    /// # Errors
+    /// `saved workspace <name> exists`, the name check `new` applies, `unknown command <word>`
+    /// or `spawn failed`; a workspace created for a refused spawn is removed again.
+    pub(crate) fn run_on_checked(&mut self, name: &str, cmd: &str) -> Result<u32, String> {
+        let live = self.layout.world.workspace_by_name(name);
+        let valid = self.persist.file_of(name).map(drop);
+        let target = run_on_target(name, live, &self.persist.saved_names(), valid)?;
+        let ws = match target {
+            Some(ws) => ws,
+            None => {
+                let output = self.layout.world.focused_output();
+                let mut created = None;
+                self.with_model(|w| {
+                    created =
+                        Some(w.insert_workspace(output, name, &WorkspaceLayout::single(()))?);
+                    Ok(())
+                })
+                .map_err(|e| e.to_string())?;
+                let (ws, _) = created.ok_or_else(|| "workspace was not created".to_string())?;
+                self.persist.workspace.set_ephemeral(ws);
+                info!(name, ?ws, "run-on: created an ephemeral workspace");
+                ws
+            }
+        };
+        let dir = self.spawn_dir(DirPolicy::Inherit, ws);
+        let spawned = Self::preflight(cmd, &dir.preflight)
+            .map_err(|word| format!("unknown command {word}"))
+            .and_then(|()| {
+                self.spawn(SpawnRequest::shell_app(cmd).in_dir(dir.run_in))
+                    .ok_or_else(|| "spawn failed".to_string())
+            });
+        match spawned {
+            Ok(pid) => {
+                self.persist
+                    .placement
+                    .pending
+                    .insert(pid, Pending::new(Target::Workspace(ws), Instant::now()));
+                info!(
+                    pid,
+                    name, cmd, "run-on: spawned into a background workspace"
+                );
+                Ok(pid)
+            }
+            Err(reason) => {
+                self.prune_ephemeral();
+                Err(reason)
+            }
+        }
+    }
+
     pub(super) fn ipc_new(&mut self, name: &str) -> Result<(), String> {
         if self.name_taken(name, &self.persist.saved_names()) {
             return Err(format!("a workspace named {name} already exists"));
@@ -502,6 +567,7 @@ mod tests {
             Request::Exec("quit".into()),
             Request::Exec("run firefox".into()),
             Request::Exec("run-in-terminal htop".into()),
+            Request::Exec("run-on scratch foot".into()),
             Request::Open("a".into()),
             Request::OpenFolder("/tmp".into()),
             Request::New("n".into()),
@@ -591,6 +657,18 @@ mod tests {
         assert_eq!(
             parse_exec("run firefox --new"),
             Ok(Action::Run("firefox --new".into()))
+        );
+        // The IPC round trip `crucible msg run-on` relies on: decoded `exec` text to the action.
+        let line = crate::ipc::Request::parse("exec run-on scratch-a-wp-4 echo 50%25%3Ax").unwrap();
+        let Request::Exec(text) = line else {
+            panic!("not an exec request");
+        };
+        assert_eq!(
+            parse_exec(&text),
+            Ok(Action::RunOn {
+                workspace: "scratch-a-wp-4".into(),
+                command: "echo 50%:x".into(),
+            })
         );
         assert_eq!(
             parse_exec("none"),

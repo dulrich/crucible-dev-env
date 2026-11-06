@@ -11,7 +11,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use crucible_layout::{PaneId, WindowId, WorkspaceId};
+use crucible_layout::{PaneId, WindowId, WorkspaceId, World};
 use tracing::{info, warn};
 
 use super::{WindowIdentity, proc_root};
@@ -34,6 +34,24 @@ impl PlacementState {
     pub(super) fn is_queued(&self, id: WindowId) -> bool {
         is_queued(self.pending.values(), id)
     }
+
+    /// Whether a pending `run-on` placement targets workspace `ws`.
+    pub(super) fn targets_workspace(&self, ws: WorkspaceId) -> bool {
+        self.pending
+            .values()
+            .any(|p| p.target == Target::Workspace(ws))
+    }
+}
+
+/// Where a `run-on` window into workspace `ws` lands, read at map time: `ws`'s focused pane, at
+/// the end of its stack, and whether it becomes that stack's focused window. It does except in
+/// the globally focused pane, where stack focus is keyboard focus: there it joins behind the
+/// current window (an empty pane still focuses it, as an empty stack focuses its first item).
+#[must_use]
+pub fn run_on_slot(world: &World, ws: WorkspaceId) -> Option<(PaneId, usize, bool)> {
+    let pane = world.workspace(ws)?.focused_pane;
+    let len = world.pane(pane)?.windows().len();
+    Some((pane, len, pane != world.focused_pane_id()))
 }
 
 /// How long a pending placement waits for its window to map.
@@ -78,6 +96,8 @@ pub enum Target {
     /// A loss placeholder (plan 03): into the live slot its lost window held, reserved in
     /// `PlacementState::reserved`.
     Lost(LostSlot),
+    /// A `run-on` spawn: into workspace `ws`'s focused pane as of map time ([`run_on_slot`]).
+    Workspace(WorkspaceId),
 }
 
 impl Target {
@@ -88,7 +108,9 @@ impl Target {
             Target::Pane { pane, .. }
             | Target::Slot(Slot { pane, .. })
             | Target::Lost(LostSlot { pane, .. }) => Some(*pane),
-            Target::Overlay | Target::WarmOverlay => None,
+            // A `run-on` target resolves its pane at map time, so it holds no pane now (and so is
+            // not part of the restore save gate).
+            Target::Overlay | Target::WarmOverlay | Target::Workspace(_) => None,
         }
     }
 }
@@ -410,6 +432,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }) => self.map_placed(element, pane, saved_index, focused, meta),
             Some(Target::Slot(slot)) => self.map_slot(element, slot, meta),
             Some(Target::Lost(slot)) => self.map_lost(element, slot, meta),
+            Some(Target::Workspace(ws)) => self.map_run_on(element, ws, meta),
             None => self.map_managed_window(element, meta),
         };
         self.init_recovery(id);
@@ -551,6 +574,30 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 .and_then(|p| p.windows().iter().position(|w| *w == id));
             if let Some(pos) = pos {
                 let _ = self.with_model(|w| w.set_stack_focus(pane, pos));
+            }
+        }
+    }
+
+    /// Maps a `run-on` window into workspace `ws` ([`run_on_slot`]); no output's active workspace
+    /// changes. A workspace gone by map time falls back to the focused pane.
+    fn map_run_on(
+        &mut self,
+        element: WindowElement,
+        ws: WorkspaceId,
+        meta: WindowMeta,
+    ) -> WindowId {
+        let Some((pane, index, focused)) = run_on_slot(&self.layout.world, ws) else {
+            warn!(?ws, "run-on workspace is gone; using the focused pane");
+            return self.map_managed_window(element, meta);
+        };
+        match self.map_managed_window_at(element.clone(), meta.clone(), pane, index) {
+            Ok(id) => {
+                self.finish_placement(pane, id, None, focused);
+                id
+            }
+            Err(err) => {
+                warn!(%err, "run-on placement failed; using the focused pane");
+                self.map_managed_window(element, meta)
             }
         }
     }
@@ -1139,5 +1186,62 @@ mod tests {
         // Mapped: its pending entry is gone, so the save runs, with the placeholder in place.
         assert!(!pending_in(&[other, pane], std::iter::empty()));
         assert_eq!(lose_and_replace(&[a, t, b], &[t], &[n], &[0]), [a, n, b]);
+    }
+}
+
+#[cfg(test)]
+mod run_on_tests {
+    use super::run_on_slot;
+    use crucible_layout::{WindowId, WorkspaceId, WorkspaceLayout, World};
+
+    /// Maps one `run-on` window into `ws` as `map_run_on` does, through the model only.
+    fn map(world: &mut World, ws: WorkspaceId) -> WindowId {
+        let (pane, index, focused) = run_on_slot(world, ws).unwrap();
+        let id = world.open_window_at(pane, index).unwrap();
+        if focused {
+            world.set_stack_focus(pane, index).unwrap();
+        }
+        id
+    }
+
+    #[test]
+    fn a_background_pane_focuses_the_new_window_in_its_stack_only() {
+        let mut world = World::new("one");
+        let one = world.active_workspace_id();
+        let keyboard = world.open_window();
+        let out = world.focused_output();
+        let (scratch, _) = world
+            .insert_workspace(out, "scratch", &WorkspaceLayout::single(()))
+            .unwrap();
+        let first = map(&mut world, scratch);
+        let second = map(&mut world, scratch);
+        let pane = world.workspace(scratch).unwrap().focused_pane;
+        assert_eq!(world.pane(pane).unwrap().windows(), [first, second]);
+        assert_eq!(world.pane(pane).unwrap().focused_window(), Some(second));
+        assert_eq!(world.active_workspace_id(), one, "no workspace switch");
+        assert_eq!(
+            world.focused_window(),
+            Some(keyboard),
+            "no keyboard focus change"
+        );
+    }
+
+    #[test]
+    fn the_globally_focused_pane_takes_it_unfocused_behind_the_current_window() {
+        let mut world = World::new("one");
+        let keyboard = world.open_window();
+        let pane = world.focused_pane_id();
+        let ws = world.active_workspace_id();
+        let id = map(&mut world, ws);
+        assert_eq!(world.pane(pane).unwrap().windows(), [keyboard, id]);
+        assert_eq!(world.focused_window(), Some(keyboard));
+    }
+
+    #[test]
+    fn an_empty_globally_focused_pane_takes_it_with_keyboard_focus() {
+        let mut world = World::new("one");
+        let ws = world.active_workspace_id();
+        let id = map(&mut world, ws);
+        assert_eq!(world.focused_window(), Some(id));
     }
 }

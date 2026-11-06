@@ -265,7 +265,10 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
         // One controller call covers both kinds: a managed window is closed in the model before its
         // binding and `Space` mapping are released; an override-redirect element is untracked and
         // unmapped. An element that is already gone resolves to `Teardown::Absent` — no error.
-        self.unmap_matching(|e| e.x11_surface() == Some(&window));
+        if let Teardown::Managed(_) = self.unmap_matching(|e| e.x11_surface() == Some(&window)) {
+            // An ephemeral `run-on` workspace goes with its last window.
+            self.prune_ephemeral();
+        }
         if !window.is_override_redirect() {
             // Protocol I/O: best-effort, and harmless to repeat.
             let _ = window.set_mapped(false);

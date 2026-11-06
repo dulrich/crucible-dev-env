@@ -524,7 +524,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let world = &self.layout.world;
         let mut connected = self.connected_outputs();
         connected.sort_by_key(|(_, id)| *id);
-        let outputs = session_outputs(world, &connected);
+        let outputs = session_outputs(world, &connected, |ws| {
+            self.persist.workspace.is_ephemeral(ws)
+        });
         let outputs = crucible_persist::session::with_header_prefs(outputs, &self.header.prefs);
         let focused = world.focused_output();
         Session {
@@ -577,6 +579,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.warm_reaped(&reaped);
         self.refresh_recovery();
         self.prune_reservations();
+        // Also catches a `run-on` whose window never mapped (its pending entry just expired).
+        self.prune_ephemeral();
         self.save_dirty(now, TICK);
         self.write_session();
         self.poll_config();
@@ -671,7 +675,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
+    /// The record of `ws` to write, `None` for an unknown or **ephemeral** workspace. This is the
+    /// single store-save choke point: every workspace-store write (`save_dirty`, `save_now`,
+    /// close's flush, rename) captures through here, so an ephemeral workspace is never written.
     fn capture_record(&self, ws: WorkspaceId) -> Option<WorkspaceRecord> {
+        if self.persist.workspace.is_ephemeral(ws) {
+            return None;
+        }
         let env = capture_env();
         let mut record = WorkspaceRecord::from_world(
             &self.layout.world,
@@ -976,12 +986,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
 /// The session's `output` records for the connected `(connector, id)` pairs: each output's
 /// workspace names in stack order and its active workspace. Pure over the world, so the
-/// recorded order is unit-tested without a compositor.
+/// recorded order is unit-tested without a compositor. An `ephemeral` workspace is never listed
+/// (nor recorded as an output's focused one).
 fn session_outputs(
     world: &crucible_layout::World,
     connected: &[(String, OutputId)],
+    ephemeral: impl Fn(WorkspaceId) -> bool,
 ) -> Vec<crucible_persist::session::OutputSession> {
-    let name_of = |ws: WorkspaceId| world.workspace(ws).map(|w| w.name.clone());
+    let name_of = |ws: WorkspaceId| {
+        (!ephemeral(ws))
+            .then(|| world.workspace(ws).map(|w| w.name.clone()))
+            .flatten()
+    };
     connected
         .iter()
         .filter_map(|(name, id)| {
@@ -1025,17 +1041,42 @@ mod tests {
         world.new_workspace("two").unwrap();
         let out = world.focused_output();
         let connected = vec![("DP-1".to_string(), out)];
-        let names =
-            |w: &crucible_layout::World| session_outputs(w, &connected)[0].workspaces.clone();
+        let names = |w: &crucible_layout::World| {
+            session_outputs(w, &connected, |_| false)[0]
+                .workspaces
+                .clone()
+        };
         assert_eq!(names(&world), ["one", "two"]);
         world.reorder_workspace(one, 1).unwrap();
-        let rec = session_outputs(&world, &connected);
+        let rec = session_outputs(&world, &connected, |_| false);
         assert_eq!(rec[0].workspaces, ["two", "one"]);
         assert_eq!(
             rec[0].focused.as_deref(),
             Some("two"),
             "active is unchanged"
         );
+    }
+
+    #[test]
+    fn an_ephemeral_workspace_is_never_in_the_session_record() {
+        let mut world = crucible_layout::World::new("one");
+        let out = world.focused_output();
+        let (scratch, _) = world
+            .insert_workspace(
+                out,
+                "scratch",
+                &crucible_layout::WorkspaceLayout::single(()),
+            )
+            .unwrap();
+        let connected = vec![("DP-1".to_string(), out)];
+        let rec = session_outputs(&world, &connected, |ws| ws == scratch);
+        assert_eq!(rec[0].workspaces, ["one"]);
+        assert_eq!(rec[0].focused.as_deref(), Some("one"));
+        // Viewing it does not make it recordable: the output records no focused name.
+        world.switch_workspace(scratch).unwrap();
+        let rec = session_outputs(&world, &connected, |ws| ws == scratch);
+        assert_eq!(rec[0].workspaces, ["one"]);
+        assert_eq!(rec[0].focused, None);
     }
 
     #[test]

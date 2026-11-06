@@ -20,6 +20,9 @@ pub(super) struct WorkspaceMeta {
     pub(super) root: Option<PathBuf>,
     /// Connector name of the output the workspace was last viewed on (see [`note_last_viewed`]).
     pub(super) last_output: Option<String>,
+    /// A `run-on` scratch workspace: never written to the store or `session.kdl`, removed once
+    /// empty (see [`ephemeral_removals`]). Cleared with the meta when the workspace is forgotten.
+    pub(super) ephemeral: bool,
 }
 
 /// Per-workspace meta and the pending slot pin (a field of [`super::PersistState`]).
@@ -47,6 +50,59 @@ impl WorkspaceState {
     pub(super) fn last_output(&self, ws: WorkspaceId) -> Option<&String> {
         self.meta.get(&ws).and_then(|m| m.last_output.as_ref())
     }
+
+    /// Whether `ws` is an ephemeral `run-on` workspace.
+    pub(super) fn is_ephemeral(&self, ws: WorkspaceId) -> bool {
+        self.meta.get(&ws).is_some_and(|m| m.ephemeral)
+    }
+
+    /// Marks `ws` ephemeral.
+    pub(super) fn set_ephemeral(&mut self, ws: WorkspaceId) {
+        self.meta.entry(ws).or_default().ephemeral = true;
+    }
+}
+
+/// Where a `run-on <name>` lands: `Ok(Some(ws))` for the live workspace `ws` (on any output),
+/// `Ok(None)` to create an ephemeral one. A saved but not live name is refused (no implicit
+/// restore), and so is a name `new` would refuse (`valid`, the store file-name check).
+pub(super) fn run_on_target(
+    name: &str,
+    live: Option<WorkspaceId>,
+    saved: &HashSet<String>,
+    valid: Result<(), String>,
+) -> Result<Option<WorkspaceId>, String> {
+    if let Some(ws) = live {
+        return Ok(Some(ws));
+    }
+    if saved.contains(name) {
+        return Err(format!("saved workspace {name} exists"));
+    }
+    valid.map(|()| None)
+}
+
+/// The ephemeral workspaces to remove now: each one with no window and no pending placement
+/// (`pending`), unless it is its output's only workspace.
+pub(super) fn ephemeral_removals(
+    world: &World,
+    ephemeral: impl Fn(WorkspaceId) -> bool,
+    pending: impl Fn(WorkspaceId) -> bool,
+) -> Vec<WorkspaceId> {
+    let mut out = Vec::new();
+    for (_, o) in world.outputs() {
+        let mut left = o.workspaces().len();
+        for ws in o.workspaces().iter().copied() {
+            let empty = world.workspace(ws).is_some_and(|w| {
+                w.panes()
+                    .iter()
+                    .all(|p| world.pane(*p).is_none_or(|p| p.windows().is_empty()))
+            });
+            if left > 1 && ephemeral(ws) && empty && !pending(ws) {
+                out.push(ws);
+                left -= 1;
+            }
+        }
+    }
+    out
 }
 
 /// Something that changes the pending slot pin (see [`pin_transition`]).
@@ -261,14 +317,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
             );
             return;
         }
-        // (c) Flush first; a failed write refuses the close (never tear down unsaved state).
-        let Some(record) = self.capture_record(ws) else {
-            warn!(?ws, "close-workspace: workspace vanished; refusing");
-            return;
-        };
-        if !skip_record(&record) && !self.write_record(record, Instant::now()) {
-            warn!(?ws, "close-workspace: save failed; refusing to close");
-            return;
+        // (c) Flush first; a failed write refuses the close (never tear down unsaved state). An
+        // ephemeral workspace is never written, so it closes without a flush.
+        if !self.persist.workspace.is_ephemeral(ws) {
+            let Some(record) = self.capture_record(ws) else {
+                warn!(?ws, "close-workspace: workspace vanished; refusing");
+                return;
+            };
+            if !skip_record(&record) && !self.write_record(record, Instant::now()) {
+                warn!(?ws, "close-workspace: save failed; refusing to close");
+                return;
+            }
         }
         // (d) Snapshot the panes before the model forgets them (for step (g)).
         let panes = self
@@ -364,12 +423,37 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// pending placements and its placed entries, by the `panes` it had.
     pub(super) fn forget_workspace(&mut self, ws: WorkspaceId, panes: &[PaneId]) {
         self.persist.workspace.meta.remove(&ws);
-        self.persist
-            .placement
-            .pending
-            .retain(|_, p| p.target.pane().is_none_or(|pane| !panes.contains(&pane)));
+        self.persist.placement.pending.retain(|_, p| {
+            p.target.pane().is_none_or(|pane| !panes.contains(&pane))
+                && p.target != super::placement::Target::Workspace(ws)
+        });
         for pane in panes {
             self.persist.placement.placed.remove(pane);
+        }
+    }
+
+    /// Removes every ephemeral workspace that [`ephemeral_removals`] selects (empty, nothing
+    /// pending, not its output's only workspace), forgetting its meta (and so its flag).
+    pub(crate) fn prune_ephemeral(&mut self) {
+        let removals = ephemeral_removals(
+            &self.layout.world,
+            |ws| self.persist.workspace.is_ephemeral(ws),
+            |ws| self.workspace_has_pending(ws) || self.persist.placement.targets_workspace(ws),
+        );
+        for ws in removals {
+            let panes = self
+                .layout
+                .world
+                .workspace(ws)
+                .map(|w| w.panes())
+                .unwrap_or_default();
+            match self.end_workspace(ws) {
+                Ok(_) => {
+                    self.forget_workspace(ws, &panes);
+                    info!(?ws, "ephemeral workspace emptied; removed");
+                }
+                Err(err) => debug!(%err, ?ws, "ephemeral workspace kept"),
+            }
         }
     }
 
@@ -402,6 +486,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let Some(name) = self.layout.world.workspace(ws).map(|w| w.name.clone()) else {
             return;
         };
+        // An ephemeral workspace is never saved, so `slots.kdl` never names it.
+        if self.persist.workspace.is_ephemeral(ws) {
+            info!(
+                slot = n,
+                workspace = name,
+                "pin-slot: ephemeral workspace; not pinned"
+            );
+            return;
+        }
         if !self.persist.slots.pin(n, &name) {
             return;
         }
@@ -498,6 +591,59 @@ fn slot_target(pinned: Option<String>, live: bool, saved: bool) -> SlotTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_on_uses_live_refuses_saved_and_invalid_and_creates_the_rest() {
+        let one = World::new("one").active_workspace_id();
+        let saved: HashSet<String> = ["kept".to_string(), "one".to_string()].into();
+        let ok = || Ok(());
+        // Live (on any output) wins, even when also saved.
+        assert_eq!(run_on_target("one", Some(one), &saved, ok()), Ok(Some(one)));
+        assert_eq!(
+            run_on_target("kept", None, &saved, ok()),
+            Err("saved workspace kept exists".to_string())
+        );
+        assert_eq!(
+            run_on_target("a/b", None, &saved, Err("invalid name".into())),
+            Err("invalid name".to_string())
+        );
+        assert_eq!(run_on_target("scratch", None, &saved, ok()), Ok(None));
+    }
+
+    #[test]
+    fn an_emptied_ephemeral_workspace_is_removed_unless_it_is_the_last() {
+        let mut world = World::new("one");
+        let out = world.focused_output();
+        let single = crucible_layout::WorkspaceLayout::single(());
+        let (scratch, _) = world.insert_workspace(out, "scratch", &single).unwrap();
+        world.insert_workspace(out, "plain", &single).unwrap();
+        let eph = |ws| ws == scratch;
+        // Pending (its window has not mapped yet): kept.
+        assert!(ephemeral_removals(&world, eph, |_| true).is_empty());
+        // Holding a window: kept.
+        let pane = world.workspace(scratch).unwrap().focused_pane;
+        let w = world.open_window_at(pane, 0).unwrap();
+        assert!(ephemeral_removals(&world, eph, |_| false).is_empty());
+        // Emptied with nothing pending: removed; a non-ephemeral empty one never is.
+        world.close_window(w).unwrap();
+        assert_eq!(ephemeral_removals(&world, eph, |_| false), [scratch]);
+        // Its output's only workspace: kept.
+        let lone = World::new("scratch");
+        let only = lone.active_workspace_id();
+        assert!(ephemeral_removals(&lone, |ws| ws == only, |_| false).is_empty());
+    }
+
+    #[test]
+    fn ephemeral_flag_lives_in_the_meta_and_goes_with_it() {
+        let mut state = WorkspaceState::default();
+        let ws = World::new("one").active_workspace_id();
+        assert!(!state.is_ephemeral(ws));
+        state.set_ephemeral(ws);
+        assert!(state.is_ephemeral(ws));
+        // `forget_workspace` drops the meta on removal, and with it the flag.
+        state.meta.remove(&ws);
+        assert!(!state.is_ephemeral(ws));
+    }
 
     #[test]
     fn slot_target_decisions() {

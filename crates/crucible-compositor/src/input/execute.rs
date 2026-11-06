@@ -62,15 +62,19 @@ pub(crate) fn admit(locked: bool, action: &Action) -> Result<(), ActionError> {
 
 /// The overlay policy: whether `action` from `origin` closes the mapped overlay before running.
 ///
-/// Chords follow [`chord_closes_overlay`]. IPC `exec` closes first unconditionally, except `run`
-/// and `run-in-terminal`: the launcher overlay sends those and shows an `err` reply in its own
+/// Chords follow [`chord_closes_overlay`]. IPC `exec` closes first unconditionally, except `run`,
+/// `run-in-terminal` and `run-on` (a background spawn that must not disturb the overlay): the launcher overlay sends those and shows an `err` reply in its own
 /// status line, and closing the overlay would kill it before the reply arrives.
 #[must_use]
 pub(crate) fn closes_overlay(origin: Origin, overlay_mapped: bool, action: &Action) -> bool {
     match origin {
         Origin::Chord => chord_closes_overlay(&overlay_mode(overlay_mapped), action),
         Origin::Ipc => {
-            overlay_mapped && !matches!(action, Action::Run(_) | Action::RunInTerminal(_))
+            overlay_mapped
+                && !matches!(
+                    action,
+                    Action::Run(_) | Action::RunInTerminal(_) | Action::RunOn { .. }
+                )
         }
     }
 }
@@ -138,6 +142,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 info!(cmd, "running command in a new terminal");
                 if let Err(reason) = self.run_in_terminal_checked(&cmd) {
                     warn!(cmd, reason, "run-in-terminal keybind not spawned");
+                    return Err(ActionError::Refused(reason));
+                }
+            }
+            Action::RunOn { workspace, command } => {
+                if let Err(reason) = self.run_on_checked(&workspace, &command) {
+                    warn!(workspace, command, reason, "run-on not spawned");
                     return Err(ActionError::Refused(reason));
                 }
             }
@@ -325,6 +335,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Option<Result<(), L
         | Action::RunTerminal
         | Action::Run(_)
         | Action::RunInTerminal(_)
+        | Action::RunOn { .. }
         | Action::NewWorkspace
         | Action::CloseWorkspace
         | Action::DeleteWorkspace
@@ -415,6 +426,10 @@ mod tests {
         for action in [
             Action::Run("firefox".into()),
             Action::RunInTerminal("htop".into()),
+            Action::RunOn {
+                workspace: "scratch".into(),
+                command: "foot".into(),
+            },
         ] {
             assert!(!closes_overlay(Origin::Ipc, true, &action), "{action}");
         }

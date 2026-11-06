@@ -64,6 +64,15 @@ pub enum Action {
     /// Run a command line (non-empty) in a new terminal: the configured terminal starts
     /// `crucible resume --now --cwd <dir> -- <cmd>`. No default chord.
     RunInTerminal(String),
+    /// Run a command line (non-empty) in the background into workspace `workspace`: its first
+    /// toplevel joins that workspace's focused pane (a missing workspace is created, not
+    /// activated, and is ephemeral). No output's active workspace changes. No default chord.
+    RunOn {
+        /// The target workspace name (one word).
+        workspace: String,
+        /// The verbatim command line.
+        command: String,
+    },
 
     /// Move pane focus in `Direction` within the active workspace. `Super+H/J/K/L`.
     Focus(Direction),
@@ -180,6 +189,7 @@ impl std::fmt::Display for Action {
             Self::RunTerminal => f.write_str("run-terminal"),
             Self::Run(cmd) => write!(f, "run {cmd}"),
             Self::RunInTerminal(cmd) => write!(f, "run-in-terminal {cmd}"),
+            Self::RunOn { workspace, command } => write!(f, "run-on {workspace} {command}"),
             Self::Focus(d) => write!(f, "focus {}", dir(d)),
             Self::Move(d) => write!(f, "move {}", dir(d)),
             Self::Split(d) => write!(f, "split {}", dir(d)),
@@ -286,6 +296,7 @@ impl Action {
             Self::RunTerminal
             | Self::Run(_)
             | Self::RunInTerminal(_)
+            | Self::RunOn { .. }
             | Self::OpenPicker
             | Self::OpenLauncher
             | Self::OpenSettings => Area::LaunchAndOverlays,
@@ -376,6 +387,17 @@ impl FromStr for Action {
             "run-terminal" => nullary(Self::RunTerminal),
             "run" => command("run").map(Self::Run),
             "run-in-terminal" => command("run-in-terminal").map(Self::RunInTerminal),
+            // `run-on <workspace> <command…>`: one workspace word, then the verbatim command.
+            "run-on" => {
+                let rest = command("run-on")?;
+                match rest.split_once(char::is_whitespace) {
+                    Some((workspace, cmd)) if !cmd.trim().is_empty() => Ok(Self::RunOn {
+                        workspace: workspace.to_string(),
+                        command: cmd.trim().to_string(),
+                    }),
+                    _ => Err(bad("`run-on` needs a workspace and a command".into())),
+                }
+            }
             "stack-window" => Err(bad(
                 "`stack-window` was retired: every launch already stacks into the focused pane; use `run-terminal`".into(),
             )),
@@ -441,6 +463,10 @@ mod tests {
             Action::RunTerminal,
             Action::Run("echo 50%:a b".into()),
             Action::RunInTerminal("htop -d 5".into()),
+            Action::RunOn {
+                workspace: "scratch-a-wp-4".into(),
+                command: "echo 50%:a  b".into(),
+            },
             Action::Focus(Direction::Left),
             Action::Move(Direction::Right),
             Action::Split(Direction::Up),
@@ -573,5 +599,27 @@ mod tests {
                 None => std::env::remove_var("TERMINAL"),
             }
         }
+    }
+
+    #[test]
+    fn run_on_takes_one_workspace_word_then_the_verbatim_command() {
+        assert_eq!(
+            "run-on scratch  foot -e  sh".parse::<Action>(),
+            Ok(Action::RunOn {
+                workspace: "scratch".into(),
+                command: "foot -e  sh".into(),
+            })
+        );
+        assert_eq!(
+            Action::RunOn {
+                workspace: "s".into(),
+                command: "foot".into()
+            }
+            .area(),
+            Area::LaunchAndOverlays
+        );
+        assert!("run-on".parse::<Action>().is_err());
+        assert!("run-on scratch".parse::<Action>().is_err());
+        assert!("run-on scratch   ".parse::<Action>().is_err());
     }
 }

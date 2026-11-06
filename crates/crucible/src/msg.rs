@@ -6,7 +6,7 @@ use crate::cli::Parsed;
 use crate::client::{Client, socket_from_env};
 
 /// Usage text for `crucible msg --help`.
-pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | save | open <name> | open-folder <path> | new <name> | rename <name> | root <path>|- | exec <action> | run <command...> | run-in-terminal <command...> | run-tui <command...> | run-term <program> | close-pid <n> | relaunch\n\n`close-pid <n>` politely asks every window of process <n> to close (an X11 window without `WM_DELETE_WINDOW` is destroyed) and answers `ok <count>`, or `err no window for pid <n>`.\n`root <path>` sets the active workspace's root (the folder its new terminals and apps start in; the path must be an absolute existing directory) and `root -` clears it.\n`exec` runs a keybinding action (the `binds` action grammar, for example `crucible msg exec focus left`); a failed action answers `err <reason>`.\n`run` and `run-in-terminal` are shorthands for `exec run <command>` and `exec run-in-terminal <command>`: they take the rest of the arguments as one command line (joined with single spaces) and encode it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. `run-tui` encodes its command the same way. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`). While the session is locked, every request but `candidates`, `bindings` and `save` answers `err session locked`.\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
+pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | save | open <name> | open-folder <path> | new <name> | rename <name> | root <path>|- | exec <action> | run <command...> | run-in-terminal <command...> | run-on <workspace> <command...> | run-tui <command...> | run-term <program> | close-pid <n> | relaunch\n\n`close-pid <n>` politely asks every window of process <n> to close (an X11 window without `WM_DELETE_WINDOW` is destroyed) and answers `ok <count>`, or `err no window for pid <n>`.\n`root <path>` sets the active workspace's root (the folder its new terminals and apps start in; the path must be an absolute existing directory) and `root -` clears it.\n`exec` runs a keybinding action (the `binds` action grammar, for example `crucible msg exec focus left`); a failed action answers `err <reason>`.\n`run` and `run-in-terminal` are shorthands for `exec run <command>` and `exec run-in-terminal <command>`: they take the rest of the arguments as one command line (joined with single spaces) and encode it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. `run-tui` encodes its command the same way.\n`run-on <workspace> <command...>` (shorthand for `exec run-on …`) runs the command in the background into that workspace (created, not shown and ephemeral when missing) and answers `ok <pid>`. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`). While the session is locked, every request but `candidates`, `bindings` and `save` answers `err session locked`.\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
 
 /// Joins the arguments into one protocol line and validates it.
 ///
@@ -18,6 +18,17 @@ pub fn build_line(args: &[String]) -> Result<String, String> {
     }
     let verb = args[0].as_str();
     let line = match verb {
+        "run-on" => {
+            // `run-on <workspace> <command…>` is a shorthand for `exec run-on …`, encoded as `run`.
+            let cmd = args.get(2..).map(|a| a.join(" ")).unwrap_or_default();
+            if cmd.trim().is_empty() {
+                return Err("run-on needs a workspace and a command".into());
+            }
+            format!(
+                "exec {}",
+                encode_field(&format!("run-on {} {cmd}", args[1]))
+            )
+        }
         "run" | "run-in-terminal" | "run-tui" | "run-term" => {
             // The command is free text: encode it so `:`, `%` and friends survive the wire.
             let cmd = args[1..].join(" ");
@@ -124,6 +135,18 @@ mod tests {
         );
         assert!(build_line(&v(&["run"])).is_err());
         assert!(build_line(&v(&["run", " "])).is_err());
+    }
+
+    #[test]
+    fn run_on_encodes_like_run() {
+        let line = build_line(&v(&["run-on", "scratch-a-wp-4", "echo", "50%:x"])).unwrap();
+        assert_eq!(line, "exec run-on scratch-a-wp-4 echo 50%25%3Ax");
+        assert_eq!(
+            Request::parse(&line),
+            Ok(Request::Exec("run-on scratch-a-wp-4 echo 50%:x".into()))
+        );
+        assert!(build_line(&v(&["run-on"])).is_err());
+        assert!(build_line(&v(&["run-on", "scratch"])).is_err());
     }
 
     #[test]
