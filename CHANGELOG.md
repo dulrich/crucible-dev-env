@@ -4,6 +4,21 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.10 — 2026-11-06
+
+### Added
+
+- `delete-workspace` verb: deletes the active workspace, ending its windows, moving its saved record to `$XDG_STATE_HOME/cde/deleted/` and clearing its slot pins. It is refused on an output's last workspace and while a restore is pending. To restore a workspace, move its file back into `workspaces/`.
+- Picker: pressing Delete on a saved (not open) row asks for confirmation, and a second Delete removes it, closing the picker. Any other key cancels. Over IPC this is the new `delete <name>` request, which refuses a live name.
+- `reorder-workspace <n>` verb: moves the active workspace `n` places within its output's stack (clamped at the ends, no wrap). The new order is saved in the `session.kdl` `output` line, whose format is unchanged.
+- Header drag-to-reorder: dragging a workspace header segment onto another segment of the same output reorders them. A plain click still switches.
+- `delete-workspace` and `reorder-workspace` are unbound by default, on purpose: deleting goes through the picker and reordering through a header drag. Bind them in `binds` if you want chords.
+
+### Changed
+
+- The settings overlay (`crucible keys`) groups its rows under functional-area headings (Panes & windows, Stacks, Workspaces, Outputs, Launch & overlays, Session & system). Typing a filter flattens the list.
+- With `terminal "cterm"`, the overlays (picker, launcher, settings) get cterm-specific default arguments: the opaque surround as cterm's background and zero padding, so no gap shows at the edges, as foot already did.
+
 ## 0.4.9 — 2026-11-06
 
 ### Added
