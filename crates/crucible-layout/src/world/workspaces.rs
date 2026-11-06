@@ -266,6 +266,17 @@ impl World {
         ws: WorkspaceId,
         output: OutputId,
     ) -> Result<(), LayoutError> {
+        self.move_workspace_to_output_at(ws, output, usize::MAX)
+    }
+
+    /// [`World::move_workspace_to_output`] with the insertion position: `index` in `output`'s
+    /// stack, clamped to `0..=len`. Same checks and error order; mutates nothing on error.
+    pub fn move_workspace_to_output_at(
+        &mut self,
+        ws: WorkspaceId,
+        output: OutputId,
+        index: usize,
+    ) -> Result<(), LayoutError> {
         let source = self.owner_of(ws)?;
         if !self.outputs.contains_key(&output) {
             return Err(LayoutError::UnknownOutput(output));
@@ -279,7 +290,7 @@ impl World {
             .get_mut(&output)
             .expect("checked")
             .stack
-            .extend([ws]);
+            .insert(index, ws);
         self.activate(ws, None)
     }
 
@@ -509,6 +520,41 @@ mod tests {
         assert_eq!(w.output(o1).unwrap().active_workspace(), a);
         assert_eq!(w.output(o2).unwrap().active_workspace(), first);
         w.check_invariants();
+    }
+
+    #[test]
+    fn move_workspace_to_output_at_inserts_at_index_and_clamps() {
+        for (index, want) in [(0, 0), (1, 1), (99, 99)] {
+            let (mut w, _o1, o2) = two_outputs();
+            let first = w.active_workspace_id();
+            let a = w.new_workspace("a").unwrap();
+            let b = w.new_workspace("b").unwrap();
+            w.new_workspace("c").unwrap(); // o1: [first, a, b, c]
+            w.move_workspace_to_output(a, o2).unwrap();
+            w.move_workspace_to_output(b, o2).unwrap(); // o2: [init, a, b]
+            let before = w.output(o2).unwrap().workspaces().to_vec();
+            assert_eq!(before.len(), 3);
+            w.move_workspace_to_output_at(first, o2, index).unwrap();
+            let after = w.output(o2).unwrap().workspaces().to_vec();
+            let mut expect = before.clone();
+            expect.insert(want.min(before.len()), first);
+            assert_eq!(after, expect, "index {index}");
+            assert_eq!(w.output(o2).unwrap().active_workspace(), first);
+            assert_eq!(w.focused_output(), o2);
+            w.check_invariants();
+        }
+    }
+
+    #[test]
+    fn move_workspace_to_output_at_refuses_last_without_mutating() {
+        let (mut w, o1, o2) = two_outputs();
+        let first = w.active_workspace_id();
+        let before = w.clone();
+        assert_eq!(
+            w.move_workspace_to_output_at(first, o2, 0),
+            Err(LayoutError::LastWorkspace(o1))
+        );
+        assert_eq!(w, before);
     }
 
     #[test]

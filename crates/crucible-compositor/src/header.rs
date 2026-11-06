@@ -208,19 +208,34 @@ pub enum ReleaseAction {
         /// The released segment's index in the output's stack.
         to: usize,
     },
+    /// Move `workspace` to another output at stack index `to` (`to` = the target stack's length
+    /// appends).
+    MoveToOutput {
+        /// The pressed workspace.
+        workspace: WorkspaceId,
+        /// The output the release landed on.
+        output: OutputId,
+        /// The insertion index in that output's stack.
+        to: usize,
+    },
 }
 
 /// Decides a consumed header release. `release` is the strip hit under the release point
 /// (`None` off every strip or with the strip hidden); `normal` is whether the input mode is
 /// still `Normal` (a lock or overlay opened since the press cancels); `order` is the pressed
-/// output's workspace stack in order. Same place as the press is a click; a different segment
-/// of the same output is a reorder to that segment's index; anything else does nothing.
+/// output's workspace stack in order and `target_order` the released output's (the same slice
+/// when both are one output). Same place as the press is a click; a different segment of the
+/// same output is a reorder to that segment's index; the same output's strip outside every
+/// label moves the workspace to the end (nothing if it already is last); another output's
+/// segment moves it there at that segment's index and that output's strip outside every label
+/// appends it; anything else does nothing. A label-less press never moves anything.
 #[must_use]
 pub fn release_decision(
     press: HeaderPress,
     release: Option<(OutputId, Option<WorkspaceId>)>,
     normal: bool,
     order: &[WorkspaceId],
+    target_order: &[WorkspaceId],
 ) -> ReleaseAction {
     if !normal {
         return ReleaseAction::None;
@@ -228,23 +243,38 @@ pub fn release_decision(
     let Some((output, workspace)) = release else {
         return ReleaseAction::None;
     };
-    if output != press.output {
-        return ReleaseAction::None;
-    }
-    if workspace == press.workspace {
+    if output == press.output && workspace == press.workspace {
         return ReleaseAction::Click(press);
     }
-    match (press.workspace, workspace) {
-        (Some(pressed), Some(target)) => {
-            order
-                .iter()
-                .position(|w| *w == target)
-                .map_or(ReleaseAction::None, |to| ReleaseAction::Reorder {
-                    workspace: pressed,
-                    to,
-                })
-        }
-        _ => ReleaseAction::None,
+    let Some(pressed) = press.workspace else {
+        return ReleaseAction::None;
+    };
+    if output != press.output {
+        let to = match workspace {
+            Some(target) => target_order.iter().position(|w| *w == target),
+            None => Some(target_order.len()),
+        };
+        return to.map_or(ReleaseAction::None, |to| ReleaseAction::MoveToOutput {
+            workspace: pressed,
+            output,
+            to,
+        });
+    }
+    match workspace {
+        Some(target) => order
+            .iter()
+            .position(|w| *w == target)
+            .map_or(ReleaseAction::None, |to| ReleaseAction::Reorder {
+                workspace: pressed,
+                to,
+            }),
+        None => match order.len().checked_sub(1) {
+            Some(last) if order.last() != Some(&pressed) => ReleaseAction::Reorder {
+                workspace: pressed,
+                to: last,
+            },
+            _ => ReleaseAction::None,
+        },
     }
 }
 
@@ -670,7 +700,14 @@ mod tests {
             output: out,
             workspace: Some(ws(1)),
         };
-        let decide = |release, normal| release_decision(press, release, normal, &order);
+        let other_order = [ws(7), ws(8)];
+        let decide = |release, normal| {
+            let target: &[WorkspaceId] = match release {
+                Some((o, _)) if o == other => &other_order,
+                _ => &order,
+            };
+            release_decision(press, release, normal, &order, target)
+        };
         // Same segment: the existing click.
         assert_eq!(
             decide(Some((out, Some(ws(1)))), true),
@@ -684,17 +721,48 @@ mod tests {
                 to: 2
             }
         );
-        // Off the labels of the same output, a different output, off every strip: nothing.
-        assert_eq!(decide(Some((out, None)), true), ReleaseAction::None);
+        // The same output's strip outside every label: move to the end.
+        assert_eq!(
+            decide(Some((out, None)), true),
+            ReleaseAction::Reorder {
+                workspace: ws(1),
+                to: 2
+            }
+        );
+        // Another output's label: move there at that label's index.
+        assert_eq!(
+            decide(Some((other, Some(ws(8)))), true),
+            ReleaseAction::MoveToOutput {
+                workspace: ws(1),
+                output: other,
+                to: 1
+            }
+        );
+        // Another output's strip outside every label: append there.
+        assert_eq!(
+            decide(Some((other, None)), true),
+            ReleaseAction::MoveToOutput {
+                workspace: ws(1),
+                output: other,
+                to: 2
+            }
+        );
+        // A label the target stack does not hold, off every strip, or a cancelled mode: nothing.
         assert_eq!(
             decide(Some((other, Some(ws(2)))), true),
             ReleaseAction::None
         );
+        assert_eq!(decide(None, true), ReleaseAction::None);
+        assert_eq!(decide(Some((other, None)), false), ReleaseAction::None);
+        // Releasing the last workspace on its own strip's empty area is already at the end.
+        let last = HeaderPress {
+            output: out,
+            workspace: Some(ws(3)),
+        };
         assert_eq!(
-            decide(Some((other, Some(ws(1)))), true),
+            release_decision(last, Some((out, None)), true, &order, &order),
             ReleaseAction::None
         );
-        assert_eq!(decide(None, true), ReleaseAction::None);
         // A target missing from the stack order: nothing.
         assert_eq!(decide(Some((out, Some(ws(9)))), true), ReleaseAction::None);
     }
@@ -708,11 +776,11 @@ mod tests {
             workspace: None,
         };
         assert_eq!(
-            release_decision(press, Some((out, None)), true, &order),
+            release_decision(press, Some((out, None)), true, &order, &order),
             ReleaseAction::Click(press)
         );
         assert_eq!(
-            release_decision(press, Some((out, Some(ws(2)))), true, &order),
+            release_decision(press, Some((out, Some(ws(2)))), true, &order, &order),
             ReleaseAction::None
         );
     }
@@ -731,7 +799,7 @@ mod tests {
         let recorded = c.consume_release(0x110).expect("release is consumed");
         for hit in [Some((out, Some(ws(1)))), Some((out, Some(ws(2))))] {
             assert_eq!(
-                release_decision(recorded, hit, false, &order),
+                release_decision(recorded, hit, false, &order, &order),
                 ReleaseAction::None
             );
         }

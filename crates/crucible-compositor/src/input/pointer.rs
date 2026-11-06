@@ -244,7 +244,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .output(press.output)
             .map(|o| o.workspaces().to_vec())
             .unwrap_or_default();
-        match release_decision(press, release, normal, &order) {
+        let target_order = match release {
+            Some((o, _)) if o != press.output => self
+                .layout
+                .world
+                .output(o)
+                .map(|o| o.workspaces().to_vec())
+                .unwrap_or_default(),
+            _ => order.clone(),
+        };
+        match release_decision(press, release, normal, &order, &target_order) {
             ReleaseAction::None => {}
             ReleaseAction::Click(p) => self.header_click(p.output, p.workspace),
             ReleaseAction::Reorder { workspace, to } => {
@@ -252,6 +261,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     self.with_model(|world| world.reorder_workspace(workspace, to).map(|_| ()))
                 {
                     tracing::warn!(%err, "header drag: workspace reorder failed");
+                }
+            }
+            ReleaseAction::MoveToOutput {
+                workspace,
+                output,
+                to,
+            } => {
+                match self
+                    .with_model(|world| world.move_workspace_to_output_at(workspace, output, to))
+                {
+                    Ok(()) => {}
+                    Err(err @ crucible_layout::LayoutError::LastWorkspace(_)) => {
+                        tracing::debug!(%err, "header drag: the last workspace stays on its output");
+                    }
+                    Err(err) => tracing::warn!(%err, "header drag: workspace move failed"),
                 }
             }
         }
