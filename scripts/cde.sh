@@ -100,8 +100,11 @@ reset_portals() {
 }
 
 reset_portals start
-"${CDE_BIN:-./target/debug/crucible}" "$mode" "$@" 2>&1 | tee -a "$log"
-status=${PIPESTATUS[0]}
+# No pipe: every process CDE spawns inherits crucible's stdout/stderr, and a `| tee` would
+# wait for the last of them (cterm thin clients outlive the compositor by design), which
+# deadlocked logout until the tty hung up (crucible-term plans/logout-pipe-deadlock.md).
+"${CDE_BIN:-./target/debug/crucible}" "$mode" "$@" >>"$log" 2>&1
+status=$?
 reset_portals exit
 echo "== crucible exited $status at $(date -Is)" | tee -a "$log"
 exit "$status"
