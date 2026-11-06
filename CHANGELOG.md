@@ -4,6 +4,23 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.11 — 2026-11-06
+
+### Added
+
+- `run-on <workspace> <command…>` verb (IPC `run-on`): spawns a command into a background scratch workspace on the focused output without changing the active workspace or focus. The workspace is ephemeral — it never appears in the workspace store or `session.kdl`, even after an explicit `save` or `rename` — and is removed once its last window closes. A live name is reused, and a saved name is refused. Agents use it for nested checks (`docs/nested-testing.md`).
+- Header drag across monitors: dropping a workspace header segment on another output's segment moves the workspace there, at that position. Dropping on the other output's empty strip appends it.
+
+### Changed
+
+- Header drags reflow the strips live, showing where the workspace will land (across outputs too). A short click still switches, and releasing off every strip does nothing.
+- Overlays (picker, launcher, settings) keep a one-cell margin around their text. In settings, area headings sit level with the `keys>` prompt and rows are indented under them.
+- With `terminal "urxvt"`, the overlays get urxvt-specific default arguments, so no gap shows at the edges.
+
+### Fixed
+
+- The session starts when XWayland first reports ready or failed (with a 5 s fallback), so restored X11 apps open on CDE's own display. Children spawned before XWayland is ready get an empty `DISPLAY` rather than inheriting another display.
+
 ## 0.4.10 — 2026-11-06
 
 ### Added
