@@ -179,8 +179,9 @@ pub enum TerminalKind {
     Ghostty,
     /// `foot`.
     Foot,
-    /// `cterm` (crucible-term): no overlay defaults (as [`Self::Other`]); its terminal spawns get a
-    /// window-identity grant.
+    /// `cterm` (crucible-term): no default-binding args, but with an N1 style the opaque surround
+    /// as its background plus zero centred padding (see [`Self::overlay_args`]); its terminal
+    /// spawns get a window-identity grant.
     Cterm,
     /// Anything else (including `footclient`, `ghostty-foo`, an empty program): no defaults.
     Other,
@@ -221,15 +222,27 @@ impl TerminalKind {
     #[must_use]
     pub fn overlay_args(self, style: OverlayStyle) -> Vec<String> {
         let mut args = self.overlay_default_args();
-        if self == Self::Foot
-            && let Some(Rgb(r, g, b)) = style.palette().map(|p| p.bg)
-        {
-            args.extend([
-                "-o".to_string(),
-                format!("colors-dark.background={r:02x}{g:02x}{b:02x}"),
-                "-o".to_string(),
-                "colors-dark.alpha=1.0".to_string(),
-            ]);
+        if let Some(Rgb(r, g, b)) = style.palette().map(|p| p.bg) {
+            match self {
+                Self::Foot => args.extend([
+                    "-o".to_string(),
+                    format!("colors-dark.background={r:02x}{g:02x}{b:02x}"),
+                    "-o".to_string(),
+                    "colors-dark.alpha=1.0".to_string(),
+                ]),
+                // cterm paints its whole buffer (padding and the cell-grid remainder) in
+                // `theme.bg` at `alpha`, so the same opaque surround closes the gap; zero
+                // padding with `center` splits the remainder evenly on every side.
+                Self::Cterm => args.extend([
+                    "-o".to_string(),
+                    format!("colors.background={r:02x}{g:02x}{b:02x}"),
+                    "-o".to_string(),
+                    "colors.alpha=1.0".to_string(),
+                    "-o".to_string(),
+                    "pad=0x0 center".to_string(),
+                ]),
+                Self::Ghostty | Self::Other => {}
+            }
         }
         args
     }
@@ -296,6 +309,25 @@ mod tests {
             dark.effective_terminal_args("foot")
                 .contains(&"colors-dark.background=0e0e10".to_string())
         );
+        // cterm: opaque N1 surround, zero padding centred; none for the terminal style.
+        let cterm_med: Vec<String> = [
+            "-o",
+            "colors.background=3a3a3b",
+            "-o",
+            "colors.alpha=1.0",
+            "-o",
+            "pad=0x0 center",
+        ]
+        .map(String::from)
+        .to_vec();
+        for p in ["cterm", "/x/cterm"] {
+            assert_eq!(unset.effective_terminal_args(p), cterm_med, "{p}");
+        }
+        assert!(term_style.effective_terminal_args("cterm").is_empty());
+        assert!(
+            dark.effective_terminal_args("cterm")
+                .contains(&"colors.background=0e0e10".to_string())
+        );
         for p in [
             "footclient",
             "foot-wrapper",
@@ -313,12 +345,14 @@ mod tests {
         };
         assert!(empty.effective_terminal_args("ghostty").is_empty());
         assert!(empty.effective_terminal_args("foot").is_empty());
+        assert!(empty.effective_terminal_args("cterm").is_empty());
         let x = OverlayConfig {
             terminal_args: Some(vec!["--x".into()]),
             ..OverlayConfig::default()
         };
         assert_eq!(x.effective_terminal_args("ghostty"), vec!["--x"]);
         assert_eq!(x.effective_terminal_args("foot"), vec!["--x"]);
+        assert_eq!(x.effective_terminal_args("cterm"), vec!["--x"]);
     }
 
     #[test]
