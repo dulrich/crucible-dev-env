@@ -143,6 +143,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
             Action::OpenPicker => self.open_picker(PickerMode::Pick),
             Action::CloseWorkspace => self.close_workspace(),
+            Action::DeleteWorkspace => self.delete_workspace(),
             Action::CloseAllWorkspaces => self.close_all_workspaces(),
             Action::Slot(n) => self.slot_open(n),
             Action::PinSlot(n) => self.pin_slot(n),
@@ -321,6 +322,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Option<Result<(), L
         | Action::RunInTerminal(_)
         | Action::NewWorkspace
         | Action::CloseWorkspace
+        | Action::DeleteWorkspace
         | Action::CloseAllWorkspaces
         | Action::Slot(_)
         | Action::PinSlot(_)

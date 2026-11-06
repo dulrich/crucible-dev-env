@@ -322,6 +322,7 @@ mod tests {
             Action::NewWorkspace,
             Action::CloseWindow,
             Action::CloseWorkspace,
+            Action::DeleteWorkspace,
             Action::Focus(Direction::Left),
             Action::RunTerminal,
         ] {

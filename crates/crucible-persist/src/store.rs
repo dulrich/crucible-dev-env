@@ -126,6 +126,39 @@ pub(crate) fn write_atomic(dir: &Path, target: &Path, text: &str) -> Result<(), 
     Ok(())
 }
 
+/// The trash directory for a store: `<store parent>/deleted/` (a sibling of the store, never
+/// inside it, so [`list_saved`] cannot see it). A store with no parent uses a relative `deleted`.
+#[must_use]
+pub fn deleted_dir(store_dir: &Path) -> PathBuf {
+    store_dir
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join("deleted")
+}
+
+/// Deletes the saved workspace `name` by moving its file to [`deleted_dir`] (created if missing,
+/// replacing an earlier trashed file of the same name). `Ok(false)` if there is no such record.
+///
+/// Uses `rename`, falling back to copy + remove when the trash is on another filesystem (`EXDEV`).
+pub fn delete(dir: &Path, name: &str) -> Result<bool, PersistError> {
+    let file = encode_file_name(name)?;
+    let src = dir.join(&file);
+    if !src.is_file() {
+        return Ok(false);
+    }
+    let trash = deleted_dir(dir);
+    fs::create_dir_all(&trash).map_err(io("create directory", &trash))?;
+    let dst = trash.join(&file);
+    if let Err(e) = fs::rename(&src, &dst) {
+        if e.raw_os_error() != Some(18) {
+            return Err(io("rename", &src)(e));
+        }
+        fs::copy(&src, &dst).map_err(io("copy", &dst))?;
+        fs::remove_file(&src).map_err(io("remove", &src))?;
+    }
+    Ok(true)
+}
+
 /// Loads and parses the workspace file at `path`.
 pub fn load(path: &Path) -> Result<WorkspaceRecord, PersistError> {
     let text = fs::read_to_string(path).map_err(io("read", path))?;
@@ -241,6 +274,48 @@ mod tests {
         let files: Vec<_> = fs::read_dir(&dir).unwrap().collect();
         assert_eq!(files.len(), names.len());
         let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn delete_moves_the_record_into_deleted_and_unlists_it() {
+        let root = temp_dir("del");
+        let dir = root.join("workspaces");
+        save(&dir, &rec("a/b")).unwrap();
+        save(&dir, &rec("keep")).unwrap();
+        assert!(delete(&dir, "a/b").unwrap());
+        let moved = root.join("deleted").join("a%2Fb.kdl");
+        assert_eq!(load(&moved).unwrap(), rec("a/b"));
+        assert!(!dir.join("a%2Fb.kdl").exists());
+        let names: Vec<_> = list_saved(&dir).into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["keep"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn delete_missing_is_false_and_creates_nothing() {
+        let root = temp_dir("delmiss");
+        let dir = root.join("workspaces");
+        fs::create_dir_all(&dir).unwrap();
+        assert!(!delete(&dir, "nope").unwrap());
+        assert!(!root.join("deleted").exists());
+        assert!(delete(&dir, "").is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn second_delete_replaces_the_earlier_trash_file() {
+        let root = temp_dir("deltwice");
+        let dir = root.join("workspaces");
+        let mut first = rec("w");
+        first.focused_pane = 1;
+        save(&dir, &first).unwrap();
+        assert!(delete(&dir, "w").unwrap());
+        save(&dir, &rec("w")).unwrap();
+        assert!(delete(&dir, "w").unwrap());
+        let trashed = load(&root.join("deleted").join("w.kdl")).unwrap();
+        assert_eq!(trashed, rec("w"));
+        assert_eq!(fs::read_dir(root.join("deleted")).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

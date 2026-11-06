@@ -18,6 +18,8 @@ pub enum Key {
     Up,
     /// Arrow down.
     Down,
+    /// Delete (`ESC [ 3 ~`).
+    Delete,
     /// Ctrl+C.
     CtrlC,
     /// Ctrl+D.
@@ -48,6 +50,7 @@ pub fn decode_keys(buf: &mut Vec<u8>) -> Vec<Key> {
                     match (end, buf[end]) {
                         (2, b'A') => keys.push(Key::Up),
                         (2, b'B') => keys.push(Key::Down),
+                        (3, b'~') if buf[2] == b'3' => keys.push(Key::Delete),
                         _ => {}
                     }
                     end + 1
@@ -186,6 +189,19 @@ mod tests {
         assert_eq!(keys(b"\x1bOA\x1bOB"), vec![Key::Up, Key::Down]);
         assert_eq!(keys(b"\x1b"), vec![Key::Esc]);
         assert_eq!(keys(b"\x1b[1;5C"), vec![]);
+    }
+
+    #[test]
+    fn decodes_delete_and_ignores_other_tilde_keys() {
+        assert_eq!(keys(b"\x1b[3~"), vec![Key::Delete]);
+        assert_eq!(keys(b"\x1b[3~\x1b[A"), vec![Key::Delete, Key::Up]);
+        // Insert / PageUp / Home are still swallowed, and a partial Delete waits for its `~`.
+        assert_eq!(keys(b"\x1b[2~\x1b[5~\x1b[1~\x1b[3;5~"), vec![]);
+        assert_eq!(keys(b"\x1b[3~x"), vec![Key::Delete, Key::Char('x')]);
+        let mut partial = b"\x1b[3".to_vec();
+        assert!(decode_keys(&mut partial).is_empty());
+        assert_eq!(partial.len(), 3);
+        assert_eq!(keys(b"\x1b"), vec![Key::Esc]);
     }
 
     #[test]

@@ -89,6 +89,9 @@ pub enum Request {
     New(String),
     /// `rename <name>` — rename the active workspace (and its saved file).
     Rename(String),
+    /// `delete <name>` — delete a *saved, not live* workspace (its record moves to `deleted/` and
+    /// its slot pins clear); a live name is refused (use `delete-workspace`), an unknown one errs.
+    Delete(String),
     /// `root <path>` / `root -` — set (`Some`) or clear (`None`) the active workspace's root, the
     /// folder its new terminals and apps start in. Not a picker root (`picker { root … }`).
     SetRoot(Option<PathBuf>),
@@ -147,6 +150,7 @@ impl Request {
             | Request::OpenFolder(_)
             | Request::New(_)
             | Request::Rename(_)
+            | Request::Delete(_)
             | Request::SetRoot(_)
             | Request::Exec(_)
             | Request::RunTui(_)
@@ -185,6 +189,7 @@ impl Request {
             "open-folder" => need(arg).map(|p| Request::OpenFolder(PathBuf::from(p))),
             "new" => need(arg).map(Request::New),
             "rename" => need(arg).map(Request::Rename),
+            "delete" => need(arg).map(Request::Delete),
             "root" => need(arg).map(|p| Request::SetRoot((p != "-").then(|| PathBuf::from(p)))),
             "exec" => need(arg).map(Request::Exec),
             "run-tui" => need(arg).map(Request::RunTui),
@@ -207,6 +212,7 @@ impl Request {
             Request::OpenFolder(p) => format!("open-folder {}", encode_field(&p.to_string_lossy())),
             Request::New(n) => format!("new {}", encode_field(n)),
             Request::Rename(n) => format!("rename {}", encode_field(n)),
+            Request::Delete(n) => format!("delete {}", encode_field(n)),
             Request::SetRoot(None) => "root -".into(),
             Request::SetRoot(Some(p)) => format!("root {}", encode_field(&p.to_string_lossy())),
             Request::Exec(a) => format!("exec {}", encode_field(a)),
@@ -543,6 +549,7 @@ mod tests {
             Request::OpenFolder(PathBuf::from("/tmp/x:y/100%")),
             Request::New("n\nl".into()),
             Request::Rename("r\r".into()),
+            Request::Delete("d:\t100%".into()),
             Request::SetRoot(Some(PathBuf::from("/tmp/x:y/100%"))),
             Request::SetRoot(None),
             Request::Exec("run sh -c 'echo 100%: a\tb'".into()),
@@ -593,6 +600,7 @@ mod tests {
             Request::OpenFolder(PathBuf::from("/tmp")),
             Request::New("n".into()),
             Request::Rename("r".into()),
+            Request::Delete("d".into()),
             Request::SetRoot(None),
             Request::RunTui("htop".into()),
             Request::RunTerm("ghostty".into()),

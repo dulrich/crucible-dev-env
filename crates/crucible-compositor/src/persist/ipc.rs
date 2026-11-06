@@ -138,6 +138,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.complete_pending_pin(r)
             }
             Request::Rename(name) => self.ipc_rename(&name),
+            Request::Delete(name) => self.ipc_delete(&name),
             Request::SetRoot(root) => self.ipc_set_root(root),
         };
         match result {
@@ -306,6 +307,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         let record = store::load(&path).map_err(|e| e.to_string())?;
         self.restore(record)
+    }
+
+    /// `delete <name>`: only a saved, not live workspace; a live one is refused.
+    pub(super) fn ipc_delete(&mut self, name: &str) -> Result<(), String> {
+        if self.layout.world.workspace_by_name(name).is_some() {
+            return Err(format!(
+                "{name} is open: refused (use delete-workspace on it)"
+            ));
+        }
+        if self.delete_saved(name)? {
+            info!(name, "saved workspace deleted");
+            Ok(())
+        } else {
+            Err(format!("no saved workspace named {name}"))
+        }
     }
 
     pub(super) fn ipc_open_folder(&mut self, path: &Path) -> Result<(), String> {
@@ -490,6 +506,7 @@ mod tests {
             Request::OpenFolder("/tmp".into()),
             Request::New("n".into()),
             Request::Rename("r".into()),
+            Request::Delete("d".into()),
             Request::SetRoot(Some("/tmp".into())),
             Request::SetRoot(None),
             Request::RunTui("htop".into()),

@@ -294,6 +294,72 @@ impl<B: Backend + 'static> CrucibleState<B> {
         info!(?ws, "workspace closed");
     }
 
+    /// Deletes the active workspace (`delete-workspace`): like [`Self::close_workspace`] (same
+    /// refusals, same teardown) but with no final flush, and its saved record is moved to
+    /// `deleted/` and its slot pins cleared. A live workspace is never auto-saved after removal,
+    /// and the `saved` cache entry is dropped so a later same-named workspace is written afresh.
+    pub(crate) fn delete_workspace(&mut self) {
+        let world = &self.layout.world;
+        let ws = world.active_workspace_id();
+        // (a) A restore in flight would race the teardown.
+        if self.workspace_has_pending(ws) {
+            info!(
+                ?ws,
+                "delete-workspace: a restore is still pending; refusing"
+            );
+            return;
+        }
+        // (b) Never the output's last workspace.
+        let output = world.focused_output();
+        if world
+            .output(output)
+            .is_none_or(|o| o.workspaces().len() < 2)
+        {
+            info!(
+                ?ws,
+                "delete-workspace: last workspace on this output; refusing"
+            );
+            return;
+        }
+        // The name is captured before the model forgets the workspace.
+        let Some(name) = world.workspace(ws).map(|w| w.name.clone()) else {
+            warn!(?ws, "delete-workspace: workspace vanished; refusing");
+            return;
+        };
+        // (d) Snapshot the panes before the model forgets them (for step (g)).
+        let panes = world.workspace(ws).map(|w| w.panes()).unwrap_or_default();
+        // (e) The lifecycle controller drops the workspace, its bindings and its `Space` mappings.
+        let ended = match self.end_workspace(ws) {
+            Ok(ended) => ended,
+            Err(err) => {
+                info!(%err, ?ws, "delete-workspace refused by the model");
+                return;
+            }
+        };
+        // (f) End each window.
+        for (element, meta) in ended {
+            self.end_window(meta.pid, Some(&element));
+        }
+        // (g) Drop per-workspace bookkeeping.
+        self.forget_workspace(ws, &panes);
+        match self.delete_saved(&name) {
+            Ok(_) => info!(?ws, name, "workspace deleted"),
+            Err(err) => warn!(%err, name, "workspace closed but its record could not be deleted"),
+        }
+    }
+
+    /// Moves the saved record `name` to `deleted/`, forgets its `saved` cache entry and clears its
+    /// slot pins (saving `slots.kdl` when any were cleared). `Ok(false)`: no such record.
+    pub(super) fn delete_saved(&mut self, name: &str) -> Result<bool, String> {
+        let deleted = crucible_persist::store::delete(&self.persist.store_dir, name)
+            .map_err(|e| e.to_string())?;
+        self.persist.saved.remove(name);
+        if self.persist.slots.unpin_name(name) {
+            self.save_slots();
+        }
+        Ok(deleted)
+    }
+
     /// Drops everything keyed by the removed workspace `ws`: its meta (root, last output), its
     /// pending placements and its placed entries, by the `panes` it had.
     pub(super) fn forget_workspace(&mut self, ws: WorkspaceId, panes: &[PaneId]) {

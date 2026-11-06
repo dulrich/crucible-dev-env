@@ -81,7 +81,8 @@ impl ListState {
         match key {
             Key::Esc | Key::CtrlC => Applied::Exit,
             Key::CtrlD if self.query.is_empty() => Applied::Exit,
-            Key::CtrlD => Applied::Ignored,
+            // Delete is acted on only by overlays that override `step` (the picker).
+            Key::CtrlD | Key::Delete => Applied::Ignored,
             Key::Up | Key::CtrlP => {
                 self.selected = self.selected.saturating_sub(1);
                 Applied::Moved

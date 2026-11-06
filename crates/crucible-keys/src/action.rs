@@ -14,7 +14,7 @@
 //! `run <command…>`, `run-in-terminal <command…>`, `focus|move|split|resize <left|right|up|down>`,
 //! `cycle-stack <±n>`, `cycle-workspace <±n>`, `new-workspace`, `move-window-to-workspace <±n>`,
 //! `mark-window`, `swap-marked-window`,
-//! `close-workspace`, `close-all-workspaces`, `slot <0-9>`, `pin-slot <0-9>`,
+//! `close-workspace`, `delete-workspace`, `close-all-workspaces`, `slot <0-9>`, `pin-slot <0-9>`,
 //! `move-workspace-to-output <±n>`, `open-picker`, `open-launcher`, `open-settings`,
 //! `toggle-header`, `toggle-fullscreen`, `rename-workspace`, `capture-workspace-root`, `set-workspace-root` and `lock`. `vt-switch <n>` is printed but deliberately
 //! **not** parsed: VT switches come only from libinput's `Ctrl+Alt+F<n>` keysyms, never from a
@@ -118,6 +118,10 @@ pub enum Action {
     /// are ended. Refused on the output's last workspace or while a restore is pending.
     /// `Super+Shift+W`.
     CloseWorkspace,
+    /// Delete the focused output's active workspace: its windows are ended and its saved record is
+    /// moved to the `deleted/` trash (no final save), and its slot pins are cleared. Refused on the
+    /// output's last workspace or while a restore is pending. Unbound by default (destructive).
+    DeleteWorkspace,
     /// Save and close every open workspace (as [`Action::CloseWorkspace`] does), leaving one fresh
     /// seed workspace per output. Unbound by default.
     CloseAllWorkspaces,
@@ -186,6 +190,7 @@ impl std::fmt::Display for Action {
             Self::CaptureWorkspaceRoot => f.write_str("capture-workspace-root"),
             Self::SetWorkspaceRoot => f.write_str("set-workspace-root"),
             Self::CloseWorkspace => f.write_str("close-workspace"),
+            Self::DeleteWorkspace => f.write_str("delete-workspace"),
             Self::CloseAllWorkspaces => f.write_str("close-all-workspaces"),
             Self::Slot(n) => write!(f, "slot {n}"),
             Self::PinSlot(n) => write!(f, "pin-slot {n}"),
@@ -306,6 +311,7 @@ impl FromStr for Action {
             "capture-workspace-root" => nullary(Self::CaptureWorkspaceRoot),
             "set-workspace-root" => nullary(Self::SetWorkspaceRoot),
             "close-workspace" => nullary(Self::CloseWorkspace),
+            "delete-workspace" => nullary(Self::DeleteWorkspace),
             "close-all-workspaces" => nullary(Self::CloseAllWorkspaces),
             "lock" => nullary(Self::Lock),
             "move-workspace-to-output" => unary(Self::MoveWorkspaceToOutput(delta(words.get(1))?)),
@@ -360,6 +366,7 @@ mod tests {
             Action::CaptureWorkspaceRoot,
             Action::SetWorkspaceRoot,
             Action::CloseWorkspace,
+            Action::DeleteWorkspace,
             Action::CloseAllWorkspaces,
             Action::Slot(3),
             Action::PinSlot(0),

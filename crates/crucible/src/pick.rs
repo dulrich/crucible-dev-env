@@ -12,7 +12,7 @@ use crucible_persist::PickTarget;
 use crate::cli::{Parsed, help_requested};
 use crate::client::{Client, ClientError};
 use crate::fuzzy;
-use crate::overlay::list::{Body, Frame, ListState};
+use crate::overlay::list::{Applied, Body, Frame, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
@@ -22,7 +22,7 @@ use crate::table::{self, Col};
 const SUPER_GLYPH: char = '\u{2318}';
 
 /// Usage text for `crucible pick --help`.
-pub const USAGE: &str = "usage: crucible pick [--rename <encoded-name> | --root <encoded-path>]\n\nThe CDE workspace picker (needs $CDE_SOCKET; CDE runs it in an overlay on Super+P).\nType to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter opens the selection (or creates a new\nworkspace from the typed name); Esc or Ctrl+C closes.\n\n  --rename <name>   single-line rename prompt prefilled with <name> (percent-encoded: %25 %3A %09 %0A %0D)\n  --root <path>     workspace-root prompt prefilled with <path> (percent-encoded; empty = none); Enter on empty clears\n";
+pub const USAGE: &str = "usage: crucible pick [--rename <encoded-name> | --root <encoded-path>]\n\nThe CDE workspace picker (needs $CDE_SOCKET; CDE runs it in an overlay on Super+P).\nType to filter; Up/Down or Ctrl+P/Ctrl+N move; Enter opens the selection (or creates a new\nworkspace from the typed name); Esc or Ctrl+C closes. Delete on a saved row arms a confirm\n(\"Delete again to remove\"); a second Delete on the same row removes the saved workspace (its file\nmoves to the deleted/ folder next to the store) and closes the picker. An open workspace is never\ndeleted here: use the delete-workspace verb.\n\n  --rename <name>   single-line rename prompt prefilled with <name> (percent-encoded: %25 %3A %09 %0A %0D)\n  --root <path>     workspace-root prompt prefilled with <path> (percent-encoded; empty = none); Enter on empty clears\n";
 
 /// Picker behaviour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +74,8 @@ pub struct Picker {
     list: ListState,
     /// `$HOME`, for `~` display and expansion.
     home: Option<String>,
+    /// The saved workspace name whose Delete is armed (the next Delete on it removes it).
+    armed: Option<String>,
 }
 
 impl Picker {
@@ -85,6 +87,7 @@ impl Picker {
             candidates,
             list: ListState::new(),
             home,
+            armed: None,
         }
     }
 
@@ -101,6 +104,7 @@ impl Picker {
             candidates,
             list: ListState::with_query(tilde(current, home.as_deref())),
             home,
+            armed: None,
         }
     }
 
@@ -137,6 +141,37 @@ impl Picker {
             rows.push(Row::New(query.clone()));
         }
         rows
+    }
+
+    /// Delete on the selected row: a saved (not live) row arms, then a second Delete on the same
+    /// row sends [`Request::Delete`]; a live row only shows a hint; folder / new rows are ignored.
+    fn delete_selected(&mut self) -> Outcome {
+        if self.mode != Mode::Pick {
+            return Outcome::Continue;
+        }
+        let Some(Row::Candidate(i)) = self.rows().get(self.list.selected).cloned() else {
+            return Outcome::Continue;
+        };
+        let c = &self.candidates[i];
+        match c.kind {
+            CandidateKind::Saved => {
+                let name = c.name.clone();
+                if self.armed.as_deref() == Some(name.as_str()) {
+                    self.armed = None;
+                    return Outcome::Send(Request::Delete(name));
+                }
+                self.list.status = Some(format!(
+                    "Delete again to remove saved workspace {}",
+                    sanitize(&name)
+                ));
+                self.armed = Some(name);
+            }
+            CandidateKind::Live => {
+                self.list.status = Some("open workspace: use delete-workspace".into());
+            }
+            CandidateKind::Folder => {}
+        }
+        Outcome::Continue
     }
 
     /// Enter / Alt+Enter: open / create the selected row (or, in root mode, set the root).
@@ -250,6 +285,27 @@ impl Overlay for Picker {
 
     fn enter(&mut self, _key: Key) -> Outcome {
         self.enter_selected()
+    }
+
+    /// Delete is the picker's two-press remove; any other key disarms a pending confirm (and
+    /// clears its hint) before being handled normally.
+    fn step(&mut self, key: Key) -> Outcome {
+        if key == Key::Delete {
+            return self.delete_selected();
+        }
+        if self.armed.take().is_some() {
+            self.list.status = None;
+        }
+        let count = self.row_count();
+        match self.list.apply(key, count) {
+            Applied::Exit => Outcome::Exit,
+            Applied::Edited => {
+                self.list.status = None;
+                Outcome::Continue
+            }
+            Applied::Moved | Applied::Ignored => Outcome::Continue,
+            Applied::Enter(k) => self.enter(k),
+        }
     }
 
     fn render_styled(&self, cols: u16, rows: u16, style: &Style) -> String {
@@ -390,6 +446,92 @@ mod tests {
         type_str(&mut p, "zz");
         let (h, t) = p.table();
         assert_eq!((h, t), (None, vec!["new workspace zz".to_string()]));
+    }
+
+    fn select(p: &mut Picker, name: &str) {
+        for _ in 0..4 {
+            p.step(Key::Up);
+        }
+        while p
+            .rows()
+            .get(p.list.selected)
+            .is_some_and(|r| !matches!(r, Row::Candidate(i) if p.candidates[*i].name == name))
+        {
+            p.step(Key::Down);
+        }
+    }
+
+    #[test]
+    fn delete_on_a_saved_row_needs_two_presses() {
+        let mut p = sample();
+        select(&mut p, "beta");
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+        assert!(p.status().unwrap().contains("Delete again"));
+        assert_eq!(
+            p.step(Key::Delete),
+            Outcome::Send(Request::Delete("beta".into()))
+        );
+        // Disarmed after the send: the next press arms again.
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+    }
+
+    #[test]
+    fn any_other_key_disarms_the_delete_confirm() {
+        let mut p = sample();
+        select(&mut p, "beta");
+        p.step(Key::Delete);
+        // Moving away and back, or typing, disarms; the key is still handled normally.
+        p.step(Key::Up);
+        assert_eq!(p.status(), None);
+        p.step(Key::Down);
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+        p.step(Key::Char('b'));
+        assert_eq!(p.query(), "b");
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+        assert!(p.status().unwrap().contains("Delete again"));
+    }
+
+    #[test]
+    fn delete_on_a_different_saved_row_re_arms_instead_of_sending() {
+        let mut p = Picker::new(
+            vec![
+                cand(CandidateKind::Saved, "one", None),
+                cand(CandidateKind::Saved, "two", None),
+            ],
+            None,
+        );
+        select(&mut p, "one");
+        p.step(Key::Delete);
+        // Down is "any other key": it disarms, so Delete on "two" only arms.
+        p.step(Key::Down);
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+        assert_eq!(
+            p.step(Key::Delete),
+            Outcome::Send(Request::Delete("two".into()))
+        );
+    }
+
+    #[test]
+    fn delete_on_live_folder_and_new_rows_sends_nothing() {
+        let mut p = sample();
+        select(&mut p, "alpha");
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+        assert_eq!(p.status(), Some("open workspace: use delete-workspace"));
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+        select(&mut p, "proj");
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+        let mut p = sample();
+        type_str(&mut p, "zzz");
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+        assert_eq!(p.step(Key::Delete), Outcome::Continue);
+        // Root mode never deletes.
+        let mut r = Picker::root(
+            "",
+            vec![cand(CandidateKind::Folder, "proj", Some("/p"))],
+            None,
+        );
+        assert_eq!(r.step(Key::Delete), Outcome::Continue);
     }
 
     #[test]

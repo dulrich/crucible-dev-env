@@ -81,6 +81,13 @@ impl Slots {
         changed
     }
 
+    /// Clears every slot pinned to `name`; true if any was cleared.
+    pub fn unpin_name(&mut self, name: &str) -> bool {
+        let before = self.pins.len();
+        self.pins.retain(|_, v| v != name);
+        self.pins.len() != before
+    }
+
     /// Encodes as KDL text, one `slot <n> "<name>"` node per pin.
     #[must_use]
     pub fn to_kdl(&self) -> String {
@@ -276,6 +283,19 @@ mod tests {
         assert_eq!(s.get(2), Some("keep"));
         assert!(!s.rename("old", "newer"));
         assert!(!s.rename("keep", "keep"));
+    }
+
+    #[test]
+    fn unpin_name_clears_every_matching_slot_only() {
+        let mut s = Slots::new();
+        s.pin(1, "gone");
+        s.pin(2, "keep");
+        s.pin(7, "gone");
+        assert!(s.unpin_name("gone"));
+        assert_eq!(s.get(1), None);
+        assert_eq!(s.get(7), None);
+        assert_eq!(s.get(2), Some("keep"));
+        assert!(!s.unpin_name("gone"));
     }
 
     #[test]
