@@ -4,6 +4,18 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.13 — 2026-11-06
+
+### Fixed
+
+- X11 apps get their X resources from the start: the session (restored apps, autostart, the overlay host) now starts after the `~/.Xresources` merge finishes (at most 1 s), instead of racing it. You no longer need to run `xrdb` by hand after CDE starts.
+- Overlays redraw when their terminal is resized. An X11 terminal such as urxvt opens at its own default size and is resized afterwards, which used to cut off the top margin until a key was pressed.
+- urxvt overlays have no scrollbar (`+sb` is added to its default overlay arguments).
+
+### Changed
+
+- Overlays keep two blank columns on each side (was one), so the side margin looks as wide as the one blank line at the top and bottom.
+
 ## 0.4.12 — 2026-11-06
 
 ### Fixed
