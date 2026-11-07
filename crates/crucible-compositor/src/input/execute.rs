@@ -50,26 +50,18 @@ pub(crate) enum ActionError {
     Snipping,
 }
 
-/// The lock admission for an action: [`Action::allowed_while_locked`] is the one lock predicate,
-/// shared with the keyboard filter (which forwards every non-admitted key to the locker).
+/// The one admission gate for an action in `mode`: the lock rule first
+/// ([`Action::allowed_while_locked`]), then the snip rule ([`Action::allowed_while_snipping`]).
+/// Shared by the action gate and the keyboard filter (which forwards every non-admitted key to the
+/// locker, or feeds it to the selection while snipping); IPC `exec` reaches it through the gate.
 ///
 /// # Errors
-/// [`ActionError::Locked`] while `locked` for every action but a VT switch.
-pub(crate) fn admit(locked: bool, action: &Action) -> Result<(), ActionError> {
-    if locked && !action.allowed_while_locked() {
+/// [`ActionError::Locked`] while locked for every action but a VT switch;
+/// [`ActionError::Snipping`] while snipping for every action but `snip` and a VT switch.
+pub(crate) fn admit<O>(mode: &InputMode<O>, action: &Action) -> Result<(), ActionError> {
+    if mode.is_locked() && !action.allowed_while_locked() {
         Err(ActionError::Locked)
-    } else {
-        Ok(())
-    }
-}
-
-/// The snip admission: while snipping only `snip` (which toggles the mode off) and VT switches
-/// run, from chords and IPC alike.
-///
-/// # Errors
-/// [`ActionError::Snipping`] while `snipping` for every other action.
-pub(crate) fn admit_snip(snipping: bool, action: &Action) -> Result<(), ActionError> {
-    if snipping && !matches!(action, Action::Snip | Action::VtSwitch(_)) {
+    } else if mode.is_snipping() && !action.allowed_while_snipping() {
         Err(ActionError::Snipping)
     } else {
         Ok(())
@@ -120,8 +112,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         origin: Origin,
     ) -> Result<(), ActionError> {
         let mode = self.input_mode();
-        admit(mode.is_locked(), &action)?;
-        admit_snip(mode.is_snipping(), &action)?;
+        admit(&mode, &action)?;
         if closes_overlay(origin, mode.has_overlay(), &action) {
             self.close_mapped_overlay();
         }
@@ -416,8 +407,8 @@ mod tests {
 
     #[test]
     fn snipping_admits_only_snip_and_vt_switch() {
-        assert_eq!(admit_snip(true, &Action::Snip), Ok(()));
-        assert_eq!(admit_snip(true, &Action::VtSwitch(3)), Ok(()));
+        assert_eq!(admit(&InputMode::<()>::Snip, &Action::Snip), Ok(()));
+        assert_eq!(admit(&InputMode::<()>::Snip, &Action::VtSwitch(3)), Ok(()));
         for action in [
             Action::Quit,
             Action::Screenshot,
@@ -427,17 +418,21 @@ mod tests {
             Action::OpenPicker,
         ] {
             assert_eq!(
-                admit_snip(true, &action),
+                admit(&InputMode::<()>::Snip, &action),
                 Err(ActionError::Snipping),
                 "{action}"
             );
-            assert_eq!(admit_snip(false, &action), Ok(()), "{action}");
+            assert_eq!(admit(&InputMode::<()>::Normal, &action), Ok(()), "{action}");
+            assert_eq!(admit(&InputMode::Overlay(()), &action), Ok(()), "{action}");
         }
     }
 
     #[test]
     fn locked_admits_only_vt_switch() {
-        assert_eq!(admit(true, &Action::VtSwitch(2)), Ok(()));
+        assert_eq!(
+            admit(&InputMode::<()>::Locked, &Action::VtSwitch(2)),
+            Ok(())
+        );
         for action in [
             Action::Quit,
             Action::CloseAllWorkspaces,
@@ -445,10 +440,24 @@ mod tests {
             Action::Focus(Direction::Left),
             Action::Lock,
         ] {
-            assert_eq!(admit(true, &action), Err(ActionError::Locked), "{action}");
-            assert_eq!(admit(false, &action), Ok(()), "{action}");
+            assert_eq!(
+                admit(&InputMode::<()>::Locked, &action),
+                Err(ActionError::Locked),
+                "{action}"
+            );
+            assert_eq!(admit(&InputMode::<()>::Normal, &action), Ok(()), "{action}");
         }
         assert_eq!(ActionError::Locked.to_string(), "session locked");
+    }
+
+    #[test]
+    fn the_lock_refusal_wins_over_the_snip_refusal() {
+        // `input_mode` never yields both, but the gate still checks the lock first: a locked
+        // session refuses `snip` itself as `Locked`, never as `Snipping`.
+        assert_eq!(
+            admit(&InputMode::<()>::Locked, &Action::Snip),
+            Err(ActionError::Locked)
+        );
     }
 
     #[test]

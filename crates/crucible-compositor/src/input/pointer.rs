@@ -12,7 +12,7 @@ use smithay::backend::input::{
 use smithay::desktop::WindowSurfaceType;
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent};
 use smithay::reexports::wayland_server::protocol::wl_pointer;
-use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
+use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
 
 use tracing::{info, warn};
 
@@ -34,7 +34,7 @@ const BTN_RIGHT: u32 = 0x111;
 /// The selection event a button makes in snip mode: left press/release drive the drag, a right
 /// press cancels; everything else is swallowed.
 #[must_use]
-fn snip_button(button: u32, pressed: bool) -> Option<crate::snip::Event> {
+pub(super) fn snip_button(button: u32, pressed: bool) -> Option<crate::snip::Event> {
     use crate::snip::Event;
     match (button, pressed) {
         (BTN_LEFT, true) => Some(Event::Press),
@@ -45,46 +45,93 @@ fn snip_button(button: u32, pressed: bool) -> Option<crate::snip::Event> {
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
-    /// Maps absolute winit pointer motion into the output and delivers it to the seat.
-    ///
-    /// Transforms the device position into the output's logical geometry, updates the pointer
-    /// location and pointer focus (the surface under the cursor, from the
-    /// [`Space`](smithay::desktop::Space)), so the focused client receives enter/leave/motion.
-    /// No-op if no output is mapped yet.
-    pub(super) fn process_pointer_motion_absolute<I: InputBackend>(
+    /// The global logical location an absolute (winit) motion maps to on the first output, or
+    /// `None` while no output is mapped.
+    pub(super) fn absolute_location<I: InputBackend>(
+        &self,
+        evt: &I::PointerMotionAbsoluteEvent,
+    ) -> Option<Point<f64, Logical>> {
+        let output = self.space.outputs().next()?;
+        let output_geo = self.space.output_geometry(output)?;
+        Some(evt.position_transformed(output_geo.size) + output_geo.loc.to_f64())
+    }
+
+    /// The pointer location before a relative motion and the output-clamped location after it, or
+    /// `None` while no output is mapped.
+    pub(super) fn relative_location<I: InputBackend>(
+        &self,
+        evt: &I::PointerMotionEvent,
+    ) -> Option<(Point<f64, Logical>, Point<f64, Logical>)> {
+        self.space.outputs().next()?;
+        let current = self.pointer.current_location();
+        Some((current, self.clamp_coords(current + evt.delta())))
+    }
+
+    /// The one motion delivery: resolves the surface under `location` in `mode`
+    /// ([`Self::surface_under`]) and moves the pointer there ([`Self::deliver_motion_to`]), with
+    /// `relative` delivered to the same surface first. Returns nothing; the seat tracks focus.
+    pub(super) fn deliver_motion(
         &mut self,
-        evt: I::PointerMotionAbsoluteEvent,
+        mode: &InputMode,
+        location: Point<f64, Logical>,
+        serial: Serial,
+        time: u32,
+        relative: Option<RelativeMotionEvent>,
     ) {
-        let Some(output) = self.space.outputs().next().cloned() else {
-            return;
-        };
-        let Some(output_geo) = self.space.output_geometry(&output) else {
-            return;
-        };
+        let under = self.surface_under(mode, location);
+        self.deliver_motion_to(under, location, serial, time, relative);
+    }
 
-        let pos = evt.position_transformed(output_geo.size) + output_geo.loc.to_f64();
-        let serial = SERIAL_COUNTER.next_serial();
-        let time = evt.time_msec();
-
-        let mode = self.input_mode();
-        let under = self.surface_under(&mode, pos);
+    /// Delivers `relative` (when given), then the absolute motion to `location` with pointer focus
+    /// `under`, then the frame. `under = None` moves the pointer with no client focused (snip
+    /// mode: the client that had focus gets a leave).
+    pub(super) fn deliver_motion_to(
+        &mut self,
+        under: Option<(PointerFocusTarget, Point<f64, Logical>)>,
+        location: Point<f64, Logical>,
+        serial: Serial,
+        time: u32,
+        relative: Option<RelativeMotionEvent>,
+    ) {
         let pointer = self.pointer.clone();
+        if let Some(relative) = relative {
+            pointer.relative_motion(self, under.clone(), &relative);
+        }
         pointer.motion(
             self,
             under,
             &MotionEvent {
-                location: pos,
+                location,
                 serial,
                 time,
             },
         );
         pointer.frame(self);
-        if mode.is_snipping() {
-            self.snip_motion(pos);
+    }
+
+    /// Maps absolute winit pointer motion into the output and delivers it to the seat.
+    ///
+    /// Transforms the device position into the output's logical geometry, updates the pointer
+    /// location and pointer focus (the surface under the cursor, from the
+    /// [`Space`](smithay::desktop::Space)), so the focused client receives enter/leave/motion.
+    /// No-op if no output is mapped yet. Snip mode never reaches here (see `process_snip_input`).
+    pub(super) fn process_pointer_motion_absolute<I: InputBackend>(
+        &mut self,
+        mode: &InputMode,
+        evt: I::PointerMotionAbsoluteEvent,
+    ) {
+        let Some(pos) = self.absolute_location::<I>(&evt) else {
             return;
-        }
+        };
+        self.deliver_motion(
+            mode,
+            pos,
+            SERIAL_COUNTER.next_serial(),
+            evt.time_msec(),
+            None,
+        );
         self.header_drag_motion();
-        self.focus_follows_pointer(&mode);
+        self.focus_follows_pointer(mode);
     }
 
     /// Maps **relative** pointer motion (real input devices, via libinput) into the seat.
@@ -94,43 +141,40 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// cursor cannot leave the visible area (it can cross freely between outputs laid left-to-right).
     /// The seat receives both the relative-motion event (for clients that requested it via the
     /// relative-pointer protocol, gated by [`Backend::HAS_RELATIVE_MOTION`]) and the resulting
-    /// absolute motion. No-op until at least one output is mapped.
+    /// absolute motion. No-op until at least one output is mapped. Snip mode never reaches here.
     pub(super) fn process_pointer_motion_relative<I: InputBackend>(
         &mut self,
+        mode: &InputMode,
         evt: I::PointerMotionEvent,
     ) {
-        if self.space.outputs().next().is_none() {
+        let Some((current, mut location)) = self.relative_location::<I>(&evt) else {
             return;
-        }
-
+        };
         let serial = SERIAL_COUNTER.next_serial();
-        let pointer = self.pointer.clone();
+        let relative = RelativeMotionEvent {
+            delta: evt.delta(),
+            delta_unaccel: evt.delta_unaccel(),
+            utime: evt.time(),
+        };
 
-        let current = pointer.current_location();
-        let mut location = self.clamp_coords(current + evt.delta());
-
-        let mode = self.input_mode();
         // An active pointer constraint (only ever activated on relative-motion backends, see
         // `crate::pointer_lock`) on the surface under the pointer locks or confines the motion.
-        let under_current = self.surface_under(&mode, current);
-        let constraint = under_current.as_ref().and_then(|(target, origin)| {
-            let surface = target.wl_surface()?.into_owned();
-            self.note_constraint_origin(&surface, *origin);
-            self.active_constraint(&surface, *origin)
-        });
+        let under_current = self.surface_under(mode, current);
+        let current_surface = under_current
+            .as_ref()
+            .and_then(|(target, origin)| Some((target.wl_surface()?.into_owned(), *origin)));
+        if let Some((surface, origin)) = &current_surface {
+            self.note_constraint_origin(surface, *origin);
+        }
+        let constraint = current_surface
+            .as_ref()
+            .and_then(|(surface, origin)| self.active_constraint(surface, *origin));
         if let Some((kind, region, rect)) = constraint {
-            match constrained_motion(Some(kind), region.as_ref(), rect, current, location) {
+            match constrained_motion(kind, region.as_ref(), rect, current, location) {
                 MotionOutcome::Suppress => {
                     // Locked: relative motion only; no absolute motion, no hover focus change.
-                    pointer.relative_motion(
-                        self,
-                        under_current,
-                        &RelativeMotionEvent {
-                            delta: evt.delta(),
-                            delta_unaccel: evt.delta_unaccel(),
-                            utime: evt.time(),
-                        },
-                    );
+                    let pointer = self.pointer.clone();
+                    pointer.relative_motion(self, under_current, &relative);
                     pointer.frame(self);
                     return;
                 }
@@ -152,37 +196,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some(rect) = self.fullscreen_confine() {
             location = clamp_to_fullscreen(rect, current, location);
         }
-        let under = self.surface_under(&mode, location);
-        pointer.relative_motion(
-            self,
-            under.clone(),
-            &RelativeMotionEvent {
-                delta: evt.delta(),
-                delta_unaccel: evt.delta_unaccel(),
-                utime: evt.time(),
-            },
-        );
-        pointer.motion(
-            self,
-            under,
-            &MotionEvent {
-                location,
-                serial,
-                time: evt.time_msec(),
-            },
-        );
-        pointer.frame(self);
-        if mode.is_snipping() {
-            self.snip_motion(location);
-            return;
-        }
+        self.deliver_motion(mode, location, serial, evt.time_msec(), Some(relative));
         self.header_drag_motion();
-        self.focus_follows_pointer(&mode);
-        let keyboard = self
-            .seat
-            .get_keyboard()
-            .and_then(|k| k.current_focus())
-            .and_then(|f| f.wl_surface().map(|s| s.into_owned()));
+        self.focus_follows_pointer(mode);
+        let keyboard = self.keyboard_focus_surface();
         self.reconcile_pointer_constraint(keyboard);
     }
 
@@ -198,27 +215,23 @@ impl<B: Backend + 'static> CrucibleState<B> {
         confine_to_outputs(pos, &rects)
     }
 
-    /// Delivers a pointer button to the seat, moving keyboard focus on press.
-    pub(super) fn process_pointer_button<I: InputBackend>(&mut self, evt: I::PointerButtonEvent) {
+    /// Delivers a pointer button to the seat, moving keyboard focus on press. Snip mode never
+    /// reaches here (see `process_snip_input`).
+    pub(super) fn process_pointer_button<I: InputBackend>(
+        &mut self,
+        mode: &InputMode,
+        evt: I::PointerButtonEvent,
+    ) {
         let serial = SERIAL_COUNTER.next_serial();
         let button = evt.button_code();
         let state = wl_pointer::ButtonState::from(evt.state());
 
-        if self.input_mode().is_snipping() {
-            // Snip mode: buttons feed the selection and never reach a client.
-            if let Some(event) = snip_button(button, state == wl_pointer::ButtonState::Pressed) {
-                self.snip_event(event);
-            }
-            return;
-        }
-
         if wl_pointer::ButtonState::Pressed == state {
-            let mode = self.input_mode();
             let element_under = self
                 .space
                 .element_under(self.pointer.current_location())
                 .map(|(w, _)| w.clone());
-            let route = press_route(&mode, element_under.as_ref());
+            let route = press_route(mode, element_under.as_ref());
             if route.try_header && self.consume_header_press(button) {
                 return;
             }
@@ -262,37 +275,27 @@ impl<B: Backend + 'static> CrucibleState<B> {
         true
     }
 
-    /// Whether the input mode is `Normal` (no lock or overlay).
-    pub(crate) fn input_is_normal(&self) -> bool {
-        matches!(self.input_mode(), InputMode::Normal)
-    }
-
-    /// Re-resolves pointer focus at the current location (a synthetic motion with no movement):
-    /// `None` while snipping, else the surface under the pointer. Used when snip mode starts and
-    /// ends so clients see a leave / a fresh enter.
+    /// Re-resolves pointer focus at the current location (a synthetic motion with no movement)
+    /// through the one motion delivery. Used when snip mode ends so the client under the pointer
+    /// gets a fresh enter.
     pub(crate) fn refresh_pointer_focus(&mut self) {
         let mode = self.input_mode();
         let location = self.pointer.current_location();
-        let under = self.surface_under(&mode, location);
-        let pointer = self.pointer.clone();
-        pointer.motion(
-            self,
-            under,
-            &MotionEvent {
-                location,
-                serial: SERIAL_COUNTER.next_serial(),
-                time: self.clock.now().as_millis(),
-            },
-        );
-        pointer.frame(self);
+        let time = self.clock.now().as_millis();
+        self.deliver_motion(&mode, location, SERIAL_COUNTER.next_serial(), time, None);
     }
 
-    /// Delivers a scroll axis frame to the seat.
+    /// Takes pointer focus away from every client at the current location (a synthetic motion
+    /// to no surface, through the shared delivery). Used when snip mode starts so the client under
+    /// the pointer gets a leave; while snipping the snip router keeps the focus empty.
+    pub(crate) fn clear_pointer_focus(&mut self) {
+        let location = self.pointer.current_location();
+        let time = self.clock.now().as_millis();
+        self.deliver_motion_to(None, location, SERIAL_COUNTER.next_serial(), time, None);
+    }
+
+    /// Delivers a scroll axis frame to the seat. Snip mode drops axis events before here.
     pub(super) fn process_pointer_axis<I: InputBackend>(&mut self, evt: I::PointerAxisEvent) {
-        if self.input_mode().is_snipping() {
-            // Snip mode swallows scrolling.
-            return;
-        }
         let horizontal = evt
             .amount(Axis::Horizontal)
             .unwrap_or_else(|| evt.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0);
@@ -333,12 +336,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         pointer.frame(self);
     }
 
-    /// Returns the [`PointerFocusTarget`] (and its top-left in global logical coords) under `pos`,
-    /// if any.
-    ///
-    /// Resolution walks the [`Space`](smithay::desktop::Space)'s mapped windows and dispatches over
-    /// the window kind so X11 windows resolve to a [`PointerFocusTarget::X11Surface`] and Wayland
-    /// windows to a [`PointerFocusTarget::WlSurface`] (see [`WindowElement::surface_under`]).
+    /// Returns the [`PointerFocusTarget`] (and its top-left in global logical coords) under `pos`
+    /// in `mode`: the lock surface while locked, else the space's ([`Self::space_surface_under`]).
+    /// Snip mode never resolves a surface: its router delivers motion with no focus.
     fn surface_under(
         &self,
         mode: &InputMode,
@@ -347,10 +347,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if mode.is_locked() {
             return crate::lock::lock_surface_under(&self.session_lock, &self.space, pos);
         }
-        if mode.is_snipping() {
-            // Snip mode: no client receives pointer input.
-            return None;
-        }
+        self.space_surface_under(pos)
+    }
+
+    /// The [`PointerFocusTarget`] (and its top-left in global logical coords) under `pos` in the
+    /// [`Space`](smithay::desktop::Space), ignoring modes.
+    ///
+    /// Resolution walks the space's mapped windows and dispatches over the window kind so X11
+    /// windows resolve to a [`PointerFocusTarget::X11Surface`] and Wayland windows to a
+    /// [`PointerFocusTarget::WlSurface`] (see [`WindowElement::surface_under`]).
+    pub(crate) fn space_surface_under(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
         self.space
             .element_under(pos)
             .and_then(|(window, location)| {
@@ -551,8 +560,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.hover_workspace.as_ref(),
             shown.as_ref(),
             self.config.focus_follows_mouse,
-            mode.is_locked(),
-            matches!(mode, InputMode::Normal),
+            &mode,
             self.pointer.is_grabbed(),
         );
         match action {

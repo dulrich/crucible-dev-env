@@ -1,5 +1,7 @@
 //! Focus-follows-mouse hover helpers: the pointer-enter identity and its pure detection.
 
+use super::modal::InputMode;
+
 /// What the pointer hovers, for focus-follows-mouse enter detection.
 ///
 /// Keyed at **pane** level: a managed window and the area of its pane it does not cover share
@@ -65,21 +67,20 @@ pub(super) enum SwitchHover {
 /// output, the option off or a locked session settle without moving focus; a mapped overlay or a
 /// pointer grab (header drag) waits.
 #[must_use]
-pub(super) fn switch_hover_action<W: PartialEq>(
+pub(super) fn switch_hover_action<W: PartialEq, O>(
     seen: Option<&W>,
     shown: Option<&W>,
     enabled: bool,
-    locked: bool,
-    normal: bool,
+    mode: &InputMode<O>,
     grabbed: bool,
 ) -> SwitchHover {
     match (seen, shown) {
         (Some(a), Some(b)) if a != b => {}
         _ => return SwitchHover::Settle,
     }
-    if !enabled || locked {
+    if !enabled || mode.is_locked() {
         SwitchHover::Settle
-    } else if !normal || grabbed {
+    } else if mode.is_modal() || grabbed {
         SwitchHover::Wait
     } else {
         SwitchHover::Refocus
@@ -92,43 +93,43 @@ mod hover_tests {
 
     #[test]
     fn a_switch_under_the_pointer_refocuses_only_when_free() {
+        use super::InputMode;
         use super::{SwitchHover, switch_hover_action as act};
+        const N: InputMode<()> = InputMode::Normal;
         // A real switch with nothing in the way refocuses.
         assert_eq!(
-            act(Some(&1), Some(&2), true, false, true, false),
+            act(Some(&1), Some(&2), true, &N, false),
             SwitchHover::Refocus
         );
         // No change, the first observation, or the pointer off every output: settle.
         assert_eq!(
-            act(Some(&1), Some(&1), true, false, true, false),
+            act(Some(&1), Some(&1), true, &N, false),
             SwitchHover::Settle
         );
+        assert_eq!(act(None, Some(&2), true, &N, false), SwitchHover::Settle);
         assert_eq!(
-            act(None, Some(&2), true, false, true, false),
-            SwitchHover::Settle
-        );
-        assert_eq!(
-            act(Some(&1), None::<&i32>, true, false, true, false),
+            act(Some(&1), None::<&i32>, true, &N, false),
             SwitchHover::Settle
         );
         // Option off or locked: settle (no retry later).
         assert_eq!(
-            act(Some(&1), Some(&2), false, false, true, false),
+            act(Some(&1), Some(&2), false, &N, false),
             SwitchHover::Settle
         );
         assert_eq!(
-            act(Some(&1), Some(&2), true, true, false, false),
+            act(Some(&1), Some(&2), true, &InputMode::<()>::Locked, false),
             SwitchHover::Settle
         );
         // An overlay (picker pick) or a header drag: wait and retry.
         assert_eq!(
-            act(Some(&1), Some(&2), true, false, false, false),
+            act(Some(&1), Some(&2), true, &InputMode::Overlay(()), false),
             SwitchHover::Wait
         );
         assert_eq!(
-            act(Some(&1), Some(&2), true, false, true, true),
+            act(Some(&1), Some(&2), true, &InputMode::<()>::Snip, false),
             SwitchHover::Wait
         );
+        assert_eq!(act(Some(&1), Some(&2), true, &N, true), SwitchHover::Wait);
     }
 
     #[test]

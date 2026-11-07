@@ -141,7 +141,7 @@ pub(super) fn hover_decision<O>(
 ) -> HoverDecision {
     if !entered || grabbed {
         HoverDecision::Ignore
-    } else if matches!(mode, InputMode::Normal) {
+    } else if !mode.is_modal() {
         HoverDecision::Move
     } else if mode.has_overlay() {
         HoverDecision::Defer

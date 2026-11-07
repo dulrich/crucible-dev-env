@@ -322,6 +322,13 @@ impl Action {
     pub fn allowed_while_locked(&self) -> bool {
         matches!(self, Self::VtSwitch(_))
     }
+
+    /// The snip rule: whether this action may run while snip mode is active. Only `snip` (which
+    /// toggles the mode off) and VT switching do, from chords and IPC alike.
+    #[must_use]
+    pub fn allowed_while_snipping(&self) -> bool {
+        matches!(self, Self::Snip | Self::VtSwitch(_))
+    }
 }
 
 /// Why an action string does not parse ([`Action`]'s `FromStr`). The message is the reason only;
@@ -571,6 +578,17 @@ mod tests {
             assert_eq!(
                 action.allowed_while_locked(),
                 matches!(action, Action::VtSwitch(_)),
+                "{action}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_snip_and_vt_switch_are_allowed_while_snipping() {
+        for action in every_variant() {
+            assert_eq!(
+                action.allowed_while_snipping(),
+                matches!(action, Action::Snip | Action::VtSwitch(_)),
                 "{action}"
             );
         }

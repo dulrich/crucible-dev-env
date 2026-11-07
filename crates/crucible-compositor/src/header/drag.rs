@@ -358,7 +358,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let base = self.header_orders();
         let drag = self.header.drag.as_mut()?;
         drag.refresh_preview(&self.layout.world, base.clone());
-        if !self.input_is_normal() {
+        if self.input_mode().is_modal() {
             return None;
         }
         self.header.drag.as_ref()?.preview(&base).cloned()
@@ -373,7 +373,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         let at = self.pointer.current_location();
         let hit = self.header_hit(at.x.floor() as i32, at.y.floor() as i32);
-        let normal = self.input_is_normal();
+        let normal = !self.input_mode().is_modal();
         if let Some(drag) = self.header.drag.as_mut() {
             drag.motion((at.x, at.y), hit, normal);
         }
@@ -403,7 +403,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(crate) fn finish_header_press(&mut self, press: HeaderPress, dragged: bool) {
         let at = self.pointer.current_location();
         let release = self.header_hit(at.x.floor() as i32, at.y.floor() as i32);
-        let normal = self.input_is_normal();
+        let normal = !self.input_mode().is_modal();
         let orders = self.header_orders();
         match drag_action(press, release, normal, dragged, &orders) {
             ReleaseAction::None => {}

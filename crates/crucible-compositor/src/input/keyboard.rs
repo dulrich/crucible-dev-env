@@ -10,9 +10,12 @@ use std::collections::BTreeSet;
 
 use smithay::backend::input::{Event, InputBackend, KeyState, KeyboardKeyEvent};
 use smithay::input::keyboard::{FilterResult, Keysym};
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::SERIAL_COUNTER;
+use smithay::wayland::seat::WaylandFocus;
 use tracing::debug;
 
+use super::modal::InputMode;
 use crate::focus::KeyboardFocusTarget;
 use crate::snip::Event as SnipEvent;
 use crate::state::{Backend, CrucibleState};
@@ -90,16 +93,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ///   (so the client never sees a dangling key-up), otherwise forwards.
     ///
     /// Any intercepted [`crucible_keys::Action`] is dispatched via [`Self::handle_key_action`].
-    pub(super) fn process_keyboard_event<I: InputBackend>(&mut self, evt: I::KeyboardKeyEvent) {
+    ///
+    /// `mode` is the event's input mode, resolved once by the router.
+    pub(super) fn process_keyboard_event<I: InputBackend>(
+        &mut self,
+        mode: &InputMode,
+        evt: I::KeyboardKeyEvent,
+    ) {
         let keycode = evt.key_code();
         let key_state = evt.state();
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time_msec(&evt);
 
         let keyboard = self.seat.get_keyboard().unwrap();
-        let mode = self.input_mode();
-        let locked = mode.is_locked();
-        let snipping = mode.is_snipping();
 
         let action = keyboard.input(
             self,
@@ -121,14 +127,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
                         shift: modifiers.shift,
                         ctrl: modifiers.ctrl,
                     };
-                    let action = crucible_keys::resolve(&state.bindings, mods, keysym);
-                    // While locked only VT switching runs; every other key goes to the locker.
-                    // Same predicate as the action gate (`admit`).
-                    let action = action.filter(|a| super::admit(locked, a).is_ok());
-                    // While snipping only `snip` (cancel) and VT switches run as chords; every
-                    // other press is swallowed (Esc / Enter feed the selection).
-                    let action = action.filter(|a| super::admit_snip(snipping, a).is_ok());
-                    if snipping {
+                    // The one admission gate (`admit`, shared with the action gate): while locked
+                    // only VT switching runs (every other key goes to the locker); while snipping
+                    // only `snip` (cancel) and VT switches run as chords.
+                    let action = crucible_keys::resolve(&state.bindings, mods, keysym)
+                        .filter(|a| super::execute::admit(mode, a).is_ok());
+                    // The single snip branch: every press is intercepted; a non-admitted one
+                    // feeds the selection (Esc / Enter) or is swallowed.
+                    if mode.is_snipping() {
                         state.suppressed_keys.consume_press(raw_keycode);
                         return FilterResult::Intercept(Some(match action {
                             Some(action) => KeyHit::Action(action),
@@ -167,6 +173,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Returns the seat's current [`KeyboardFocusTarget`], if any.
     pub fn keyboard_focus(&self) -> Option<KeyboardFocusTarget> {
         self.seat.get_keyboard().and_then(|kbd| kbd.current_focus())
+    }
+
+    /// The `WlSurface` of the seat's current keyboard focus, if any (the pointer-constraint
+    /// policy's "keyboard on surface" input).
+    pub(crate) fn keyboard_focus_surface(&self) -> Option<WlSurface> {
+        self.keyboard_focus()
+            .and_then(|f| f.wl_surface().map(|s| s.into_owned()))
     }
 
     /// Sets (or clears) the seat's keyboard focus to `target`.

@@ -60,21 +60,21 @@ pub enum MotionOutcome {
 
 /// Decides where a relative motion takes the pointer.
 ///
-/// `kind` is the *active* constraint on the pointer-focused surface (`None`: unconstrained).
+/// `kind` is the *active* constraint on the pointer-focused surface (an unconstrained motion
+/// never asks).
 /// `region` is the constraint region in surface-local coordinates (`None`: the whole surface);
 /// `surface` is the surface's rectangle in global coordinates (its origin maps the region).
 /// `proposed` is the already output-clamped `current + delta`.
 pub fn constrained_motion(
-    kind: Option<ConstraintKind>,
+    kind: ConstraintKind,
     region: Option<&RegionAttributes>,
     surface: Rectangle<i32, Logical>,
     current: Point<f64, Logical>,
     proposed: Point<f64, Logical>,
 ) -> MotionOutcome {
     match kind {
-        None => MotionOutcome::Move(proposed),
-        Some(ConstraintKind::Locked) => MotionOutcome::Suppress,
-        Some(ConstraintKind::Confined) => {
+        ConstraintKind::Locked => MotionOutcome::Suppress,
+        ConstraintKind::Confined => {
             let origin = surface.loc.to_f64();
             let local = proposed - origin;
             let whole = Rectangle::from_size(surface.size);
@@ -122,14 +122,39 @@ fn dist2(a: Point<f64, Logical>, b: Point<f64, Logical>) -> f64 {
     d.x * d.x + d.y * d.y
 }
 
-/// Whether a constraint may be active (pure eligibility, see the module docs).
-pub fn constraint_eligible(
-    relative_motion: bool,
-    modal: bool,
-    keyboard_on_surface: bool,
-    pointer_in_region: bool,
-) -> bool {
-    relative_motion && !modal && keyboard_on_surface && pointer_in_region
+/// The four eligibility gates of a pointer constraint (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConstraintGates {
+    /// The backend delivers relative motion ([`Backend::HAS_RELATIVE_MOTION`]).
+    pub relative_motion: bool,
+    /// A modal mode (lock, snip or overlay) is active.
+    pub modal: bool,
+    /// The keyboard focus is on the constrained surface's tree.
+    pub keyboard_on_surface: bool,
+    /// The pointer is inside the constraint region (or the constraint is already active).
+    pub pointer_in_region: bool,
+}
+
+impl ConstraintGates {
+    /// The conditions that fail, named for the diagnostic log (empty: eligible).
+    #[must_use]
+    pub fn failed(&self) -> Vec<&'static str> {
+        [
+            (!self.relative_motion, "no-relative-motion"),
+            (self.modal, "modal"),
+            (!self.keyboard_on_surface, "keyboard-elsewhere"),
+            (!self.pointer_in_region, "pointer-outside-region"),
+        ]
+        .into_iter()
+        .filter_map(|(failed, name)| failed.then_some(name))
+        .collect()
+    }
+
+    /// Whether a constraint may be active: no gate fails.
+    #[must_use]
+    pub fn eligible(&self) -> bool {
+        self.failed().is_empty()
+    }
 }
 
 /// The rectangle a keyboard-focused fullscreen window confines the pointer to (pure decision).
@@ -164,24 +189,6 @@ pub fn clamp_to_fullscreen(
     } else {
         proposed
     }
-}
-
-/// The eligibility conditions that fail, named for the diagnostic log (empty: eligible).
-pub fn failed_gates(
-    relative_motion: bool,
-    modal: bool,
-    keyboard_on_surface: bool,
-    pointer_in_region: bool,
-) -> Vec<&'static str> {
-    [
-        (!relative_motion, "no-relative-motion"),
-        (modal, "modal"),
-        (!keyboard_on_surface, "keyboard-elsewhere"),
-        (!pointer_in_region, "pointer-outside-region"),
-    ]
-    .into_iter()
-    .filter_map(|(failed, name)| failed.then_some(name))
-    .collect()
 }
 
 /// Whether `hint` (surface-local) lies inside a surface of `size`, i.e. may be applied on unlock.
@@ -357,18 +364,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         with_pointer_constraint(&surface, &pointer, |c| {
             let Some(c) = c else { return };
             let pointer_in_region = c.is_active() || in_region(c.region());
-            let gates = (
-                B::HAS_RELATIVE_MOTION,
+            let gates = ConstraintGates {
+                relative_motion: B::HAS_RELATIVE_MOTION,
                 modal,
                 keyboard_on_surface,
                 pointer_in_region,
-            );
-            let eligible = constraint_eligible(gates.0, gates.1, gates.2, gates.3);
-            seen = Some((
-                kind_of(&c),
-                c.region().cloned(),
-                failed_gates(gates.0, gates.1, gates.2, gates.3),
-            ));
+            };
+            let failed = gates.failed();
+            let eligible = failed.is_empty();
+            seen = Some((kind_of(&c), c.region().cloned(), failed));
             if eligible {
                 c.activate();
                 activated = true;
@@ -421,13 +425,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         &self,
         location: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let (window, win_loc) = self.space.element_under(location)?;
-        let (target, offset) = window.surface_under(
-            location - win_loc.to_f64(),
-            smithay::desktop::WindowSurfaceType::ALL,
-        )?;
-        let surface = target.wl_surface()?.into_owned();
-        Some((surface, (offset + win_loc).to_f64()))
+        let (target, origin) = self.space_surface_under(location)?;
+        Some((target.wl_surface()?.into_owned(), origin))
     }
 
     /// Moves the pointer to `surface`'s latest cursor-position hint (if it lies inside the
@@ -481,11 +480,7 @@ impl<B: Backend + 'static> PointerConstraintsHandler for CrucibleState<B> {
             "pointer constraint created"
         );
         self.pointer_lock.last_logged = None;
-        let keyboard = self
-            .seat
-            .get_keyboard()
-            .and_then(|k| k.current_focus())
-            .and_then(|f| f.wl_surface().map(|s| s.into_owned()));
+        let keyboard = self.keyboard_focus_surface();
         self.reconcile_pointer_constraint(keyboard);
     }
 
@@ -611,15 +606,9 @@ mod tests {
     }
 
     #[test]
-    fn no_constraint_moves_to_proposed() {
-        let out = constrained_motion(None, None, surface(), p(0.0, 0.0), p(5.0, 7.0));
-        assert_eq!(out, MotionOutcome::Move(p(5.0, 7.0)));
-    }
-
-    #[test]
     fn lock_suppresses_motion() {
         let out = constrained_motion(
-            Some(ConstraintKind::Locked),
+            ConstraintKind::Locked,
             None,
             surface(),
             p(150.0, 80.0),
@@ -631,7 +620,7 @@ mod tests {
     #[test]
     fn confine_inside_moves_freely() {
         let out = constrained_motion(
-            Some(ConstraintKind::Confined),
+            ConstraintKind::Confined,
             None,
             surface(),
             p(150.0, 80.0),
@@ -642,7 +631,7 @@ mod tests {
 
     fn confined_to(proposed: Point<f64, Logical>) -> Point<f64, Logical> {
         match constrained_motion(
-            Some(ConstraintKind::Confined),
+            ConstraintKind::Confined,
             None,
             surface(),
             p(150.0, 80.0),
@@ -686,7 +675,7 @@ mod tests {
             )],
         };
         let out = constrained_motion(
-            Some(ConstraintKind::Confined),
+            ConstraintKind::Confined,
             Some(&region),
             surface(),
             p(115.0, 65.0),
@@ -703,7 +692,7 @@ mod tests {
     fn confine_with_empty_region_stays_put() {
         let region = RegionAttributes { rects: vec![] };
         let out = constrained_motion(
-            Some(ConstraintKind::Confined),
+            ConstraintKind::Confined,
             Some(&region),
             surface(),
             p(150.0, 80.0),
@@ -712,29 +701,35 @@ mod tests {
         assert_eq!(out, MotionOutcome::Move(p(150.0, 80.0)));
     }
 
+    /// The gates in the order `relative_motion`, `modal`, `keyboard_on_surface`, `pointer_in_region`.
+    fn g(
+        relative_motion: bool,
+        modal: bool,
+        keyboard_on_surface: bool,
+        pointer_in_region: bool,
+    ) -> ConstraintGates {
+        ConstraintGates {
+            relative_motion,
+            modal,
+            keyboard_on_surface,
+            pointer_in_region,
+        }
+    }
+
     #[test]
     fn eligibility_needs_every_condition() {
-        assert!(constraint_eligible(true, false, true, true));
-        assert!(
-            !constraint_eligible(false, false, true, true),
-            "winit: never"
-        );
-        assert!(!constraint_eligible(true, true, true, true), "modal");
-        assert!(
-            !constraint_eligible(true, false, false, true),
-            "keyboard left"
-        );
-        assert!(
-            !constraint_eligible(true, false, true, false),
-            "outside region"
-        );
+        assert!(g(true, false, true, true).eligible());
+        assert!(!g(false, false, true, true).eligible(), "winit: never");
+        assert!(!g(true, true, true, true).eligible(), "modal");
+        assert!(!g(true, false, false, true).eligible(), "keyboard left");
+        assert!(!g(true, false, true, false).eligible(), "outside region");
     }
 
     #[test]
     fn failed_gates_names_each_failing_condition() {
-        assert!(failed_gates(true, false, true, true).is_empty());
+        assert!(g(true, false, true, true).failed().is_empty());
         assert_eq!(
-            failed_gates(false, true, false, false),
+            g(false, true, false, false).failed(),
             vec![
                 "no-relative-motion",
                 "modal",
@@ -743,7 +738,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            failed_gates(true, false, false, true),
+            g(true, false, false, true).failed(),
             vec!["keyboard-elsewhere"]
         );
     }

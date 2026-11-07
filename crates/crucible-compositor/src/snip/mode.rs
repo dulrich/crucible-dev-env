@@ -330,7 +330,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             model: Snip::new(infos, pointer),
             frames,
         });
-        self.refresh_pointer_focus();
+        self.clear_pointer_focus();
         self.snip_redraw_all();
     }
 
