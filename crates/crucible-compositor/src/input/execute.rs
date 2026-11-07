@@ -2,7 +2,7 @@
 //!
 //! [`CrucibleState::handle_key_action`] is the single, fallible action gate shared by the
 //! keyboard and IPC `exec`: lock ([`admit`]) → overlay ([`closes_overlay`]) → execute. It is also
-//! the **one** execution arm per verb (`reviews/2026-07-30-tn-code-review.md` F3):
+//! the **one** execution arm per verb:
 //! compositor-level verbs are handled directly; every model verb is routed
 //! through [`apply_model_action`] with the single mutation entry point's
 //! relayout-only-on-`Ok` contract ([`CrucibleState::with_model`]). [`apply_model_action`] and the gate's decisions only touch

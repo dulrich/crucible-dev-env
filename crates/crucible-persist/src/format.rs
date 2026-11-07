@@ -1,4 +1,4 @@
-//! The KDL workspace file format (see `plans/03-persistence.md`, "Workspace file").
+//! The KDL workspace file format.
 //!
 //! ```kdl
 //! version 1

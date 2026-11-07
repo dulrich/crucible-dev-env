@@ -1,6 +1,6 @@
 //! The `Super`-leader chord table: maps a modifier + keysym combination to an [`Action`].
 //!
-//! This is the canonical key policy (`reviews/2026-07-30-tn-code-review.md` F1): the compositor
+//! This is the canonical key policy: the compositor
 //! converts its own `ModifiersState`/`Keysym` types to [`Modifiers`]/[`Keysym`] at the edge and
 //! calls [`resolve`] with its [`Bindings`]; it owns no binding table of its own. The table is data
 //! ([`Bindings::default`] plus config overrides, see [`crate::bindings`]), not a `match`.

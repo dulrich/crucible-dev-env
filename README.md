@@ -32,9 +32,9 @@ The word *tab* is intentionally reserved for applications' own internal tabs —
 
 ## Status
 
-Current version: **0.4.0** — see [`CHANGELOG.md`](CHANGELOG.md).
+Current version: **0.5.2** — see [`CHANGELOG.md`](CHANGELOG.md).
 
-Pre-alpha, but **the MVP (Phases 0–3 of [the roadmap](plans/00-mvp-roadmap.md)) is implemented** and CDE is the daily session on the author's machines: a Smithay-based tiling Wayland compositor with saved, restorable workspaces.
+Pre-alpha, but **the MVP (Phases 0–3 of the roadmap) is implemented** and CDE is the daily session on the author's machines: a Smithay-based tiling Wayland compositor with saved, restorable workspaces.
 
 **What works now:**
 
@@ -54,7 +54,7 @@ Pre-alpha, but **the MVP (Phases 0–3 of [the roadmap](plans/00-mvp-roadmap.md)
 - **Overlays** — the workspace picker, program launcher and settings view, with numbered workspace slots.
 - **Desktop basics** — screen lock, auto-lock and screen blanking on idle, keyboard layout switching, fullscreen (Wayland and X11, games included), closing windows, a session launcher for tty1, and a `crucible msg` control socket.
 
-**Not yet:** a status bar, screenshots and screen sharing (screencopy), and a built-in terminal (foot is the default for now).
+**Not yet:** a status bar, screen sharing (screencopy), and a built-in terminal (foot is the default for now).
 
 ## Running
 
@@ -62,7 +62,7 @@ The TTY launcher is `scripts/cde.sh`: it rebuilds first, exports a fallback `$TE
 
 Requires a recent stable Rust (1.85+, edition 2024) and a terminal emulator. CDE uses the `terminal` setting in `config.kdl` if it is set, otherwise `$TERMINAL`, otherwise `foot` from `$PATH`.
 
-CDE's terminal is foot ≥ 1.20.2, built by `scripts/foot/build.sh` (dev host; output `target/foot-build/foot-1.28.0-<arch>.tar.gz`) and installed on each host by `scripts/foot/install.sh <tarball>` to `~/.local/opt/foot` (the stable absolute path CDE's `terminal` setting should name, `~/.local/opt/foot/bin/foot`), with `foot`/`footclient` symlinked into `~/.local/bin`. The distro foot 1.16.2 crashes on CDE (upstream #1910) and must not be used; `install.sh` refuses to finish unless the installed foot is new enough.
+CDE's terminal is foot ≥ 1.20.2, built by `scripts/foot/build.sh` (output `target/foot-build/foot-1.28.0-<arch>.tar.gz`) and installed by `scripts/foot/install.sh <tarball>` to `~/.local/opt/foot` (the stable absolute path CDE's `terminal` setting should name, `~/.local/opt/foot/bin/foot`), with `foot`/`footclient` symlinked into `~/.local/bin`. The distro foot 1.16.2 crashes on CDE (upstream #1910) and must not be used; `install.sh` refuses to finish unless the installed foot is new enough.
 
 ```sh
 # Nested in your current desktop session (development):
@@ -163,11 +163,20 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo audit
 trivy fs --scanners vuln --include-dev-deps --skip-db-update --exit-code 1 --severity CRITICAL,HIGH .
-bun <code-root>/the fleet tooling repo/scripts/help-gate.mjs .   # every entrypoint answers --help
 ```
 
-The compositor crates link native libraries (libinput, libgbm, libdrm, …); see
-[`plans/01-compositor-up.md`](plans/01-compositor-up.md) for the system dependencies. The packages each fleet node needs are tracked as the `cde-build` and `cde-runtime` groups in the private host baseline (`the private config repo/util/host-baseline/baseline.conf`; check with `util host-baseline check <node>`).
+The compositor crates link native libraries (libinput, libgbm, libdrm, …). On Debian/Ubuntu the build needs:
+
+```sh
+sudo apt-get install -y --no-install-recommends \
+  pkg-config \
+  libwayland-dev libwayland-bin wayland-protocols \
+  libinput-dev libgbm-dev libdrm-dev libseat-dev \
+  libxkbcommon-dev libudev-dev libpixman-1-dev \
+  libegl1-mesa-dev libgles2-mesa-dev libdisplay-info-dev libffi-dev
+```
+
+To install a release build, run `cargo build --release` and copy `target/release/crucible` to `~/.local/bin/crucible`; `scripts/cde.sh` is the tty launcher (see [`docs/session.md`](docs/session.md)).
 
 ## Contributing
 

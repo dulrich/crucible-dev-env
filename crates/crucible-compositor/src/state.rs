@@ -264,8 +264,7 @@ pub struct CrucibleState<B: Backend + 'static> {
     ///
     /// Each entry's matching *release* is swallowed so the focused client never sees a dangling
     /// key-up for a key the compositor consumed — tracked by keycode, not the resolved keysym, so
-    /// a modifier change between press and release cannot desync the match
-    /// (`reviews/2026-09-07-tn-code-review.md` F10). See [`crate::input`].
+    /// a modifier change between press and release cannot desync the match. See [`crate::input`].
     pub suppressed_keys: SuppressedKeys,
 
     /// The running XWayland X11 window manager, once XWayland has reached `Ready`.

@@ -318,7 +318,7 @@ mod tests {
         );
     }
 
-    /// ghostty's bash integration (measured on host-b 2026-10-26):
+    /// ghostty's bash integration (measured on 2026-10-26):
     /// `ghostty → /bin/sh -c "/bin/bash --posix" → /bin/bash --posix`, the inner bash foreground.
     #[test]
     fn ghostty_sh_c_wrapped_shell_is_idle_with_the_inner_cwd() {

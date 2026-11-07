@@ -49,7 +49,7 @@ xkbcommon = "0.9"
 
 # Smithay tracks `master` (anvil does too; master is ahead of the 0.7.0 crates.io
 # release). Pinned to an exact commit for reproducible builds — see the
-# "Primary risk — Smithay version skew" note in plans/01-compositor-up.md.
+# "Primary risk — Smithay version skew" note in the original compositor plan.
 # WS-1 only *links* Smithay; per-feature use lands in later workstreams.
 [dependencies.smithay]
 git = "https://github.com/Smithay/smithay"

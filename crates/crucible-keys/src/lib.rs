@@ -6,8 +6,8 @@
 //! against zellij's default modal "layout mode").
 //!
 //! This crate owns the canonical key **policy** — the [`Action`] verb set and the default
-//! `Super`-leader chord table ([`Bindings`], looked up by [`chord::resolve`]) — with **no Smithay dependency**
-//! (`reviews/2026-07-30-tn-code-review.md` F1). `crucible-compositor` converts its own backend
+//! `Super`-leader chord table ([`Bindings`], looked up by [`chord::resolve`]) — with **no Smithay dependency**.
+//! `crucible-compositor` converts its own backend
 //! event types (`ModifiersState`, `Keysym`) to [`chord::Modifiers`]/[`chord::Keysym`] at the edge,
 //! calls [`chord::resolve`], and executes the resulting [`Action`] through its single
 //! model-mutation entry point. See `crates/crucible-compositor/src/input/` for the edge.

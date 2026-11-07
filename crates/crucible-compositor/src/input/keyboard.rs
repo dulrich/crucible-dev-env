@@ -1,5 +1,5 @@
 //! Keyboard I/O: the seat filter closure, `Super`-leader resolution at the edge, and stable
-//! consumed-key identity (`reviews/2026-09-07-tn-code-review.md` F10).
+//! consumed-key identity.
 //!
 //! [`CrucibleState::process_keyboard_event`] is the only place Smithay's `ModifiersState`/`Keysym`
 //! meet [`crucible_keys`]: it converts them to [`crucible_keys::Modifiers`]/[`crucible_keys::Keysym`]

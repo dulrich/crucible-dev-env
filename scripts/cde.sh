@@ -90,7 +90,7 @@ fi
 # Portal reset (bare TTY only; nested modes share the parent session's portals). When CDE
 # exits, xdg-desktop-portal-gtk loses its display and xdg-desktop-portal re-activates it at
 # once against the dead display; the failed activation stays pending in dbus for 120 s, and
-# every GTK4 app (ghostty) started meanwhile blocks before mapping (host-a 2026-10-31 14:44).
+# every GTK4 app (ghostty) started meanwhile blocks before mapping.
 # Stopping both units leaves them to dbus activation with the next session's environment.
 reset_portals() {
 	[ "$mode" = --tty-udev ] || return 0
@@ -102,7 +102,7 @@ reset_portals() {
 reset_portals start
 # No pipe: every process CDE spawns inherits crucible's stdout/stderr, and a `| tee` would
 # wait for the last of them (cterm thin clients outlive the compositor by design), which
-# deadlocked logout until the tty hung up (crucible-term plans/logout-pipe-deadlock.md).
+# deadlocked logout until the tty hung up (see crucible-term's logout-pipe-deadlock fix).
 "${CDE_BIN:-./target/debug/crucible}" "$mode" "$@" >>"$log" 2>&1
 status=$?
 reset_portals exit

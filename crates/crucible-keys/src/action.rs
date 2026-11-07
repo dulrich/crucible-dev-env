@@ -5,7 +5,7 @@
 //! each verb through the single model-mutation entry point (`update_model`/`with_model`). Verbs
 //! that used to be one variant per direction/sign (`FocusLeft`, `FocusDown`, …) are parameterized
 //! over [`crucible_layout::Direction`] instead, so the compositor needs exactly one execution arm
-//! per verb (`reviews/2026-07-30-tn-code-review.md` F1, F3).
+//! per verb.
 //!
 //! ## The verb grammar
 //!

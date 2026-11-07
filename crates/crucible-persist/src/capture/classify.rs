@@ -262,7 +262,7 @@ mod tests {
     #[test]
     fn uncaptured_terminal_never_becomes_an_app() {
         let p = FakeProc::new("uncaptured");
-        // A bare terminal saved before its shell started (the host-b 2026-10-27 regression).
+        // A bare terminal saved before its shell started (a regression seen on 2026-10-27).
         p.add(
             (100, "ghostty", 1),
             0,
@@ -625,7 +625,7 @@ mod tests {
         );
     }
 
-    /// Measured on host-a 2026-10-31: `ghostty -> crucible resume ... -- claude -n 'Lush Egret'
+    /// Measured on 2026-10-31: `ghostty -> crucible resume ... -- claude -n 'Lush Egret'
     /// -> claude -n Lush Egret`, the last two sharing pgrp 118161.
     fn measured_tree(d: &FakeProc) {
         d.add_anon(117_833, 1, 0, "/", &["ghostty"], &[118_161]);

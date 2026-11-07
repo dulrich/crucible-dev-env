@@ -1,7 +1,7 @@
 //! The bridge between the pure [`crucible_layout`] model and the Smithay [`Space`].
 //!
 //! `crucible-layout` is the single source of truth for geometry, focus, stacking, and workspace
-//! membership (decision #1 in `plans/02-tiling-model.md`). This module owns:
+//! membership. This module owns:
 //!
 //! - the [`World`] (the model) plus the payload bindings — [`LayoutState`], which holds the stable
 //!   [`WindowId`] ↔ element map for **managed** windows and the flat set of **unmanaged** elements

@@ -1,7 +1,7 @@
 //! Typed identifiers for the layout model.
 //!
 //! Every entity in the model (`Window`, `Pane`, `Workspace`, `Output`) is referred to by a `Copy`
-//! newtype id over `u64` rather than by reference (decision #5 in `plans/02-tiling-model.md`). This
+//! newtype id over `u64` rather than by reference. This
 //! keeps the model `Clone` and serde-friendly and lets the compositor hold a stable
 //! `WindowId ↔ WindowElement` map.
 //!

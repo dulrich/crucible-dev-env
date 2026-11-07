@@ -8,7 +8,7 @@ edition = "2024"
 license = "MIT"
 authors = ["David Ulrich <david@ulrichdev.com>"]
 description = "The language-agnostic desktop environment that turns your entire developer machine into an IDE"
-repository = ""
+repository = "https://github.com/dulrich/crucible-dev-env"
 rust-version = "1.85"
 
 # Shared dependency versions. Crates opt in via `dep.workspace = true`.

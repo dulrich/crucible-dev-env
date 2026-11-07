@@ -11,7 +11,7 @@ CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.
 - `crucible mem` no longer reports another session's cterm daemon: a daemon now matches only when its resolved Wayland socket path (an absolute `WAYLAND_DISPLAY`, else `XDG_RUNTIME_DIR` joined with it) equals the compositor's, so nested sessions and thin clients attach to their own daemon.
 - A `run-on` workspace emptied by an X11 window that is destroyed without being unmapped is now pruned, like any other closed `run-on` workspace.
 - `crucible msg capture` replies in request order and no longer races the connection: it passes the same admission (lock and snip refusals) as every other request, and pipelined requests are no longer answered ahead of it.
-- `scripts/deploy.sh` refuses to deploy from a checkout that is not on `master` (so every host installs the same build) and no longer re-enters itself by hostname when an ssh alias differs from the short hostname.
+- the deploy script refuses to deploy from a checkout that is not on `master` (so every host installs the same build) and no longer re-enters itself by hostname when an ssh alias differs from the short hostname.
 
 ### Changed
 
@@ -67,7 +67,7 @@ CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.
 
 ### Added
 
-- `run-on <workspace> <command…>` verb (IPC `run-on`): spawns a command into a background scratch workspace on the focused output without changing the active workspace or focus. The workspace is ephemeral — it never appears in the workspace store or `session.kdl`, even after an explicit `save` or `rename` — and is removed once its last window closes. A live name is reused, and a saved name is refused. Agents use it for nested checks (`docs/nested-testing.md`).
+- `run-on <workspace> <command…>` verb (IPC `run-on`): spawns a command into a background scratch workspace on the focused output without changing the active workspace or focus. The workspace is ephemeral — it never appears in the workspace store or `session.kdl`, even after an explicit `save` or `rename` — and is removed once its last window closes. A live name is reused, and a saved name is refused. Agents use it for nested checks.
 - Header drag across monitors: dropping a workspace header segment on another output's segment moves the workspace there, at that position. Dropping on the other output's empty strip appends it.
 
 ### Changed

@@ -2,14 +2,14 @@
 //!
 //! Funnels the nested `winit` backend's [`InputEvent`]s (and, from the udev backend, real
 //! libinput devices) into the seat so the compositor becomes interactive. The module is split by
-//! concern (`reviews/2026-07-30-tn-code-review.md` F7):
+//! concern:
 //!
 //! - [`keyboard`] — keyboard I/O: runs every key through the seat's
 //!   [`keyboard.input`](smithay::input::keyboard::KeyboardHandle::input) filter closure, which
 //!   resolves `Super`-leader chords via [`crucible_keys::resolve`] and uses
 //!   [`keyboard::SuppressedKeys`] (keyed by physical keycode, never the resolved keysym) so a key
 //!   whose press was intercepted never leaks a dangling release to the client even if modifiers
-//!   changed in between (`reviews/2026-09-07-tn-code-review.md` F10).
+//!   changed in between.
 //! - [`pointer`] — pointer I/O: absolute/relative motion, buttons, axis frames, and
 //!   click-to-focus.
 //! - [`execute`] — the action gate: [`CrucibleState::handle_key_action`] (lock → overlay → execute) dispatches a resolved
@@ -19,8 +19,7 @@
 //!
 //! ## Canonical key policy lives in `crucible-keys`
 //! Shortcut *meaning* — the default chord table and the [`crucible_keys::Action`] verb set — is
-//! owned by the Smithay-free `crucible-keys` crate (`reviews/2026-07-30-tn-code-review.md` F1,
-//! F3). This module only converts backend event types (Smithay `ModifiersState`/`Keysym`,
+//! owned by the Smithay-free `crucible-keys` crate. This module only converts backend event types (Smithay `ModifiersState`/`Keysym`,
 //! physical keycodes) to that crate's types at the edge, and executes the resolved action.
 //!
 //! ## Entry points

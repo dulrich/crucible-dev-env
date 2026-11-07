@@ -152,7 +152,7 @@ tiling {
 focus-follows-mouse #false
 confine-pointer-to-fullscreen #false
 picker {
-    root "<code-root>"
+    root "/home/u/code"
     root "/srv/work"
 }
 binds {
@@ -219,10 +219,7 @@ binds {
         assert!(!c.confine_pointer_to_fullscreen);
         assert_eq!(
             c.picker.roots,
-            vec![
-                PathBuf::from("<code-root>"),
-                PathBuf::from("/srv/work")
-            ]
+            vec![PathBuf::from("/home/u/code"), PathBuf::from("/srv/work")]
         );
         assert_eq!(
             c.binds,

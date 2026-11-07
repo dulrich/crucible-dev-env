@@ -24,7 +24,7 @@ fn pane(windows: Vec<WindowRecord>) -> RecordNode {
 }
 
 fn golden_record() -> WorkspaceRecord {
-    let root = "crucible-dev-env";
+    let root = "/home/u/code/crucible-dev-env";
     WorkspaceRecord {
         name: "crucible-dev-env".into(),
         root: Some(root.into()),

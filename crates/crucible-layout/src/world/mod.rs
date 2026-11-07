@@ -1,8 +1,8 @@
 //! The `World`: arena maps for the whole model plus every mutating operation, split by concern
 //! across `types`, `projection`, `windows`, `workspaces`, and `outputs`.
 //!
-//! `World` is the single source of truth for focus, stacking, and workspace membership (decision #1
-//! in `plans/02-tiling-model.md`). It holds arena-style maps keyed by typed ids and a per-workspace
+//! `World` is the single source of truth for focus, stacking, and workspace membership.
+//! It holds arena-style maps keyed by typed ids and a per-workspace
 //! [`SplitTree`](crate::tree::SplitTree) of panes. It is `Clone` and free of compositor types so it can be exhaustively
 //! unit-tested. Rect math lives in `crate::geometry`; [`World::geometry`] runs it over the model.
 

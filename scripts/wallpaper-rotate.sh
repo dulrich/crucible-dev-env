@@ -38,8 +38,8 @@ Exit status: 0 on success or when no Wayland session is running; 1 when swaybg
 fails to start (the previous background is left in place); 2 on bad usage.
 State: ${XDG_STATE_HOME:-~/.local/state}/wallpaper-rotate/current (last image).
 
-Cron example (host-b):
-  */5 * * * * <code-root>/the fleet tooling repo/scripts/cron-run wallpaper-rotate --max-age 15m -- crucible-dev-env/scripts/wallpaper-rotate.sh
+Cron example:
+  */5 * * * * /path/to/crucible-dev-env/scripts/wallpaper-rotate.sh
 USAGE
 }
 

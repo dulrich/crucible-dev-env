@@ -1,6 +1,6 @@
 //! BSP-style split tree backing each workspace's pane arrangement.
 //!
-//! Internal arrangement is a binary split tree (decision #2 in `plans/02-tiling-model.md`): leaves
+//! Internal arrangement is a binary split tree: leaves
 //! carry a payload (`PaneId` in the model, but the tree is generic so it can be unit-tested in
 //! isolation), and internal nodes are horizontal or vertical splits carrying a ratio in `(0, 1)`.
 //!

@@ -6,7 +6,7 @@
 //! result. It is the only crate that depends on Smithay, keeping the layout/persist/config/keys
 //! crates pure and testable.
 //!
-//! Each module below owns one durable boundary; `plans/` records how they arrived.
+//! Each module below owns one durable boundary.
 
 /// Compositor state, Wayland globals, and calloop event-loop wiring.
 pub mod config;
