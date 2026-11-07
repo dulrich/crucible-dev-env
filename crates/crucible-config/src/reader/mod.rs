@@ -3,7 +3,7 @@
 
 use std::ops::RangeInclusive;
 
-use kdl::{KdlDocument, KdlNode, KdlValue};
+use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use crate::error::{ConfigError, Location};
 use crate::model::Rgb;
@@ -20,6 +20,30 @@ pub(crate) fn locate(text: &str, offset: usize) -> Location {
         }
     }
     Location { line, column }
+}
+
+/// The units a size key accepts: `(px)` only, or `(px)` / `(pt)` (font sizes).
+#[derive(Clone, Copy)]
+enum SizeUnits {
+    Px,
+    PxOrPt,
+}
+
+impl SizeUnits {
+    /// The accepted forms, spelled with `n` as the example number.
+    fn accepted(self, n: &str) -> String {
+        match self {
+            Self::Px => format!("(px){n}"),
+            Self::PxOrPt => format!("(px){n} or (pt){n}"),
+        }
+    }
+
+    fn expected(self) -> &'static str {
+        match self {
+            Self::Px => "a (px) size",
+            Self::PxOrPt => "a (px) or (pt) size",
+        }
+    }
 }
 
 /// One node of the parsed document together with the source text its locations refer to.
@@ -260,6 +284,13 @@ impl<'a> NodeReader<'a> {
     }
 
     /// A non-negative integer property `key`, if present.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "kept beside the px readers for unitless integer properties"
+        )
+    )]
     pub(crate) fn u32_prop(&self, key: &str) -> Result<Option<u32>, ConfigError> {
         let Some(entry) = self.node.entry(key) else {
             return Ok(None);
@@ -278,6 +309,13 @@ impl<'a> NodeReader<'a> {
     /// A non-negative integer property `key` within `range`, if present. A negative or oversize
     /// value is [`NodeReader::u32_prop`]'s error at the property; a value outside `range` is an
     /// `InvalidValue` at the **node** (where the checks it replaces always reported it).
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "kept beside the px readers for unitless integer properties"
+        )
+    )]
     pub(crate) fn u32_prop_in(
         &self,
         key: &str,
@@ -293,6 +331,143 @@ impl<'a> NodeReader<'a> {
             ));
         }
         Ok(Some(n))
+    }
+
+    // ---- unit-annotated sizes -----------------------------------------------------------
+
+    /// Reads one size entry that must carry a unit annotation: `(px)N` (an integer) or, when
+    /// `unit` is [`SizeUnits::PxOrPt`], `(pt)N` (integer or decimal, converted to px as
+    /// `N * 96 / 72` rounded half away from zero). Returns the px value and the value as
+    /// written (`(pt)80 = 107px`) for range messages. `key` names the key in unit errors.
+    fn size_entry(
+        &self,
+        entry: &KdlEntry,
+        key: &str,
+        what: &str,
+        units: SizeUnits,
+    ) -> Result<(i128, String), ConfigError> {
+        let at = locate(self.text, entry.span().offset());
+        let value = entry.value();
+        let written = value.to_string();
+        let accepted = units.accepted(&written);
+        let Some(ty) = entry.ty().map(|t| t.value()) else {
+            return Err(self.invalid_at(at, what, format!("`{key}` needs a unit: {accepted}")));
+        };
+        match (ty, units) {
+            ("px", _) => {
+                let n = value
+                    .as_integer()
+                    .ok_or_else(|| self.wrong_type_at(at, what, "an integer"))?;
+                Ok((n, format!("(px){n}")))
+            }
+            ("pt", SizeUnits::PxOrPt) => {
+                #[allow(clippy::cast_precision_loss)]
+                let pt = value
+                    .as_float()
+                    .or_else(|| value.as_integer().map(|n| n as f64))
+                    .ok_or_else(|| self.wrong_type_at(at, what, "a number"))?;
+                if !pt.is_finite() || pt < 0.0 {
+                    return Err(self.invalid_at(
+                        at,
+                        what,
+                        format!("(pt){written} must not be negative"),
+                    ));
+                }
+                let px = (pt * 96.0 / 72.0).round();
+                if px > f64::from(u32::MAX) {
+                    return Err(self.invalid_at(
+                        at,
+                        what,
+                        format!("(pt){written} is outside 0..={}", u32::MAX),
+                    ));
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                let px = px as i128;
+                Ok((px, format!("(pt){written} = {px}px")))
+            }
+            ("pt", SizeUnits::Px) => Err(self.invalid_at(
+                at,
+                what,
+                format!("`{key}` accepts only (px), e.g. (px){written}"),
+            )),
+            (other, _) => Err(self.invalid_at(
+                at,
+                what,
+                format!("`{key}` has unknown unit ({other}); use {accepted}"),
+            )),
+        }
+    }
+
+    /// The single positional argument entry, with the existing missing/unexpected errors.
+    fn single_arg_entry(&self, expected: &'static str) -> Result<&'a KdlEntry, ConfigError> {
+        let mut all = self.node.entries().iter().filter(|e| e.name().is_none());
+        let first = all.next().ok_or_else(|| self.missing(expected))?;
+        if let Some(e) = all.next() {
+            return Err(self.unexpected_at(locate(self.text, e.span().offset())));
+        }
+        Ok(first)
+    }
+
+    fn size_arg_in(
+        &self,
+        units: SizeUnits,
+        range: RangeInclusive<u32>,
+    ) -> Result<u32, ConfigError> {
+        let entry = self.single_arg_entry(units.expected())?;
+        let key = self.name();
+        let (n, written) = self.size_entry(entry, key, "argument", units)?;
+        u32::try_from(n)
+            .ok()
+            .filter(|n| range.contains(n))
+            .ok_or_else(|| {
+                self.invalid(
+                    "argument",
+                    format!("{written} is outside {}..={}", range.start(), range.end()),
+                )
+            })
+    }
+
+    /// Exactly one `(px)N` argument within `range` (header `divider`, cursor `size`). A bare
+    /// number, `(pt)` or another annotation is an `InvalidValue` at the argument; outside
+    /// `range` is an `InvalidValue` at the node, quoting the value as written.
+    pub(crate) fn px_arg_in(&self, range: RangeInclusive<u32>) -> Result<u32, ConfigError> {
+        self.size_arg_in(SizeUnits::Px, range)
+    }
+
+    /// Exactly one font-size argument, `(px)N` or `(pt)N`, converted to px and checked against
+    /// `range` (header `size`).
+    pub(crate) fn font_size_arg_in(&self, range: RangeInclusive<u32>) -> Result<u32, ConfigError> {
+        self.size_arg_in(SizeUnits::PxOrPt, range)
+    }
+
+    /// A `(px)N` property `key` within `range`, if present. Unit errors are at the property; a
+    /// value outside `range` is an `InvalidValue` at the node (as [`NodeReader::u32_prop_in`]).
+    pub(crate) fn px_prop_in(
+        &self,
+        key: &str,
+        range: RangeInclusive<u32>,
+    ) -> Result<Option<u32>, ConfigError> {
+        let Some(entry) = self.node.entry(key) else {
+            return Ok(None);
+        };
+        let what = format!("property `{key}`");
+        let (n, written) = self.size_entry(entry, key, &what, SizeUnits::Px)?;
+        let n = u32::try_from(n).map_err(|_| {
+            let at = locate(self.text, entry.span().offset());
+            self.invalid_at(at, &what, format!("{written} is outside 0..={}", u32::MAX))
+        })?;
+        if !range.contains(&n) {
+            return Err(self.invalid(
+                &what,
+                format!("{written} is outside {}..={}", range.start(), range.end()),
+            ));
+        }
+        Ok(Some(n))
+    }
+
+    /// A non-negative `(px)N` property `key`, if present (tiling `gap` / `ring` / `ring-inset`).
+    pub(crate) fn px_prop(&self, key: &str) -> Result<Option<u32>, ConfigError> {
+        self.px_prop_in(key, 0..=u32::MAX)
     }
 
     /// A `"#rrggbb"` string property `key`, if present, validated.

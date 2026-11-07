@@ -11,13 +11,13 @@ fn parse_terminal_tiling(
 ) -> Result<(), ConfigError> {
     node.allow_properties(&["gap", "ring", "ring-inset", "frame"])?;
     node.no_args()?;
-    if let Some(gap) = node.u32_prop("gap")? {
+    if let Some(gap) = node.px_prop("gap")? {
         out.gap = gap;
     }
-    if let Some(ring) = node.u32_prop("ring")? {
+    if let Some(ring) = node.px_prop("ring")? {
         out.ring = ring;
     }
-    if let Some(inset) = node.u32_prop("ring-inset")? {
+    if let Some(inset) = node.px_prop("ring-inset")? {
         out.ring_inset = inset;
     }
     if let Some(c) = node.hex_prop("frame")? {
@@ -30,10 +30,10 @@ fn parse_terminal_tiling(
 fn parse_app_tiling(node: NodeReader<'_>, out: &mut AppTiling) -> Result<(), ConfigError> {
     node.allow_properties(&["gap", "ring", "fill"])?;
     node.no_args()?;
-    if let Some(gap) = node.u32_prop("gap")? {
+    if let Some(gap) = node.px_prop("gap")? {
         out.gap = gap;
     }
-    if let Some(ring) = node.u32_prop("ring")? {
+    if let Some(ring) = node.px_prop("ring")? {
         out.ring = ring;
     }
     if let Some(c) = node.hex_prop("fill")? {
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn unknown_property() {
-        let (err, at) = err_at("tiling {\n    terminal gap=1 middle=2\n}\n");
+        let (err, at) = err_at("tiling {\n    terminal gap=(px)1 middle=2\n}\n");
         assert!(
             matches!(&err, ConfigError::UnknownProperty { name, node, .. }
                 if name == "middle" && node == "terminal"),
@@ -106,13 +106,13 @@ mod tests {
             at,
             Location {
                 line: 2,
-                column: 20
+                column: 24
             }
         );
         // `fill` is an app-only property.
         let (err, _) = err_at("tiling {\n    terminal fill=\"#000000\"\n}\n");
         assert!(matches!(err, ConfigError::UnknownProperty { .. }));
-        let (err, _) = err_at("tiling {\n    window gap=1\n}\n");
+        let (err, _) = err_at("tiling {\n    window gap=(px)1\n}\n");
         assert!(matches!(&err, ConfigError::UnknownNode { context, .. } if *context == "tiling"));
         let (err, _) = err_at("terminal \"foot\" flag=\"-e\"\n");
         assert!(matches!(err, ConfigError::UnknownProperty { .. }));
@@ -120,25 +120,29 @@ mod tests {
 
     #[test]
     fn ring_clamps_to_gap_in_parse() {
-        let c = parse("tiling {\n    terminal gap=2 ring=9\n    app gap=1 ring=5\n}\n").unwrap();
+        let c =
+            parse("tiling {\n    terminal gap=(px)2 ring=(px)9\n    app gap=(px)1 ring=(px)5\n}\n")
+                .unwrap();
         assert_eq!(c.tiling.terminal.ring, 2);
         assert_eq!(c.tiling.app.ring, 1);
     }
 
     #[test]
     fn terminal_ring_inset_and_frame_parse_clamp_and_reject() {
-        let c = parse("tiling {\n    terminal gap=9 ring=1 ring-inset=4 frame=\"#3a3a3a\"\n}\n")
-            .unwrap();
+        let c = parse(
+            "tiling {\n    terminal gap=(px)9 ring=(px)1 ring-inset=(px)4 frame=\"#3a3a3a\"\n}\n",
+        )
+        .unwrap();
         let t = c.tiling.terminal;
         assert_eq!((t.ring, t.ring_inset), (1, 4));
         assert_eq!(t.frame, Some(Rgb(0x3a, 0x3a, 0x3a)));
         let d = TilingConfig::default().terminal;
         assert_eq!((d.ring_inset, d.frame), (0, None));
-        let c = parse("tiling {\n    terminal gap=6 ring=3 ring-inset=5\n}\n").unwrap();
+        let c = parse("tiling {\n    terminal gap=(px)6 ring=(px)3 ring-inset=(px)5\n}\n").unwrap();
         assert_eq!(c.tiling.terminal.ring_inset, 3);
         let (err, _) = err_at("tiling {\n    terminal frame=\"red\"\n}\n");
         assert!(matches!(err, ConfigError::InvalidValue { .. }), "{err:?}");
-        for bad in ["app ring-inset=1", "app frame=\"#000000\""] {
+        for bad in ["app ring-inset=(px)1", "app frame=\"#000000\""] {
             let (err, _) = err_at(&format!("tiling {{\n    {bad}\n}}\n"));
             assert!(
                 matches!(err, ConfigError::UnknownProperty { .. }),
@@ -160,8 +164,8 @@ mod tests {
             "2:14: `terminal` property `frame`: `red` is not a #rrggbb colour"
         );
         assert_eq!(
-            msg("tiling {\n    terminal gap=-1\n}\n"),
-            "2:14: `terminal` property `gap`: -1 is outside 0..=4294967295"
+            msg("tiling {\n    terminal gap=(px)-1\n}\n"),
+            "2:14: `terminal` property `gap`: (px)-1 is outside 0..=4294967295"
         );
         assert_eq!(
             msg("tiling {\n    terminal fill=\"#000000\"\n}\n"),
@@ -172,8 +176,29 @@ mod tests {
             "2:9: unknown property `frame` on `app`"
         );
         assert_eq!(
-            msg("tiling {\n    app ring-inset=1\n}\n"),
+            msg("tiling {\n    app ring-inset=(px)1\n}\n"),
             "2:9: unknown property `ring-inset` on `app`"
         );
+    }
+
+    #[test]
+    fn size_properties_need_px() {
+        let msg = |text: &str| parse(text).unwrap_err().to_string();
+        assert_eq!(
+            msg("tiling {\n    terminal gap=6\n}\n"),
+            "2:14: `terminal` property `gap`: `gap` needs a unit: (px)6"
+        );
+        assert_eq!(
+            msg("tiling {\n    terminal gap=(pt)6\n}\n"),
+            "2:14: `terminal` property `gap`: `gap` accepts only (px), e.g. (px)6"
+        );
+        assert_eq!(
+            msg("tiling {\n    app ring=(em)2\n}\n"),
+            "2:9: `app` property `ring`: `ring` has unknown unit (em); use (px)2"
+        );
+        assert!(matches!(
+            parse("tiling {\n    terminal ring-inset=(px)1.5\n}\n").unwrap_err(),
+            ConfigError::WrongType { .. }
+        ));
     }
 }

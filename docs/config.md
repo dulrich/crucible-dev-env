@@ -2,6 +2,8 @@
 
 CDE reads one KDL (v2) file: `$XDG_CONFIG_HOME/cde/config.kdl`, falling back to `$HOME/.config/cde/config.kdl`. A missing file means the built-in defaults, which are CDE's behaviour with no config. An invalid file is logged at startup as an error with its line and column, and CDE then runs on the defaults. Every key is optional. KDL v2 comments are valid: `//` line comments, `/* */` block comments, and `/-` to comment out a whole node.
 
+Units: every size key carries an explicit KDL type annotation naming its unit — tiling `gap` / `ring` / `ring-inset`, header `size` / `divider` / `inset` and cursor `size`. `(px)N` is N logical pixels and must be an integer; header `size` (a font size) also accepts `(pt)N` (integer or decimal), converted to px as N × 96 / 72 rounded half away from zero. A bare number on a size key (`gap=6`, `size 14`), an unknown unit (`(em)`, `(PX)` — units are case-sensitive) or `(pt)` on a px-only key is a located config error naming the accepted units. Other numbers (seconds, scale, keyboard repeat) stay unannotated.
+
 Reload: WP-5 reloads on file change; until then restart.
 
 ## Schema
@@ -24,17 +26,17 @@ Loss recovery: when a bound window disappears because its Wayland client disconn
 
 ```kdl
 tiling {
-    terminal gap=6 ring=3
-    app gap=0 ring=0 fill="#737373"
+    terminal gap=(px)6 ring=(px)3
+    app gap=(px)0 ring=(px)0 fill="#737373"
     terminal-args "-o" "pad={gap}x{gap} center"
 }
 ```
 
-Tiles are edge to edge: they abut and cover the output, so no background shows between them. Each window class then gets its own gap and focus ring (both non-negative integers, in pixels; every key is optional):
+Tiles are edge to edge: they abut and cover the output, so no background shows between them. Each window class then gets its own gap and focus ring (both non-negative `(px)` integers; every key is optional):
 
-- `terminal` — CDE-spawned terminals. The window fills its whole tile; `gap` is the padding the terminal draws itself (see `terminal-args`) and the focus ring (`ring`) is drawn inside the tile, in that padding. Defaults: `gap=6`, `ring=3`.
-- `app` — every other window. The window is inset by `gap` on each side; the focus ring is drawn outside the window, in the gap, and the rest of the gap is painted `fill` (`"#rrggbb"`, default `#737373`) so no background shows. Defaults: `gap=0`, `ring=0` (no ring, nothing drawn).
-- `terminal` also takes `ring-inset=<px>` (default `0`): the focus ring is drawn that many pixels inside the tile edge instead of on it. `frame="#rrggbb"` (default unset) draws a frame of the same geometry (the ring position and thickness) in that colour around every **unfocused** terminal tile; the focus ring and mark ring draw over it. Both are terminal only; `app` rejects them as unknown properties.
+- `terminal` — CDE-spawned terminals. The window fills its whole tile; `gap` is the padding the terminal draws itself (see `terminal-args`) and the focus ring (`ring`) is drawn inside the tile, in that padding. Defaults: `gap=(px)6`, `ring=(px)3`.
+- `app` — every other window. The window is inset by `gap` on each side; the focus ring is drawn outside the window, in the gap, and the rest of the gap is painted `fill` (`"#rrggbb"`, default `#737373`) so no background shows. Defaults: `gap=(px)0`, `ring=(px)0` (no ring, nothing drawn).
+- `terminal` also takes `ring-inset=(px)<n>` (default `0`): the focus ring is drawn that many pixels inside the tile edge instead of on it. `frame="#rrggbb"` (default unset) draws a frame of the same geometry (the ring position and thickness) in that colour around every **unfocused** terminal tile; the focus ring and mark ring draw over it. Both are terminal only; `app` rejects them as unknown properties.
 - A `ring` larger than its `gap` is clamped to `gap`, and then `ring-inset` is clamped to `gap - ring` (each logged as a warning).
 - `ring`, `ring-inset` and `frame` apply on hot reload. Terminal padding (`gap` through `terminal-args`) is a spawn argument, so it applies only to terminals spawned after the change.
 - `terminal-args` — zero or more strings inserted before the exec flag on terminal spawns only (`Super+Shift+Return`, `run-in-terminal`, restored terminals, and launcher TERM rows via `run-term` -- applied only when the TERM program is the configured terminal, compared by basename; not overlays, which use `overlay.terminal-args`, and not apps). `{gap}` in an argument is replaced by the terminal `gap`. For foot (the CDE terminal), the arguments above make foot pad `gap` pixels on each side, centred, in its own background so the compositor ring never covers a cell. The ghostty equivalent (rollback) is `"--window-padding-x={gap}" "--window-padding-y={gap}" "--window-padding-color=extend-always" "--window-padding-balance=true"`, which overrides ghostty's own `window-padding`. Default: none, in which case the terminal ring is drawn over the terminal's outermost pixels.
@@ -43,7 +45,7 @@ A zellij-like look, a thin frame around each pane with the padding inside it (ri
 
 ```kdl
 tiling {
-    terminal gap=9 ring=1 ring-inset=4 frame="#3a3a3a"
+    terminal gap=(px)9 ring=(px)1 ring-inset=(px)4 frame="#3a3a3a"
     terminal-args "-o" "pad={gap}x{gap} center"
 }
 ```
@@ -162,8 +164,8 @@ header {
     mode "toggle"
     start "hidden"
     font "DejaVu Sans"
-    size 14
-    divider 0
+    size (px)14
+    divider (px)0
     slots #false
 }
 ```
@@ -173,8 +175,8 @@ A clickable workspace strip at the top of every output, listing that output's wo
 - `mode` — `"off"`, `"always"` or `"toggle"` (default); any other value (including the old `"alt"`) is a config error. `off`: no strip and no input effect; `toggle-header` does nothing. `always`: the strip is always shown and its height is reserved at the top of each output (tiles, rings and X11 placement all shrink by exactly that height). `toggle`: the strip is hidden until the `toggle-header` action (default `Super+B`) shows it; while shown it reserves its height exactly like `always` (every window is re-configured to the reflowed rects), and `Super+B` again hides it and gives the space back. `toggle-header` acts on the focused output only; each output keeps its own shown/hidden state, remembered per connector name in `$XDG_STATE_HOME/cde/session.kdl`: it survives restarts, unplugging the monitor and config mode switches (e.g. `toggle` -> `always` -> `toggle`), and a saved state wins over `start`.
 - `start` — `"shown"` or `"hidden"` (default); any other value is a config error. The `toggle`-mode state of a monitor that has never been toggled (no saved state); `always` and `off` ignore it.
 - `font` — a font file path (a value containing `/`) or a fontconfig family name resolved with `fc-match`. Default `"DejaVu Sans"`. If no font can be loaded the strip still draws its background and highlight, without labels (one warning is logged).
-- `size` — label size in pixels, an integer from 6 to 96; default 14. The strip height is the size plus padding. The size is in logical pixels, while terminals usually size fonts in points; at scale 1 the conversion is px ≈ pt × 96/72 (14 pt ≈ 19 px).
-- `divider` — width in logical pixels of a divider drawn between adjacent workspace labels, an integer from 0 to 16; default 0 (off). It takes its own space between labels (never before the first or after the last), is drawn in the inactive label colour by default, never sits under the active highlight, and a click on it switches nothing. Negative, above 16 or non-integer values are config errors. Optional properties: `inset=<px>` (0 to 32, default 0) trims the line that many pixels from its top and bottom, and draws no line when nothing is left; `color="#rrggbb"` (default `#cdd0d6`, the label colour) sets its colour. Both are inert when the width is 0, and invalid values are config errors. Example: `divider 1 inset=6 color="#5c6370"`.
+- `size` — label size, `(px)N` (an integer) or `(pt)N` (integer or decimal), from 6 to 96 px after conversion; default `(px)14`. The strip height is the size plus padding. `(pt)` converts as px = round(pt × 96 / 72), half away from zero, so `(pt)14` is 19 px, `(pt)10.5` is 14 px and `(pt)12` is 16 px; the range is checked on the converted value (`(pt)80` = 107 px is an error).
+- `divider` — width of a divider drawn between adjacent workspace labels, `(px)N` from 0 to 16; default `(px)0` (off). It takes its own space between labels (never before the first or after the last), is drawn in the inactive label colour by default, never sits under the active highlight, and a click on it switches nothing. Negative, above 16, non-integer or unannotated values are config errors. Optional properties: `inset=(px)<n>` (0 to 32, default 0) trims the line that many pixels from its top and bottom, and draws no line when nothing is left; `color="#rrggbb"` (default `#cdd0d6`, the label colour) sets its colour. Both are inert when the width is 0, and invalid values are config errors. Example: `divider (px)1 inset=(px)6 color="#5c6370"`.
 - `slots` — `#true` or `#false` (default `#false`). When on, the label of a workspace pinned to a slot shows the slot digit with a Super glyph (`⌘` + digit, e.g. `⌘3 name`); if the header font lacks the glyph the badge falls back to `S-3 name`. Unpinned labels are unchanged.
 
 Clicking a workspace name focuses that output and switches it to that workspace; the click acts on release (the press and its release are consumed by the strip, never sent to the window beneath). A drag starts once the pointer has moved 5 logical pixels from the press; while it is live every strip reflows to show where the workspace will land (also across outputs), and nothing changes until the release. Dragging a name and releasing on another name on the same output moves that workspace to the other's position and reorders the stack (`session.kdl` records the new order); releasing on the same output's empty strip area moves it to the end; releasing on another output's name moves the workspace there at that position, and on another output's empty strip area appends it there (the last workspace on an output cannot be dragged away: a no-op); releasing anywhere else, or after a lock or overlay opened, does nothing. A click never hides the strip; in `toggle` mode only `toggle-header` does. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
@@ -218,11 +220,11 @@ Blanking powers the monitors off on the TTY (DRM) backend; under the nested `win
 ```kdl
 cursor {
     theme "Adwaita"
-    size 24
+    size (px)24
 }
 ```
 
-The pointer cursor theme and size, both optional (each child may appear once). Without a child, CDE uses the `XCURSOR_THEME` / `XCURSOR_SIZE` environment variables, then `default` and 24. `theme` is the name of an installed XCursor theme (a non-empty string); `size` is a whole number of logical pixels from 1 to 256. An empty theme, a non-string theme, a zero, negative, fractional or too large size, a repeated child or an unknown child is a located config error (never coerced or clamped).
+The pointer cursor theme and size, both optional (each child may appear once). Without a child, CDE uses the `XCURSOR_THEME` / `XCURSOR_SIZE` environment variables, then `default` and 24. `theme` is the name of an installed XCursor theme (a non-empty string); `size` is `(px)N`, a whole number of logical pixels from 1 to 256 (`(pt)` is not accepted). An empty theme, a non-string theme, a zero, negative, fractional, unannotated or too large size, a repeated child or an unknown child is a located config error (never coerced or clamped).
 
 CDE reads the theme from the installed cursor themes (`XCURSOR_PATH`, the XDG data dirs, `~/.icons`, following `Inherits=`), picks the image nearest `size × output scale` and draws it 1:1. When no theme can be loaded it draws a built-in arrow. It also advertises `wp_cursor_shape_manager_v1`, so clients can ask for a named shape. When `theme` or `size` is set, CDE exports `XCURSOR_THEME` / `XCURSOR_SIZE` to the programs it spawns (including XWayland); a hot reload rebuilds CDE's own cursor and applies the new values to later spawns only.
 
@@ -324,9 +326,9 @@ Not a config key. When XWayland starts, CDE loads `$HOME/.Xresources` into it wi
 ```kdl
 terminal "/home/you/.local/opt/foot/bin/foot" exec-flag="-e"
 tiling {
-    terminal gap=6 ring=3
+    terminal gap=(px)6 ring=(px)3
     terminal-args "-o" "pad={gap}x{gap} center"
-    app gap=0 ring=0
+    app gap=(px)0 ring=(px)0
 }
 focus-follows-mouse #true
 confine-pointer-to-fullscreen #true
@@ -342,7 +344,7 @@ header {
     mode "toggle"
     start "hidden"
     font "DejaVu Sans"
-    size 14
+    size (px)14
 }
 idle {
     lock-after 300
@@ -350,7 +352,7 @@ idle {
 }
 cursor {
     theme "Adwaita"
-    size 24
+    size (px)24
 }
 output "DP-1" { scale 1.4167 }
 autostart "dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"

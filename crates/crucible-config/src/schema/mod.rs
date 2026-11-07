@@ -147,8 +147,8 @@ mod tests {
     const FULL: &str = r##"
 terminal "/tmp/cde/ghostty-cde" exec-flag="-e"
 tiling {
-    terminal gap=4 ring=2
-    app gap=3 ring=1 fill="#102030"
+    terminal gap=(px)4 ring=(px)2
+    app gap=(px)3 ring=(px)1 fill="#102030"
     terminal-args "--window-padding-x={gap}" "--b"
 }
 focus-follows-mouse #false
@@ -248,7 +248,7 @@ binds {
 
     #[test]
     fn partial_files_keep_other_defaults() {
-        let c = parse("tiling {\n    terminal gap=0 ring=0\n}\n").unwrap();
+        let c = parse("tiling {\n    terminal gap=(px)0 ring=(px)0\n}\n").unwrap();
         assert_eq!(c.tiling.terminal.gap, 0);
         assert_eq!((c.tiling.app.gap, c.tiling.app.ring), (0, 0));
         assert!(c.focus_follows_mouse);
@@ -287,7 +287,7 @@ binds {
 
     #[test]
     fn wrong_value_types() {
-        let (err, _) = err_at("tiling {\n    app gap=\"big\"\n}\n");
+        let (err, _) = err_at("tiling {\n    app gap=(px)\"big\"\n}\n");
         assert!(
             matches!(&err, ConfigError::WrongType { expected, .. } if *expected == "an integer")
         );
@@ -305,9 +305,9 @@ binds {
 
     #[test]
     fn out_of_range_and_empty_values() {
-        let (err, _) = err_at("tiling {\n    terminal gap=-1\n}\n");
+        let (err, _) = err_at("tiling {\n    terminal gap=(px)-1\n}\n");
         assert!(matches!(err, ConfigError::InvalidValue { .. }));
-        let (err, _) = err_at("tiling {\n    app ring=99999999999\n}\n");
+        let (err, _) = err_at("tiling {\n    app ring=(px)99999999999\n}\n");
         assert!(matches!(err, ConfigError::InvalidValue { .. }));
         let (err, _) = err_at("tiling {\n    app fill=\"red\"\n}\n");
         assert!(matches!(err, ConfigError::InvalidValue { .. }));

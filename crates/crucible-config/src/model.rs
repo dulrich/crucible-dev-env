@@ -360,7 +360,7 @@ pub struct IdleConfig {
     pub blank_after: Option<u32>,
 }
 
-/// Pointer cursor theme and size (`cursor { theme "Adwaita"; size 24 }`); `None` defers to the
+/// Pointer cursor theme and size (`cursor { theme "Adwaita"; size (px)24 }`); `None` defers to the
 /// `XCURSOR_THEME`/`XCURSOR_SIZE` environment, then to `default`/24.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CursorConfig {

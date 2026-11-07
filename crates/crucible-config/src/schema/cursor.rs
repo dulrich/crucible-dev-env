@@ -1,4 +1,4 @@
-//! The `cursor { theme "Adwaita"; size 24 }` block.
+//! The `cursor { theme "Adwaita"; size (px)24 }` block.
 
 use crate::error::ConfigError;
 use crate::model::CursorConfig;
@@ -18,7 +18,7 @@ pub(super) fn parse_cursor(node: NodeReader<'_>) -> Result<CursorConfig, ConfigE
                 child.nonempty("theme", name)?;
                 out.theme = Some(name.to_string());
             }
-            "size" => out.size = Some(child.u32_arg_in(1..=MAX_SIZE)?),
+            "size" => out.size = Some(child.px_arg_in(1..=MAX_SIZE)?),
             _ => return Err(child.unknown_node("cursor")),
         }
     }
@@ -43,10 +43,10 @@ mod tests {
 
     #[test]
     fn cursor_parses_both_children() {
-        let c = parse("cursor { theme \"Adwaita\"; size 32; }\n").unwrap();
+        let c = parse("cursor { theme \"Adwaita\"; size (px)32; }\n").unwrap();
         assert_eq!(c.cursor.theme.as_deref(), Some("Adwaita"));
         assert_eq!(c.cursor.size, Some(32));
-        let c = parse("cursor { size 256; }\n").unwrap();
+        let c = parse("cursor { size (px)256; }\n").unwrap();
         assert_eq!((c.cursor.theme, c.cursor.size), (None, Some(256)));
     }
 
@@ -56,10 +56,10 @@ mod tests {
             "theme 5",
             "theme \"\"",
             "theme \"  \"",
-            "size 0",
-            "size 257",
-            "size -3",
-            "size 1.5",
+            "size (px)0",
+            "size (px)257",
+            "size (px)-3",
+            "size (px)1.5",
             "size \"24\"",
         ] {
             let (err, at) = err_at(&format!("\ncursor {{ {bad}; }}\n"));
@@ -78,9 +78,20 @@ mod tests {
     fn cursor_rejects_unknown_child_and_repeats() {
         let (err, _) = err_at("cursor { shape 5; }\n");
         assert!(matches!(err, ConfigError::UnknownNode { .. }), "{err:?}");
-        let (err, _) = err_at("cursor { size 5; size 6; }\n");
+        let (err, _) = err_at("cursor { size (px)5; size (px)6; }\n");
         assert!(matches!(err, ConfigError::Duplicate { .. }), "{err:?}");
         let (err, _) = err_at("cursor { theme \"a\"; theme \"b\"; }\n");
         assert!(matches!(err, ConfigError::Duplicate { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn size_needs_px() {
+        for bad in ["size 24", "size (pt)24", "size (em)24"] {
+            let (err, _) = err_at(&format!("cursor {{ {bad}; }}\n"));
+            assert!(
+                matches!(err, ConfigError::InvalidValue { .. }),
+                "{bad}: {err:?}"
+            );
+        }
     }
 }

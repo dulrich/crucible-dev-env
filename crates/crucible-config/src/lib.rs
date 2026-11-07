@@ -102,7 +102,7 @@ mod tests {
         assert_eq!(load(&missing).unwrap(), Config::default());
 
         let good = dir.join("good.kdl");
-        std::fs::write(&good, "tiling {\n    terminal gap=2 ring=1\n}\n").unwrap();
+        std::fs::write(&good, "tiling {\n    terminal gap=(px)2 ring=(px)1\n}\n").unwrap();
         assert_eq!(load(&good).unwrap().tiling.terminal.gap, 2);
 
         let bad = dir.join("bad.kdl");

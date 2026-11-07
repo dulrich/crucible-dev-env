@@ -22,11 +22,11 @@ pub(super) fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigE
                 child.nonempty("font", s)?;
                 out.font = s.to_string();
             }
-            "size" => out.size = child.u32_arg_in(HEADER_SIZE_MIN..=HEADER_SIZE_MAX)?,
+            "size" => out.size = child.font_size_arg_in(HEADER_SIZE_MIN..=HEADER_SIZE_MAX)?,
             "divider" => {
                 child.allow_properties(&["inset", "color"])?;
-                out.divider = child.u32_arg_in(0..=HEADER_DIVIDER_MAX)?;
-                if let Some(inset) = child.u32_prop_in("inset", 0..=HEADER_DIVIDER_INSET_MAX)? {
+                out.divider = child.px_arg_in(0..=HEADER_DIVIDER_MAX)?;
+                if let Some(inset) = child.px_prop_in("inset", 0..=HEADER_DIVIDER_INSET_MAX)? {
                     out.divider_inset = inset;
                 }
                 if let Some(c) = child.hex_prop("color")? {
@@ -114,16 +114,19 @@ mod tests {
 
     #[test]
     fn header_size_bounds() {
-        assert_eq!(parse("header {\n size 6\n}\n").unwrap().header.size, 6);
-        assert_eq!(parse("header {\n size 96\n}\n").unwrap().header.size, 96);
-        for bad in ["5", "97", "0", "-3"] {
+        assert_eq!(parse("header {\n size (px)6\n}\n").unwrap().header.size, 6);
+        assert_eq!(
+            parse("header {\n size (px)96\n}\n").unwrap().header.size,
+            96
+        );
+        for bad in ["(px)5", "(px)97", "(px)0", "(px)-3"] {
             let err = parse(&format!("header {{\n size {bad}\n}}\n")).unwrap_err();
             assert!(
                 matches!(err, ConfigError::InvalidValue { .. }),
                 "{bad}: {err:?}"
             );
         }
-        let err = parse("header {\n size 1.5\n}\n").unwrap_err();
+        let err = parse("header {\n size (px)1.5\n}\n").unwrap_err();
         assert!(matches!(err, ConfigError::WrongType { .. }), "{err:?}");
     }
 
@@ -132,14 +135,14 @@ mod tests {
         let h = parse("").unwrap().header;
         assert_eq!(h.divider_inset, 0);
         assert_eq!(h.divider_color, Rgb(0xcd, 0xd0, 0xd6));
-        let h = parse("header {\n divider 1 inset=6 color=\"#5c6370\"\n}\n")
+        let h = parse("header {\n divider (px)1 inset=(px)6 color=\"#5c6370\"\n}\n")
             .unwrap()
             .header;
         assert_eq!((h.divider, h.divider_inset), (1, 6));
         assert_eq!(h.divider_color, Rgb(0x5c, 0x63, 0x70));
         // Properties are accepted (and inert) with a zero width.
         assert_eq!(
-            parse("header {\n divider 0 inset=32\n}\n")
+            parse("header {\n divider (px)0 inset=(px)32\n}\n")
                 .unwrap()
                 .header
                 .divider_inset,
@@ -150,10 +153,10 @@ mod tests {
     #[test]
     fn header_divider_rejects_bad_properties() {
         for bad in [
-            "divider 1 inset=33",
-            "divider 1 inset=-1",
-            "divider 1 color=\"red\"",
-            "divider 1 color=\"#12345\"",
+            "divider (px)1 inset=(px)33",
+            "divider (px)1 inset=(px)-1",
+            "divider (px)1 color=\"red\"",
+            "divider (px)1 color=\"#12345\"",
         ] {
             let err = parse(&format!("header {{\n {bad}\n}}\n")).unwrap_err();
             assert!(
@@ -162,9 +165,9 @@ mod tests {
             );
         }
         for bad in [
-            "divider 1 inset=1.5",
-            "divider 1 inset=\"2\"",
-            "divider 1 color=3",
+            "divider (px)1 inset=(px)1.5",
+            "divider (px)1 inset=(px)\"2\"",
+            "divider (px)1 color=3",
         ] {
             let err = parse(&format!("header {{\n {bad}\n}}\n")).unwrap_err();
             assert!(
@@ -172,7 +175,7 @@ mod tests {
                 "{bad}: {err:?}"
             );
         }
-        for bad in ["divider 1 foo=1", "size 14 x=1"] {
+        for bad in ["divider (px)1 foo=1", "size (px)14 x=1"] {
             assert!(parse(&format!("header {{\n {bad}\n}}\n")).is_err(), "{bad}");
         }
     }
@@ -181,25 +184,34 @@ mod tests {
     fn header_divider_default_and_bounds() {
         assert_eq!(parse("").unwrap().header.divider, 0);
         assert_eq!(
-            parse("header {\n divider 2\n}\n").unwrap().header.divider,
+            parse("header {\n divider (px)2\n}\n")
+                .unwrap()
+                .header
+                .divider,
             2
         );
         assert_eq!(
-            parse("header {\n divider 0\n}\n").unwrap().header.divider,
+            parse("header {\n divider (px)0\n}\n")
+                .unwrap()
+                .header
+                .divider,
             0
         );
         assert_eq!(
-            parse("header {\n divider 16\n}\n").unwrap().header.divider,
+            parse("header {\n divider (px)16\n}\n")
+                .unwrap()
+                .header
+                .divider,
             16
         );
-        for bad in ["-1", "17"] {
+        for bad in ["(px)-1", "(px)17"] {
             let err = parse(&format!("header {{\n divider {bad}\n}}\n")).unwrap_err();
             assert!(
                 matches!(err, ConfigError::InvalidValue { .. }),
                 "{bad}: {err:?}"
             );
         }
-        for bad in ["1.5", "\"2\""] {
+        for bad in ["(px)1.5", "(px)\"2\""] {
             let err = parse(&format!("header {{\n divider {bad}\n}}\n")).unwrap_err();
             assert!(
                 matches!(err, ConfigError::WrongType { .. }),
@@ -217,28 +229,28 @@ mod tests {
             "2:2: `mode` argument: `x` is not one of off, always, toggle"
         );
         assert_eq!(
-            msg("header {\n size -1\n}\n"),
-            "2:2: `size` argument: -1 is outside 6..=96"
+            msg("header {\n size (px)-1\n}\n"),
+            "2:2: `size` argument: (px)-1 is outside 6..=96"
         );
         assert_eq!(
-            msg("header {\n size 97\n}\n"),
-            "2:2: `size` argument: 97 is outside 6..=96"
+            msg("header {\n size (px)97\n}\n"),
+            "2:2: `size` argument: (px)97 is outside 6..=96"
         );
         assert_eq!(
-            msg("header {\n divider 17\n}\n"),
-            "2:2: `divider` argument: 17 is outside 0..=16"
+            msg("header {\n divider (px)17\n}\n"),
+            "2:2: `divider` argument: (px)17 is outside 0..=16"
         );
         assert_eq!(
-            msg("header {\n divider 1 inset=33\n}\n"),
-            "2:2: `divider` property `inset`: 33 is outside 0..=32"
+            msg("header {\n divider (px)1 inset=(px)33\n}\n"),
+            "2:2: `divider` property `inset`: (px)33 is outside 0..=32"
         );
         assert_eq!(
-            msg("header {\n divider 1 inset=-1\n}\n"),
-            "2:12: `divider` property `inset`: -1 is outside 0..=4294967295"
+            msg("header {\n divider (px)1 inset=(px)-1\n}\n"),
+            "2:16: `divider` property `inset`: (px)-1 is outside 0..=4294967295"
         );
         assert_eq!(
-            msg("header {\n divider 1 color=\"red\"\n}\n"),
-            "2:12: `divider` property `color`: `red` is not a #rrggbb colour"
+            msg("header {\n divider (px)1 color=\"red\"\n}\n"),
+            "2:16: `divider` property `color`: `red` is not a #rrggbb colour"
         );
     }
 
@@ -250,5 +262,51 @@ mod tests {
             assert_eq!(mode.as_str(), name);
             assert_eq!(HeaderMode::from_name(name), Some(mode));
         }
+    }
+
+    #[test]
+    fn size_units_convert_and_reject() {
+        let size = |v: &str| parse(&format!("header {{\n size {v}\n}}\n")).map(|c| c.header.size);
+        assert_eq!(size("(pt)14").unwrap(), 19);
+        assert_eq!(size("(pt)10.5").unwrap(), 14);
+        assert_eq!(size("(pt)12").unwrap(), 16);
+        assert_eq!(size("(px)19").unwrap(), 19);
+        let msg = |text: &str| parse(text).unwrap_err().to_string();
+        assert_eq!(
+            msg("header {\n size 14\n}\n"),
+            "2:7: `size` argument: `size` needs a unit: (px)14 or (pt)14"
+        );
+        assert_eq!(
+            msg("header {\n size (em)14\n}\n"),
+            "2:7: `size` argument: `size` has unknown unit (em); use (px)14 or (pt)14"
+        );
+        assert_eq!(
+            msg("header {\n size (PX)14\n}\n"),
+            "2:7: `size` argument: `size` has unknown unit (PX); use (px)14 or (pt)14"
+        );
+        assert!(matches!(
+            parse("header {\n size (px)1.5\n}\n").unwrap_err(),
+            ConfigError::WrongType { .. }
+        ));
+        assert_eq!(
+            msg("header {\n size (pt)80\n}\n"),
+            "2:2: `size` argument: (pt)80 = 107px is outside 6..=96"
+        );
+        assert_eq!(
+            msg("header {\n size (pt)-1\n}\n"),
+            "2:7: `size` argument: (pt)-1 must not be negative"
+        );
+        assert_eq!(
+            msg("header {\n divider (pt)1\n}\n"),
+            "2:10: `divider` argument: `divider` accepts only (px), e.g. (px)1"
+        );
+        assert_eq!(
+            msg("header {\n divider 1\n}\n"),
+            "2:10: `divider` argument: `divider` needs a unit: (px)1"
+        );
+        assert_eq!(
+            msg("header {\n divider (px)1 inset=6\n}\n"),
+            "2:16: `divider` property `inset`: `inset` needs a unit: (px)6"
+        );
     }
 }
