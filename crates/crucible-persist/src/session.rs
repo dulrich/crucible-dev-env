@@ -42,9 +42,55 @@ pub struct OutputSession {
     pub workspaces: Vec<String>,
     /// The output's active workspace.
     pub focused: Option<String>,
-    /// The output's saved header-strip preference: `Some(true)` shown, `Some(false)` hidden,
-    /// `None` unknown. Encoded as `header="shown"|"hidden"`; an unrecognised value reads as `None`.
-    pub header: Option<bool>,
+    /// The output's saved header-strip preference, `None` unknown. Encoded as
+    /// `header="shown"|"hidden"`; an unrecognised value reads as `None`.
+    pub header: Option<HeaderPref>,
+}
+
+/// An output's saved header-strip preference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderPref {
+    /// The strip is shown.
+    Shown,
+    /// The strip is hidden.
+    Hidden,
+}
+
+impl HeaderPref {
+    /// The `header=` value.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HeaderPref::Shown => "shown",
+            HeaderPref::Hidden => "hidden",
+        }
+    }
+
+    /// Parses a `header=` value; `None` for anything unrecognised.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "shown" => Some(HeaderPref::Shown),
+            "hidden" => Some(HeaderPref::Hidden),
+            _ => None,
+        }
+    }
+
+    /// The preference for a strip that is (`true`) or is not visible.
+    #[must_use]
+    pub fn from_visible(visible: bool) -> Self {
+        if visible {
+            HeaderPref::Shown
+        } else {
+            HeaderPref::Hidden
+        }
+    }
+
+    /// Whether the strip is shown.
+    #[must_use]
+    pub fn is_shown(self) -> bool {
+        self == HeaderPref::Shown
+    }
 }
 
 /// The open workspaces per output plus the focused output.
@@ -75,11 +121,8 @@ impl Session {
             if let Some(f) = &out.focused {
                 node.push(KdlEntry::new_prop("focused", f.as_str()));
             }
-            if let Some(shown) = out.header {
-                node.push(KdlEntry::new_prop(
-                    "header",
-                    if shown { "shown" } else { "hidden" },
-                ));
+            if let Some(pref) = out.header {
+                node.push(KdlEntry::new_prop("header", pref.as_str()));
             }
             doc.nodes_mut().push(node);
         }
@@ -140,16 +183,13 @@ impl Session {
                 }
                 "output" => {
                     let mut focused = None;
-                    let mut header = None;
+                    let (mut header, mut header_seen) = (None, false);
                     for e in node.entries().iter() {
                         let Some(key) = e.name() else { continue };
-                        if key.value() == "header" && header.is_none() {
+                        if key.value() == "header" && !header_seen {
                             // Lenient: an unknown or non-string value is ignored, never fatal.
-                            header = Some(match e.value().as_string() {
-                                Some("shown") => Some(true),
-                                Some("hidden") => Some(false),
-                                _ => None,
-                            });
+                            header_seen = true;
+                            header = e.value().as_string().and_then(HeaderPref::parse);
                             continue;
                         }
                         if key.value() != "focused" || focused.is_some() {
@@ -176,7 +216,7 @@ impl Session {
                         output: output.clone(),
                         workspaces: workspaces.to_vec(),
                         focused,
-                        header: header.flatten(),
+                        header,
                     });
                 }
                 other => {
@@ -214,10 +254,10 @@ impl Session {
     }
 }
 
-/// The header preferences recorded in `record`: connector name to shown, for outputs that carry
-/// one. Read from the raw record, independent of [`plan_restore`]. Pure.
+/// The header preferences recorded in `record`, by connector name, for outputs that carry one.
+/// Read from the raw record, independent of [`plan_restore`]. Pure.
 #[must_use]
-pub fn header_prefs(record: &Session) -> BTreeMap<String, bool> {
+pub fn header_prefs(record: &Session) -> BTreeMap<String, HeaderPref> {
     record
         .outputs
         .iter()
@@ -231,16 +271,16 @@ pub fn header_prefs(record: &Session) -> BTreeMap<String, bool> {
 #[must_use]
 pub fn with_header_prefs(
     mut outputs: Vec<OutputSession>,
-    prefs: &BTreeMap<String, bool>,
+    prefs: &BTreeMap<String, HeaderPref>,
 ) -> Vec<OutputSession> {
     for out in &mut outputs {
         out.header = prefs.get(&out.output).copied();
     }
-    for (name, shown) in prefs {
+    for (name, pref) in prefs {
         if !outputs.iter().any(|o| &o.output == name) {
             outputs.push(OutputSession {
                 output: name.clone(),
-                header: Some(*shown),
+                header: Some(*pref),
                 ..OutputSession::default()
             });
         }
@@ -349,9 +389,9 @@ mod tests {
     #[test]
     fn header_property_round_trips_and_old_records_parse() {
         let mut shown = out("DP-1", &["a"], Some("a"));
-        shown.header = Some(true);
+        shown.header = Some(HeaderPref::Shown);
         let mut hidden = out("HDMI-A-1", &[], None);
-        hidden.header = Some(false);
+        hidden.header = Some(HeaderPref::Hidden);
         let s = Session {
             outputs: vec![shown, hidden, out("eDP-1", &["b"], None)],
             focused_output: None,
@@ -385,15 +425,15 @@ mod tests {
         // Read from the raw record, even for an output with no workspaces.
         let prefs = header_prefs(&record);
         assert_eq!(prefs.len(), 2);
-        assert!(prefs["DP-1"]);
-        assert!(!prefs["HDMI-A-1"]);
+        assert!(prefs["DP-1"].is_shown());
+        assert!(!prefs["HDMI-A-1"].is_shown());
         // Only DP-1 connected: HDMI-A-1's preference is carried as a workspace-less record.
         let outs = with_header_prefs(vec![out("DP-1", &["a"], None)], &prefs);
         assert_eq!(outs.len(), 2);
-        assert_eq!(outs[0].header, Some(true));
+        assert_eq!(outs[0].header, Some(HeaderPref::Shown));
         assert_eq!(outs[1].output, "HDMI-A-1");
         assert!(outs[1].workspaces.is_empty());
-        assert_eq!(outs[1].header, Some(false));
+        assert_eq!(outs[1].header, Some(HeaderPref::Hidden));
         // The carried-forward record re-parses and plan_restore ignores it.
         let text = Session {
             outputs: outs,

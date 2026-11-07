@@ -36,11 +36,10 @@ impl PlacementState {
         is_queued(self.pending.values(), id)
     }
 
-    /// Whether a pending `run-on` placement targets workspace `ws`.
-    pub(super) fn targets_workspace(&self, ws: WorkspaceId) -> bool {
-        self.pending
-            .values()
-            .any(|p| p.target == Target::Workspace(ws))
+    /// Whether a pending placement lands in workspace `ws` ([`Target::lands_in`]).
+    pub(super) fn lands_in(&self, world: &World, ws: WorkspaceId) -> bool {
+        let panes = world.workspace(ws).map(|w| w.panes()).unwrap_or_default();
+        self.pending.values().any(|p| p.target.lands_in(ws, &panes))
     }
 }
 
@@ -112,6 +111,16 @@ impl Target {
             // A `run-on` target resolves its pane at map time, so it holds no pane now (and so is
             // not part of the restore save gate).
             Target::Overlay | Target::WarmOverlay | Target::Workspace(_) => None,
+        }
+    }
+
+    /// Whether the placement lands in workspace `ws`, whose panes are `panes`: a pane target in
+    /// one of them, or a `run-on` into `ws`.
+    #[must_use]
+    pub fn lands_in(&self, ws: WorkspaceId, panes: &[PaneId]) -> bool {
+        match self {
+            Target::Workspace(w) => *w == ws,
+            _ => self.pane().is_some_and(|pane| panes.contains(&pane)),
         }
     }
 }
@@ -339,6 +348,95 @@ pub fn pending_in<'a>(panes: &[PaneId], mut targets: impl Iterator<Item = &'a Ta
     targets.any(|t| t.pane().is_some_and(|pane| panes.contains(&pane)))
 }
 
+/// Where a new toplevel lands: `pane` at stack `index`, with its restore entry and stack focus;
+/// `lost` is the loss window whose reservation it fills.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Placement {
+    /// The pane.
+    pub pane: PaneId,
+    /// The stack index.
+    pub index: usize,
+    /// The restore placement entry (`placed`) it takes.
+    pub saved_index: Option<usize>,
+    /// Whether it becomes the pane's focused window.
+    pub focused: bool,
+    /// The lost window it replaces in the pane's reservation.
+    pub lost: Option<WindowId>,
+}
+
+/// Where `target` lands now; `None` when its pane (or `run-on` workspace) is gone, or for an
+/// overlay. A restore target into a missing pane still resolves (index 0; the map then fails).
+#[must_use]
+pub fn resolve(world: &World, placement: &PlacementState, target: Target) -> Option<Placement> {
+    let (pane, index, saved_index, focused, lost) = match target {
+        Target::Lost(LostSlot {
+            pane,
+            lost,
+            focused,
+            saved_index,
+        }) => {
+            let live = world.pane(pane)?.windows();
+            let index = (placement.reserved.get(&pane))
+                .map_or(live.len(), |order| reserved_index(order, lost, live));
+            (pane, index, saved_index, focused, Some(lost))
+        }
+        Target::Pane {
+            pane,
+            saved_index,
+            focused,
+        } => {
+            let live = world.pane(pane).map_or(&[][..], |p| p.windows());
+            let placed = placement.placed.get(&pane).into_iter().flatten();
+            let saved = placed.filter(|(w, _)| live.contains(w)).map(|(_, i)| *i);
+            (
+                pane,
+                insert_index(saved, saved_index),
+                Some(saved_index),
+                focused,
+                None,
+            )
+        }
+        Target::Workspace(ws) => {
+            let (pane, index, focused) = run_on_slot(world, ws)?;
+            (pane, index, None, focused, None)
+        }
+        Target::Slot(Slot {
+            pane,
+            index,
+            focused,
+            saved_index,
+        }) => {
+            let index = slot_index(index, world.pane(pane)?.windows().len());
+            (pane, index, saved_index, focused, None)
+        }
+        Target::Overlay | Target::WarmOverlay => return None,
+    };
+    Some(Placement {
+        pane,
+        index,
+        saved_index,
+        focused,
+        lost,
+    })
+}
+
+/// Puts the mapped placeholder `id` in the reservation `order` in its lost window's place.
+pub fn fill_reservation(order: &mut [WindowId], lost: WindowId, id: WindowId) {
+    for w in order.iter_mut().filter(|w| **w == lost) {
+        *w = id;
+    }
+}
+
+/// A new window's class: a terminal when client `pid` is a CDE terminal spawn, else an app.
+#[must_use]
+pub fn classify_class(pid: Option<u32>, is_terminal_spawn: impl Fn(u32) -> bool) -> WindowClass {
+    if pid.is_some_and(is_terminal_spawn) {
+        WindowClass::Terminal
+    } else {
+        WindowClass::App
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     pub(super) fn workspace_has_pending(&self, ws: WorkspaceId) -> bool {
         let Some(w) = self.layout.world.workspace(ws) else {
@@ -407,11 +505,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         // The class must be known before the first placement (every mapping path applies the
         // layout), so the window's first rect already honours terminal vs app.
-        let class = if pid.is_some_and(|p| self.persist.spawn.is_terminal_spawn(p)) {
-            WindowClass::Terminal
-        } else {
-            WindowClass::App
-        };
+        let class = classify_class(pid, |p| self.persist.spawn.is_terminal_spawn(p));
         let meta = WindowMeta {
             pid,
             class,
@@ -427,51 +521,73 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.store_warm(element, pid);
                 return;
             }
-            Some(Target::Pane {
-                pane,
-                saved_index,
-                focused,
-            }) => self.map_placed(element, pane, saved_index, focused, meta),
-            Some(Target::Slot(slot)) => self.map_slot(element, slot, meta),
-            Some(Target::Lost(slot)) => self.map_lost(element, slot, meta),
-            Some(Target::Workspace(ws)) => self.map_run_on(element, ws, meta),
+            Some(target) => self.map_target(element, target, meta),
             None => self.map_managed_window(element, meta),
         };
         self.init_recovery(id);
     }
 
-    /// Maps a loss placeholder into the slot reserved for its lost window (plan 03, M1), then
-    /// puts its own id in the reservation in the lost window's place.
-    fn map_lost(&mut self, element: WindowElement, slot: LostSlot, meta: WindowMeta) -> WindowId {
-        let LostSlot {
+    /// Maps a new toplevel into its pending `target` ([`resolve`]). A target whose pane or
+    /// workspace is gone falls back to the focused pane (a lost window's pane also drops its
+    /// reservation); a pane target first prunes its `placed` entries to the live stack.
+    fn map_target(&mut self, element: WindowElement, target: Target, meta: WindowMeta) -> WindowId {
+        if let Target::Pane { pane, .. } = target {
+            let world = &self.layout.world;
+            let live = world.pane(pane).map_or(&[][..], |p| p.windows());
+            let placed = self.persist.placement.placed.entry(pane).or_default();
+            placed.retain(|(w, _)| live.contains(w));
+        }
+        if let Some(placement) = resolve(&self.layout.world, &self.persist.placement, target) {
+            let label = match target {
+                Target::Lost(_) => "loss",
+                Target::Pane { .. } => "restore",
+                Target::Workspace(_) => "run-on",
+                _ => "relaunch",
+            };
+            return self.map_at(element, meta, placement, label);
+        }
+        match target {
+            Target::Lost(LostSlot { pane, .. }) => {
+                warn!(?pane, "lost window's pane is gone; using the focused pane");
+                self.persist.placement.reserved.remove(&pane);
+            }
+            Target::Workspace(ws) => warn!(?ws, "run-on workspace is gone; using the focused pane"),
+            Target::Slot(Slot { pane, .. }) => {
+                warn!(?pane, "relaunch pane is gone; using the focused pane");
+            }
+            _ => {}
+        }
+        self.map_managed_window(element, meta)
+    }
+
+    /// Maps a new toplevel at `placement`, then fills a loss reservation and records its saved
+    /// index and stack focus; a failed placement (`label` names it) uses the focused pane.
+    fn map_at(
+        &mut self,
+        element: WindowElement,
+        meta: WindowMeta,
+        placement: Placement,
+        label: &str,
+    ) -> WindowId {
+        let Placement {
             pane,
-            lost,
-            focused,
+            index,
             saved_index,
-        } = slot;
-        let Some(live) = self.layout.world.pane(pane).map(|p| p.windows().to_vec()) else {
-            warn!(?pane, "lost window's pane is gone; using the focused pane");
-            self.persist.placement.reserved.remove(&pane);
-            return self.map_managed_window(element, meta);
-        };
-        let index = self
-            .persist
-            .placement
-            .reserved
-            .get(&pane)
-            .map_or(live.len(), |order| reserved_index(order, lost, &live));
+            focused,
+            lost,
+        } = placement;
         match self.map_managed_window_at(element.clone(), meta.clone(), pane, index) {
             Ok(id) => {
-                if let Some(order) = self.persist.placement.reserved.get_mut(&pane) {
-                    for w in order.iter_mut().filter(|w| **w == lost) {
-                        *w = id;
-                    }
+                if let (Some(lost), Some(order)) =
+                    (lost, self.persist.placement.reserved.get_mut(&pane))
+                {
+                    fill_reservation(order, lost, id);
                 }
                 self.finish_placement(pane, id, saved_index, focused);
                 id
             }
             Err(err) => {
-                warn!(%err, "loss placement failed; using the focused pane");
+                warn!(%err, "{label} placement failed; using the focused pane");
                 self.map_managed_window(element, meta)
             }
         }
@@ -523,35 +639,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
         })
     }
 
-    pub(super) fn map_placed(
-        &mut self,
-        element: WindowElement,
-        pane: PaneId,
-        saved_index: usize,
-        focused: bool,
-        meta: WindowMeta,
-    ) -> WindowId {
-        let live: Vec<WindowId> = self
-            .layout
-            .world
-            .pane(pane)
-            .map(|p| p.windows().to_vec())
-            .unwrap_or_default();
-        let placed = self.persist.placement.placed.entry(pane).or_default();
-        placed.retain(|(w, _)| live.contains(w));
-        let index = insert_index(placed.iter().map(|(_, i)| *i), saved_index);
-        match self.map_managed_window_at(element.clone(), meta.clone(), pane, index) {
-            Ok(id) => {
-                self.finish_placement(pane, id, Some(saved_index), focused);
-                id
-            }
-            Err(err) => {
-                warn!(%err, "restore placement failed; using the focused pane");
-                self.map_managed_window(element, meta)
-            }
-        }
-    }
-
     /// Records a placed window's saved index (if any) and applies its stack focus.
     pub(super) fn finish_placement(
         &mut self,
@@ -576,64 +663,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 .and_then(|p| p.windows().iter().position(|w| *w == id));
             if let Some(pos) = pos {
                 let _ = self.with_model(|w| w.set_stack_focus(pane, pos));
-            }
-        }
-    }
-
-    /// Maps a `run-on` window into workspace `ws` ([`run_on_slot`]); no output's active workspace
-    /// changes. A workspace gone by map time falls back to the focused pane.
-    fn map_run_on(
-        &mut self,
-        element: WindowElement,
-        ws: WorkspaceId,
-        meta: WindowMeta,
-    ) -> WindowId {
-        let Some((pane, index, focused)) = run_on_slot(&self.layout.world, ws) else {
-            warn!(?ws, "run-on workspace is gone; using the focused pane");
-            return self.map_managed_window(element, meta);
-        };
-        match self.map_managed_window_at(element.clone(), meta.clone(), pane, index) {
-            Ok(id) => {
-                self.finish_placement(pane, id, None, focused);
-                id
-            }
-            Err(err) => {
-                warn!(%err, "run-on placement failed; using the focused pane");
-                self.map_managed_window(element, meta)
-            }
-        }
-    }
-
-    /// Maps a relaunched app into the slot its placeholder held (clamped to the live stack).
-    pub(super) fn map_slot(
-        &mut self,
-        element: WindowElement,
-        slot: Slot,
-        meta: WindowMeta,
-    ) -> WindowId {
-        let Slot {
-            pane,
-            index,
-            focused,
-            saved_index,
-        } = slot;
-        let Some(live_len) = self.layout.world.pane(pane).map(|p| p.windows().len()) else {
-            warn!(?pane, "relaunch pane is gone; using the focused pane");
-            return self.map_managed_window(element, meta);
-        };
-        match self.map_managed_window_at(
-            element.clone(),
-            meta.clone(),
-            pane,
-            slot_index(index, live_len),
-        ) {
-            Ok(id) => {
-                self.finish_placement(pane, id, saved_index, focused);
-                id
-            }
-            Err(err) => {
-                warn!(%err, "relaunch placement failed; using the focused pane");
-                self.map_managed_window(element, meta)
             }
         }
     }
@@ -668,7 +697,7 @@ fn terminate_with(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crucible_layout::World;
     use std::collections::HashSet;
@@ -694,6 +723,89 @@ mod tests {
         )));
         assert!(!terminate(0));
         assert!(!terminate(u32::MAX));
+    }
+
+    /// Each target resolves against the live model; a gone pane or workspace is `None` (the
+    /// caller's "is gone" fallback), except a restore target, which keeps index 0.
+    #[test]
+    fn resolve_places_each_target_or_reports_it_gone() {
+        let mut w = World::new("1");
+        let pane = w.focused_pane_id();
+        let (a, b) = (w.open_window(), w.open_window());
+        let gone = PaneId::from_raw(999);
+        // `lost` is no longer live; it keeps its reserved slot between `a` and `b`.
+        let lost = WindowId::from_raw(999);
+        let mut st = PlacementState::default();
+        st.reserved.insert(pane, vec![a, lost, b]);
+        let lost_at = |pane| {
+            Target::Lost(LostSlot {
+                pane,
+                lost,
+                focused: true,
+                saved_index: Some(1),
+            })
+        };
+        let got = resolve(&w, &st, lost_at(pane)).unwrap();
+        assert_eq!((got.pane, got.index, got.lost), (pane, 1, Some(lost)));
+        assert_eq!((got.saved_index, got.focused), (Some(1), true));
+        assert_eq!(resolve(&w, &st, lost_at(gone)), None);
+        let slot = |pane| {
+            Target::Slot(Slot {
+                pane,
+                index: 9,
+                focused: false,
+                saved_index: None,
+            })
+        };
+        assert_eq!(resolve(&w, &st, slot(pane)).map(|p| p.index), Some(2));
+        assert_eq!(resolve(&w, &st, slot(gone)), None);
+        st.placed.insert(pane, vec![(a, 0), (lost, 1), (b, 4)]);
+        let restore = |pane| Target::Pane {
+            pane,
+            saved_index: 2,
+            focused: false,
+        };
+        // The dead `lost` entry is not counted: after `a` (0), before `b` (4).
+        let got = resolve(&w, &st, restore(pane)).unwrap();
+        assert_eq!((got.index, got.saved_index, got.lost), (1, Some(2), None));
+        assert_eq!(resolve(&w, &st, restore(gone)).map(|p| p.index), Some(0));
+        let ws = w.active_workspace_id();
+        let run_on = resolve(&w, &st, Target::Workspace(ws)).unwrap();
+        assert_eq!(
+            (run_on.pane, run_on.index, run_on.saved_index),
+            (pane, 2, None)
+        );
+        assert_eq!(
+            resolve(&w, &st, Target::Workspace(WorkspaceId::from_raw(99))),
+            None
+        );
+        assert_eq!(resolve(&w, &st, Target::Overlay), None);
+        assert_eq!(resolve(&w, &st, Target::WarmOverlay), None);
+    }
+
+    #[test]
+    fn lands_in_matches_pane_targets_and_run_on_into_the_workspace() {
+        let w = World::new("1");
+        let ws = w.active_workspace_id();
+        let pane = w.focused_pane_id();
+        let other_ws = WorkspaceId::from_raw(99);
+        let restore = Target::Pane {
+            pane,
+            saved_index: 0,
+            focused: false,
+        };
+        assert!(restore.lands_in(ws, &[pane]));
+        assert!(!restore.lands_in(ws, &[]));
+        assert!(Target::Workspace(ws).lands_in(ws, &[]));
+        assert!(!Target::Workspace(other_ws).lands_in(ws, &[pane]));
+        assert!(!Target::Overlay.lands_in(ws, &[pane]));
+        let mut st = PlacementState::default();
+        assert!(!st.lands_in(&w, ws));
+        st.pending
+            .insert(1, Pending::new(Target::Workspace(ws), Instant::now()));
+        assert!(st.lands_in(&w, ws) && !st.lands_in(&w, other_ws));
+        st.pending.insert(1, Pending::new(restore, Instant::now()));
+        assert!(st.lands_in(&w, ws) && !st.lands_in(&w, other_ws));
     }
 
     #[test]
@@ -784,7 +896,7 @@ mod tests {
         }
     }
 
-    fn ids(n: usize) -> Vec<WindowId> {
+    pub(in super::super) fn ids(n: usize) -> Vec<WindowId> {
         let mut w = World::new("1");
         (0..n).map(|_| w.open_window()).collect()
     }
@@ -920,14 +1032,14 @@ mod tests {
 
     /// The thin clients C1, C2 of one daemon D, their roots R1, R2 (children of D).
     const D: u32 = 600;
-    const C1: u32 = 500;
+    pub(in super::super) const C1: u32 = 500;
     const C2: u32 = 501;
-    const R1: u32 = 601;
+    pub(in super::super) const R1: u32 = 601;
     const R2: u32 = 602;
 
-    fn bound(spawn_pid: u32, root_pid: u32) -> WindowIdentity {
+    pub(in super::super) fn bound(spawn_pid: u32, root_pid: u32) -> WindowIdentity {
         WindowIdentity {
-            id: u64::from(spawn_pid),
+            id: spawn_pid,
             spawn_pid,
             root_pid,
             session: None,
@@ -958,11 +1070,7 @@ mod tests {
             assert_eq!(pid, identity.spawn_pid);
             let key = match_pending(pid, &[1], |k| pending.contains_key(&k)).unwrap();
             assert_eq!(pending.remove(&key), Some(target(want)));
-            let class = if terminal_spawns.contains(&pid) {
-                WindowClass::Terminal
-            } else {
-                WindowClass::App
-            };
+            let class = classify_class(Some(pid), |p| terminal_spawns.contains(&p));
             assert_eq!(class, WindowClass::Terminal);
         }
         assert!(pending.is_empty());
@@ -991,203 +1099,24 @@ mod tests {
         assert_eq!(relaunch_window_pid(D, &[1], &windows), None);
         assert_eq!(relaunch_window_pid(801, &[D, 1], &windows), None);
     }
-    // ---- loss recovery (crucible-term plan 03) --------------------------------------------------
-
-    use super::super::identity::{ClientLink, Destruction, classify_destruction};
-    use crucible_persist::WindowRecord;
-    use std::ffi::OsString;
-    use std::path::{Path, PathBuf};
-
-    fn keyed_terminal(cwd: &str, command: Option<&str>, key: &str) -> WindowRecord {
-        WindowRecord::Terminal {
-            cwd: cwd.into(),
-            command: command.map(str::to_string),
-            session: Some(key.into()),
-        }
-    }
-
-    fn lost_job(record: &WindowRecord) -> Option<crucible_persist::SpawnJob> {
-        crucible_persist::prepare_lost(
-            record,
-            None,
-            Ok(PathBuf::from("/bin/crucible")),
-            None,
-            "-e",
-            |_: &Path| true,
-        )
-        .expect("crucible path")
-    }
-
-    fn os(a: &[&str]) -> Vec<OsString> {
-        a.iter().map(OsString::from).collect()
-    }
-
-    /// Loses `lost` from `stack` (each reserved against the live stack before it closes), then maps
-    /// their placeholders `new` in `arrival` order; returns the final live stack.
-    fn lose_and_replace(
-        stack: &[WindowId],
-        lost: &[WindowId],
-        new: &[WindowId],
-        arrival: &[usize],
-    ) -> Vec<WindowId> {
-        let mut live = stack.to_vec();
-        let mut order: Option<Vec<WindowId>> = None;
-        for l in lost {
-            order = Some(reserve(order.as_deref(), &live));
-            live.retain(|w| w != l);
-        }
-        let mut order = order.expect("one loss");
-        for &k in arrival {
-            let index = reserved_index(&order, lost[k], &live);
-            live.insert(index, new[k]);
-            for w in order.iter_mut().filter(|w| **w == lost[k]) {
-                *w = new[k];
-            }
-        }
-        live
-    }
-
-    #[test]
-    fn disconnect_then_destroy_is_a_loss_with_a_placeholder_in_the_same_slot() {
-        let client = crate::state::ClientState::default();
-        let identity = WindowIdentity {
-            client: client.link.clone(),
-            ..bound(C1, R1)
-        };
-        assert_eq!(classify_destruction(Some(&identity)), Destruction::Close);
-        client.link.mark_disconnected();
-        assert_eq!(classify_destruction(Some(&identity)), Destruction::Lost);
-        let record = keyed_terminal("/p", Some("htop"), "k1");
-        let job = lost_job(&record).expect("a terminal always has a placeholder");
-        assert_eq!(
-            job.args,
-            os(&[
-                "-e",
-                "/bin/crucible",
-                "resume",
-                "--lost",
-                "--cwd",
-                "/p",
-                "--",
-                "htop"
-            ])
-        );
-        assert_eq!(job.dir, PathBuf::from("/p"));
-        // The origin carries the key, which the spawn re-exports (`session_for_spawn`).
-        assert_eq!(job.origin, record);
-        let w = ids(6);
-        let (a, t, b) = (w[0], w[1], w[2]);
-        assert_eq!(
-            lose_and_replace(&[a, t, b], &[t], &[w[3]], &[0]),
-            [a, w[3], b]
-        );
-    }
-
-    #[test]
-    fn destroy_without_disconnect_is_todays_close() {
-        assert_eq!(classify_destruction(None), Destruction::Close);
-        let identity = bound(C1, R1);
-        assert!(!identity.client.is_disconnected());
-        assert_eq!(classify_destruction(Some(&identity)), Destruction::Close);
-        // A link only reports its own client: another client's disconnect does not leak.
-        let other = ClientLink::default();
-        other.mark_disconnected();
-        assert_eq!(classify_destruction(Some(&identity)), Destruction::Close);
-    }
-
-    #[test]
-    fn a_window_lost_before_its_first_save_has_its_map_time_record() {
-        // At map the record is the spawn origin with the identity's key; no save has run.
-        let origin = WindowRecord::Terminal {
-            cwd: "/q".into(),
-            command: None,
-            session: None,
-        };
-        let record = origin.with_session(Some("k2".into()));
-        assert_eq!(record, keyed_terminal("/q", None, "k2"));
-        let job = lost_job(&record).expect("placeholder");
-        // An idle shell still gets the lost banner (and then its shell at once).
-        assert_eq!(
-            job.args,
-            os(&["-e", "/bin/crucible", "resume", "--lost", "--cwd", "/q"])
-        );
-    }
-
-    #[test]
-    fn mixed_stack_keeps_every_slot_for_one_or_two_losses_in_either_order() {
-        let w = ids(7);
-        let (a1, t, a2) = (w[0], w[1], w[2]);
-        let (n1, n2) = (w[3], w[4]);
-        let stack = [a1, t, a2];
-        assert_eq!(lose_and_replace(&stack, &[t], &[n1], &[0]), [a1, n1, a2]);
-        assert_eq!(lose_and_replace(&stack, &[a1], &[n1], &[0]), [n1, t, a2]);
-        assert_eq!(lose_and_replace(&stack, &[a2], &[n1], &[0]), [a1, t, n1]);
-        for arrival in [[0, 1], [1, 0]] {
-            assert_eq!(
-                lose_and_replace(&stack, &[a1, t], &[n1, n2], &arrival),
-                [n1, n2, a2]
-            );
-            assert_eq!(
-                lose_and_replace(&stack, &[a1, a2], &[n1, n2], &arrival),
-                [n1, t, n2]
-            );
-            assert_eq!(
-                lose_and_replace(&stack, &[t, a2], &[n1, n2], &arrival),
-                [a1, n1, n2]
-            );
-        }
-    }
-
-    #[test]
-    fn a_bound_relaunch_placeholder_lost_comes_back_as_a_relaunch_placeholder() {
-        let app = WindowRecord::App {
-            app_id: Some("org.x".into()),
-            cmdline: Some("firefox".into()),
-        };
-        let job = lost_job(&app).expect("relaunch placeholder");
-        assert_eq!(
-            job.args,
-            os(&[
-                "-e",
-                "/bin/crucible",
-                "relaunch",
-                "--app-id",
-                "org.x",
-                "--",
-                "firefox"
-            ])
-        );
-        assert_eq!(job.origin, app);
-    }
-
-    #[test]
-    fn workspace_is_held_while_the_placeholder_is_pending_and_freed_after_it_maps() {
-        let w = ids(4);
-        let (a, t, b, n) = (w[0], w[1], w[2], w[3]);
-        let pane = PaneId::from_raw(9);
-        let other = PaneId::from_raw(10);
-        let target = Target::Lost(LostSlot {
-            pane,
-            lost: t,
-            focused: false,
-            saved_index: None,
-        });
-        assert!(pending_in(&[other, pane], [target].iter()));
-        assert!(!pending_in(&[other], [target].iter()));
-        // Mapped: its pending entry is gone, so the save runs, with the placeholder in place.
-        assert!(!pending_in(&[other, pane], std::iter::empty()));
-        assert_eq!(lose_and_replace(&[a, t, b], &[t], &[n], &[0]), [a, n, b]);
-    }
 }
 
 #[cfg(test)]
 mod run_on_tests {
-    use super::run_on_slot;
+    use super::{Placement, PlacementState, Target, resolve};
     use crucible_layout::{WindowId, WorkspaceId, WorkspaceLayout, World};
 
-    /// Maps one `run-on` window into `ws` as `map_run_on` does, through the model only.
+    /// Maps one `run-on` window into `ws` through [`resolve`] (as `map_new_window` does) and the
+    /// model ops.
     fn map(world: &mut World, ws: WorkspaceId) -> WindowId {
-        let (pane, index, focused) = run_on_slot(world, ws).unwrap();
+        let Placement {
+            pane,
+            index,
+            focused,
+            saved_index,
+            lost,
+        } = resolve(world, &PlacementState::default(), Target::Workspace(ws)).unwrap();
+        assert_eq!((saved_index, lost), (None, None));
         let id = world.open_window_at(pane, index).unwrap();
         if focused {
             world.set_stack_focus(pane, index).unwrap();

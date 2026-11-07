@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crucible_config::{HeaderMode, HeaderStart, Rgb};
 use crucible_layout::{OutputId, Rect, WorkspaceId};
+use crucible_persist::session::HeaderPref;
 
 use crate::{
     layout::model_output_id,
@@ -148,8 +149,8 @@ pub fn toggled_visible(mode: HeaderMode, visible: bool) -> bool {
 
 /// A newly known output's initial `toggle`-mode visibility: the saved preference, else `start`.
 #[must_use]
-pub fn seed_visible(pref: Option<bool>, start: HeaderStart) -> bool {
-    pref.unwrap_or_else(|| start.is_shown())
+pub fn seed_visible(pref: Option<HeaderPref>, start: HeaderStart) -> bool {
+    pref.map_or_else(|| start.is_shown(), HeaderPref::is_shown)
 }
 
 // ---- compositor glue -------------------------------------------------------------------------
@@ -159,10 +160,10 @@ pub fn seed_visible(pref: Option<bool>, start: HeaderStart) -> bool {
 pub struct HeaderState {
     /// The `toggle`-mode state: the outputs whose strip is currently shown (absent = hidden).
     shown: BTreeSet<OutputId>,
-    /// The saved preference per connector name (shown = `true`), loaded from `session.kdl` at
+    /// The saved preference per connector name, loaded from `session.kdl` at
     /// startup and updated on every toggle. Holds disconnected connectors too, so an unplug,
     /// a workspace-less output or `restore-session off` never loses it.
-    pub prefs: BTreeMap<String, bool>,
+    pub prefs: BTreeMap<String, HeaderPref>,
     /// Buttons whose press the strip consumed.
     pub consumed: ConsumedButtons,
     /// The label press being tracked as a possible drag.
@@ -196,7 +197,8 @@ impl HeaderState {
 
     /// Records `name`'s preference; returns whether the stored map changed.
     pub fn remember(&mut self, name: &str, visible: bool) -> bool {
-        self.prefs.insert(name.to_string(), visible) != Some(visible)
+        let pref = HeaderPref::from_visible(visible);
+        self.prefs.insert(name.to_string(), pref) != Some(pref)
     }
 }
 
@@ -554,8 +556,8 @@ mod tests {
     #[test]
     fn seed_precedence_is_pref_then_start_then_hidden() {
         use HeaderStart::{Hidden, Shown};
-        assert!(seed_visible(Some(true), Hidden));
-        assert!(!seed_visible(Some(false), Shown));
+        assert!(seed_visible(Some(HeaderPref::Shown), Hidden));
+        assert!(!seed_visible(Some(HeaderPref::Hidden), Shown));
         assert!(seed_visible(None, Shown));
         assert!(!seed_visible(None, Hidden));
     }
@@ -564,7 +566,7 @@ mod tests {
     fn seed_uses_pref_and_does_not_record_one() {
         let (a, b) = (OutputId::from_raw(1), OutputId::from_raw(2));
         let mut st = HeaderState::default();
-        st.prefs.insert("DP-1".into(), true);
+        st.prefs.insert("DP-1".into(), HeaderPref::Shown);
         st.seed(a, "DP-1", HeaderStart::Hidden);
         st.seed(b, "HDMI-A-1", HeaderStart::Shown);
         assert!(st.is_visible(a) && st.is_visible(b));

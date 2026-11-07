@@ -73,21 +73,37 @@ impl SpawnRegistry {
 /// Grant lookup scans the live records (a handful of spawns; no second index to keep in sync with
 /// reap): a reaped spawn's grant is gone with its record, a used one is `None`.
 impl crate::persist::identity::Grants for SpawnRegistry {
-    fn lookup(&self, grant: &str) -> Option<(u32, PathBuf)> {
+    fn lookup(&self, token: &str) -> Option<(u32, PathBuf)> {
         self.by_pid.iter().find_map(|(pid, s)| {
-            (s.record.grant.as_deref() == Some(grant))
-                .then(|| s.record.exe.clone().map(|exe| (*pid, exe)))
-                .flatten()
+            let grant = s.record.grant.as_ref()?;
+            (grant.token.as_deref() == Some(token)).then(|| (*pid, grant.exe.clone()))
         })
     }
 
-    fn consume(&mut self, grant: &str) {
-        for s in self.by_pid.values_mut() {
-            if s.record.grant.as_deref() == Some(grant) {
-                s.record.grant = None;
+    fn consume(&mut self, token: &str) {
+        for grant in self
+            .by_pid
+            .values_mut()
+            .filter_map(|s| s.record.grant.as_mut())
+        {
+            if grant.token.as_deref() == Some(token) {
+                grant.token = None;
             }
         }
     }
+}
+
+/// The window-identity grant of a `cterm` terminal spawn, minted together with its canonical
+/// executable and session key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grant {
+    /// The single-use token (`CRUCIBLE_WINDOW_GRANT`); `None` once a bind consumed it.
+    pub token: Option<String>,
+    /// The canonical executable resolved at mint, which a binding peer must run.
+    pub exe: PathBuf,
+    /// The `CRUCIBLE_TERM_SESSION` key exported with the grant (32 lowercase hex chars), copied
+    /// into the window's identity at bind (after the token is consumed).
+    pub session: Option<String>,
 }
 
 /// What a CDE-spawned process is, remembered per PID so a mapped window can be classified.
@@ -115,14 +131,9 @@ pub struct SpawnRecord {
     /// The saved record this spawn stands for (a restored window, or a relaunched app), carried
     /// to map time so capture records it instead of reverse-engineering CDE's own wrappers.
     pub origin: Option<WindowRecord>,
-    /// The single-use window-identity grant (`CRUCIBLE_WINDOW_GRANT`) of a `cterm` terminal spawn;
-    /// `None` once a bind consumed it, and gone with the record on reap.
-    pub grant: Option<String>,
-    /// The canonical executable resolved at mint, which a binding peer must run.
-    pub exe: Option<PathBuf>,
-    /// The `CRUCIBLE_TERM_SESSION` key exported with the grant (32 lowercase hex chars), copied
-    /// into the window's identity at bind. Only a granted `cterm` spawn carries one.
-    pub session: Option<String>,
+    /// The window-identity grant of a granted `cterm` terminal spawn; gone with the record on
+    /// reap.
+    pub grant: Option<Grant>,
 }
 
 impl SpawnRecord {
@@ -136,8 +147,6 @@ impl SpawnRecord {
             epoch_ms: epoch_ms_now(),
             origin: None,
             grant: None,
-            exe: None,
-            session: None,
         }
     }
 
@@ -172,6 +181,41 @@ mod tests {
             let _ = s.child.kill();
             let _ = s.child.wait();
         }
+    }
+
+    /// A grant is found by its token until a bind consumes it; its exe and session stay.
+    #[test]
+    fn grant_lookup_and_consume_keep_exe_and_session() {
+        use crate::persist::identity::Grants;
+        let mut reg = SpawnRegistry::default();
+        let grant = Grant {
+            token: Some("t1".into()),
+            exe: PathBuf::from("/bin/cterm"),
+            session: Some("k".into()),
+        };
+        let record = SpawnRecord {
+            grant: Some(grant.clone()),
+            ..SpawnRecord::now(SpawnKind::Terminal, "cterm")
+        };
+        let pid = reg.insert(spawn("/bin/sleep", &["30"]), record);
+        let plain = reg.insert(
+            spawn("/bin/sleep", &["30"]),
+            SpawnRecord::now(SpawnKind::App, "sleep"),
+        );
+        assert_eq!(reg.lookup("t1"), Some((pid, grant.exe.clone())));
+        assert_eq!(reg.lookup("t2"), None);
+        reg.consume("t1");
+        assert_eq!(reg.lookup("t1"), None);
+        let kept = reg.get(pid).and_then(|r| r.grant.clone());
+        assert_eq!(
+            kept,
+            Some(Grant {
+                token: None,
+                ..grant
+            })
+        );
+        assert_eq!(reg.get(plain).and_then(|r| r.grant.clone()), None);
+        end_all(&mut reg);
     }
 
     #[test]

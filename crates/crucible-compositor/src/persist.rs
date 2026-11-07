@@ -205,6 +205,26 @@ fn config_mtime() -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+/// What [`CrucibleState::capture_record`] yields for a workspace.
+pub(super) enum Capture {
+    /// The record to write.
+    Record(WorkspaceRecord),
+    /// An ephemeral (`run-on`) workspace: never written.
+    Ephemeral,
+    /// No such workspace.
+    Gone,
+}
+
+impl Capture {
+    /// The record, if there is one to write.
+    pub(super) fn record(self) -> Option<WorkspaceRecord> {
+        match self {
+            Capture::Record(record) => Some(record),
+            Capture::Ephemeral | Capture::Gone => None,
+        }
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Ends a window: kill its CDE-spawned child `pid` (so a terminal never asks to confirm
     /// closing a running process), else politely ask `element` to close.
@@ -485,7 +505,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             if self.workspace_has_pending(ws) {
                 continue;
             }
-            let Some(record) = self.capture_record_from(ws, captured) else {
+            let Capture::Record(record) = self.capture_record_from(ws, captured) else {
                 continue;
             };
             if !should_write(&record, self.persist.saved.contains_key(&record.name)) {
@@ -518,6 +538,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     fn save_now(&mut self, ws: WorkspaceId) -> Result<(), String> {
         let record = self
             .capture_record(ws)
+            .record()
             .ok_or_else(|| "workspace vanished".to_string())?;
         if self.write_record(record, Instant::now()) {
             Ok(())
@@ -547,10 +568,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// The record of `ws` to write, `None` for an unknown or **ephemeral** workspace. This is the
+    /// The record of `ws` to write ([`Capture`]): never one for an unknown or **ephemeral** workspace. This is the
     /// single store-save choke point: every workspace-store write (`save_dirty`, `save_now`,
     /// close's flush, rename) captures through here, so an ephemeral workspace is never written.
-    fn capture_record(&self, ws: WorkspaceId) -> Option<WorkspaceRecord> {
+    fn capture_record(&self, ws: WorkspaceId) -> Capture {
         self.capture_record_from(ws, &HashMap::new())
     }
 
@@ -560,12 +581,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
         &self,
         ws: WorkspaceId,
         captured: &HashMap<WindowId, WindowRecord>,
-    ) -> Option<WorkspaceRecord> {
+    ) -> Capture {
         if self.persist.workspace.is_ephemeral(ws) {
-            return None;
+            return Capture::Ephemeral;
         }
         let env = capture_env();
-        let mut record = WorkspaceRecord::from_world(
+        let record = WorkspaceRecord::from_world(
             &self.layout.world,
             ws,
             self.persist.workspace.root(ws).cloned(),
@@ -575,9 +596,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     .cloned()
                     .unwrap_or_else(|| self.window_record(&env, id))
             },
-        )?;
+        );
+        let Some(mut record) = record else {
+            return Capture::Gone;
+        };
         record.output = self.persist.workspace.last_output(ws).cloned();
-        Some(record)
+        Capture::Record(record)
     }
 
     fn restore(&mut self, record: WorkspaceRecord) -> Result<(), String> {

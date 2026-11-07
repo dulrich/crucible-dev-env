@@ -513,6 +513,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             true => {
                 let record = self
                     .capture_record(ws)
+                    .record()
                     .ok_or_else(|| "workspace vanished".to_string())?;
                 Some(save_renamed(&self.persist.store_dir, record, new)?)
             }

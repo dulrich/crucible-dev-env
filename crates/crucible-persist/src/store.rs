@@ -139,7 +139,8 @@ pub fn deleted_dir(store_dir: &Path) -> PathBuf {
 /// Deletes the saved workspace `name` by moving its file to [`deleted_dir`] (created if missing,
 /// replacing an earlier trashed file of the same name). `Ok(false)` if there is no such record.
 ///
-/// Uses `rename`, falling back to copy + remove when the trash is on another filesystem (`EXDEV`).
+/// Uses `rename`, falling back to an atomic, synced write of the (UTF-8 KDL) text into the trash
+/// plus a remove when the trash is on another filesystem ([`std::io::ErrorKind::CrossesDevices`]).
 pub fn delete(dir: &Path, name: &str) -> Result<bool, PersistError> {
     let file = encode_file_name(name)?;
     let src = dir.join(&file);
@@ -150,10 +151,11 @@ pub fn delete(dir: &Path, name: &str) -> Result<bool, PersistError> {
     fs::create_dir_all(&trash).map_err(io("create directory", &trash))?;
     let dst = trash.join(&file);
     if let Err(e) = fs::rename(&src, &dst) {
-        if e.raw_os_error() != Some(18) {
+        if e.kind() != std::io::ErrorKind::CrossesDevices {
             return Err(io("rename", &src)(e));
         }
-        fs::copy(&src, &dst).map_err(io("copy", &dst))?;
+        let text = fs::read_to_string(&src).map_err(io("read", &src))?;
+        write_atomic(&trash, &dst, &text)?;
         fs::remove_file(&src).map_err(io("remove", &src))?;
     }
     Ok(true)

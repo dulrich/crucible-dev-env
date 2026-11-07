@@ -258,7 +258,7 @@ mod tests {
         const R1: u32 = 601;
         const R2: u32 = 602;
         let bound = |spawn_pid: u32, root_pid| WindowIdentity {
-            id: u64::from(spawn_pid),
+            id: spawn_pid,
             spawn_pid,
             root_pid,
             session: None,
@@ -278,5 +278,199 @@ mod tests {
             Some(ProcAnchor::Terminal(99))
         );
         assert_eq!(meta(None, None).anchor(), None);
+    }
+}
+
+/// Loss recovery (crucible-term plan 03), moved from placement's tests: the loss decision, the
+/// placeholder job and the slot reservation, through the pure seams.
+#[cfg(test)]
+mod loss_tests {
+    use super::super::WindowIdentity;
+    use super::super::placement::tests::{C1, R1, bound, ids};
+    use super::super::placement::{fill_reservation, pending_in, reserve, reserved_index};
+    use super::*;
+
+    use super::super::identity::{ClientLink, Destruction, classify_destruction};
+    use crucible_persist::WindowRecord;
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    fn keyed_terminal(cwd: &str, command: Option<&str>, key: &str) -> WindowRecord {
+        WindowRecord::Terminal {
+            cwd: cwd.into(),
+            command: command.map(str::to_string),
+            session: Some(key.into()),
+        }
+    }
+
+    fn lost_job(record: &WindowRecord) -> Option<crucible_persist::SpawnJob> {
+        crucible_persist::prepare_lost(
+            record,
+            None,
+            Ok(PathBuf::from("/bin/crucible")),
+            None,
+            "-e",
+            |_: &Path| true,
+        )
+        .expect("crucible path")
+    }
+
+    fn os(a: &[&str]) -> Vec<OsString> {
+        a.iter().map(OsString::from).collect()
+    }
+
+    /// Loses `lost` from `stack` (each reserved against the live stack before it closes), then maps
+    /// their placeholders `new` in `arrival` order; returns the final live stack.
+    fn lose_and_replace(
+        stack: &[WindowId],
+        lost: &[WindowId],
+        new: &[WindowId],
+        arrival: &[usize],
+    ) -> Vec<WindowId> {
+        let mut live = stack.to_vec();
+        let mut order: Option<Vec<WindowId>> = None;
+        for l in lost {
+            order = Some(reserve(order.as_deref(), &live));
+            live.retain(|w| w != l);
+        }
+        let mut order = order.expect("one loss");
+        for &k in arrival {
+            let index = reserved_index(&order, lost[k], &live);
+            live.insert(index, new[k]);
+            fill_reservation(&mut order, lost[k], new[k]);
+        }
+        live
+    }
+
+    #[test]
+    fn disconnect_then_destroy_is_a_loss_with_a_placeholder_in_the_same_slot() {
+        let client = crate::state::ClientState::default();
+        let identity = WindowIdentity {
+            client: client.link.clone(),
+            ..bound(C1, R1)
+        };
+        assert_eq!(classify_destruction(Some(&identity)), Destruction::Close);
+        client.link.mark_disconnected();
+        assert_eq!(classify_destruction(Some(&identity)), Destruction::Lost);
+        let record = keyed_terminal("/p", Some("htop"), "k1");
+        let job = lost_job(&record).expect("a terminal always has a placeholder");
+        assert_eq!(
+            job.args,
+            os(&[
+                "-e",
+                "/bin/crucible",
+                "resume",
+                "--lost",
+                "--cwd",
+                "/p",
+                "--",
+                "htop"
+            ])
+        );
+        assert_eq!(job.dir, PathBuf::from("/p"));
+        // The origin carries the key, which the spawn re-exports (`session_for_spawn`).
+        assert_eq!(job.origin, record);
+        let w = ids(6);
+        let (a, t, b) = (w[0], w[1], w[2]);
+        assert_eq!(
+            lose_and_replace(&[a, t, b], &[t], &[w[3]], &[0]),
+            [a, w[3], b]
+        );
+    }
+
+    #[test]
+    fn destroy_without_disconnect_is_todays_close() {
+        assert_eq!(classify_destruction(None), Destruction::Close);
+        let identity = bound(C1, R1);
+        assert!(!identity.client.is_disconnected());
+        assert_eq!(classify_destruction(Some(&identity)), Destruction::Close);
+        // A link only reports its own client: another client's disconnect does not leak.
+        let other = ClientLink::default();
+        other.mark_disconnected();
+        assert_eq!(classify_destruction(Some(&identity)), Destruction::Close);
+    }
+
+    #[test]
+    fn a_window_lost_before_its_first_save_has_its_map_time_record() {
+        // At map the record is the spawn origin with the identity's key; no save has run.
+        let origin = WindowRecord::Terminal {
+            cwd: "/q".into(),
+            command: None,
+            session: None,
+        };
+        let record = origin.with_session(Some("k2".into()));
+        assert_eq!(record, keyed_terminal("/q", None, "k2"));
+        let job = lost_job(&record).expect("placeholder");
+        // An idle shell still gets the lost banner (and then its shell at once).
+        assert_eq!(
+            job.args,
+            os(&["-e", "/bin/crucible", "resume", "--lost", "--cwd", "/q"])
+        );
+    }
+
+    #[test]
+    fn mixed_stack_keeps_every_slot_for_one_or_two_losses_in_either_order() {
+        let w = ids(7);
+        let (a1, t, a2) = (w[0], w[1], w[2]);
+        let (n1, n2) = (w[3], w[4]);
+        let stack = [a1, t, a2];
+        assert_eq!(lose_and_replace(&stack, &[t], &[n1], &[0]), [a1, n1, a2]);
+        assert_eq!(lose_and_replace(&stack, &[a1], &[n1], &[0]), [n1, t, a2]);
+        assert_eq!(lose_and_replace(&stack, &[a2], &[n1], &[0]), [a1, t, n1]);
+        for arrival in [[0, 1], [1, 0]] {
+            assert_eq!(
+                lose_and_replace(&stack, &[a1, t], &[n1, n2], &arrival),
+                [n1, n2, a2]
+            );
+            assert_eq!(
+                lose_and_replace(&stack, &[a1, a2], &[n1, n2], &arrival),
+                [n1, t, n2]
+            );
+            assert_eq!(
+                lose_and_replace(&stack, &[t, a2], &[n1, n2], &arrival),
+                [a1, n1, n2]
+            );
+        }
+    }
+
+    #[test]
+    fn a_bound_relaunch_placeholder_lost_comes_back_as_a_relaunch_placeholder() {
+        let app = WindowRecord::App {
+            app_id: Some("org.x".into()),
+            cmdline: Some("firefox".into()),
+        };
+        let job = lost_job(&app).expect("relaunch placeholder");
+        assert_eq!(
+            job.args,
+            os(&[
+                "-e",
+                "/bin/crucible",
+                "relaunch",
+                "--app-id",
+                "org.x",
+                "--",
+                "firefox"
+            ])
+        );
+        assert_eq!(job.origin, app);
+    }
+
+    #[test]
+    fn workspace_is_held_while_the_placeholder_is_pending_and_freed_after_it_maps() {
+        let w = ids(4);
+        let (a, t, b, n) = (w[0], w[1], w[2], w[3]);
+        let pane = PaneId::from_raw(9);
+        let other = PaneId::from_raw(10);
+        let target = Target::Lost(LostSlot {
+            pane,
+            lost: t,
+            focused: false,
+            saved_index: None,
+        });
+        assert!(pending_in(&[other, pane], [target].iter()));
+        assert!(!pending_in(&[other], [target].iter()));
+        // Mapped: its pending entry is gone, so the save runs, with the placeholder in place.
+        assert!(!pending_in(&[other, pane], std::iter::empty()));
+        assert_eq!(lose_and_replace(&[a, t, b], &[t], &[n], &[0]), [a, n, b]);
     }
 }

@@ -10,7 +10,7 @@ use crucible_persist::slots::slots_path;
 use tracing::{debug, info, warn};
 
 use super::overlay::PickerMode;
-use super::skip_record;
+use super::{Capture, skip_record};
 use crate::state::{Backend, CrucibleState};
 
 /// One workspace's persistence-side facts: the single record behind what used to be two parallel maps.
@@ -23,6 +23,42 @@ pub(super) struct WorkspaceMeta {
     /// A `run-on` scratch workspace: never written to the store or `session.kdl`, removed once
     /// empty (see [`ephemeral_removals`]). Cleared with the meta when the workspace is forgotten.
     pub(super) ephemeral: bool,
+}
+
+/// How [`CrucibleState::remove_workspace`] treats the workspace's record.
+pub(super) enum Teardown {
+    /// Write it first and refuse on a failed write (an ephemeral workspace is not written).
+    Flush,
+    /// Never write it.
+    Discard,
+}
+
+/// Why [`CrucibleState::remove_workspace`] refused; nothing changed.
+#[derive(Debug)]
+pub(super) enum Refusal {
+    /// A restore is still pending.
+    Pending,
+    /// The output's last workspace.
+    Last,
+    /// The workspace vanished.
+    Vanished,
+    /// The flush failed.
+    SaveFailed,
+    /// The model refused the removal.
+    Model(crucible_layout::LayoutError),
+}
+
+impl Refusal {
+    /// Logs the refusal of `verb` (`close-workspace` / `delete-workspace`) on `ws`.
+    fn log(&self, verb: &str, ws: WorkspaceId) {
+        match self {
+            Refusal::Pending => info!(?ws, "{verb}: a restore is still pending; refusing"),
+            Refusal::Last => info!(?ws, "{verb}: last workspace on this output; refusing"),
+            Refusal::Vanished => warn!(?ws, "{verb}: workspace vanished; refusing"),
+            Refusal::SaveFailed => warn!(?ws, "{verb}: save failed; refusing to close"),
+            Refusal::Model(err) => info!(%err, ?ws, "{verb} refused by the model"),
+        }
+    }
 }
 
 /// Per-workspace meta and the pending slot pin (a field of [`super::PersistState`]).
@@ -294,40 +330,70 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     /// Closes the focused output's active workspace (`close-workspace`): refuse while a restore is
-    /// pending or on the output's last workspace; flush its record (refuse if the write fails);
-    /// drop it from the model; then end each of its windows (kill the held child, else a polite
-    /// close) after releasing its binding so no late teardown lands elsewhere.
+    /// pending or on the output's last workspace; flush its record (refuse if the write fails; an
+    /// ephemeral workspace is never written, so it closes without one); then remove it
+    /// ([`Self::remove_workspace`]).
     pub(crate) fn close_workspace(&mut self) {
-        let world = &self.layout.world;
-        let ws = world.active_workspace_id();
+        let ws = self.layout.world.active_workspace_id();
+        match self.remove_workspace(ws, Teardown::Flush) {
+            Ok(_) => info!(?ws, "workspace closed"),
+            Err(refusal) => refusal.log("close-workspace", ws),
+        }
+    }
+
+    /// Deletes the active workspace (`delete-workspace`): like [`Self::close_workspace`] (same
+    /// refusals, same teardown) but with no final flush, and its saved record is moved to
+    /// `deleted/` and its slot pins cleared. A live workspace is never auto-saved after removal,
+    /// and the `saved` cache entry is dropped so a later same-named workspace is written afresh.
+    pub(crate) fn delete_workspace(&mut self) {
+        let ws = self.layout.world.active_workspace_id();
+        let name = match self.remove_workspace(ws, Teardown::Discard) {
+            Ok(name) => name,
+            Err(refusal) => return refusal.log("delete-workspace", ws),
+        };
+        match self.delete_saved(&name) {
+            Ok(_) => info!(?ws, name, "workspace deleted"),
+            Err(err) => warn!(%err, name, "workspace closed but its record could not be deleted"),
+        }
+    }
+
+    /// The one workspace removal: (a) refuse while a restore is pending, (b) refuse on the
+    /// output's last workspace, (c) [`Teardown::Flush`] only: flush the record (refuse if the
+    /// write fails), [`Teardown::Discard`] only: refuse a vanished workspace (its name is captured
+    /// before the model forgets it), (d) snapshot the panes, (e) drop the workspace from the model,
+    /// (f) end each of its windows (kill the held child, else a polite close), (g) drop the
+    /// per-workspace bookkeeping. Returns the workspace's name.
+    pub(super) fn remove_workspace(
+        &mut self,
+        ws: WorkspaceId,
+        teardown: Teardown,
+    ) -> Result<String, Refusal> {
         // (a) A restore in flight would race the teardown; refuse before any flush.
         if self.workspace_has_pending(ws) {
-            info!(?ws, "close-workspace: a restore is still pending; refusing");
-            return;
+            return Err(Refusal::Pending);
         }
-        // (b) Never the output's last workspace (checked before flushing anything).
-        let output = world.focused_output();
-        if world
-            .output(output)
-            .is_none_or(|o| o.workspaces().len() < 2)
-        {
-            info!(
-                ?ws,
-                "close-workspace: last workspace on this output; refusing"
-            );
-            return;
+        // (b) Never its output's last workspace (checked before flushing anything). For close and
+        // delete `ws` is the focused output's active workspace, so this is the focused output.
+        let last = (self.layout.world.outputs())
+            .find(|(_, o)| o.workspaces().contains(&ws))
+            .is_none_or(|(_, o)| o.workspaces().len() < 2);
+        if last {
+            return Err(Refusal::Last);
         }
-        // (c) Flush first; a failed write refuses the close (never tear down unsaved state). An
-        // ephemeral workspace is never written, so it closes without a flush.
-        if !self.persist.workspace.is_ephemeral(ws) {
-            let Some(record) = self.capture_record(ws) else {
-                warn!(?ws, "close-workspace: workspace vanished; refusing");
-                return;
-            };
-            if !skip_record(&record) && !self.write_record(record, Instant::now()) {
-                warn!(?ws, "close-workspace: save failed; refusing to close");
-                return;
-            }
+        // (c) Flush first; a failed write refuses the removal (never tear down unsaved state).
+        let name = self.layout.world.workspace(ws).map(|w| w.name.clone());
+        match teardown {
+            Teardown::Flush => match self.capture_record(ws) {
+                Capture::Record(record) => {
+                    if !skip_record(&record) && !self.write_record(record, Instant::now()) {
+                        return Err(Refusal::SaveFailed);
+                    }
+                }
+                Capture::Ephemeral => {}
+                Capture::Gone => return Err(Refusal::Vanished),
+            },
+            Teardown::Discard if name.is_none() => return Err(Refusal::Vanished),
+            Teardown::Discard => {}
         }
         // (d) Snapshot the panes before the model forgets them (for step (g)).
         let panes = self
@@ -337,74 +403,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .map(|w| w.panes())
             .unwrap_or_default();
         // (e) The lifecycle controller drops the workspace, its bindings and its `Space` mappings.
-        let ended = match self.end_workspace(ws) {
-            Ok(ended) => ended,
-            Err(err) => {
-                info!(%err, ?ws, "close-workspace refused by the model");
-                return;
-            }
-        };
+        let ended = self.end_workspace(ws).map_err(Refusal::Model)?;
         // (f) Policy: end each window — kill a CDE-spawned child, else ask the client to close.
         for (element, meta) in ended {
             self.end_window(meta.pid, Some(&element));
         }
         // (g) Drop per-workspace bookkeeping.
         self.forget_workspace(ws, &panes);
-        info!(?ws, "workspace closed");
-    }
-
-    /// Deletes the active workspace (`delete-workspace`): like [`Self::close_workspace`] (same
-    /// refusals, same teardown) but with no final flush, and its saved record is moved to
-    /// `deleted/` and its slot pins cleared. A live workspace is never auto-saved after removal,
-    /// and the `saved` cache entry is dropped so a later same-named workspace is written afresh.
-    pub(crate) fn delete_workspace(&mut self) {
-        let world = &self.layout.world;
-        let ws = world.active_workspace_id();
-        // (a) A restore in flight would race the teardown.
-        if self.workspace_has_pending(ws) {
-            info!(
-                ?ws,
-                "delete-workspace: a restore is still pending; refusing"
-            );
-            return;
-        }
-        // (b) Never the output's last workspace.
-        let output = world.focused_output();
-        if world
-            .output(output)
-            .is_none_or(|o| o.workspaces().len() < 2)
-        {
-            info!(
-                ?ws,
-                "delete-workspace: last workspace on this output; refusing"
-            );
-            return;
-        }
-        // The name is captured before the model forgets the workspace.
-        let Some(name) = world.workspace(ws).map(|w| w.name.clone()) else {
-            warn!(?ws, "delete-workspace: workspace vanished; refusing");
-            return;
-        };
-        // (d) Snapshot the panes before the model forgets them (for step (g)).
-        let panes = world.workspace(ws).map(|w| w.panes()).unwrap_or_default();
-        // (e) The lifecycle controller drops the workspace, its bindings and its `Space` mappings.
-        let ended = match self.end_workspace(ws) {
-            Ok(ended) => ended,
-            Err(err) => {
-                info!(%err, ?ws, "delete-workspace refused by the model");
-                return;
-            }
-        };
-        // (f) End each window.
-        for (element, meta) in ended {
-            self.end_window(meta.pid, Some(&element));
-        }
-        // (g) Drop per-workspace bookkeeping.
-        self.forget_workspace(ws, &panes);
-        match self.delete_saved(&name) {
-            Ok(_) => info!(?ws, name, "workspace deleted"),
-            Err(err) => warn!(%err, name, "workspace closed but its record could not be deleted"),
-        }
+        Ok(name.unwrap_or_default())
     }
 
     /// Moves the saved record `name` to `deleted/`, forgets its `saved` cache entry and clears its
@@ -423,36 +429,30 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// pending placements and its placed entries, by the `panes` it had.
     pub(super) fn forget_workspace(&mut self, ws: WorkspaceId, panes: &[PaneId]) {
         self.persist.workspace.meta.remove(&ws);
-        self.persist.placement.pending.retain(|_, p| {
-            p.target.pane().is_none_or(|pane| !panes.contains(&pane))
-                && p.target != super::placement::Target::Workspace(ws)
-        });
+        self.persist
+            .placement
+            .pending
+            .retain(|_, p| !p.target.lands_in(ws, panes));
         for pane in panes {
             self.persist.placement.placed.remove(pane);
         }
     }
 
     /// Removes every ephemeral workspace that [`ephemeral_removals`] selects (empty, nothing
-    /// pending, not its output's only workspace), forgetting its meta (and so its flag).
+    /// pending, not its output's only workspace), forgetting its meta (and so its flag). It goes
+    /// through [`Self::remove_workspace`] with [`Teardown::Discard`]: the selection already passes
+    /// every refusal, and an empty workspace ends no window, so no close hook ever runs.
     pub(crate) fn prune_ephemeral(&mut self) {
         let removals = ephemeral_removals(
             &self.layout.world,
             |ws| self.persist.workspace.is_ephemeral(ws),
-            |ws| self.workspace_has_pending(ws) || self.persist.placement.targets_workspace(ws),
+            |ws| self.persist.placement.lands_in(&self.layout.world, ws),
         );
         for ws in removals {
-            let panes = self
-                .layout
-                .world
-                .workspace(ws)
-                .map(|w| w.panes())
-                .unwrap_or_default();
-            match self.end_workspace(ws) {
-                Ok(_) => {
-                    self.forget_workspace(ws, &panes);
-                    info!(?ws, "ephemeral workspace emptied; removed");
-                }
-                Err(err) => debug!(%err, ?ws, "ephemeral workspace kept"),
+            match self.remove_workspace(ws, Teardown::Discard) {
+                Ok(_) => info!(?ws, "ephemeral workspace emptied; removed"),
+                Err(Refusal::Model(err)) => debug!(%err, ?ws, "ephemeral workspace kept"),
+                Err(_) => {}
             }
         }
     }

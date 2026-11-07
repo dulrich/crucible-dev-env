@@ -31,8 +31,8 @@ pub const SESSION_ENV: &str = "CRUCIBLE_TERM_SESSION";
 /// registry), `root_pid` the shell or wrapper the daemon forked for this window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowIdentity {
-    /// Compositor-assigned id (from 1; kept within `u32`, the wire type of `bound`).
-    pub id: u64,
+    /// Compositor-assigned id (from 1, wrapping within `u32`, the wire type of `bound`).
+    pub id: u32,
     /// The CDE spawn the grant was minted for.
     pub spawn_pid: u32,
     /// The process the binding client forked for this window.
@@ -192,7 +192,7 @@ impl<K: Eq + Hash> IdentityTable<K> {
         let id = self.next_id;
         self.next_id = self.next_id.checked_add(1).unwrap_or(1);
         let identity = WindowIdentity {
-            id: u64::from(id),
+            id,
             spawn_pid,
             root_pid,
             session,
@@ -258,7 +258,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .persist
             .spawn
             .get(spawn_pid)
-            .and_then(|r| r.session.clone());
+            .and_then(|r| r.grant.as_ref()?.session.clone());
         // The binding client's disconnect flag (XWayland clients never bind, so a missing
         // `ClientState` only yields an unshared flag that is never set).
         let client = surface
@@ -278,7 +278,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             root_pid,
             "identity: surface bound"
         );
-        Ok(u32::try_from(identity.id).unwrap_or(u32::MAX))
+        Ok(identity.id)
     }
 
     /// The identity bound to `surface`, if any.
