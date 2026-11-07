@@ -1,12 +1,12 @@
 //! The one window classifier: turns a managed window into the record to save.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use super::{
     CaptureEnv, claude,
-    procfs::{children_of, read_cmdline, read_cwd},
+    procfs::{read_cmdline, read_cwd},
     shell::join_command,
-    terminal::{capture_shell, capture_terminal},
+    terminal::{ProcAnchor, capture_anchor, wrapper_candidates},
 };
 use crate::invocation::{CdeWrapper, RelaunchWrapper, ResumeWrapper};
 use crate::record::WindowRecord;
@@ -27,21 +27,25 @@ fn wrapper_record(wrapper: CdeWrapper) -> WindowRecord {
 }
 
 /// A process whose own argv is a bare CDE wrapper (`crucible resume|relaunch …`).
-fn wrapper_process(proc_root: &Path, pid: u32) -> Option<CdeWrapper> {
-    let argv = read_cmdline(proc_root, pid);
-    RelaunchWrapper::from_argv(&argv)
+fn wrapper_process(env: &CaptureEnv, pid: u32) -> Option<CdeWrapper> {
+    let argv = read_cmdline(&env.proc_root, pid);
+    RelaunchWrapper::from_argv(&argv, &env.own_exe)
         .map(CdeWrapper::App)
-        .or_else(|| ResumeWrapper::from_argv(&argv).map(CdeWrapper::Terminal))
+        .or_else(|| ResumeWrapper::from_argv(&argv, &env.own_exe).map(CdeWrapper::Terminal))
 }
 
-/// The `crucible relaunch` wrapper a placeholder window runs, with the wrapper's pid:
-/// `window_pid` is the window's own client (the terminal), so the wrapper is the pid itself or,
-/// normally, one of its direct children. `None` for any other window.
+/// The `crucible relaunch` wrapper a placeholder window runs, with the wrapper's pid. The wrapper
+/// is the anchored pid itself or, normally, one of its direct children, for either anchor kind:
+/// the candidates are always those of a [`ProcAnchor::Shell`] at the anchored pid (unlike the
+/// classifier, which never treats a terminal as its own wrapper). `None` for any other window.
 #[must_use]
-pub fn relaunch_wrapper_of(proc_root: &Path, window_pid: u32) -> Option<(u32, RelaunchWrapper)> {
-    std::iter::once(window_pid)
-        .chain(children_of(proc_root, window_pid))
-        .find_map(|pid| RelaunchWrapper::from_argv(&read_cmdline(proc_root, pid)).map(|w| (pid, w)))
+pub fn relaunch_wrapper_of(env: &CaptureEnv, anchor: ProcAnchor) -> Option<(u32, RelaunchWrapper)> {
+    wrapper_candidates(&env.proc_root, ProcAnchor::Shell(anchor.pid()))
+        .into_iter()
+        .find_map(|pid| {
+            RelaunchWrapper::from_argv(&read_cmdline(&env.proc_root, pid), &env.own_exe)
+                .map(|w| (pid, w))
+        })
 }
 
 /// What kind of window the classifier is looking at.
@@ -56,8 +60,11 @@ pub enum SpawnClass {
 /// One window's facts for [`window_record`].
 #[derive(Debug, Clone)]
 pub struct WindowRecordInput<'a> {
-    /// The client PID, if known.
+    /// The client PID, if known (the app arm reads its argv).
     pub pid: Option<u32>,
+    /// Where the terminal arm's `/proc` reads start ([`ProcAnchor::of`] the client pid and a
+    /// bound identity's root). `None`: nothing to read.
+    pub anchor: Option<ProcAnchor>,
     /// Whether the window is a CDE-spawned terminal or an app.
     pub class: SpawnClass,
     /// The saved record its spawn stands for (a restored window or a relaunched app).
@@ -66,10 +73,9 @@ pub struct WindowRecordInput<'a> {
     pub app_id: Option<String>,
     /// The terminal's exec flag.
     pub exec_flag: &'a str,
-    /// A bound cterm window's root process (its shell or CDE wrapper under the shared daemon),
-    /// from its `WindowIdentity`. With it, every `/proc` read is rooted there instead of at `pid`
-    /// (which is only the thin client). `None` for unbound windows: unchanged behaviour.
-    pub root_pid: Option<u32>,
+    /// A bound identity's session key, stamped onto a terminal record at the one exit of
+    /// [`window_record`] ([`WindowRecord::with_session`]).
+    pub session: Option<String>,
 }
 
 /// Classifies one managed window into the record to save. Pure over `env` (normally the real
@@ -90,12 +96,14 @@ pub struct WindowRecordInput<'a> {
 ///   argv such as `steamwebhelper`) records that cmdline, the element app id filling a missing
 ///   origin id; (3) else the app id and the joined argv (no cmdline when the argv is empty).
 ///
-/// **Rooted (bound cterm window, `root_pid` set):** the terminal arm reads the root instead of the
-/// client: wrapper candidates are the root itself then its children, the live capture is
-/// [`capture_shell`] on the root, and the decode / cwd fallbacks read the root.
+/// **Anchored:** the terminal arm reads `anchor`, never the client `pid`: wrapper candidates come
+/// from [`ProcAnchor`] (a [`ProcAnchor::Shell`] root itself then its children, a terminal's
+/// children), the live capture is [`capture_anchor`], and the decode / cwd fallbacks read the
+/// anchored pid. A bound identity's `session` key is stamped on the terminal record last.
 #[must_use]
 pub fn window_record(env: &CaptureEnv, mut input: WindowRecordInput<'_>) -> WindowRecord {
     input.app_id = non_empty(input.app_id);
+    let session = input.session.take();
     let record = match input.class {
         SpawnClass::Terminal => terminal_record(env, input),
         SpawnClass::App => app_record(env, input),
@@ -105,7 +113,7 @@ pub fn window_record(env: &CaptureEnv, mut input: WindowRecordInput<'_>) -> Wind
             app_id: non_empty(app_id),
             cmdline,
         },
-        other => other,
+        other => other.with_session(session),
     }
 }
 
@@ -117,30 +125,23 @@ fn non_empty(app_id: Option<String>) -> Option<String> {
 /// The [`SpawnClass::Terminal`] arm of [`window_record`].
 fn terminal_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowRecord {
     let WindowRecordInput {
-        pid,
+        anchor,
         origin,
         exec_flag,
-        root_pid,
         ..
     } = input;
     let proc_root = env.proc_root.as_path();
-    let Some(pid) = root_pid.or(pid) else {
+    let Some(anchor) = anchor else {
         return origin.cloned().unwrap_or(WindowRecord::Terminal {
             cwd: PathBuf::new(),
             command: None,
             session: None,
         });
     };
-    let candidates = if root_pid.is_some() {
-        std::iter::once(pid)
-            .chain(children_of(proc_root, pid))
-            .collect()
-    } else {
-        children_of(proc_root, pid)
-    };
-    if let Some((wrapper_pid, wrapper)) = candidates
+    let pid = anchor.pid();
+    if let Some((wrapper_pid, wrapper)) = wrapper_candidates(proc_root, anchor)
         .into_iter()
-        .find_map(|c| wrapper_process(proc_root, c).map(|w| (c, w)))
+        .find_map(|c| wrapper_process(env, c).map(|w| (c, w)))
     {
         if matches!(wrapper, CdeWrapper::Terminal(_))
             && let Some((cwd, command)) = claude::resume_descendant(env, wrapper_pid)
@@ -153,12 +154,7 @@ fn terminal_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowReco
         }
         return origin.cloned().unwrap_or_else(|| wrapper_record(wrapper));
     }
-    let cap = if root_pid.is_some() {
-        capture_shell(env, pid)
-    } else {
-        capture_terminal(env, pid)
-    };
-    if let Some(cap) = cap {
+    if let Some(cap) = capture_anchor(env, anchor) {
         return WindowRecord::Terminal {
             cwd: cap.cwd,
             command: cap.command,
@@ -168,7 +164,7 @@ fn terminal_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowReco
     if let Some(origin) = origin {
         return origin.clone();
     }
-    match CdeWrapper::decode(&read_cmdline(proc_root, pid), exec_flag) {
+    match CdeWrapper::decode(&read_cmdline(proc_root, pid), exec_flag, &env.own_exe) {
         Some(wrapper) => wrapper_record(wrapper),
         None => WindowRecord::Terminal {
             cwd: read_cwd(proc_root, pid).unwrap_or_default(),
@@ -190,7 +186,7 @@ fn app_record(env: &CaptureEnv, input: WindowRecordInput<'_>) -> WindowRecord {
     let argv = pid
         .map(|p| read_cmdline(&env.proc_root, p))
         .unwrap_or_default();
-    if let Some(wrapper) = CdeWrapper::decode(&argv, exec_flag) {
+    if let Some(wrapper) = CdeWrapper::decode(&argv, exec_flag, &env.own_exe) {
         return match wrapper {
             CdeWrapper::App(cap) => WindowRecord::App {
                 app_id: non_empty(cap.app_id).or(app_id),
@@ -251,7 +247,8 @@ mod tests {
                 origin,
                 app_id: app_id.map(str::to_string),
                 exec_flag: "-e",
-                root_pid: None,
+                anchor: ProcAnchor::of(pid, None),
+                session: None,
             },
         )
     }
@@ -467,16 +464,25 @@ mod tests {
         );
         p.add((300, "ghostty", 1), 0, "/", &["ghostty"], &[301]);
         p.add((301, "bash", 300), 301, "/", &["bash"], &[]);
-        let (pid, got) = relaunch_wrapper_of(&p.proc_root(), 100).unwrap();
+        let (pid, got) = relaunch_wrapper_of(&p.env(), ProcAnchor::Terminal(100)).unwrap();
         assert_eq!(pid, 200);
         assert_eq!(got.cmdline, "firefox");
         assert_eq!(got.app_id.as_deref(), Some("firefox"));
         assert_eq!(
-            relaunch_wrapper_of(&p.proc_root(), 200).unwrap().1.cmdline,
+            relaunch_wrapper_of(&p.env(), ProcAnchor::Terminal(200))
+                .unwrap()
+                .1
+                .cmdline,
             "firefox"
         );
-        assert_eq!(relaunch_wrapper_of(&p.proc_root(), 300), None);
-        assert_eq!(relaunch_wrapper_of(&p.proc_root(), 999), None);
+        assert_eq!(
+            relaunch_wrapper_of(&p.env(), ProcAnchor::Terminal(300)),
+            None
+        );
+        assert_eq!(
+            relaunch_wrapper_of(&p.env(), ProcAnchor::Terminal(999)),
+            None
+        );
     }
 
     #[test]
@@ -754,7 +760,8 @@ mod tests {
                 origin: None,
                 app_id: None,
                 exec_flag: "-e",
-                root_pid: Some(root),
+                anchor: ProcAnchor::of(Some(pid), Some(root)),
+                session: None,
             },
         )
     }
@@ -811,6 +818,47 @@ mod tests {
         );
     }
 
+    /// The bound identity's session key is stamped once, at the classifier's exit: on a
+    /// terminal record (over an origin's key), never on an app.
+    #[test]
+    fn session_key_is_stamped_at_the_exit() {
+        let p = FakeProc::new("stamp");
+        p.add((100, "ghostty", 1), 0, "/t", &["ghostty"], &[200]);
+        p.add((200, "bash", 100), 200, "/home/u", &["bash"], &[]);
+        let origin = WindowRecord::Terminal {
+            cwd: "/o".into(),
+            command: None,
+            session: Some("old".into()),
+        };
+        let input = |class, origin| WindowRecordInput {
+            pid: Some(100),
+            class,
+            origin,
+            app_id: None,
+            exec_flag: "-e",
+            anchor: ProcAnchor::of(Some(100), None),
+            session: Some("k".into()),
+        };
+        let keyed = |cwd: &str| WindowRecord::Terminal {
+            cwd: cwd.into(),
+            command: None,
+            session: Some("k".into()),
+        };
+        let env = p.env();
+        assert_eq!(
+            window_record(&env, input(SpawnClass::Terminal, None)),
+            keyed("/home/u")
+        );
+        p.add_bare(101);
+        let mut lost = input(SpawnClass::Terminal, Some(&origin));
+        lost.anchor = ProcAnchor::of(Some(101), None);
+        assert_eq!(window_record(&env, lost), keyed("/o"));
+        assert_eq!(
+            window_record(&env, input(SpawnClass::App, None)),
+            app(None, Some("ghostty"))
+        );
+    }
+
     /// `relaunch_wrapper_of` on a root that is itself the `crucible relaunch` wrapper finds it.
     #[test]
     fn relaunch_wrapper_of_finds_a_wrapper_root() {
@@ -825,7 +873,8 @@ mod tests {
                 &[],
             );
         }
-        let wrapper = |root| relaunch_wrapper_of(&p.proc_root(), root).map(|(pid, _)| pid);
+        let wrapper =
+            |root| relaunch_wrapper_of(&p.env(), ProcAnchor::Shell(root)).map(|(pid, _)| pid);
         assert_eq!(wrapper(602), Some(602));
         assert_eq!(wrapper(601), Some(601));
     }

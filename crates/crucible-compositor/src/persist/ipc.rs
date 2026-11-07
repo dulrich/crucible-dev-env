@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use crucible_layout::{WindowId, WorkspaceId};
 use crucible_persist::slots::Slots;
-use crucible_persist::{WorkspaceRecord, store};
+use crucible_persist::{ProcAnchor, WorkspaceRecord, store};
 use tracing::info;
 
 use super::placement::{
@@ -19,6 +19,7 @@ use super::workspace::{folder_workspace_name, run_on_target};
 use super::{capture_env, close_element, proc_root};
 use crate::input::{ActionError, Origin};
 use crate::ipc::{Reply, Request, Response};
+use crate::layout::WindowMeta;
 use crate::state::{Backend, CrucibleState};
 use crucible_keys::{Action, BindTarget};
 use crucible_layout::WorkspaceLayout;
@@ -198,14 +199,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(super) fn ipc_relaunch(&mut self, peer: Option<u32>) -> Result<(), String> {
         let peer = peer.ok_or_else(|| "not a relaunch placeholder".to_string())?;
         let args = crucible_persist::capture::read_cmdline(proc_root(), peer);
-        let capture = crucible_persist::RelaunchWrapper::from_argv(&args)
-            .ok_or_else(|| "not a relaunch placeholder".to_string())?;
+        let capture =
+            crucible_persist::RelaunchWrapper::from_argv(&args, &crucible_persist::own_exe_name())
+                .ok_or_else(|| "not a relaunch placeholder".to_string())?;
         let ancestors = crucible_persist::ancestors(proc_root(), peer, ANCESTOR_DEPTH);
         let layout = &self.layout;
-        let windows: Vec<(Option<u32>, Option<u32>)> = layout
-            .metas()
-            .map(|(_, m)| (m.pid, m.identity.as_ref().map(|i| i.root_pid)))
-            .collect();
+        let windows: Vec<(Option<u32>, Option<ProcAnchor>)> =
+            layout.metas().map(|(_, m)| (m.pid, m.anchor())).collect();
         let pid = relaunch_window_pid(peer, &ancestors, &windows)
             .ok_or_else(|| "no placeholder window".to_string())?;
         let mut ids: Vec<WindowId> = layout
@@ -418,14 +418,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .focused_window()
             .ok_or_else(|| "no focused window".to_string())?;
         let meta = self.layout.meta(id);
-        let pid = terminal_pid(meta)?;
+        terminal_pid(meta)?;
         // A bound cterm window's terminal is the shared daemon: capture from its root shell.
-        let cwd = match meta.and_then(|m| m.identity.as_ref()) {
-            Some(identity) => crucible_persist::capture_shell(&capture_env(), identity.root_pid),
-            None => crucible_persist::capture_terminal(&capture_env(), pid),
-        }
-        .ok_or_else(|| "cannot read the terminal's working directory".to_string())?
-        .cwd;
+        let cwd = meta
+            .and_then(WindowMeta::anchor)
+            .and_then(|anchor| crucible_persist::capture_anchor(&capture_env(), anchor))
+            .ok_or_else(|| "cannot read the terminal's working directory".to_string())?
+            .cwd;
         self.ipc_set_root(Some(cwd))
     }
 

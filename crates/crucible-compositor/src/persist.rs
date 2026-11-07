@@ -29,10 +29,12 @@
 //! so saved records never nest `crucible resume|relaunch`, and an uncaptured terminal is never an
 //! app.
 
+mod candidates;
 pub(crate) mod identity;
 mod ipc;
 mod overlay;
 mod placement;
+mod recovery;
 mod spawn;
 mod warm_slot;
 mod workspace;
@@ -48,20 +50,18 @@ use std::time::{Duration, Instant, SystemTime};
 use crucible_layout::{OutputId, PaneId, WindowId, WorkspaceId};
 use crucible_persist::session::{Session, plan_restore, session_path};
 use crucible_persist::slots::{Slots, slots_path};
-use crucible_persist::{
-    CaptureEnv, SpawnClass, WindowRecord, WindowRecordInput, WorkspaceRecord, store,
-};
+use crucible_persist::{CaptureEnv, WindowRecord, WorkspaceRecord, store};
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
 use tracing::{debug, error, info, warn};
 
 use crate::element::WindowElement;
-use crate::ipc::{Candidate, CandidateKind};
 use crate::state::{Backend, CrucibleState};
+use candidates::SavedRootCache;
 use overlay::Overlay;
 pub(crate) use overlay::PickerMode;
-use placement::{LostSlot, PENDING_TTL, Pending, Target};
+use placement::{PENDING_TTL, Pending, Target};
 use workspace::restore_target;
 
 /// Auto-save / config-poll cadence.
@@ -164,141 +164,14 @@ pub fn should_write(record: &WorkspaceRecord, previously_saved: bool) -> bool {
     !skip_record(record) || previously_saved
 }
 
-/// Immediate, non-hidden subdirectories of each root as `(basename, path)`, each root's entries
-/// sorted by name, roots in order. Unreadable roots and non-UTF-8 names are skipped.
-#[must_use]
-pub fn folder_entries(roots: &[PathBuf]) -> Vec<(String, PathBuf)> {
-    let mut out = Vec::new();
-    for root in roots {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            continue;
-        };
-        let mut dirs: Vec<(String, PathBuf)> = entries
-            .filter_map(Result::ok)
-            .filter_map(|e| {
-                let name = e.file_name().into_string().ok()?;
-                let path = e.path();
-                (!name.starts_with('.') && path.is_dir()).then_some((name, path))
-            })
-            .collect();
-        dirs.sort();
-        out.extend(dirs);
-    }
-    out
-}
-
-/// The `candidates` list: live (in the given order), then saved not live, then folders.
-#[must_use]
-pub fn build_candidates(
-    live: Vec<(String, Option<PathBuf>)>,
-    saved: Vec<(String, Option<PathBuf>)>,
-    folders: Vec<(String, PathBuf)>,
-) -> Vec<Candidate> {
-    let live_names: HashSet<String> = live.iter().map(|(n, _)| n.clone()).collect();
-    let mut out: Vec<Candidate> = live
-        .into_iter()
-        .map(|(name, path)| Candidate {
-            kind: CandidateKind::Live,
-            name,
-            path,
-            slot: None,
-        })
-        .collect();
-    out.extend(
-        saved
-            .into_iter()
-            .filter(|(n, _)| !live_names.contains(n))
-            .map(|(name, root)| Candidate {
-                kind: CandidateKind::Saved,
-                name,
-                path: root,
-                slot: None,
-            }),
-    );
-    out.extend(folders.into_iter().map(|(name, path)| Candidate {
-        kind: CandidateKind::Folder,
-        name,
-        path: Some(path),
-        slot: None,
-    }));
-    out
-}
-
-/// The root of each saved file, cached by file path and modification time: a file is parsed only
-/// when it is new or has changed since it was last read.
-#[derive(Debug, Default)]
-pub struct SavedRootCache {
-    entries: HashMap<PathBuf, (SystemTime, Option<PathBuf>)>,
-}
-
-impl SavedRootCache {
-    /// The root of `file` as of `mtime`: the cached one when `mtime` matches the cached read, else
-    /// `load()` (cached under `mtime`). With no `mtime` the file is always loaded and never cached.
-    pub fn root(
-        &mut self,
-        file: &Path,
-        mtime: Option<SystemTime>,
-        load: impl FnOnce() -> Option<PathBuf>,
-    ) -> Option<PathBuf> {
-        let Some(mtime) = mtime else { return load() };
-        if let Some((seen, root)) = self.entries.get(file) {
-            if *seen == mtime {
-                return root.clone();
-            }
-        }
-        let root = load();
-        self.entries
-            .insert(file.to_path_buf(), (mtime, root.clone()));
-        root
-    }
-
-    /// Forgets every file not in `listed` (deleted saves).
-    pub fn retain_listed(&mut self, listed: &[(String, PathBuf)]) {
-        self.entries
-            .retain(|file, _| listed.iter().any(|(_, f)| f == file));
-    }
-}
-
-/// Saved workspaces with their roots: the `cached` record's root when `cached` knows the name
-/// (`Some(root)`), else `file_root` of the saved file itself (an unreadable file just has no root).
-#[must_use]
-pub fn saved_with_roots(
-    listed: Vec<(String, PathBuf)>,
-    cached: impl Fn(&str) -> Option<Option<PathBuf>>,
-    mut file_root: impl FnMut(&Path) -> Option<PathBuf>,
-) -> Vec<(String, Option<PathBuf>)> {
-    listed
-        .into_iter()
-        .map(|(name, file)| {
-            let root = cached(&name).unwrap_or_else(|| file_root(&file));
-            (name, root)
-        })
-        .collect()
-}
-
-/// Fills `slot` on live and saved candidates from `slot_of` (folders never carry one).
-pub fn apply_slots(candidates: &mut [Candidate], slot_of: impl Fn(&str) -> Option<u8>) {
-    for c in candidates
-        .iter_mut()
-        .filter(|c| c.kind != CandidateKind::Folder)
-    {
-        c.slot = slot_of(&c.name);
-    }
-}
-
 fn proc_root() -> &'static Path {
     Path::new("/proc")
 }
 
-/// Where `/proc` reads for a window start: a bound cterm window's identity root (its shell or CDE
-/// wrapper under the shared daemon), else its client pid (unbound: unchanged).
-pub(super) fn proc_root_pid(meta: &crate::layout::WindowMeta) -> Option<u32> {
-    meta.identity.as_ref().map(|i| i.root_pid).or(meta.pid)
-}
-
 /// What capture reads: `/proc` and the claude home, where claude keeps its per-pid session
 /// records (`<claude-home>/sessions`). The home is `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`.
-/// Read per capture (cheap); a missing home yields a relative path that simply reads nothing.
+/// Read per capture (cheap), with the running binary's basename resolved once for it; a missing
+/// home yields a relative path that simply reads nothing.
 pub(super) fn capture_env() -> CaptureEnv {
     let home = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|v| !v.is_empty())
@@ -308,10 +181,11 @@ pub(super) fn capture_env() -> CaptureEnv {
     CaptureEnv {
         proc_root: proc_root().to_path_buf(),
         claude_home: home,
+        own_exe: crucible_persist::own_exe_name(),
     }
 }
 
-fn element_app_id(element: &WindowElement) -> Option<String> {
+pub(super) fn element_app_id(element: &WindowElement) -> Option<String> {
     if let Some(toplevel) = element.toplevel() {
         return with_states(toplevel.wl_surface(), |states| {
             states
@@ -324,17 +198,6 @@ fn element_app_id(element: &WindowElement) -> Option<String> {
         .x11_surface()
         .map(|x| x.class())
         .filter(|c| !c.is_empty())
-}
-
-/// `record` with a bound identity's session key (a terminal's key wins over the origin's).
-#[must_use]
-pub(super) fn with_session(mut record: WindowRecord, key: Option<String>) -> WindowRecord {
-    if let WindowRecord::Terminal { session, .. } = &mut record
-        && key.is_some()
-    {
-        *session = key;
-    }
-    record
 }
 
 fn config_mtime() -> Option<SystemTime> {
@@ -358,13 +221,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// killing a running process (ghostty's "Close window?" dialog). End the wrapper instead
     /// (found by one direct-child lookup from the terminal pid); its terminal then closes on its
     /// own. Only when no wrapper is found is the window asked to close. A bound cterm window is
-    /// looked up from its identity's root (see [`proc_root_pid`]).
+    /// looked up from its identity's root (see [`crate::layout::WindowMeta::anchor`]).
     fn end_placeholder(&mut self, id: WindowId) {
         let wrapper = self
             .layout
             .meta(id)
-            .and_then(proc_root_pid)
-            .and_then(|pid| crucible_persist::relaunch_wrapper_of(proc_root(), pid));
+            .and_then(crate::layout::WindowMeta::anchor)
+            .and_then(|anchor| crucible_persist::relaunch_wrapper_of(&capture_env(), anchor));
         let ended = wrapper.is_some_and(|(pid, _)| placement::terminate(pid));
         if !ended && let Some(element) = self.layout.element(id) {
             close_element(element);
@@ -577,18 +440,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
             debug!(?reaped, "reaped exited children");
         }
         self.warm_reaped(&reaped);
-        self.refresh_recovery();
+        // One `/proc` capture per tick feeds both the recovery set and the auto-save.
+        let captured = self.tick_capture();
+        self.refresh_recovery(&captured);
         self.prune_reservations();
         // Also catches a `run-on` whose window never mapped (its pending entry just expired).
         self.prune_ephemeral();
-        self.save_dirty(now, TICK);
+        self.save_dirty(now, TICK, &captured);
         self.write_session();
         self.poll_config();
     }
 
     /// Writes every dirty workspace now, bypassing the interval (`save`, `Super+Shift+Q`).
     pub fn flush_workspaces(&mut self) {
-        self.save_dirty(Instant::now(), Duration::ZERO);
+        self.save_dirty(Instant::now(), Duration::ZERO, &HashMap::new());
         self.write_session();
     }
 
@@ -599,7 +464,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    fn live_workspaces(&self) -> Vec<(OutputId, WorkspaceId)> {
+    pub(super) fn live_workspaces(&self) -> Vec<(OutputId, WorkspaceId)> {
         let mut outs: Vec<_> = self.layout.world.outputs().collect();
         outs.sort_by_key(|(id, _)| *id);
         outs.into_iter()
@@ -607,13 +472,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .collect()
     }
 
-    fn save_dirty(&mut self, now: Instant, min_interval: Duration) {
+    /// Writes the dirty live workspaces whose interval passed. `captured` holds this tick's window
+    /// records ([`Self::tick_capture`]); a window missing from it is captured fresh.
+    fn save_dirty(
+        &mut self,
+        now: Instant,
+        min_interval: Duration,
+        captured: &HashMap<WindowId, WindowRecord>,
+    ) {
         for (_, ws) in self.live_workspaces() {
             // A restore in progress would overwrite the saved commands with half-mapped panes.
             if self.workspace_has_pending(ws) {
                 continue;
             }
-            let Some(record) = self.capture_record(ws) else {
+            let Some(record) = self.capture_record_from(ws, captured) else {
                 continue;
             };
             if !should_write(&record, self.persist.saved.contains_key(&record.name)) {
@@ -679,6 +551,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// single store-save choke point: every workspace-store write (`save_dirty`, `save_now`,
     /// close's flush, rename) captures through here, so an ephemeral workspace is never written.
     fn capture_record(&self, ws: WorkspaceId) -> Option<WorkspaceRecord> {
+        self.capture_record_from(ws, &HashMap::new())
+    }
+
+    /// [`Self::capture_record`] taking each window's record from `captured` (this tick's capture),
+    /// a window missing from it captured fresh. Same ephemeral rule.
+    fn capture_record_from(
+        &self,
+        ws: WorkspaceId,
+        captured: &HashMap<WindowId, WindowRecord>,
+    ) -> Option<WorkspaceRecord> {
         if self.persist.workspace.is_ephemeral(ws) {
             return None;
         }
@@ -687,221 +569,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
             &self.layout.world,
             ws,
             self.persist.workspace.root(ws).cloned(),
-            |id| self.window_record(&env, id),
+            |id| {
+                captured
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_else(|| self.window_record(&env, id))
+            },
         )?;
         record.output = self.persist.workspace.last_output(ws).cloned();
         Some(record)
-    }
-
-    /// The saved record for window `id`: its meta (pid, class, spawn origin), element app id and
-    /// the exec flag, classified by [`crucible_persist::window_record`].
-    fn window_record(&self, env: &CaptureEnv, id: WindowId) -> WindowRecord {
-        let meta = self.layout.meta(id);
-        let class = if meta.is_some_and(|m| m.class == crate::layout::WindowClass::Terminal) {
-            SpawnClass::Terminal
-        } else {
-            SpawnClass::App
-        };
-        let session = meta.and_then(|m| m.identity.as_ref()?.session.clone());
-        let mut record = crucible_persist::window_record(
-            env,
-            WindowRecordInput {
-                pid: meta.and_then(|m| m.pid),
-                class,
-                origin: meta.and_then(|m| m.origin.as_ref()),
-                app_id: self.layout.element(id).and_then(element_app_id),
-                exec_flag: &self.config.terminal.exec_flag,
-                root_pid: meta.and_then(|m| m.identity.as_ref().map(|i| i.root_pid)),
-            },
-        );
-        // The bound identity's key wins over whatever the origin carried (they are the same key
-        // unless the window was re-bound).
-        if let WindowRecord::Terminal { session: slot, .. } = &mut record
-            && session.is_some()
-        {
-            *slot = session;
-        }
-        record
-    }
-
-    // ---- loss recovery (crucible-term plan 03) -------------------------------------------------
-
-    /// Sets the recovery record of a just-mapped window `id` when it is bound: its spawn origin
-    /// (with the identity's session key) when there is one, else a capture. Unbound: nothing.
-    pub(super) fn init_recovery(&mut self, id: WindowId) {
-        let Some(meta) = self.layout.meta(id) else {
-            return;
-        };
-        let Some(identity) = &meta.identity else {
-            return;
-        };
-        let record = match &meta.origin {
-            Some(origin) => with_session(origin.clone(), identity.session.clone()),
-            None => self.window_record(&capture_env(), id),
-        };
-        self.persist.recovery.insert(id, record);
-    }
-
-    /// Refreshes the recovery record of every bound window (each tick, before and independent of
-    /// the save gate) and drops the records of closed windows. A window whose client has already
-    /// disconnected keeps its last record (its shell may be dying).
-    fn refresh_recovery(&mut self) {
-        let env = capture_env();
-        let bound: Vec<(WindowId, bool)> = self
-            .layout
-            .metas()
-            .filter_map(|(id, m)| Some((id, m.identity.as_ref()?.client.is_disconnected())))
-            .collect();
-        let mut fresh = HashMap::with_capacity(bound.len());
-        for (id, gone) in bound {
-            let kept = gone
-                .then(|| self.persist.recovery.get(&id).cloned())
-                .flatten();
-            fresh.insert(id, kept.unwrap_or_else(|| self.window_record(&env, id)));
-        }
-        self.persist.recovery = fresh;
-    }
-
-    /// Drops a pane's loss reservation once no loss placeholder for it is pending.
-    fn prune_reservations(&mut self) {
-        let placement = &mut self.persist.placement;
-        let waiting: HashSet<PaneId> = placement
-            .pending
-            .values()
-            .filter_map(|p| match p.target {
-                Target::Lost(LostSlot { pane, .. }) => Some(pane),
-                _ => None,
-            })
-            .collect();
-        placement.reserved.retain(|pane, _| waiting.contains(pane));
-    }
-
-    /// Drops window `id`'s recovery record (a normal close).
-    pub(crate) fn forget_recovery(&mut self, id: WindowId) {
-        self.persist.recovery.remove(&id);
-    }
-
-    /// Bookkeeping after managed window `id` closed (mirror of `unmanaged_closed`): forgets its
-    /// recovery record, and an ephemeral `run-on` workspace goes with its last window.
-    pub(crate) fn managed_closed(&mut self, id: WindowId) {
-        self.forget_recovery(id);
-        self.prune_ephemeral();
-    }
-
-    /// The workspace holding `pane`.
-    fn workspace_of_pane(&self, pane: PaneId) -> Option<WorkspaceId> {
-        self.live_workspaces().into_iter().find_map(|(_, ws)| {
-            let w = self.layout.world.workspace(ws)?;
-            w.panes().contains(&pane).then_some(ws)
-        })
-    }
-
-    /// Handles a lost window `id` (its bound client disconnected; plan 03): plans its placeholder
-    /// from its recovery record (never `/proc`), reserves its slot against the live stack, closes
-    /// it in the model through `close` and spawns the placeholder into the slot with a pending
-    /// entry, which holds the workspace's saves until it maps or expires.
-    pub(crate) fn window_lost(&mut self, id: WindowId, close: impl Fn(&WindowElement) -> bool) {
-        let record = self
-            .persist
-            .recovery
-            .remove(&id)
-            .or_else(|| self.layout.meta(id).and_then(|m| m.origin.clone()));
-        let slot = self.placeholder_slot(id);
-        let root = slot
-            .and_then(|s| self.workspace_of_pane(s.pane))
-            .and_then(|ws| self.persist.workspace.root(ws).cloned());
-        let home = std::env::var_os("HOME").map(PathBuf::from);
-        let job = match &record {
-            Some(record) => crucible_persist::prepare_lost(
-                record,
-                root.as_deref(),
-                Self::crucible_exe("loss placeholder")
-                    .ok_or_else(|| std::io::Error::other("crucible binary unavailable")),
-                home.as_deref(),
-                &self.config.terminal.exec_flag,
-                Path::is_dir,
-            ),
-            None => Err("no recovery record".to_string()),
-        };
-        let (slot, job) = match (slot, job) {
-            (Some(slot), Ok(Some(job))) => (slot, job),
-            (slot, job) => {
-                warn!(
-                    ?id,
-                    ?slot,
-                    ?job,
-                    "window lost; no placeholder can stand in, closing it"
-                );
-                self.unmap_matching(close);
-                return;
-            }
-        };
-        let live: Vec<WindowId> = self
-            .layout
-            .world
-            .pane(slot.pane)
-            .map(|p| p.windows().to_vec())
-            .unwrap_or_default();
-        let order = placement::reserve(
-            self.persist
-                .placement
-                .reserved
-                .get(&slot.pane)
-                .map(Vec::as_slice),
-            &live,
-        );
-        self.persist.placement.reserved.insert(slot.pane, order);
-        // Hook-free: the recovery record is already gone and the placeholder is not pending yet, so
-        // the managed-close prune would remove the ephemeral workspace it is about to fill.
-        self.teardown_matching(close);
-        let target = Target::Lost(LostSlot {
-            pane: slot.pane,
-            lost: id,
-            focused: slot.focused,
-            saved_index: slot.saved_index,
-        });
-        let args = self.with_tiling_args(job.args);
-        let req = SpawnRequest::new(self.terminal_program(), args, SpawnKind::Terminal)
-            .in_dir(Some(job.dir))
-            .with_origin(Some(job.origin));
-        match self.spawn(req) {
-            Some(pid) => {
-                info!(?id, pid, pane = ?slot.pane, "window lost; placeholder spawned into its slot");
-                self.persist
-                    .placement
-                    .pending
-                    .insert(pid, Pending::new(target, Instant::now()));
-            }
-            None => warn!(?id, "window lost; its placeholder could not be spawned"),
-        }
-    }
-
-    fn candidates(&mut self) -> Vec<Candidate> {
-        let world = &self.layout.world;
-        let live = self
-            .live_workspaces()
-            .into_iter()
-            .filter_map(|(_, ws)| {
-                let name = world.workspace(ws)?.name.clone();
-                Some((name, self.persist.workspace.root(ws).cloned()))
-            })
-            .collect();
-        let listed = store::list_saved(&self.persist.store_dir);
-        self.persist.picker_roots.retain_listed(&listed);
-        let (saved_cache, picker_roots) = (&self.persist.saved, &mut self.persist.picker_roots);
-        let saved = saved_with_roots(
-            listed,
-            |n| saved_cache.get(n).map(|(r, _)| r.root.clone()),
-            |file| {
-                let mtime = std::fs::metadata(file).and_then(|m| m.modified()).ok();
-                picker_roots.root(file, mtime, || store::load(file).ok().and_then(|r| r.root))
-            },
-        );
-        let mut out = build_candidates(live, saved, folder_entries(&self.config.picker.roots));
-        if self.config.picker.slots {
-            apply_slots(&mut out, |n| self.persist.slots.slot_of(n));
-        }
-        out
     }
 
     fn restore(&mut self, record: WorkspaceRecord) -> Result<(), String> {
@@ -1026,7 +702,7 @@ mod tests {
     use super::*;
     use crucible_persist::{PaneRecord, RecordNode};
 
-    fn record(root: Option<&str>, tree: RecordNode) -> WorkspaceRecord {
+    pub(super) fn record(root: Option<&str>, tree: RecordNode) -> WorkspaceRecord {
         WorkspaceRecord {
             name: "w".into(),
             root: root.map(PathBuf::from),
@@ -1036,7 +712,7 @@ mod tests {
         }
     }
 
-    fn pane(windows: Vec<WindowRecord>) -> RecordNode {
+    pub(super) fn pane(windows: Vec<WindowRecord>) -> RecordNode {
         RecordNode::Pane(PaneRecord {
             focused: 0,
             windows,
@@ -1122,113 +798,5 @@ mod tests {
         assert!(should_write(&emptied, true));
         // A fresh empty seed that was never saved stays unsaved.
         assert!(!should_write(&emptied, false));
-    }
-
-    #[test]
-    fn candidates_order_live_saved_folder_and_dedupe_live() {
-        let c = build_candidates(
-            vec![("b".into(), None), ("a".into(), Some("/r".into()))],
-            vec![("a".into(), None), ("z".into(), Some("/zroot".into()))],
-            vec![("proj".into(), "/code/proj".into())],
-        );
-        let got: Vec<(CandidateKind, &str)> = c.iter().map(|c| (c.kind, c.name.as_str())).collect();
-        assert_eq!(
-            got,
-            [
-                (CandidateKind::Live, "b"),
-                (CandidateKind::Live, "a"),
-                (CandidateKind::Saved, "z"),
-                (CandidateKind::Folder, "proj"),
-            ]
-        );
-        assert_eq!(c[2].path, Some(PathBuf::from("/zroot")));
-    }
-
-    #[test]
-    fn saved_roots_prefer_the_cache_and_fall_back_to_the_file() {
-        let dir = std::env::temp_dir().join(format!("cde-savedroots-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut rec = record(Some("/on/disk"), pane(vec![]));
-        rec.name = "disk".into();
-        let file = store::save(&dir, &rec).unwrap();
-        let listed = vec![
-            ("disk".to_string(), file),
-            ("cached".to_string(), dir.join("missing.kdl")),
-            ("broken".to_string(), dir.join("missing2.kdl")),
-        ];
-        let loads = std::cell::Cell::new(0);
-        let mut cache = SavedRootCache::default();
-        let mtime = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
-        let mut read = |listed: Vec<(String, PathBuf)>, mtime| {
-            saved_with_roots(
-                listed,
-                |n| match n {
-                    "cached" => Some(Some(PathBuf::from("/cached"))),
-                    _ => None,
-                },
-                |file| {
-                    cache.root(file, Some(mtime), || {
-                        loads.set(loads.get() + 1);
-                        store::load(file).ok().and_then(|r| r.root)
-                    })
-                },
-            )
-        };
-        let got = read(listed.clone(), mtime);
-        assert_eq!(got[0].1, Some(PathBuf::from("/on/disk")));
-        assert_eq!(got[1].1, Some(PathBuf::from("/cached")));
-        assert_eq!(got[2].1, None);
-        assert_eq!(loads.get(), 2); // "cached" is answered without reading its file
-        // Unchanged mtime: no file is parsed again.
-        assert_eq!(read(listed.clone(), mtime), got);
-        assert_eq!(loads.get(), 2);
-        // A changed mtime re-reads exactly the changed file.
-        let mut rec = record(Some("/moved"), pane(vec![]));
-        rec.name = "disk".into();
-        store::save(&dir, &rec).unwrap();
-        let later = mtime + std::time::Duration::from_secs(1);
-        let got = read(listed, later);
-        assert_eq!(got[0].1, Some(PathBuf::from("/moved")));
-        assert_eq!(loads.get(), 4);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn apply_slots_fills_live_and_saved_but_never_folders() {
-        let mut c = build_candidates(
-            vec![("a".into(), None)],
-            vec![("z".into(), None)],
-            vec![("a".into(), "/code/a".into())],
-        );
-        assert!(c.iter().all(|c| c.slot.is_none()));
-        apply_slots(&mut c, |n| match n {
-            "a" => Some(2),
-            "z" => Some(9),
-            _ => None,
-        });
-        let got: Vec<(CandidateKind, Option<u8>)> = c.iter().map(|c| (c.kind, c.slot)).collect();
-        assert_eq!(
-            got,
-            [
-                (CandidateKind::Live, Some(2)),
-                (CandidateKind::Saved, Some(9)),
-                (CandidateKind::Folder, None),
-            ]
-        );
-    }
-
-    #[test]
-    fn folder_entries_lists_sorted_visible_subdirectories() {
-        let root = std::env::temp_dir().join(format!("cde-folders-{}", std::process::id()));
-        for d in ["b", "a", ".hidden"] {
-            std::fs::create_dir_all(root.join(d)).unwrap();
-        }
-        std::fs::write(root.join("file"), b"").unwrap();
-        let got = folder_entries(&[root.clone(), root.join("missing")]);
-        let names: Vec<&str> = got.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, ["a", "b"]);
-        assert_eq!(got[0].1, root.join("a"));
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

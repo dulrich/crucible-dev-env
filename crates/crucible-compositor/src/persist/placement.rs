@@ -18,6 +18,7 @@ use super::{WindowIdentity, proc_root};
 use crate::element::WindowElement;
 use crate::layout::{WindowClass, WindowMeta};
 use crate::state::{Backend, CrucibleState};
+use crucible_persist::ProcAnchor;
 
 /// Pending placements and restore order (a field of [`super::PersistState`]).
 #[derive(Debug, Default)]
@@ -260,20 +261,21 @@ pub fn placement_pid(client_pid: Option<u32>, identity: Option<&WindowIdentity>)
 }
 
 /// The window pid (`meta.pid`) a `crucible relaunch` peer stands for, over `windows` as
-/// `(meta.pid, identity root_pid)` pairs. First the peer or its nearest ancestor that is a bound
-/// window's root resolves to that window's `meta.pid`; only then today's match of the peer or an
-/// ancestor against a `meta.pid`. A shared daemon (an ancestor of every root) is never a root nor
-/// a `meta.pid`, so it never matches.
+/// `(meta.pid, anchor)` pairs ([`WindowMeta::anchor`]): first the peer or its nearest ancestor
+/// that is a bound window's [`ProcAnchor::shell_root`] resolves to that window's `meta.pid`, only
+/// then a match of the peer or an ancestor against a `meta.pid`. A shared daemon (an ancestor of
+/// every root) is never a root nor a `meta.pid`, so it never matches.
 #[must_use]
 pub fn relaunch_window_pid(
     peer: u32,
     ancestors: &[u32],
-    windows: &[(Option<u32>, Option<u32>)],
+    windows: &[(Option<u32>, Option<ProcAnchor>)],
 ) -> Option<u32> {
+    let root = |a: &Option<ProcAnchor>| a.and_then(ProcAnchor::shell_root);
     match_pending(peer, ancestors, |p| {
-        windows.iter().any(|(_, r)| *r == Some(p))
+        windows.iter().any(|(_, a)| root(a) == Some(p))
     })
-    .and_then(|root| windows.iter().find(|(_, r)| *r == Some(root))?.0)
+    .and_then(|r| windows.iter().find(|(_, a)| root(a) == Some(r))?.0)
     .or_else(|| {
         match_pending(peer, ancestors, |p| {
             windows.iter().any(|(m, _)| *m == Some(p))
@@ -971,10 +973,16 @@ mod tests {
 
     /// The `crucible relaunch` pair: each root is its window's wrapper. A relaunch from R1, R2 or
     /// a child of R1 resolves to its own window's `meta.pid`, never through the shared daemon;
-    /// unbound windows still match by `meta.pid`; placeholder termination roots at the identity.
+    /// unbound windows still match by `meta.pid`.
     #[test]
     fn relaunch_resolves_each_bound_wrapper_to_its_own_window() {
-        let windows = [(Some(C1), Some(R1)), (Some(C2), Some(R2)), (Some(99), None)];
+        let shell = |r| Some(ProcAnchor::Shell(r));
+        let term = |p| Some(ProcAnchor::Terminal(p));
+        let windows = [
+            (Some(C1), shell(R1)),
+            (Some(C2), shell(R2)),
+            (Some(99), term(99)),
+        ];
         assert_eq!(relaunch_window_pid(R2, &[D, 1], &windows), Some(C2));
         assert_eq!(relaunch_window_pid(R1, &[D, 1], &windows), Some(C1));
         assert_eq!(relaunch_window_pid(700, &[R1, D, 1], &windows), Some(C1));
@@ -982,23 +990,6 @@ mod tests {
         assert_eq!(relaunch_window_pid(800, &[99, 1], &windows), Some(99));
         assert_eq!(relaunch_window_pid(D, &[1], &windows), None);
         assert_eq!(relaunch_window_pid(801, &[D, 1], &windows), None);
-
-        let meta = |pid, identity| WindowMeta {
-            pid,
-            class: WindowClass::Terminal,
-            origin: None,
-            identity,
-        };
-        assert_eq!(
-            super::super::proc_root_pid(&meta(Some(C1), Some(bound(C1, R1)))),
-            Some(R1)
-        );
-        assert_eq!(
-            super::super::proc_root_pid(&meta(Some(C2), Some(bound(C2, R2)))),
-            Some(R2)
-        );
-        assert_eq!(super::super::proc_root_pid(&meta(Some(99), None)), Some(99));
-        assert_eq!(super::super::proc_root_pid(&meta(None, None)), None);
     }
     // ---- loss recovery (crucible-term plan 03) --------------------------------------------------
 
@@ -1112,7 +1103,7 @@ mod tests {
             command: None,
             session: None,
         };
-        let record = super::super::with_session(origin, Some("k2".into()));
+        let record = origin.with_session(Some("k2".into()));
         assert_eq!(record, keyed_terminal("/q", None, "k2"));
         let job = lost_job(&record).expect("placeholder");
         // An idle shell still gets the lost banner (and then its shell at once).

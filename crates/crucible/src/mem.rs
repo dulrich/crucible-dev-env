@@ -85,11 +85,11 @@ fn read_rollup(proc_root: &Path, pid: u32) -> Option<(u64, u64)> {
 /// The compositor pid: the process owned by `uid` whose argv[0] is `crucible` (basename) with a
 /// `--winit` or `--tty-udev` argument. Several: an ancestor of `self_pid` wins, else the lowest.
 #[must_use]
-pub fn find_compositor(proc_root: &Path, uid: u32, self_pid: u32) -> Option<u32> {
+pub fn find_compositor(proc_root: &Path, uid: u32, self_pid: u32, own: &str) -> Option<u32> {
     let mut found: Vec<u32> = ProcSnapshot::read(proc_root)
         .iter()
         .filter(|(pid, p)| {
-            crucible_subcommand(&p.argv).is_some()
+            crucible_subcommand(&p.argv, own).is_some()
                 && p.argv.iter().any(|a| a == "--winit" || a == "--tty-udev")
                 && fs::metadata(proc_root.join(pid.to_string())).is_ok_and(|m| m.uid() == uid)
         })
@@ -142,8 +142,8 @@ pub struct Report {
 
 /// Whether a process is skipped when labelling: a shell or one of CDE's own `crucible` processes
 /// (resume/relaunch wrappers, the overlay host, `crucible mem` itself).
-fn skipped_in_label(p: &ProcInfo) -> bool {
-    is_cde_process(&p.argv, &p.comm)
+fn skipped_in_label(p: &ProcInfo, own: &str) -> bool {
+    is_cde_process(&p.argv, &p.comm, own)
         || p.argv.first().is_some_and(|a| is_shell_program(a))
         || (p.argv.is_empty() && is_shell_program(&p.comm))
 }
@@ -219,6 +219,7 @@ fn subtree_row(
     procs: &ProcSnapshot,
     tree: &[(u32, usize)],
     mut label: String,
+    own: &str,
 ) -> Row {
     let (mut pss, mut swap, mut unreadable) = (0, 0, false);
     let mut best: Option<(usize, u64, Reverse<u32>)> = None;
@@ -232,8 +233,8 @@ fn subtree_row(
         let Some(info) = procs.get(p) else {
             continue;
         };
-        overlay |= crucible_subcommand(&info.argv) == Some("overlay-host");
-        if d > 0 && !skipped_in_label(info) {
+        overlay |= crucible_subcommand(&info.argv, own) == Some("overlay-host");
+        if d > 0 && !skipped_in_label(info, own) {
             // Deepest first, then largest PSS, then lowest pid (deterministic).
             best = best.max(Some((d, a, Reverse(p))));
         }
@@ -258,15 +259,15 @@ fn subtree_row(
 
 /// The app a daemon window runs: the deepest process that is neither a shell nor one of CDE's
 /// own (ties: lowest pid), else the deepest shell, else the window's root (`crucible resume` for a restore banner not yet confirmed).
-fn window_app(procs: &ProcSnapshot, tree: &[(u32, usize)]) -> String {
+fn window_app(procs: &ProcSnapshot, tree: &[(u32, usize)], own: &str) -> String {
     let pick = |skip_shells: bool| {
         tree.iter()
             .filter_map(|&(p, d)| procs.get(p).map(|i| (p, d, i)))
             .filter(|(_, _, i)| {
                 if skip_shells {
-                    !skipped_in_label(i)
+                    !skipped_in_label(i, own)
                 } else {
-                    !is_cde_process(&i.argv, &i.comm)
+                    !is_cde_process(&i.argv, &i.comm, own)
                 }
             })
             .max_by_key(|&(p, d, _)| (d, Reverse(p)))
@@ -276,7 +277,7 @@ fn window_app(procs: &ProcSnapshot, tree: &[(u32, usize)]) -> String {
         .or_else(|| pick(false))
         .or_else(|| {
             tree.first().and_then(|&(p, _)| procs.get(p)).map(|i| {
-                crucible_subcommand(&i.argv)
+                crucible_subcommand(&i.argv, own)
                     .map_or_else(|| i.comm.clone(), |s| format!("crucible {s}"))
             })
         })
@@ -295,6 +296,7 @@ fn daemon_rows(
     socket: &Path,
     counted: &HashSet<u32>,
     top: &[u32],
+    own: &str,
 ) -> (Vec<Row>, Vec<u32>) {
     let mut daemons: Vec<u32> = procs
         .iter()
@@ -329,11 +331,11 @@ fn daemon_rows(
     let mut apps: Vec<Row> = Vec::new();
     for (i, d) in daemons.into_iter().enumerate() {
         let windows: &[u32] = kids.get(&d).map_or(&[][..], Vec::as_slice);
-        let mut own: Vec<(u32, usize)> = vec![(d, 0)];
+        let mut mine: Vec<(u32, usize)> = vec![(d, 0)];
         if i == 0 {
-            own.extend(thin.iter().map(|&c| (c, 0)));
+            mine.extend(thin.iter().map(|&c| (c, 0)));
         }
-        let mut row = subtree_row(proc_root, procs, &own, String::new());
+        let mut row = subtree_row(proc_root, procs, &mine, String::new(), own);
         row.label = format!(
             "cterm daemon (+{} window{})",
             windows.len(),
@@ -343,8 +345,8 @@ fn daemon_rows(
         // Each window's subtree counts toward its app, summed by app name.
         for &w in windows {
             let tree = subtree(kids, w);
-            let label = window_app(procs, &tree);
-            let r = subtree_row(proc_root, procs, &tree, String::new());
+            let label = window_app(procs, &tree, own);
+            let r = subtree_row(proc_root, procs, &tree, String::new(), own);
             match apps.iter_mut().find(|a| a.label == label) {
                 Some(a) => a.absorb(&r),
                 None => apps.push(Row { label, ..r }),
@@ -358,7 +360,7 @@ fn daemon_rows(
 /// Builds the report for the compositor `pid` from a `/proc`-shaped tree; cterm daemons count
 /// only when owned by `uid`.
 #[must_use]
-pub fn build_report(proc_root: &Path, pid: u32, uid: u32) -> Report {
+pub fn build_report(proc_root: &Path, pid: u32, uid: u32, own: &str) -> Report {
     let procs = ProcSnapshot::read(proc_root);
     let mut kids = procs.children();
     // The compositor is never anybody's child here (also guards a pid-1 style self-parent).
@@ -378,7 +380,10 @@ pub fn build_report(proc_root: &Path, pid: u32, uid: u32) -> Report {
     for &child in top {
         let tree = subtree(&kids, child);
         counted.extend(tree.iter().map(|&(p, _)| p));
-        top_rows.push((child, subtree_row(proc_root, &procs, &tree, name(child))));
+        top_rows.push((
+            child,
+            subtree_row(proc_root, &procs, &tree, name(child), own),
+        ));
     }
     // cterm daemons serving this compositor: detached into their own session, so they are not
     // descendants; matched by the resolved Wayland socket path of the first compositor child.
@@ -386,7 +391,9 @@ pub fn build_report(proc_root: &Path, pid: u32, uid: u32) -> Report {
         .iter()
         .find_map(|&c| proc_env(proc_root, c).and_then(|env| wayland_socket(&env)));
     if let Some(socket) = socket {
-        let (rows, thin) = daemon_rows(proc_root, &procs, &kids, pid, uid, &socket, &counted, top);
+        let (rows, thin) = daemon_rows(
+            proc_root, &procs, &kids, pid, uid, &socket, &counted, top, own,
+        );
         children.extend(rows);
         top_rows.retain(|(p, _)| !thin.contains(p));
     }
@@ -467,9 +474,11 @@ pub fn run(args: &[String]) -> i32 {
     };
     let proc_root = Path::new("/proc");
     let uid = rustix::process::getuid().as_raw();
+    // CDE's own basename, resolved once for the whole report.
+    let own = crucible_persist::own_exe_name();
     let pid = parsed
         .pid
-        .or_else(|| find_compositor(proc_root, uid, std::process::id()));
+        .or_else(|| find_compositor(proc_root, uid, std::process::id(), &own));
     let Some(pid) = pid else {
         eprintln!("crucible mem: no running CDE compositor found (pass --pid <n>)");
         return 1;
@@ -478,7 +487,10 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("crucible mem: no process {pid}");
         return 1;
     }
-    print!("{}", format_report(pid, &build_report(proc_root, pid, uid)));
+    print!(
+        "{}",
+        format_report(pid, &build_report(proc_root, pid, uid, &own))
+    );
     0
 }
 
@@ -572,7 +584,7 @@ mod tests {
         // not a child of the compositor
         f.proc(50, 1, "other", &["other"], Some((9999, 0)));
 
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         let labels: Vec<_> = r.children.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -603,7 +615,7 @@ mod tests {
         f.proc(30, 10, "ghostty", &["ghostty"], Some((200, 0)));
         f.proc(31, 30, "bash", &["bash"], Some((10, 0)));
         f.proc(32, 31, "crucible", &["crucible", "mem"], Some((10, 0)));
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         let labels: Vec<_> = r.children.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["ghostty", "ghostty (overlay)"]);
     }
@@ -640,7 +652,7 @@ mod tests {
         f.proc(10, 1, "crucible", &["crucible", "--winit"], Some((100, 0)));
         f.proc(20, 10, "foot", &["foot"], Some((500, 0)));
         f.proc(21, 20, "gone", &["gone"], None);
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         assert_eq!(r.children[0].pss_kb, 500);
         assert!(r.children[0].unreadable);
         assert!(r.total.unreadable);
@@ -658,9 +670,12 @@ mod tests {
         f.proc(9, 1, "crucible", &["/a/crucible", "pick"], None);
         f.proc(12, 8, "sh", &["sh"], None);
         f.proc(13, 12, "crucible", &["crucible", "mem"], None);
-        assert_eq!(find_compositor(&f.0, uid, 13), Some(8));
-        assert_eq!(find_compositor(&f.0, uid, 99), Some(5));
-        assert_eq!(find_compositor(&f.0, uid.wrapping_add(1), 13), None);
+        assert_eq!(find_compositor(&f.0, uid, 13, "crucible"), Some(8));
+        assert_eq!(find_compositor(&f.0, uid, 99, "crucible"), Some(5));
+        assert_eq!(
+            find_compositor(&f.0, uid.wrapping_add(1), 13, "crucible"),
+            None
+        );
     }
 
     #[test]
@@ -714,7 +729,7 @@ mod tests {
     #[test]
     fn matching_cterm_daemon_gets_one_row_with_its_window_count() {
         let f = daemon_fixture("daemon");
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         let d: Vec<_> = r
             .children
             .iter()
@@ -747,7 +762,7 @@ mod tests {
     #[test]
     fn total_includes_the_daemon_row() {
         let f = daemon_fixture("daemontotal");
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         assert_eq!(r.children.len(), 3);
         assert_eq!(r.total.pss_kb, 100 + 300 + 560);
         assert_eq!(r.total.procs, 1 + 1 + 4);
@@ -765,7 +780,7 @@ mod tests {
             ],
         );
         f.proc(71, 70, "bash", &["bash"], Some((10, 0)));
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         assert_eq!(r.children.len(), 3);
         assert!(r.children.iter().all(|c| c.pss_kb != 910));
     }
@@ -795,7 +810,7 @@ mod tests {
                 ("WAYLAND_DISPLAY", "wayland-1"),
             ],
         );
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         let labels: Vec<_> = r.children.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["cterm daemon (+2 windows)", "htop", "zsh"]);
     }
@@ -821,7 +836,7 @@ mod tests {
             &["/x/crucible", "resume", "--cwd", "/", "--", "vim"],
             Some((3, 0)),
         );
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         let labels: Vec<_> = r
             .children
             .iter()
@@ -879,7 +894,7 @@ mod tests {
             ],
         );
         f.proc(71, 70, "bash", &["bash"], Some((10, 0)));
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         assert_eq!(r.children.len(), 3);
         assert!(
             r.children
@@ -903,7 +918,7 @@ mod tests {
         f.environ(20, &[("WAYLAND_DISPLAY", "/s/wayland-1")]);
         f.proc(60, 1, "cterm", &["/x/cterm", "daemon"], Some((500, 0)));
         f.environ(60, &[("WAYLAND_DISPLAY", "/s/wayland-1")]);
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         assert_eq!(r.children.len(), 1);
         assert_eq!(r.children[0].label, "cterm daemon (+0 windows)");
         assert_eq!(r.children[0].pss_kb, 800);
@@ -914,7 +929,7 @@ mod tests {
         let f = daemon_fixture("daemonnosock");
         f.proc(70, 1, "cterm", &["/y/cterm", "daemon"], Some((900, 0)));
         f.environ(70, &[("WAYLAND_DISPLAY", "wayland-1")]);
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         assert_eq!(r.children.len(), 3);
         assert_eq!(r.total.pss_kb, 100 + 300 + 560);
     }
@@ -930,7 +945,7 @@ mod tests {
                 ("WAYLAND_DISPLAY", "wayland-1"),
             ],
         );
-        let r = build_report(&f.0, 10, uid());
+        let r = build_report(&f.0, 10, uid(), "crucible");
         let d = r
             .children
             .iter()

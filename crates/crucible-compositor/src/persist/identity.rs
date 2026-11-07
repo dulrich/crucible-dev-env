@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crucible_config::TerminalKind;
+use crucible_persist::strip_deleted;
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -99,23 +100,6 @@ pub trait ProcView {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RealProc;
 
-/// `link` without a trailing ` (deleted)` (the kernel's marker for an unlinked executable).
-#[must_use]
-pub fn strip_deleted(link: &Path) -> PathBuf {
-    let s = link.as_os_str().to_string_lossy();
-    match s.strip_suffix(" (deleted)") {
-        Some(base) => PathBuf::from(base),
-        None => link.to_path_buf(),
-    }
-}
-
-/// The parent pid in a `/proc/<pid>/stat` line (the field after the state, past the last `)`).
-#[must_use]
-pub fn parse_stat_ppid(stat: &str) -> Option<u32> {
-    let rest = &stat[stat.rfind(')')? + 1..];
-    rest.split_whitespace().nth(1)?.parse().ok()
-}
-
 impl ProcView for RealProc {
     fn exe(&self, pid: u32) -> Option<PathBuf> {
         std::fs::read_link(format!("/proc/{pid}/exe"))
@@ -124,7 +108,8 @@ impl ProcView for RealProc {
     }
 
     fn ppid(&self, pid: u32) -> Option<u32> {
-        parse_stat_ppid(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+        let stat = crucible_persist::capture::read_stat(Path::new("/proc"), pid)?;
+        u32::try_from(stat.ppid).ok()
     }
 }
 
@@ -472,10 +457,5 @@ mod tests {
             g.bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
         );
-    }
-
-    #[test]
-    fn stat_ppid_parses_past_parenthesised_comm() {
-        assert_eq!(parse_stat_ppid("42 (a) b) S 7 42 42 0"), Some(7));
     }
 }

@@ -1,7 +1,7 @@
 //! Terminal capture: the working directory and foreground command of whatever runs in a
 //! terminal, with the foreground decision made by a table of program policies.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{
     CaptureEnv, claude,
@@ -140,10 +140,106 @@ pub fn capture_shell(env: &CaptureEnv, shell: u32) -> Option<TerminalCapture> {
     Some(TerminalCapture { cwd, command })
 }
 
+/// Where a window's `/proc` reads start, decided once per window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcAnchor {
+    /// An unbound window's client: the terminal process itself (its shell is a child).
+    Terminal(u32),
+    /// A bound cterm window's identity root: its shell or CDE wrapper under the shared daemon
+    /// (the client is only the thin client, so it is never read).
+    Shell(u32),
+}
+
+impl ProcAnchor {
+    /// The anchor of a window with client `pid` and bound identity root `root`: the root when
+    /// bound, else the client pid; `None` when neither is known.
+    #[must_use]
+    pub fn of(pid: Option<u32>, root: Option<u32>) -> Option<Self> {
+        root.map(Self::Shell).or(pid.map(Self::Terminal))
+    }
+
+    /// A [`ProcAnchor::Shell`]'s root; `None` for a terminal.
+    #[must_use]
+    pub fn shell_root(self) -> Option<u32> {
+        match self {
+            Self::Shell(root) => Some(root),
+            Self::Terminal(_) => None,
+        }
+    }
+
+    /// The anchored pid.
+    #[must_use]
+    pub fn pid(self) -> u32 {
+        match self {
+            Self::Terminal(pid) | Self::Shell(pid) => pid,
+        }
+    }
+}
+
+/// The processes a CDE wrapper is looked for in under `anchor`: a [`ProcAnchor::Shell`] root
+/// itself then its children (the root may be the wrapper), a [`ProcAnchor::Terminal`]'s children
+/// only (the terminal is never its own foreground).
+pub(super) fn wrapper_candidates(proc_root: &Path, anchor: ProcAnchor) -> Vec<u32> {
+    match anchor {
+        ProcAnchor::Shell(root) => std::iter::once(root)
+            .chain(children_of(proc_root, root))
+            .collect(),
+        ProcAnchor::Terminal(pid) => children_of(proc_root, pid),
+    }
+}
+
+/// The live capture under `anchor`: [`capture_shell`] on a root, [`capture_terminal`] on a
+/// terminal (which first picks the terminal's shell).
+#[must_use]
+pub fn capture_anchor(env: &CaptureEnv, anchor: ProcAnchor) -> Option<TerminalCapture> {
+    match anchor {
+        ProcAnchor::Shell(root) => capture_shell(env, root),
+        ProcAnchor::Terminal(pid) => capture_terminal(env, pid),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::capture::fake_proc::FakeProc;
+
+    /// One anchor decides both the live capture and the wrapper candidates: a terminal anchor
+    /// captures through its shell child and never treats itself as its wrapper; a shell anchor
+    /// captures the root itself and does. `relaunch_wrapper_of` searches the pid itself either way.
+    #[test]
+    fn one_anchor_picks_capture_and_candidates() {
+        let p = FakeProc::new("anchor");
+        p.add((100, "ghostty", 1), 0, "/t", &["ghostty"], &[200]);
+        p.add((200, "bash", 100), 200, "/home/u", &["bash"], &[]);
+        let env = p.env();
+        assert_eq!(
+            capture_anchor(&env, ProcAnchor::Terminal(100)).map(|c| c.cwd),
+            Some("/home/u".into())
+        );
+        assert_eq!(
+            capture_anchor(&env, ProcAnchor::Shell(200)).map(|c| c.cwd),
+            Some("/home/u".into())
+        );
+        let root = env.proc_root.as_path();
+        assert_eq!(wrapper_candidates(root, ProcAnchor::Terminal(100)), [200]);
+        assert_eq!(wrapper_candidates(root, ProcAnchor::Shell(100)), [100, 200]);
+        assert_eq!(ProcAnchor::of(Some(5), Some(9)), Some(ProcAnchor::Shell(9)));
+        assert_eq!(ProcAnchor::of(Some(5), None), Some(ProcAnchor::Terminal(5)));
+        assert_eq!(ProcAnchor::of(None, None), None);
+        // A terminal whose own argv is the relaunch wrapper is found by `relaunch_wrapper_of`.
+        p.add(
+            (300, "crucible", 1),
+            0,
+            "/",
+            &["crucible", "relaunch", "--", "gimp"],
+            &[],
+        );
+        assert_eq!(
+            crate::capture::relaunch_wrapper_of(&env, ProcAnchor::Terminal(300))
+                .map(|(pid, _)| pid),
+            Some(300)
+        );
+    }
 
     fn fg<'a>(argv: &'a [String], direct_child_of_shell: bool) -> Foreground<'a> {
         Foreground {

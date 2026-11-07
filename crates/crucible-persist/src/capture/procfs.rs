@@ -77,7 +77,9 @@ pub fn children_of(proc_root: &Path, pid: u32) -> Vec<u32> {
         .collect()
 }
 
-pub(super) fn read_stat(proc_root: &Path, pid: u32) -> Option<Stat> {
+/// The parsed `/proc/<pid>/stat` of `pid` under `proc_root` ([`parse_stat`]); `None` when unreadable.
+#[must_use]
+pub fn read_stat(proc_root: &Path, pid: u32) -> Option<Stat> {
     parse_stat(&fs::read_to_string(pid_dir(proc_root, pid).join("stat")).ok()?)
 }
 
@@ -216,6 +218,11 @@ mod tests {
         assert_eq!(s, Stat { ppid: 7, tpgid: 99 });
         let s = parse_stat("42 (we ird) x) S 7 42 42 34816 -1 0").unwrap();
         assert_eq!(s, Stat { ppid: 7, tpgid: -1 });
+        // A comm holding `) ` (identity.rs's former `parse_stat_ppid` case).
+        assert_eq!(
+            parse_stat("42 (a) b) S 7 42 42 0 5").map(|s| s.ppid),
+            Some(7)
+        );
         assert_eq!(parse_stat("garbage"), None);
         assert_eq!(parse_stat("1 (x) S 1 2"), None);
         assert_eq!(parse_stat("1 (x) S notnum 2 3 4 5"), None);

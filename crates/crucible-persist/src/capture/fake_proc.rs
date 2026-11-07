@@ -48,6 +48,7 @@ impl FakeProc {
         CaptureEnv {
             proc_root: self.proc_root(),
             claude_home: self.claude_home(),
+            own_exe: "crucible".to_string(),
         }
     }
 

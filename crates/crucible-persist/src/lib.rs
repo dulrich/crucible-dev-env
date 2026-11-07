@@ -37,19 +37,20 @@ pub mod slots;
 pub mod store;
 
 pub use capture::{
-    CaptureEnv, ProcInfo, ProcSnapshot, SpawnClass, TerminalCapture, WindowRecordInput, ancestors,
-    capture_shell, capture_terminal, children_of, relaunch_wrapper_of, window_record,
+    CaptureEnv, ProcAnchor, ProcInfo, ProcSnapshot, SpawnClass, TerminalCapture, WindowRecordInput,
+    ancestors, capture_anchor, capture_shell, capture_terminal, children_of, relaunch_wrapper_of,
+    window_record,
 };
 pub use error::PersistError;
 pub use format::{FORMAT_VERSION, is_session_key};
 pub use invocation::{
     CdeWrapper, Invocation, PickTarget, RelaunchWrapper, ResumeMode, ResumeWrapper,
-    crucible_subcommand, crucible_subcommand_as, is_cde_process, is_cde_process_as,
+    crucible_subcommand, is_cde_process,
 };
 pub use policy::should_save;
 pub use program::{
-    CrucibleExeError, ExeRemoved, child_path, crucible_exe, is_executable_file, own_exe_name,
-    preflight_command, reinstalled_exe, resolve_program, same_program,
+    CrucibleExeError, DELETED_SUFFIX, ExeRemoved, child_path, crucible_exe, is_executable_file,
+    own_exe_name, preflight_command, reinstalled_exe, resolve_program, same_program, strip_deleted,
 };
 pub use record::{PaneRecord, RecordNode, WindowRecord, WorkspaceRecord};
 pub use restore::{SpawnJob, prepare_lost, prepare_restore, resolve_cwd};

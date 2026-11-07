@@ -23,10 +23,10 @@ pub use classify::{SpawnClass, WindowRecordInput, relaunch_wrapper_of, window_re
 pub use claude::{claude_resume_argv, claude_session_id};
 pub use procfs::{
     ProcInfo, ProcSnapshot, Stat, ancestors, children_of, parse_children, parse_cmdline,
-    parse_stat, read_cmdline,
+    parse_stat, read_cmdline, read_stat,
 };
 pub use shell::{is_shell_program, join_command, shell_quote};
-pub use terminal::{TerminalCapture, capture_shell, capture_terminal};
+pub use terminal::{ProcAnchor, TerminalCapture, capture_anchor, capture_shell, capture_terminal};
 
 /// Where capture reads from: the `/proc` tree and the claude home.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +36,9 @@ pub struct CaptureEnv {
     /// `$CLAUDE_CONFIG_DIR`, else `$HOME/.claude`. A home that does not exist (or has no
     /// `sessions/`) simply reads nothing: every program is then captured by its plain argv.
     pub claude_home: PathBuf,
+    /// The running binary's basename ([`crate::own_exe_name`]), resolved once per capture by the
+    /// caller: the wrapper parsers recognise `argv[0]` named `crucible` or this.
+    pub own_exe: String,
 }
 
 impl CaptureEnv {

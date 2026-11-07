@@ -15,7 +15,17 @@ pub fn is_executable_file(path: &Path) -> bool {
 }
 
 /// The suffix Linux appends to `/proc/self/exe` when the running binary was replaced or removed.
-const DELETED_SUFFIX: &str = " (deleted)";
+pub const DELETED_SUFFIX: &str = " (deleted)";
+
+/// `link` without a trailing [` (deleted)`](DELETED_SUFFIX) (the kernel's marker for an unlinked
+/// executable, as read from `/proc/<pid>/exe`).
+#[must_use]
+pub fn strip_deleted(link: &Path) -> PathBuf {
+    match link.to_str().and_then(|s| s.strip_suffix(DELETED_SUFFIX)) {
+        Some(base) => PathBuf::from(base),
+        None => link.to_path_buf(),
+    }
+}
 
 /// The running binary's path is gone: it was removed (not replaced) while the process ran.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -195,6 +205,18 @@ pub fn same_program(a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn strip_deleted_drops_only_the_kernel_suffix() {
+        assert_eq!(
+            strip_deleted(Path::new("/x/crucible (deleted)")),
+            PathBuf::from("/x/crucible")
+        );
+        assert_eq!(
+            strip_deleted(Path::new("/x/crucible")),
+            PathBuf::from("/x/crucible")
+        );
+    }
 
     #[test]
     fn only_executable_regular_files_count() {

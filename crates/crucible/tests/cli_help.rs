@@ -225,7 +225,8 @@ fn resume_stays_resident_and_capturable_while_the_command_runs() {
         .collect();
     assert!(argv.iter().any(|a| a == "resume"), "{argv:?}");
     assert!(argv.iter().any(|a| a == "--cwd"), "{argv:?}");
-    let cap = crucible_persist::ResumeWrapper::from_argv(&argv).expect("banner argv decodes");
+    let cap =
+        crucible_persist::ResumeWrapper::from_argv(&argv, "crucible").expect("banner argv decodes");
     assert_eq!(cap.command.as_deref(), Some(cmd));
     assert_eq!(cap.cwd, dir);
     let _ = std::fs::remove_dir_all(&dir);

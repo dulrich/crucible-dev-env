@@ -26,6 +26,21 @@ pub enum WindowRecord {
     },
 }
 
+impl WindowRecord {
+    /// This record stamped with a bound identity's session `key`: a terminal's key is replaced
+    /// only when `key` is `Some` (the identity's key wins over whatever the origin carried); an
+    /// app, or a `None` key, is returned unchanged. The one place a session key is applied.
+    #[must_use]
+    pub fn with_session(mut self, key: Option<String>) -> Self {
+        if let Self::Terminal { session, .. } = &mut self
+            && key.is_some()
+        {
+            *session = key;
+        }
+        self
+    }
+}
+
 /// One pane as persisted: its window stack in order and the focused stack index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneRecord {
@@ -101,6 +116,25 @@ impl WorkspaceRecord {
 mod tests {
     use super::*;
     use crucible_layout::Direction::{Down, Right};
+
+    #[test]
+    fn with_session_stamps_a_terminal_only_with_a_key() {
+        let keyed = |k: Option<&str>| WindowRecord::Terminal {
+            cwd: "/q".into(),
+            command: None,
+            session: k.map(str::to_string),
+        };
+        assert_eq!(
+            keyed(Some("k1")).with_session(Some("k2".into())),
+            keyed(Some("k2"))
+        );
+        assert_eq!(keyed(Some("k1")).with_session(None), keyed(Some("k1")));
+        let app = WindowRecord::App {
+            app_id: None,
+            cmdline: Some("gimp".into()),
+        };
+        assert_eq!(app.clone().with_session(Some("k".into())), app);
+    }
 
     fn term(n: usize) -> WindowRecord {
         WindowRecord::Terminal {
