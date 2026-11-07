@@ -29,8 +29,8 @@
 
 use std::os::unix::{io::OwnedFd, net::UnixStream};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
+use std::process::{Child, Stdio};
+use std::time::{Duration, Instant};
 
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::{
@@ -107,13 +107,12 @@ fn xresources_file(home: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Optio
 
 /// Loads `~/.Xresources` into the new X server, as an X session's startup would (`xrdb -merge`),
 /// so X11 apps such as urxvt see their resources. Runs only when the file exists; a missing `xrdb`
-/// is logged at debug and a failed merge as a warning. Never blocks the event loop: the child is
-/// reaped on a thread.
-fn merge_xresources(display_number: u32) {
+/// is logged at debug and a failed start as a warning. Returns the running merge, which the caller
+/// waits on ([`CrucibleState::start_session_after_merge`]) before anything X11 is spawned: an app
+/// reads its resources once, at startup.
+fn merge_xresources(display_number: u32) -> Option<(Child, PathBuf)> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let Some(file) = xresources_file(home.as_deref(), Path::is_file) else {
-        return;
-    };
+    let file = xresources_file(home.as_deref(), Path::is_file)?;
     let child = std::process::Command::new("xrdb")
         .arg("-merge")
         .arg(&file)
@@ -123,20 +122,60 @@ fn merge_xresources(display_number: u32) {
         .stderr(Stdio::null())
         .spawn();
     match child {
-        Ok(mut child) => {
-            std::thread::spawn(move || match child.wait() {
-                Ok(status) if status.success() => {
-                    info!(file = %file.display(), "merged X resources into XWayland");
-                }
-                Ok(status) => warn!(file = %file.display(), %status, "xrdb -merge failed"),
-                Err(err) => warn!(%err, "xrdb -merge could not be waited on"),
-            });
-        }
+        Ok(child) => Some((child, file)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             debug!("xrdb not installed; X resources not loaded");
+            None
         }
-        Err(err) => warn!(%err, "xrdb -merge could not be started"),
+        Err(err) => {
+            warn!(%err, "xrdb -merge could not be started");
+            None
+        }
     }
+}
+
+/// How long the session start waits for `xrdb -merge` (it takes tens of milliseconds).
+const XRDB_WAIT: Duration = Duration::from_secs(1);
+/// How often the session start polls the running merge.
+const XRDB_POLL: Duration = Duration::from_millis(10);
+
+/// What one poll of the running merge decides ([`xrdb_wait_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XrdbWait {
+    /// Still running and within [`XRDB_WAIT`]: poll again.
+    Poll,
+    /// Finished (or its status is unreadable): start the session.
+    Start,
+    /// Still running past [`XRDB_WAIT`]: start the session anyway and leave it to finish.
+    GiveUp,
+}
+
+/// Decides one poll: `finished` is whether the merge has exited (or cannot be waited on).
+/// **Pure.**
+fn xrdb_wait_step(finished: bool, elapsed: Duration) -> XrdbWait {
+    if finished {
+        XrdbWait::Start
+    } else if elapsed < XRDB_WAIT {
+        XrdbWait::Poll
+    } else {
+        XrdbWait::GiveUp
+    }
+}
+
+/// Logs a finished merge's outcome.
+fn log_merge(file: &Path, status: std::io::Result<std::process::ExitStatus>) {
+    match status {
+        Ok(status) if status.success() => {
+            info!(file = %file.display(), "merged X resources into XWayland");
+        }
+        Ok(status) => warn!(file = %file.display(), %status, "xrdb -merge failed"),
+        Err(err) => warn!(%err, "xrdb -merge could not be waited on"),
+    }
+}
+
+/// Reaps a merge left running on a thread, so it never blocks the event loop or becomes a zombie.
+fn reap_merge_later(mut child: Child, file: PathBuf) {
+    std::thread::spawn(move || log_merge(&file, child.wait()));
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
@@ -184,10 +223,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     x11_socket,
                     display_number,
                 } => {
-                    data.on_xwayland_ready(&client, x11_socket, display_number);
                     // Success or WM-attach failure alike: the session starts, then autostart
-                    // runs, each exactly once.
-                    data.on_xwayland_outcome(OutcomeSite::Ready);
+                    // runs, each exactly once, after any `.Xresources` merge has landed.
+                    match data.on_xwayland_ready(&client, x11_socket, display_number) {
+                        Some(merge) => data.start_session_after_merge(merge),
+                        None => data.on_xwayland_outcome(OutcomeSite::Ready),
+                    }
                 }
                 XWaylandEvent::Error => {
                     warn!("XWayland crashed on startup");
@@ -204,8 +245,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// claims both selections, records the `DISPLAY` number and exports it.
     ///
     /// A failed WM attach is logged and leaves `xwm` unset. Does **not** run the autostart; the
-    /// event-loop callback does that once per outcome.
-    fn on_xwayland_ready(&mut self, client: &Client, x11_socket: UnixStream, display_number: u32) {
+    /// event-loop callback does that once per outcome. Returns the running `.Xresources` merge, if
+    /// one was started.
+    fn on_xwayland_ready(
+        &mut self,
+        client: &Client,
+        x11_socket: UnixStream,
+        display_number: u32,
+    ) -> Option<(Child, PathBuf)> {
+        let mut merge = None;
         // X11 clients can't interpret fractional wl_output scale; apply it per-client.
         let scale = xwayland_scale(
             std::env::var(XWAYLAND_SCALE_ENV).ok().as_deref(),
@@ -244,11 +292,58 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     display = display_number,
                     "XWayland ready (DISPLAY=:{display_number})"
                 );
-                merge_xresources(display_number);
+                merge = merge_xresources(display_number);
             }
             Err(err) => {
                 error!(%err, "Failed to attach X11 window manager");
             }
+        }
+        merge
+    }
+
+    /// Starts the session (the [`OutcomeSite::Ready`] outcome) once the `.Xresources` merge has
+    /// exited, polling it from an event-loop timer so nothing blocks. Without the wait, the warm
+    /// overlay host and restored X11 apps are spawned while `xrdb` is still running and start
+    /// without their resources. Past [`XRDB_WAIT`] the session starts anyway and the merge is
+    /// reaped on a thread.
+    fn start_session_after_merge(&mut self, merge: (Child, PathBuf)) {
+        let started = Instant::now();
+        let mut pending = Some(merge);
+        let timer = self
+            .handle
+            .insert_source(Timer::immediate(), move |_, _, data| {
+                let Some((mut child, file)) = pending.take() else {
+                    return TimeoutAction::Drop;
+                };
+                let status = child.try_wait();
+                let finished = !matches!(status, Ok(None));
+                match xrdb_wait_step(finished, started.elapsed()) {
+                    XrdbWait::Poll => {
+                        pending = Some((child, file));
+                        return TimeoutAction::ToDuration(XRDB_POLL);
+                    }
+                    XrdbWait::Start => match status {
+                        Ok(Some(exit)) => log_merge(&file, Ok(exit)),
+                        Err(err) => log_merge(&file, Err(err)),
+                        // `finished` is false for `Ok(None)`, so this step never sees it.
+                        Ok(None) => {}
+                    },
+                    XrdbWait::GiveUp => {
+                        warn!(
+                            file = %file.display(),
+                            "xrdb -merge still running after {XRDB_WAIT:?}; starting the session"
+                        );
+                        reap_merge_later(child, file);
+                    }
+                }
+                data.on_xwayland_outcome(OutcomeSite::Ready);
+                TimeoutAction::Drop
+            });
+        if let Err(err) = timer {
+            // The closure (and the merge it owned) was dropped with the failed source; the
+            // session must not wait on it.
+            error!(%err, "cannot arm the xrdb wait; starting the session now");
+            self.on_xwayland_outcome(OutcomeSite::Ready);
         }
     }
 
@@ -420,6 +515,22 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
 mod tests {
     use super::{xresources_file, xwayland_scale};
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn the_session_waits_for_the_xrdb_merge_but_never_past_the_limit() {
+        use super::{XRDB_WAIT, XrdbWait, xrdb_wait_step};
+        use std::time::Duration;
+        // A finished merge starts the session at once, even at the limit.
+        assert_eq!(xrdb_wait_step(true, Duration::ZERO), XrdbWait::Start);
+        assert_eq!(xrdb_wait_step(true, XRDB_WAIT * 2), XrdbWait::Start);
+        // A running merge is polled until the limit, then given up on.
+        assert_eq!(xrdb_wait_step(false, Duration::ZERO), XrdbWait::Poll);
+        assert_eq!(
+            xrdb_wait_step(false, XRDB_WAIT - Duration::from_millis(1)),
+            XrdbWait::Poll
+        );
+        assert_eq!(xrdb_wait_step(false, XRDB_WAIT), XrdbWait::GiveUp);
+    }
 
     #[test]
     fn xresources_file_is_home_xresources_when_present() {
