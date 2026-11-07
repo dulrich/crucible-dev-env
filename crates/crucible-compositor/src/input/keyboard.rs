@@ -9,11 +9,12 @@
 use std::collections::BTreeSet;
 
 use smithay::backend::input::{Event, InputBackend, KeyState, KeyboardKeyEvent};
-use smithay::input::keyboard::FilterResult;
+use smithay::input::keyboard::{FilterResult, Keysym};
 use smithay::utils::SERIAL_COUNTER;
 use tracing::debug;
 
 use crate::focus::KeyboardFocusTarget;
+use crate::snip::Event as SnipEvent;
 use crate::state::{Backend, CrucibleState};
 
 /// Physical-keycode identity for consumed Super-leader key presses (F10).
@@ -54,6 +55,26 @@ impl SuppressedKeys {
     }
 }
 
+/// What an intercepted key press does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum KeyHit {
+    /// Run this (admitted) chord action.
+    Action(crucible_keys::Action),
+    /// Snip mode: feed this event to the selection (`None`: the key is just swallowed).
+    Snip(Option<SnipEvent>),
+}
+
+/// The selection event a key press makes in snip mode: `Escape` cancels, `Return`/`KP_Enter`
+/// accept; every other key is swallowed.
+#[must_use]
+fn snip_key(keysym: Keysym) -> Option<SnipEvent> {
+    match keysym {
+        Keysym::Escape => Some(SnipEvent::Esc),
+        Keysym::Return | Keysym::KP_Enter => Some(SnipEvent::Enter),
+        _ => None,
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Runs a keyboard key through the seat, intercepting `Super`-leader chords.
     ///
@@ -76,7 +97,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let time = Event::time_msec(&evt);
 
         let keyboard = self.seat.get_keyboard().unwrap();
-        let locked = self.input_mode().is_locked();
+        let mode = self.input_mode();
+        let locked = mode.is_locked();
+        let snipping = mode.is_snipping();
 
         let action = keyboard.input(
             self,
@@ -102,13 +125,23 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     // While locked only VT switching runs; every other key goes to the locker.
                     // Same predicate as the action gate (`admit`).
                     let action = action.filter(|a| super::admit(locked, a).is_ok());
+                    // While snipping only `snip` (cancel) and VT switches run as chords; every
+                    // other press is swallowed (Esc / Enter feed the selection).
+                    let action = action.filter(|a| super::admit_snip(snipping, a).is_ok());
+                    if snipping {
+                        state.suppressed_keys.consume_press(raw_keycode);
+                        return FilterResult::Intercept(Some(match action {
+                            Some(action) => KeyHit::Action(action),
+                            None => KeyHit::Snip(snip_key(keysym)),
+                        }));
+                    }
                     if action.is_some() {
                         state.suppressed_keys.consume_press(raw_keycode);
                     }
-                    // The filter's `Intercept` payload type is `Option<Action>` (a release
+                    // The filter's `Intercept` payload type is `Option<KeyHit>` (a release
                     // intercepts with `None`); wrap the matched action accordingly.
                     match action {
-                        Some(action) => FilterResult::Intercept(Some(action)),
+                        Some(action) => FilterResult::Intercept(Some(KeyHit::Action(action))),
                         None => FilterResult::Forward,
                     }
                 } else if state.suppressed_keys.consume_release(raw_keycode) {
@@ -121,9 +154,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
         // `input` returns `Option<FilterResult::Intercept(_)>`; the outer `Option` is `None` when
         // the key was forwarded. A release carries `Some(None)` (intercepted, no action).
-        if let Some(Some(action)) = action {
-            // Failures are already logged by the gate at their usual levels.
-            let _ = self.handle_key_action(action, super::Origin::Chord);
+        match action {
+            Some(Some(KeyHit::Action(action))) => {
+                // Failures are already logged by the gate at their usual levels.
+                let _ = self.handle_key_action(action, super::Origin::Chord);
+            }
+            Some(Some(KeyHit::Snip(Some(event)))) => self.snip_event(event),
+            _ => {}
         }
     }
 
@@ -171,6 +208,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snip_keys_map_escape_and_enter_only() {
+        assert_eq!(snip_key(Keysym::Escape), Some(SnipEvent::Esc));
+        assert_eq!(snip_key(Keysym::Return), Some(SnipEvent::Enter));
+        assert_eq!(snip_key(Keysym::KP_Enter), Some(SnipEvent::Enter));
+        assert_eq!(snip_key(Keysym::a), None);
+        assert_eq!(snip_key(Keysym::space), None);
+    }
 
     // ---- F10: consumed-release transitions -------------------------------------------------
     //

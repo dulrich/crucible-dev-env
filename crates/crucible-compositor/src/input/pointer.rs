@@ -28,6 +28,23 @@ use crate::pointer_lock::{MotionOutcome, clamp_to_fullscreen, constrained_motion
 use crate::state::{Backend, CrucibleState};
 use smithay::wayland::seat::WaylandFocus;
 
+/// Linux `BTN_LEFT` / `BTN_RIGHT` (`input-event-codes.h`).
+const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
+
+/// The selection event a button makes in snip mode: left press/release drive the drag, a right
+/// press cancels; everything else is swallowed.
+#[must_use]
+fn snip_button(button: u32, pressed: bool) -> Option<crate::snip::Event> {
+    use crate::snip::Event;
+    match (button, pressed) {
+        (BTN_LEFT, true) => Some(Event::Press),
+        (BTN_LEFT, false) => Some(Event::Release),
+        (BTN_RIGHT, true) => Some(Event::Esc),
+        _ => None,
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Maps absolute winit pointer motion into the output and delivers it to the seat.
     ///
@@ -63,6 +80,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             },
         );
         pointer.frame(self);
+        if mode.is_snipping() {
+            self.snip_motion(pos);
+            return;
+        }
         self.header_drag_motion();
         self.focus_follows_pointer(&mode);
     }
@@ -152,6 +173,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             },
         );
         pointer.frame(self);
+        if mode.is_snipping() {
+            self.snip_motion(location);
+            return;
+        }
         self.header_drag_motion();
         self.focus_follows_pointer(&mode);
         let keyboard = self
@@ -179,6 +204,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let serial = SERIAL_COUNTER.next_serial();
         let button = evt.button_code();
         let state = wl_pointer::ButtonState::from(evt.state());
+
+        if self.input_mode().is_snipping() {
+            // Snip mode: buttons feed the selection and never reach a client.
+            if let Some(event) = snip_button(button, state == wl_pointer::ButtonState::Pressed) {
+                self.snip_event(event);
+            }
+            return;
+        }
 
         if wl_pointer::ButtonState::Pressed == state {
             let mode = self.input_mode();
@@ -273,8 +306,32 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
+    /// Re-resolves pointer focus at the current location (a synthetic motion with no movement):
+    /// `None` while snipping, else the surface under the pointer. Used when snip mode starts and
+    /// ends so clients see a leave / a fresh enter.
+    pub(crate) fn refresh_pointer_focus(&mut self) {
+        let mode = self.input_mode();
+        let location = self.pointer.current_location();
+        let under = self.surface_under(&mode, location);
+        let pointer = self.pointer.clone();
+        pointer.motion(
+            self,
+            under,
+            &MotionEvent {
+                location,
+                serial: SERIAL_COUNTER.next_serial(),
+                time: self.clock.now().as_millis(),
+            },
+        );
+        pointer.frame(self);
+    }
+
     /// Delivers a scroll axis frame to the seat.
     pub(super) fn process_pointer_axis<I: InputBackend>(&mut self, evt: I::PointerAxisEvent) {
+        if self.input_mode().is_snipping() {
+            // Snip mode swallows scrolling.
+            return;
+        }
         let horizontal = evt
             .amount(Axis::Horizontal)
             .unwrap_or_else(|| evt.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0);
@@ -328,6 +385,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
         if mode.is_locked() {
             return crate::lock::lock_surface_under(&self.session_lock, &self.space, pos);
+        }
+        if mode.is_snipping() {
+            // Snip mode: no client receives pointer input.
+            return None;
         }
         self.space
             .element_under(pos)
@@ -648,5 +709,20 @@ mod confine_tests {
             confine_to_outputs((1.0, 2.0).into(), &[]),
             (1.0, 2.0).into()
         );
+    }
+}
+
+#[cfg(test)]
+mod snip_tests {
+    use super::*;
+    use crate::snip::Event;
+
+    #[test]
+    fn snip_buttons_left_drags_right_cancels_rest_swallowed() {
+        assert_eq!(snip_button(BTN_LEFT, true), Some(Event::Press));
+        assert_eq!(snip_button(BTN_LEFT, false), Some(Event::Release));
+        assert_eq!(snip_button(BTN_RIGHT, true), Some(Event::Esc));
+        assert_eq!(snip_button(BTN_RIGHT, false), None);
+        assert_eq!(snip_button(0x112, true), None);
     }
 }

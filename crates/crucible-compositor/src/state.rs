@@ -317,6 +317,9 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// A Wayland toplevel whose keyboard focus is deferred until its first buffer commits (X2);
     /// see [`CrucibleState::set_keyboard_focus`].
     pub pending_keyboard_focus: PendingFocus<WindowElement>,
+    /// The active snip session (frozen frames + selection), `None` outside snip mode; see
+    /// [`crate::snip`].
+    pub snip: Option<crate::snip::SnipSession>,
 }
 
 /// The icon surface a client attached to a pointer drag, with its accumulated hotspot offset.
@@ -487,6 +490,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             cursor: crate::cursor::Cursor::default(),
             seat_name,
             suppressed_keys: SuppressedKeys::new(),
+            snip: None,
             xwm: None,
             xdisplay: None,
             autostart_gate: crate::autostart::AutostartGate::default(),

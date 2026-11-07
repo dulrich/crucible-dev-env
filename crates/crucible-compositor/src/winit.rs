@@ -99,6 +99,7 @@ impl Backend for WinitData {
             projection: &state.projection,
             tiling: &state.config.tiling,
             dnd_icon: None,
+            snip: state.snip.as_ref(),
             inputs: &inputs,
         };
         let renderer = state.backend_data.backend.renderer();
@@ -298,6 +299,7 @@ pub fn run_winit() {
                 projection: &state.projection,
                 tiling: &state.config.tiling,
                 dnd_icon: state.dnd_icon.as_ref(),
+                snip: state.snip.as_ref(),
                 inputs: &inputs,
             };
             let header_text = &mut state.header_text;

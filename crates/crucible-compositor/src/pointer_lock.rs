@@ -260,7 +260,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// [`fullscreen_confine_rect`]); logs (debug, deduplicated) when confinement switches.
     pub(crate) fn fullscreen_confine(&mut self) -> Option<Rectangle<i32, Logical>> {
         let mode = self.input_mode();
-        let modal = mode.is_locked() || mode.has_overlay();
+        let modal = mode.is_modal();
         let rect = fullscreen_confine_rect(
             B::HAS_RELATIVE_MOTION,
             modal,
@@ -306,7 +306,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(crate) fn reconcile_pointer_constraint(&mut self, keyboard: Option<WlSurface>) {
         let pointer = self.pointer.clone();
         let mode = self.input_mode();
-        let modal = mode.is_locked() || mode.has_overlay();
+        let modal = mode.is_modal();
         let location = pointer.current_location();
 
         // A constraint CDE activated on a surface that lost pointer focus was deactivated by

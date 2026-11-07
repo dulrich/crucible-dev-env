@@ -439,6 +439,8 @@ impl<B: Backend + 'static> SessionLockHandler for CrucibleState<B> {
         info!("lock: lock accepted; blanking every output");
         self.session_lock.reset_surfaces();
         self.close_mapped_overlay();
+        // The lock wins over snip: drop the selection and its frozen frames now.
+        self.discard_snip();
         self.force_keyboard_focus(None);
         self.lock_redraw_all();
         // Confirms at once when no output exists or every output is powered off by idle

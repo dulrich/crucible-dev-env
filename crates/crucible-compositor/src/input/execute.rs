@@ -45,6 +45,9 @@ pub(crate) enum ActionError {
     /// The model refused the verb (anything but the expected `SameWorkspace` no-op).
     #[error("{0}")]
     Model(LayoutError),
+    /// Snip mode is active and the action is not `snip` (cancel) or a VT switch.
+    #[error("snip in progress (only snip and vt-switch run; press Esc to cancel)")]
+    Snipping,
 }
 
 /// The lock admission for an action: [`Action::allowed_while_locked`] is the one lock predicate,
@@ -55,6 +58,19 @@ pub(crate) enum ActionError {
 pub(crate) fn admit(locked: bool, action: &Action) -> Result<(), ActionError> {
     if locked && !action.allowed_while_locked() {
         Err(ActionError::Locked)
+    } else {
+        Ok(())
+    }
+}
+
+/// The snip admission: while snipping only `snip` (which toggles the mode off) and VT switches
+/// run, from chords and IPC alike.
+///
+/// # Errors
+/// [`ActionError::Snipping`] while `snipping` for every other action.
+pub(crate) fn admit_snip(snipping: bool, action: &Action) -> Result<(), ActionError> {
+    if snipping && !matches!(action, Action::Snip | Action::VtSwitch(_)) {
+        Err(ActionError::Snipping)
     } else {
         Ok(())
     }
@@ -105,6 +121,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ) -> Result<(), ActionError> {
         let mode = self.input_mode();
         admit(mode.is_locked(), &action)?;
+        admit_snip(mode.is_snipping(), &action)?;
         if closes_overlay(origin, mode.has_overlay(), &action) {
             self.close_mapped_overlay();
         }
@@ -175,7 +192,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     warn!(reason, "screenshot not taken");
                 }
             }
-            Action::Snip => debug!("snip: not implemented yet"),
+            Action::Snip => self.toggle_snip(),
             Action::CloseWindow => self.close_focused_window(),
             Action::SetLayout(name) => self.set_layout(&name),
             // Auto-names skip live AND saved names, so a fresh "2" never overwrites a saved "2".
@@ -396,6 +413,27 @@ fn move_window_to_adjacent_workspace(world: &mut World, delta: i64) -> Result<()
 mod tests {
     use super::*;
     use crucible_layout::Direction;
+
+    #[test]
+    fn snipping_admits_only_snip_and_vt_switch() {
+        assert_eq!(admit_snip(true, &Action::Snip), Ok(()));
+        assert_eq!(admit_snip(true, &Action::VtSwitch(3)), Ok(()));
+        for action in [
+            Action::Quit,
+            Action::Screenshot,
+            Action::Run("firefox".into()),
+            Action::Focus(Direction::Left),
+            Action::Lock,
+            Action::OpenPicker,
+        ] {
+            assert_eq!(
+                admit_snip(true, &action),
+                Err(ActionError::Snipping),
+                "{action}"
+            );
+            assert_eq!(admit_snip(false, &action), Ok(()), "{action}");
+        }
+    }
 
     #[test]
     fn locked_admits_only_vt_switch() {

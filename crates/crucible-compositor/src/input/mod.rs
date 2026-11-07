@@ -33,7 +33,7 @@
 
 mod execute;
 
-pub(crate) use execute::{ActionError, Origin, admit};
+pub(crate) use execute::{ActionError, Origin, admit, admit_snip};
 mod hover;
 mod keyboard;
 mod modal;

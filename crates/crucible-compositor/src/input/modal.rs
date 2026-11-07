@@ -1,7 +1,7 @@
 //! Modal input routing: the one place the lock/overlay precedence is written.
 //!
-//! [`CrucibleState::input_mode`] resolves the mode **once per event** (`Locked` > `Overlay` >
-//! `Normal`); the pure route functions below decide what each kind of event does in that mode, so
+//! [`CrucibleState::input_mode`] resolves the mode **once per event** (`Locked` > `Snip` >
+//! `Overlay` > `Normal`); the pure route functions below decide what each kind of event does in that mode, so
 //! no handler re-asks "is the session locked?" or "is an overlay mapped?" on its own. The
 //! `set_keyboard_focus` lock choke point (`keyboard.rs`) stays a separate, additional guard.
 
@@ -16,6 +16,9 @@ use crate::state::{Backend, CrucibleState};
 pub(crate) enum InputMode<O = WindowElement> {
     /// The session is locked: only the lock surface receives input; only VT switching runs.
     Locked,
+    /// Snip mode (`snip` action): every output shows a frozen frame and all pointer and key
+    /// input feeds the selection; clients receive nothing. Only `Snip` and `VtSwitch` run.
+    Snip,
     /// A modal overlay is mapped (and the session is not locked).
     Overlay(O),
     /// Neither: ordinary click-to-focus, header clicks and focus-follows-mouse.
@@ -32,19 +35,43 @@ impl<O> InputMode<O> {
     pub(crate) fn has_overlay(&self) -> bool {
         matches!(self, Self::Overlay(_))
     }
+
+    /// Whether snip mode is active (and not shadowed by the lock).
+    pub(crate) fn is_snipping(&self) -> bool {
+        matches!(self, Self::Snip)
+    }
+
+    /// Whether the mode is modal (lock, snip or overlay): pointer constraints and fullscreen
+    /// confinement are suspended.
+    pub(crate) fn is_modal(&self) -> bool {
+        !matches!(self, Self::Normal)
+    }
+}
+
+/// The pure precedence resolver behind [`CrucibleState::input_mode`]:
+/// **Locked > Snip > Overlay > Normal**.
+#[must_use]
+pub(crate) fn resolve_mode<O>(locked: bool, snipping: bool, overlay: Option<O>) -> InputMode<O> {
+    if locked {
+        InputMode::Locked
+    } else if snipping {
+        InputMode::Snip
+    } else if let Some(overlay) = overlay {
+        InputMode::Overlay(overlay)
+    } else {
+        InputMode::Normal
+    }
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
-    /// Resolves the input mode for one event. Precedence is **Locked > Overlay > Normal**, and
-    /// this is the only place it is written.
+    /// Resolves the input mode for one event. Precedence is **Locked > Snip > Overlay >
+    /// Normal** ([`resolve_mode`]), and this is the only place it is written.
     pub(crate) fn input_mode(&self) -> InputMode {
-        if self.is_session_locked() {
-            InputMode::Locked
-        } else if let Some(overlay) = self.mapped_overlay() {
-            InputMode::Overlay(overlay.clone())
-        } else {
-            InputMode::Normal
-        }
+        resolve_mode(
+            self.is_session_locked(),
+            self.snip.is_some(),
+            self.mapped_overlay().cloned(),
+        )
     }
 }
 
@@ -62,12 +89,13 @@ pub(super) struct PressRoute {
 /// Routes a press. `under` is the element under the pointer.
 ///
 /// - `Locked`: the press goes to the lock surface; no header, no focus change.
+/// - `Snip`: the press feeds the selection (handled before routing); nothing else.
 /// - `Overlay`: modal — no header consume; the overlay closes unless the click hit it.
 /// - `Normal`: header first, else click-to-focus.
 #[must_use]
 pub(super) fn press_route<O: PartialEq>(mode: &InputMode<O>, under: Option<&O>) -> PressRoute {
     match mode {
-        InputMode::Locked => PressRoute {
+        InputMode::Locked | InputMode::Snip => PressRoute {
             try_header: false,
             close_overlay: false,
             click_focus: false,
@@ -85,10 +113,10 @@ pub(super) fn press_route<O: PartialEq>(mode: &InputMode<O>, under: Option<&O>) 
     }
 }
 
-/// Whether focus-follows-mouse tracks hover enters at all (not while locked).
+/// Whether focus-follows-mouse tracks hover enters at all (not while locked or snipping).
 #[must_use]
 pub(super) fn hover_tracks<O>(mode: &InputMode<O>) -> bool {
-    !mode.is_locked()
+    !mode.is_locked() && !mode.is_snipping()
 }
 
 /// What a hover does to focus ([`hover_decision`]).
@@ -303,6 +331,31 @@ mod tests {
         assert_eq!(deferred_hover_action(false, true), DeferredHover::Clear);
         assert_eq!(deferred_hover_action(true, true), DeferredHover::Track);
         assert_eq!(deferred_hover_action(true, false), DeferredHover::Focus);
+    }
+
+    #[test]
+    fn mode_precedence_is_locked_snip_overlay_normal() {
+        assert_eq!(resolve_mode(true, true, Some(OVERLAY)), InputMode::Locked);
+        assert_eq!(resolve_mode(true, false, None::<u32>), InputMode::Locked);
+        assert_eq!(resolve_mode(false, true, Some(OVERLAY)), InputMode::Snip);
+        assert_eq!(resolve_mode(false, true, None::<u32>), InputMode::Snip);
+        assert_eq!(
+            resolve_mode(false, false, Some(OVERLAY)),
+            InputMode::Overlay(OVERLAY)
+        );
+        assert_eq!(resolve_mode(false, false, None::<u32>), InputMode::Normal);
+    }
+
+    #[test]
+    fn snip_is_modal_and_routes_nothing() {
+        let snip: InputMode<u32> = InputMode::Snip;
+        assert!(snip.is_modal() && snip.is_snipping());
+        assert!(locked().is_modal() && overlay().is_modal() && !normal().is_modal());
+        let r = press_route(&snip, Some(&OTHER));
+        assert!(!r.try_header && !r.close_overlay && !r.click_focus);
+        assert!(!hover_tracks(&snip));
+        assert_eq!(hover_decision(&snip, true, false), HoverDecision::Ignore);
+        assert!(!chord_closes_overlay(&snip, &Action::Slot(1)));
     }
 
     #[test]

@@ -139,6 +139,9 @@ pub struct FrameView<'a> {
     pub tiling: &'a TilingConfig,
     /// The active pointer drag's icon, drawn at the cursor (unlocked frames only).
     pub dnd_icon: Option<&'a DndIcon>,
+    /// The active snip session: when set, an output it froze shows only the snip overlay over
+    /// its frozen frame (after the lock, which always wins).
+    pub snip: Option<&'a crate::snip::SnipSession>,
     /// The per-output inputs from [`CrucibleState::begin_frame`].
     pub inputs: &'a FrameInputs,
 }
@@ -220,6 +223,8 @@ pub fn icon_location(
 /// - **Locked** (or locking): only `output`'s lock surface, over
 ///   [`LOCK_CLEAR_COLOR`](crate::lock::LOCK_CLEAR_COLOR). Chrome, header, cursor and windows are
 ///   not built.
+/// - **Snipping** (an output the snip froze): cursor → size label → ring → dim → the frozen
+///   frame ([`crate::snip::snip_elements`]); no header, chrome or live windows.
 /// - **Unlocked**: cursor (only when `inputs.cursor` is `Some`, at that output-local physical location)
 ///   → header strip → chrome → the mapped windows from the `space`, over
 ///   [`CLEAR_COLOR`].
@@ -255,6 +260,19 @@ where
                 .map(OutputRenderElements::Custom)
                 .collect();
         return (elements, crate::lock::LOCK_CLEAR_COLOR.into());
+    }
+    if let Some(snip) = view.snip
+        && let Some(elements) = crate::snip::snip_elements(
+            snip,
+            view.output,
+            inputs.cursor,
+            header_text,
+            cursor,
+            renderer,
+            scale,
+        )
+    {
+        return (elements, CLEAR_COLOR.into());
     }
 
     let origin = view

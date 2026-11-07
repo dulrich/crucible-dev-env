@@ -221,6 +221,7 @@ impl CrucibleState<UdevData> {
             projection: &self.projection,
             tiling: &self.config.tiling,
             dnd_icon: self.dnd_icon.as_ref(),
+            snip: self.snip.as_ref(),
             inputs: &inputs,
         };
         let (elements, clear_color) =
@@ -411,6 +412,7 @@ impl CrucibleState<UdevData> {
             projection: &self.projection,
             tiling: &self.config.tiling,
             dnd_icon: None,
+            snip: self.snip.as_ref(),
             inputs: &inputs,
         };
         crate::capture::render_capture::<_, GlesRenderbuffer>(
