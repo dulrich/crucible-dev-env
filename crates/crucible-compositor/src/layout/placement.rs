@@ -53,9 +53,15 @@ pub fn window_rect(tile: Rect, class: WindowClass, tiling: &TilingConfig) -> Rec
 impl<B: Backend + 'static> CrucibleState<B> {
     /// The window rect for model window `id` placed in `tile`: its class insets applied, in Smithay
     /// logical coordinates. The one place a tile becomes a window geometry.
-    pub(crate) fn placed_rect(&self, id: WindowId, tile: Rect) -> Rectangle<i32, Logical> {
+    /// `fullscreen` is the window's flag in the projection being placed, never the live world.
+    pub(crate) fn placed_rect(
+        &self,
+        id: WindowId,
+        tile: Rect,
+        fullscreen: bool,
+    ) -> Rectangle<i32, Logical> {
         // A fullscreen window takes its whole tile (the raw output rect): no class inset.
-        if self.layout.world.is_fullscreen(id) {
+        if fullscreen {
             return to_logical(tile);
         }
         to_logical(window_rect(
@@ -94,7 +100,7 @@ pub(super) fn configure_placement(
             }
             changed
         });
-        if toplevel_needs_configure(resized, !states_changed) {
+        if resized || states_changed {
             toplevel.send_configure();
         }
     } else if let Some(surface) = element.x11_surface() {
@@ -183,12 +189,6 @@ fn has_tiled_states(states: &smithay::wayland::shell::xdg::ToplevelStateSet) -> 
     TILED_STATES.iter().all(|s| states.contains(*s))
 }
 
-/// Whether a placement must (re)send a toplevel configure: a size change, or the tiled states
-/// being newly applied (a states-only change at the same size still needs one). **Pure**.
-fn toplevel_needs_configure(resized: bool, states_current: bool) -> bool {
-    resized || !states_current
-}
-
 /// Whether an X11 window whose X geometry is `current` must be configured to reach `target`.
 /// **Pure** so the rule is unit-testable without an X server.
 fn x11_needs_configure(current: Rectangle<i32, Logical>, target: Rectangle<i32, Logical>) -> bool {
@@ -237,16 +237,6 @@ mod tests {
         tiling.app.gap = 1000;
         let w = window_rect(Rect::new(0, 0, 40, 10), WindowClass::App, &tiling);
         assert_eq!(w, Rect::new(5, 5, 30, 0));
-    }
-
-    #[test]
-    fn toplevel_configure_resent_when_only_states_change() {
-        assert!(toplevel_needs_configure(true, true), "resize");
-        assert!(toplevel_needs_configure(false, false), "states-only change");
-        assert!(
-            !toplevel_needs_configure(false, true),
-            "pure move: nothing new"
-        );
     }
 
     #[test]

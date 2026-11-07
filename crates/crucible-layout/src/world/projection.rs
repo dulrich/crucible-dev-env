@@ -20,6 +20,8 @@ pub struct Projection {
     windows: Vec<(WindowId, Rect)>,
     /// The window that should hold keyboard focus, if any.
     focus: Option<WindowId>,
+    /// Every managed fullscreen window (hidden ones included), ascending by id.
+    fullscreen: Vec<WindowId>,
 }
 
 impl Projection {
@@ -34,7 +36,33 @@ impl Projection {
         let mut windows: Vec<(WindowId, Rect)> = windows.into_iter().collect();
         windows.sort_by_key(|(id, _)| *id);
         windows.dedup_by_key(|(id, _)| *id);
-        Self { windows, focus }
+        Self {
+            windows,
+            focus,
+            fullscreen: Vec::new(),
+        }
+    }
+
+    /// Sets the fullscreen window set (every managed fullscreen window, shown or hidden); sorted
+    /// and de-duplicated.
+    #[must_use]
+    pub fn with_fullscreen(mut self, fullscreen: impl IntoIterator<Item = WindowId>) -> Self {
+        self.fullscreen = fullscreen.into_iter().collect();
+        self.fullscreen.sort();
+        self.fullscreen.dedup();
+        self
+    }
+
+    /// Whether `id` is a fullscreen window in this projection (shown or hidden).
+    #[must_use]
+    pub fn is_fullscreen(&self, id: WindowId) -> bool {
+        self.fullscreen.binary_search(&id).is_ok()
+    }
+
+    /// Whether any window (shown or hidden) is fullscreen in this projection.
+    #[must_use]
+    pub fn has_fullscreen(&self) -> bool {
+        !self.fullscreen.is_empty()
     }
 
     /// The visible windows and their rects, ascending by id.
@@ -74,9 +102,16 @@ impl Projection {
     ///   differs (so position-only moves skip the `configure`);
     /// - a newly visible window yields `Place { resized: true }`;
     /// - a window that stopped being visible yields [`LayoutChange::Hide`];
+    /// - a window visible in `next` whose fullscreen flag flipped yields `Place { resized: true }`
+    ///   even at an identical rect (its states and size must be re-sent); every `Place` carries
+    ///   the window's `fullscreen` flag from `next`;
+    /// - a window **not** visible in `next` whose fullscreen flag flipped (hidden in both, or just
+    ///   hidden) yields [`LayoutChange::ShellState`];
     /// - focus reports [`FocusChange::Unchanged`] unless the focused identity actually differs.
     ///
-    /// Changes come out in ascending [`WindowId`] order (deterministic).
+    /// Order (deterministic): every `Place`/`Hide` ascending by [`WindowId`], then every
+    /// `ShellState` ascending by [`WindowId`] — so a just-hidden window's `Hide` precedes its
+    /// shell-state change.
     pub fn diff(&self, next: &Projection) -> ProjectionDiff {
         let (prev, next_windows) = (&self.windows, &next.windows);
         let mut changes = Vec::new();
@@ -93,16 +128,21 @@ impl Projection {
                         id: *nid,
                         rect: *nrect,
                         resized: true,
+                        fullscreen: next.is_fullscreen(*nid),
                     });
                     j += 1;
                 }
                 (Some((pid, prect)), Some((nid, nrect))) => {
                     if pid == nid {
-                        if prect != nrect {
+                        let flipped = self.is_fullscreen(*pid) != next.is_fullscreen(*nid);
+                        if prect != nrect || flipped {
                             changes.push(LayoutChange::Place {
                                 id: *nid,
                                 rect: *nrect,
-                                resized: prect.width != nrect.width || prect.height != nrect.height,
+                                resized: flipped
+                                    || prect.width != nrect.width
+                                    || prect.height != nrect.height,
+                                fullscreen: next.is_fullscreen(*nid),
                             });
                         }
                         i += 1;
@@ -115,12 +155,29 @@ impl Projection {
                             id: *nid,
                             rect: *nrect,
                             resized: true,
+                            fullscreen: next.is_fullscreen(*nid),
                         });
                         j += 1;
                     }
                 }
             }
         }
+
+        // Shell-state-only flips: the symmetric difference of the fullscreen sets, minus windows
+        // visible in `next` (their `Place` above already carries the flag).
+        let mut flips: Vec<WindowId> = self
+            .fullscreen
+            .iter()
+            .filter(|w| !next.is_fullscreen(**w))
+            .chain(next.fullscreen.iter().filter(|w| !self.is_fullscreen(**w)))
+            .copied()
+            .filter(|w| !next.is_visible(*w))
+            .collect();
+        flips.sort();
+        changes.extend(flips.into_iter().map(|id| LayoutChange::ShellState {
+            id,
+            fullscreen: next.is_fullscreen(id),
+        }));
 
         let focus = if self.focus == next.focus {
             FocusChange::Unchanged
@@ -140,13 +197,24 @@ pub enum LayoutChange {
         id: WindowId,
         /// Its new rect, in the same coordinate space the projection was derived in.
         rect: Rect,
-        /// Whether the size changed (a `configure` is required), vs. a position-only move.
+        /// Whether a `configure` is required: the size changed or the fullscreen flag flipped
+        /// (vs. a position-only move).
         resized: bool,
+        /// Whether the window is fullscreen in the projection being applied.
+        fullscreen: bool,
     },
     /// The window is no longer visible and must be unmapped.
     Hide {
         /// The window to hide.
         id: WindowId,
+    },
+    /// A window not visible in the projection being applied whose fullscreen flag flipped: only
+    /// its shell state changes (applied after any `Hide` of it).
+    ShellState {
+        /// The window whose shell state flips.
+        id: WindowId,
+        /// Its fullscreen flag in the projection being applied.
+        fullscreen: bool,
     },
 }
 
@@ -163,7 +231,7 @@ pub enum FocusChange {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use]
 pub struct ProjectionDiff {
-    /// Geometry/visibility changes, ascending by [`WindowId`].
+    /// Geometry/visibility changes, then shell-state flips (order: see [`Projection::diff`]).
     pub changes: Vec<LayoutChange>,
     /// Whether (and where) keyboard focus must move.
     pub focus: FocusChange,
@@ -202,7 +270,7 @@ impl World {
                 let window = fullscreen.or_else(|| self.panes.get(&pane)?.focused_window())?;
                 Some((window, rect))
             });
-        Projection::new(windows, self.focused_window())
+        Projection::new(windows, self.focused_window()).with_fullscreen(self.fullscreen_windows())
     }
 
     /// Like [`World::project`] but using every output's stored `Output::rect`.
@@ -270,6 +338,7 @@ mod projection_tests {
                 id: wid(0),
                 rect: r(0, 0, 800, 600),
                 resized: true,
+                fullscreen: false,
             }]
         );
         assert_eq!(diff.focus, FocusChange::To(Some(wid(0))));
@@ -293,6 +362,7 @@ mod projection_tests {
                 id: wid(0),
                 rect: r(410, 0, 400, 600),
                 resized: false,
+                fullscreen: false,
             }]
         );
     }
@@ -307,6 +377,7 @@ mod projection_tests {
                 id: wid(0),
                 rect: r(0, 0, 400, 600),
                 resized: true,
+                fullscreen: false,
             }]
         );
     }
@@ -338,11 +409,13 @@ mod projection_tests {
                     id: wid(0),
                     rect: r(0, 0, 400, 600),
                     resized: true,
+                    fullscreen: false,
                 },
                 LayoutChange::Place {
                     id: wid(1),
                     rect: r(400, 0, 400, 600),
                     resized: true,
+                    fullscreen: false,
                 },
             ]
         );
@@ -362,6 +435,7 @@ mod projection_tests {
                     id: wid(1),
                     rect,
                     resized: true,
+                    fullscreen: false,
                 },
             ]
         );
@@ -382,6 +456,7 @@ mod projection_tests {
             id: wid(2),
             rect: r(0, 0, 800, 600),
             resized: true,
+            fullscreen: false,
         }));
     }
 
@@ -392,5 +467,121 @@ mod projection_tests {
         assert!(p.is_visible(wid(3)));
         assert_eq!(p.rect_of(wid(9)), None);
         assert!(!p.is_visible(wid(9)));
+    }
+    fn fs(p: Projection, ids: &[WindowId]) -> Projection {
+        p.with_fullscreen(ids.iter().copied())
+    }
+
+    #[test]
+    fn fullscreen_entered_and_left_at_an_identical_rect_re_places_with_configure() {
+        let rect = r(0, 0, 800, 600);
+        let tiled = proj(&[(wid(1), rect)], Some(wid(1)));
+        let full = fs(tiled.clone(), &[wid(1)]);
+        assert!(full.is_fullscreen(wid(1)) && full.has_fullscreen());
+        assert!(!tiled.is_fullscreen(wid(1)) && !tiled.has_fullscreen());
+        let place = |fullscreen| LayoutChange::Place {
+            id: wid(1),
+            rect,
+            resized: true,
+            fullscreen,
+        };
+        assert_eq!(tiled.diff(&full).changes, vec![place(true)], "entered");
+        assert_eq!(full.diff(&tiled).changes, vec![place(false)], "left");
+        assert_ne!(tiled, full, "the fullscreen set participates in equality");
+    }
+
+    #[test]
+    fn unchanged_fullscreen_at_the_same_rect_is_no_change() {
+        let p = fs(
+            proj(&[(wid(1), r(0, 0, 800, 600))], Some(wid(1))),
+            &[wid(1), wid(7)],
+        );
+        assert!(p.diff(&p.clone()).is_empty());
+    }
+
+    #[test]
+    fn hidden_flip_is_a_shell_state_change_and_not_a_place() {
+        let shown = proj(&[(wid(1), r(0, 0, 800, 600))], Some(wid(1)));
+        let diff = shown.diff(&fs(shown.clone(), &[wid(5)]));
+        assert!(!diff.is_empty());
+        assert_eq!(
+            diff.changes,
+            vec![LayoutChange::ShellState {
+                id: wid(5),
+                fullscreen: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn window_hidden_while_leaving_fullscreen_is_hidden_then_shell_stated() {
+        let rect = r(0, 0, 800, 600);
+        let prev = fs(proj(&[(wid(1), rect)], Some(wid(1))), &[wid(1)]);
+        let next = proj(&[(wid(2), rect)], Some(wid(2)));
+        assert_eq!(
+            prev.diff(&next).changes,
+            vec![
+                LayoutChange::Hide { id: wid(1) },
+                LayoutChange::Place {
+                    id: wid(2),
+                    rect,
+                    resized: true,
+                    fullscreen: false,
+                },
+                LayoutChange::ShellState {
+                    id: wid(1),
+                    fullscreen: false,
+                },
+            ]
+        );
+    }
+
+    fn world_with_output() -> World {
+        let mut w = World::new("1");
+        let out = w.focused_output();
+        w.set_output_rect(out, r(0, 0, 800, 600)).unwrap();
+        w
+    }
+
+    #[test]
+    fn set_fullscreen_on_an_inactive_workspace_diffs_to_shell_state_only() {
+        let mut w = world_with_output();
+        let a = w.open_window();
+        let _other = w.new_workspace("2").unwrap();
+        let b = w.open_window();
+        assert!(!w.project_stored(GapConfig::default()).is_visible(a));
+        let before = w.project_stored(GapConfig::default());
+        assert!(w.set_fullscreen(a, true).unwrap());
+        let after = w.project_stored(GapConfig::default());
+        assert!(after.is_fullscreen(a));
+        assert!(after.is_visible(b));
+        assert_eq!(
+            before.diff(&after).changes,
+            vec![LayoutChange::ShellState {
+                id: a,
+                fullscreen: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn stack_focus_moved_off_a_fullscreen_window_still_projects_it() {
+        let mut w = world_with_output();
+        let a = w.open_window();
+        let b = w.open_window();
+        let pane = w.pane_of_window(a).unwrap();
+        assert_eq!(w.pane_of_window(b), Some(pane), "one stacked pane");
+        assert!(w.set_fullscreen(b, true).unwrap());
+        let a_index = (0..2)
+            .find(|&i| {
+                w.set_stack_focus(pane, i).unwrap();
+                w.panes[&pane].focused_window() == Some(a)
+            })
+            .expect("a is in the stack");
+        w.set_stack_focus(pane, a_index).unwrap();
+        assert!(w.is_fullscreen(b), "stack focus does not exit fullscreen");
+        let p = w.project_stored(GapConfig::default());
+        assert_eq!(p.windows(), &[(b, r(0, 0, 800, 600))]);
+        assert!(p.is_fullscreen(b));
     }
 }

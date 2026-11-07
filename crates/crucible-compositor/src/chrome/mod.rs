@@ -76,7 +76,7 @@ pub fn build_chrome_elements(
     let marked = world.marked();
     for &(id, tile) in projection.windows() {
         // A fullscreen window covers its output edge to edge: no ring, fill or mark ring.
-        if world.is_fullscreen(id) {
+        if projection.is_fullscreen(id) {
             continue;
         }
         let class = layout.window_class(id);
@@ -147,7 +147,7 @@ pub fn build_chrome_elements(
         .windows()
         .iter()
         .map(|&(id, tile)| {
-            if world.is_fullscreen(id) {
+            if projection.is_fullscreen(id) {
                 tile
             } else {
                 window_rect(tile, layout.window_class(id), tiling)

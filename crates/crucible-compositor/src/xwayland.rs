@@ -425,7 +425,11 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
         // real geometry via a synthetic ConfigureNotify); only unmanaged ones honour the size.
         let placement = match self.layout.resolve(|e| e.x11_surface() == Some(&window)) {
             Binding::Managed(id) => match self.projection.rect_of(id) {
-                Some(tile) => X11Placement::ManagedVisible(self.placed_rect(id, tile)),
+                Some(tile) => X11Placement::ManagedVisible(self.placed_rect(
+                    id,
+                    tile,
+                    self.projection.is_fullscreen(id),
+                )),
                 None => X11Placement::ManagedHidden,
             },
             Binding::Unmanaged | Binding::None => X11Placement::Unmanaged,
