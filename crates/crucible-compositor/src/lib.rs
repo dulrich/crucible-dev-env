@@ -89,3 +89,6 @@ pub mod capture;
 
 /// Screenshot delivery: clipboard image selection, file save (plan 34).
 pub mod screenshot;
+
+/// Snip mode: the pure selection state machine (plan 34 WP-3); the compositor side arrives in WP-4.
+pub mod snip;
