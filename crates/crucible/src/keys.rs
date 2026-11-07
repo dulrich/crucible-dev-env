@@ -9,7 +9,7 @@ use crucible_keys::{Action, Area};
 use crate::cli::{Parsed, help_requested};
 use crate::client::{Client, ClientError};
 use crate::fuzzy;
-use crate::overlay::list::{Applied, Body, Frame, ListState};
+use crate::overlay::list::{Body, Frame, Line, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
@@ -162,29 +162,21 @@ impl Overlay for Keys {
         self.entries().len()
     }
 
-    /// As the shared step, but with an empty query Up/Down/Ctrl+P/Ctrl+N skip the headings, and
-    /// clearing the query lands on the first real row.
-    fn step(&mut self, key: Key) -> Outcome {
-        let grouped = self.list.query.is_empty();
-        let count = self.row_count();
-        if grouped && matches!(key, Key::Up | Key::CtrlP | Key::Down | Key::CtrlN) {
+    /// With an empty query Up/Down/Ctrl+P/Ctrl+N skip the headings.
+    fn intercept(&mut self, key: Key) -> Option<Outcome> {
+        if self.list.query.is_empty()
+            && matches!(key, Key::Up | Key::CtrlP | Key::Down | Key::CtrlN)
+        {
             self.move_over_headings(matches!(key, Key::Down | Key::CtrlN));
-            return Outcome::Continue;
+            return Some(Outcome::Continue);
         }
-        match self.list.apply(key, count) {
-            Applied::Exit => Outcome::Exit,
-            Applied::Edited => {
-                self.snap_to_row();
-                Outcome::Continue
-            }
-            Applied::Moved | Applied::Ignored => Outcome::Continue,
-            Applied::Enter(k) => self.enter(k),
-        }
+        None
     }
 
-    /// Typing keeps a refusal visible (it clears only when Enter runs a binding).
-    fn clears_status_on_edit(&self) -> bool {
-        false
+    /// Clearing the query lands on the first real row. Typing keeps a refusal visible (the status
+    /// clears only when Enter runs a binding).
+    fn after_edit(&mut self) {
+        self.snap_to_row();
     }
 
     /// Enter sends the selected row's action for execution.
@@ -205,18 +197,18 @@ impl Overlay for Keys {
             .map(|(c, a)| vec![sanitize(c), sanitize(a)])
             .collect();
         let (_, lines) = table::layout(&[Col::left(""), Col::left("")], &cells);
-        let texts: Vec<(bool, String)> = self
+        let texts: Vec<Line> = self
             .entries()
             .iter()
             .map(|e| match e {
-                Entry::Heading(label) => (true, (*label).to_string()),
-                Entry::Row(idx) => (false, lines[*idx].clone()),
+                Entry::Heading(label) => Line::Heading((*label).to_string()),
+                Entry::Row(idx) => Line::Row(lines[*idx].clone()),
             })
             .collect();
         let frame = Frame {
             prompt: "keys> ",
             header: None,
-            body: Body::Sectioned(&texts),
+            body: Body::Rows(&texts),
             idle_status: STATUS,
         };
         self.list.render(frame, cols, rows, style)

@@ -18,29 +18,30 @@ pub fn build_line(args: &[String]) -> Result<String, String> {
     }
     let verb = args[0].as_str();
     let line = match verb {
-        "run-on" => {
-            // `run-on <workspace> <command…>` is a shorthand for `exec run-on …`, encoded as `run`.
-            let cmd = args.get(2..).map(|a| a.join(" ")).unwrap_or_default();
-            if cmd.trim().is_empty() {
-                return Err("run-on needs a workspace and a command".into());
-            }
-            format!(
-                "exec {}",
-                encode_field(&format!("run-on {} {cmd}", args[1]))
-            )
-        }
-        "run" | "run-in-terminal" | "run-tui" | "run-term" => {
-            // The command is free text: encode it so `:`, `%` and friends survive the wire.
-            let cmd = args[1..].join(" ");
-            if verb == "run-tui" || verb == "run-term" {
-                format!("{verb} {}", encode_field(&cmd))
-            } else if cmd.trim().is_empty() {
-                return Err(format!("{verb} needs a command"));
+        // Shorthands for `exec run …`, `exec run-in-terminal …` and `exec run-on <workspace> …`:
+        // the command is free text, so encode it so `:`, `%` and friends survive the wire.
+        "run" | "run-in-terminal" | "run-on" => {
+            let on = verb == "run-on";
+            let (command, missing) = if on {
+                (
+                    args.get(2..),
+                    "run-on needs a workspace and a command".to_string(),
+                )
             } else {
-                // `run`/`run-in-terminal` are shorthands for `exec run …`/`exec run-in-terminal …`.
-                format!("exec {}", encode_field(&format!("{verb} {cmd}")))
+                (args.get(1..), format!("{verb} needs a command"))
+            };
+            let cmd = command.map(|a| a.join(" ")).unwrap_or_default();
+            if cmd.trim().is_empty() {
+                return Err(missing);
             }
+            let head = if on {
+                format!("run-on {}", args[1])
+            } else {
+                verb.to_string()
+            };
+            format!("exec {}", encode_field(&format!("{head} {cmd}")))
         }
+        "run-tui" | "run-term" => format!("{verb} {}", encode_field(&args[1..].join(" "))),
         _ => args.join(" "),
     };
     Request::parse(&line)?;
@@ -133,8 +134,14 @@ mod tests {
             Request::parse(&line),
             Ok(Request::Exec("run echo 50%:x".into()))
         );
-        assert!(build_line(&v(&["run"])).is_err());
-        assert!(build_line(&v(&["run", " "])).is_err());
+        assert_eq!(
+            build_line(&v(&["run"])),
+            Err("run needs a command".to_string())
+        );
+        assert_eq!(
+            build_line(&v(&["run", " "])),
+            Err("run needs a command".to_string())
+        );
     }
 
     #[test]
@@ -145,8 +152,36 @@ mod tests {
             Request::parse(&line),
             Ok(Request::Exec("run-on scratch-a-wp-4 echo 50%:x".into()))
         );
-        assert!(build_line(&v(&["run-on"])).is_err());
-        assert!(build_line(&v(&["run-on", "scratch"])).is_err());
+        let missing = Err("run-on needs a workspace and a command".to_string());
+        assert_eq!(build_line(&v(&["run-on"])), missing);
+        assert_eq!(build_line(&v(&["run-on", "scratch"])), missing);
+    }
+
+    #[test]
+    fn each_run_shorthand_pins_its_encoded_line_and_missing_command_error() {
+        for (argv, line) in [
+            (&["run", "a:b", "50%"][..], "exec run a%3Ab 50%25"),
+            (
+                &["run-in-terminal", "a:b", "50%"],
+                "exec run-in-terminal a%3Ab 50%25",
+            ),
+            (
+                &["run-on", "ws:1", "a:b", "50%"],
+                "exec run-on ws%3A1 a%3Ab 50%25",
+            ),
+        ] {
+            assert_eq!(build_line(&v(argv)).as_deref(), Ok(line), "{argv:?}");
+        }
+        for (argv, err) in [
+            (&["run", "  "][..], "run needs a command"),
+            (&["run-in-terminal", ""], "run-in-terminal needs a command"),
+            (
+                &["run-on", "ws", " "],
+                "run-on needs a workspace and a command",
+            ),
+        ] {
+            assert_eq!(build_line(&v(argv)), Err(err.to_string()), "{argv:?}");
+        }
     }
 
     #[test]
@@ -179,7 +214,10 @@ mod tests {
             Request::parse(&line),
             Ok(Request::run_in_terminal("htop 50%:x"))
         );
-        assert!(build_line(&v(&["run-in-terminal"])).is_err());
+        assert_eq!(
+            build_line(&v(&["run-in-terminal"])),
+            Err("run-in-terminal needs a command".to_string())
+        );
     }
 
     #[test]

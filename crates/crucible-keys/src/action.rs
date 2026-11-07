@@ -7,18 +7,14 @@
 //! over [`crucible_layout::Direction`] instead, so the compositor needs exactly one execution arm
 //! per verb (`reviews/2026-07-30-tn-code-review.md` F1, F3).
 //!
-//! ## The verb table
+//! ## The verb grammar
 //!
-//! [`Action`]'s `Display` and `FromStr` impls are the **one** verb table: `Display` prints the
-//! action grammar and `FromStr` parses it back. Verbs: `quit`, `close-pane`, `close-window`, `set-layout <name>`, `run-terminal`,
-//! `run <command…>`, `run-in-terminal <command…>`, `focus|move|split|resize <left|right|up|down>`,
-//! `cycle-stack <±n>`, `cycle-workspace <±n>`, `reorder-workspace <±n>`, `new-workspace`, `move-window-to-workspace <±n>`,
-//! `mark-window`, `swap-marked-window`,
-//! `close-workspace`, `delete-workspace`, `close-all-workspaces`, `slot <0-9>`, `pin-slot <0-9>`,
-//! `move-workspace-to-output <±n>`, `open-picker`, `open-launcher`, `open-settings`,
-//! `toggle-header`, `toggle-fullscreen`, `rename-workspace`, `capture-workspace-root`, `set-workspace-root` and `lock`. `vt-switch <n>` is printed but deliberately
-//! **not** parsed: VT switches come only from libinput's `Ctrl+Alt+F<n>` keysyms, never from a
-//! bind or an IPC `exec`. The bind-only `none` (unbind) is [`crate::bindings::BindTarget`].
+//! [`Action`]'s `Display` and `FromStr` impls are the one verb grammar: `Display` prints it and
+//! `FromStr` parses it back. The argument-free verbs (and their [`Area`]) live in the `NULLARY`
+//! table; every verb that takes an argument has an explicit arm in each impl. `vt-switch <n>` is
+//! printed but deliberately **not** parsed: VT switches come only from libinput's `Ctrl+Alt+F<n>`
+//! keysyms, never from a bind or an IPC `exec`. The bind-only `none` (unbind) is
+//! [`crate::bindings::BindTarget`].
 
 use std::str::FromStr;
 
@@ -177,21 +173,57 @@ pub enum Action {
     Snip,
 }
 
+/// The argument-free verbs: the action, its grammar word and its [`Area`]. `Display`, `FromStr`
+/// and [`Action::area`] all consult this one table.
+#[rustfmt::skip]
+const NULLARY: &[(Action, &str, Area)] = &[
+    (Action::Quit, "quit", Area::SessionAndSystem),
+    (Action::ClosePane, "close-pane", Area::PanesAndWindows),
+    (Action::CloseWindow, "close-window", Area::PanesAndWindows),
+    (Action::RunTerminal, "run-terminal", Area::LaunchAndOverlays),
+    (Action::NewWorkspace, "new-workspace", Area::Workspaces),
+    (Action::MarkWindow, "mark-window", Area::PanesAndWindows),
+    (Action::SwapMarkedWindow, "swap-marked-window", Area::PanesAndWindows),
+    (Action::CaptureWorkspaceRoot, "capture-workspace-root", Area::Workspaces),
+    (Action::SetWorkspaceRoot, "set-workspace-root", Area::Workspaces),
+    (Action::CloseWorkspace, "close-workspace", Area::Workspaces),
+    (Action::DeleteWorkspace, "delete-workspace", Area::Workspaces),
+    (Action::CloseAllWorkspaces, "close-all-workspaces", Area::Workspaces),
+    (Action::OpenPicker, "open-picker", Area::LaunchAndOverlays),
+    (Action::OpenLauncher, "open-launcher", Area::LaunchAndOverlays),
+    (Action::OpenSettings, "open-settings", Area::LaunchAndOverlays),
+    (Action::ToggleHeader, "toggle-header", Area::Outputs),
+    (Action::ToggleFullscreen, "toggle-fullscreen", Area::PanesAndWindows),
+    (Action::RenameWorkspace, "rename-workspace", Area::Workspaces),
+    (Action::Lock, "lock", Area::SessionAndSystem),
+    (Action::Screenshot, "screenshot", Area::LaunchAndOverlays),
+    (Action::Snip, "snip", Area::LaunchAndOverlays),
+];
+
+/// The direction words, shared by `Display` and `FromStr`.
+const DIRECTIONS: [(Direction, &str); 4] = [
+    (Direction::Left, "left"),
+    (Direction::Right, "right"),
+    (Direction::Up, "up"),
+    (Direction::Down, "down"),
+];
+
+fn direction_word(d: Direction) -> &'static str {
+    DIRECTIONS
+        .iter()
+        .find(|(dir, _)| *dir == d)
+        .map_or("", |(_, word)| word)
+}
+
 impl std::fmt::Display for Action {
     /// The exact action grammar (`FromStr` accepts every form but `vt-switch`).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let dir = |d: &Direction| match d {
-            Direction::Left => "left",
-            Direction::Right => "right",
-            Direction::Up => "up",
-            Direction::Down => "down",
-        };
+        if let Some((_, word, _)) = NULLARY.iter().find(|(action, ..)| action == self) {
+            return f.write_str(word);
+        }
+        let dir = |d: &Direction| direction_word(*d);
         match self {
-            Self::Quit => f.write_str("quit"),
-            Self::ClosePane => f.write_str("close-pane"),
-            Self::CloseWindow => f.write_str("close-window"),
             Self::SetLayout(name) => write!(f, "set-layout {name}"),
-            Self::RunTerminal => f.write_str("run-terminal"),
             Self::Run(cmd) => write!(f, "run {cmd}"),
             Self::RunInTerminal(cmd) => write!(f, "run-in-terminal {cmd}"),
             Self::RunOn { workspace, command } => write!(f, "run-on {workspace} {command}"),
@@ -202,28 +234,13 @@ impl std::fmt::Display for Action {
             Self::CycleStack(n) => write!(f, "cycle-stack {n}"),
             Self::CycleWorkspace(n) => write!(f, "cycle-workspace {n}"),
             Self::ReorderWorkspace(n) => write!(f, "reorder-workspace {n}"),
-            Self::NewWorkspace => f.write_str("new-workspace"),
             Self::MoveWindowToWorkspace(n) => write!(f, "move-window-to-workspace {n}"),
-            Self::MarkWindow => f.write_str("mark-window"),
-            Self::SwapMarkedWindow => f.write_str("swap-marked-window"),
-            Self::CaptureWorkspaceRoot => f.write_str("capture-workspace-root"),
-            Self::SetWorkspaceRoot => f.write_str("set-workspace-root"),
-            Self::CloseWorkspace => f.write_str("close-workspace"),
-            Self::DeleteWorkspace => f.write_str("delete-workspace"),
-            Self::CloseAllWorkspaces => f.write_str("close-all-workspaces"),
             Self::Slot(n) => write!(f, "slot {n}"),
             Self::PinSlot(n) => write!(f, "pin-slot {n}"),
             Self::MoveWorkspaceToOutput(n) => write!(f, "move-workspace-to-output {n}"),
-            Self::OpenPicker => f.write_str("open-picker"),
-            Self::OpenLauncher => f.write_str("open-launcher"),
-            Self::OpenSettings => f.write_str("open-settings"),
-            Self::ToggleHeader => f.write_str("toggle-header"),
-            Self::ToggleFullscreen => f.write_str("toggle-fullscreen"),
-            Self::RenameWorkspace => f.write_str("rename-workspace"),
-            Self::Lock => f.write_str("lock"),
-            Self::Screenshot => f.write_str("screenshot"),
-            Self::Snip => f.write_str("snip"),
             Self::VtSwitch(n) => write!(f, "vt-switch {n}"),
+            // Every nullary verb returned from `NULLARY` above.
+            _ => unreachable!("{self:?} has no NULLARY row"),
         }
     }
 }
@@ -272,46 +289,29 @@ impl Area {
 }
 
 impl Action {
-    /// The functional area of this verb. Exhaustive (no wildcard arm): a new verb does not
-    /// compile until it is classified.
+    /// The functional area of this verb: the `NULLARY` row for an argument-free verb, else the
+    /// argument verb's own arm. The test-side `every_variant` guard keeps the classification
+    /// complete (a new verb fails to compile there until it is listed).
     #[must_use]
     pub fn area(&self) -> Area {
+        if let Some((.., area)) = NULLARY.iter().find(|(action, ..)| action == self) {
+            return *area;
+        }
         match self {
-            Self::ClosePane
-            | Self::CloseWindow
-            | Self::Focus(_)
-            | Self::Move(_)
-            | Self::Split(_)
-            | Self::Resize(_)
-            | Self::MarkWindow
-            | Self::SwapMarkedWindow
-            | Self::ToggleFullscreen => Area::PanesAndWindows,
+            Self::Focus(_) | Self::Move(_) | Self::Split(_) | Self::Resize(_) => {
+                Area::PanesAndWindows
+            }
             Self::CycleStack(_) => Area::Stacks,
             Self::CycleWorkspace(_)
             | Self::ReorderWorkspace(_)
-            | Self::NewWorkspace
             | Self::MoveWindowToWorkspace(_)
-            | Self::CaptureWorkspaceRoot
-            | Self::SetWorkspaceRoot
-            | Self::CloseWorkspace
-            | Self::DeleteWorkspace
-            | Self::CloseAllWorkspaces
             | Self::Slot(_)
-            | Self::PinSlot(_)
-            | Self::RenameWorkspace => Area::Workspaces,
-            Self::MoveWorkspaceToOutput(_) | Self::ToggleHeader => Area::Outputs,
-            Self::RunTerminal
-            | Self::Run(_)
-            | Self::RunInTerminal(_)
-            | Self::RunOn { .. }
-            | Self::OpenPicker
-            | Self::OpenLauncher
-            | Self::OpenSettings
-            | Self::Screenshot
-            | Self::Snip => Area::LaunchAndOverlays,
-            Self::Quit | Self::Lock | Self::SetLayout(_) | Self::VtSwitch(_) => {
-                Area::SessionAndSystem
-            }
+            | Self::PinSlot(_) => Area::Workspaces,
+            Self::MoveWorkspaceToOutput(_) => Area::Outputs,
+            Self::Run(_) | Self::RunInTerminal(_) | Self::RunOn { .. } => Area::LaunchAndOverlays,
+            Self::SetLayout(_) | Self::VtSwitch(_) => Area::SessionAndSystem,
+            // Every nullary verb returned from `NULLARY` above.
+            _ => unreachable!("{self:?} has no NULLARY row"),
         }
     }
 
@@ -346,14 +346,16 @@ impl FromStr for Action {
         let bad = ActionParseError;
         let words: Vec<&str> = text.split_whitespace().collect();
         let direction = |arg: Option<&&str>| -> Result<Direction, ActionParseError> {
-            match arg.map(|s| s.to_ascii_lowercase()).as_deref() {
-                Some("left") => Ok(Direction::Left),
-                Some("right") => Ok(Direction::Right),
-                Some("up") => Ok(Direction::Up),
-                Some("down") => Ok(Direction::Down),
-                Some(other) => Err(bad(format!(
-                    "`{other}` is not a direction (left, right, up, down)"
-                ))),
+            match arg.map(|s| s.to_ascii_lowercase()) {
+                Some(word) => DIRECTIONS
+                    .iter()
+                    .find(|(_, name)| *name == word)
+                    .map(|(dir, _)| *dir)
+                    .ok_or_else(|| {
+                        bad(format!(
+                            "`{word}` is not a direction (left, right, up, down)"
+                        ))
+                    }),
                 None => Err(bad("expected a direction (left, right, up, down)".into())),
             }
         };
@@ -392,15 +394,15 @@ impl FromStr for Action {
         let Some(verb) = words.first() else {
             return Err(bad("empty action".into()));
         };
-        match verb.to_ascii_lowercase().as_str() {
-            "quit" => nullary(Self::Quit),
-            "close-pane" => nullary(Self::ClosePane),
-            "close-window" => nullary(Self::CloseWindow),
+        let verb = verb.to_ascii_lowercase();
+        if let Some((action, ..)) = NULLARY.iter().find(|(_, word, _)| *word == verb) {
+            return nullary(action.clone());
+        }
+        match verb.as_str() {
             "set-layout" => match words.get(1) {
                 Some(name) => unary(Self::SetLayout((*name).to_string())),
                 None => Err(bad("expected a layout name".into())),
             },
-            "run-terminal" => nullary(Self::RunTerminal),
             "run" => command("run").map(Self::Run),
             "run-in-terminal" => command("run-in-terminal").map(Self::RunInTerminal),
             // `run-on <workspace> <command…>`: one workspace word, then the verbatim command.
@@ -417,13 +419,6 @@ impl FromStr for Action {
             "stack-window" => Err(bad(
                 "`stack-window` was retired: every launch already stacks into the focused pane; use `run-terminal`".into(),
             )),
-            "new-workspace" => nullary(Self::NewWorkspace),
-            "open-picker" => nullary(Self::OpenPicker),
-            "open-launcher" => nullary(Self::OpenLauncher),
-            "open-settings" => nullary(Self::OpenSettings),
-            "toggle-header" => nullary(Self::ToggleHeader),
-            "toggle-fullscreen" => nullary(Self::ToggleFullscreen),
-            "rename-workspace" => nullary(Self::RenameWorkspace),
             "focus" => unary(Self::Focus(direction(words.get(1))?)),
             "move" => unary(Self::Move(direction(words.get(1))?)),
             "split" => unary(Self::Split(direction(words.get(1))?)),
@@ -432,16 +427,6 @@ impl FromStr for Action {
             "cycle-workspace" => unary(Self::CycleWorkspace(delta(words.get(1))?)),
             "reorder-workspace" => unary(Self::ReorderWorkspace(delta(words.get(1))?)),
             "move-window-to-workspace" => unary(Self::MoveWindowToWorkspace(delta(words.get(1))?)),
-            "mark-window" => nullary(Self::MarkWindow),
-            "swap-marked-window" => nullary(Self::SwapMarkedWindow),
-            "capture-workspace-root" => nullary(Self::CaptureWorkspaceRoot),
-            "set-workspace-root" => nullary(Self::SetWorkspaceRoot),
-            "close-workspace" => nullary(Self::CloseWorkspace),
-            "delete-workspace" => nullary(Self::DeleteWorkspace),
-            "close-all-workspaces" => nullary(Self::CloseAllWorkspaces),
-            "lock" => nullary(Self::Lock),
-            "screenshot" => nullary(Self::Screenshot),
-            "snip" => nullary(Self::Snip),
             "move-workspace-to-output" => unary(Self::MoveWorkspaceToOutput(delta(words.get(1))?)),
             "slot" => unary(Self::Slot(slot_index(words.get(1))?)),
             "pin-slot" => unary(Self::PinSlot(slot_index(words.get(1))?)),
@@ -467,18 +452,55 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Serializes the two tests below: `$TERMINAL` is process-global state, and `cargo test` runs
-    /// this crate's tests on multiple threads, so mutating it from two tests concurrently would be
-    /// racy (`resolve`'s own tests avoid the hazard entirely by never asserting on the exact
-    /// string — see `chord::tests::super_return_runs_a_terminal`).
-    /// One instance of every variant (directions/deltas varied).
+    /// Compile-time completeness guard (no wildcard): a new [`Action`] variant fails to compile
+    /// here until it is classified as an argument verb or a `NULLARY` one.
+    fn is_argument_verb(action: &Action) -> bool {
+        match action {
+            Action::SetLayout(_)
+            | Action::Run(_)
+            | Action::RunInTerminal(_)
+            | Action::RunOn { .. }
+            | Action::Focus(_)
+            | Action::Move(_)
+            | Action::Split(_)
+            | Action::Resize(_)
+            | Action::CycleStack(_)
+            | Action::CycleWorkspace(_)
+            | Action::ReorderWorkspace(_)
+            | Action::MoveWindowToWorkspace(_)
+            | Action::Slot(_)
+            | Action::PinSlot(_)
+            | Action::MoveWorkspaceToOutput(_)
+            | Action::VtSwitch(_) => true,
+            Action::Quit
+            | Action::ClosePane
+            | Action::CloseWindow
+            | Action::RunTerminal
+            | Action::NewWorkspace
+            | Action::MarkWindow
+            | Action::SwapMarkedWindow
+            | Action::CaptureWorkspaceRoot
+            | Action::SetWorkspaceRoot
+            | Action::CloseWorkspace
+            | Action::DeleteWorkspace
+            | Action::CloseAllWorkspaces
+            | Action::OpenPicker
+            | Action::OpenLauncher
+            | Action::OpenSettings
+            | Action::ToggleHeader
+            | Action::ToggleFullscreen
+            | Action::RenameWorkspace
+            | Action::Lock
+            | Action::Screenshot
+            | Action::Snip => false,
+        }
+    }
+
+    /// Every `NULLARY` verb plus one sample per argument verb (directions/deltas varied).
     fn every_variant() -> Vec<Action> {
-        vec![
-            Action::Quit,
-            Action::ClosePane,
-            Action::CloseWindow,
+        let mut all: Vec<Action> = NULLARY.iter().map(|(action, ..)| action.clone()).collect();
+        all.extend([
             Action::SetLayout("es".into()),
-            Action::RunTerminal,
             Action::Run("echo 50%:a b".into()),
             Action::RunInTerminal("htop -d 5".into()),
             Action::RunOn {
@@ -492,29 +514,24 @@ mod tests {
             Action::CycleStack(-1),
             Action::CycleWorkspace(1),
             Action::ReorderWorkspace(-1),
-            Action::NewWorkspace,
             Action::MoveWindowToWorkspace(2),
-            Action::MarkWindow,
-            Action::SwapMarkedWindow,
-            Action::CaptureWorkspaceRoot,
-            Action::SetWorkspaceRoot,
-            Action::CloseWorkspace,
-            Action::DeleteWorkspace,
-            Action::CloseAllWorkspaces,
             Action::Slot(3),
             Action::PinSlot(0),
             Action::MoveWorkspaceToOutput(-2),
-            Action::OpenPicker,
-            Action::OpenLauncher,
-            Action::OpenSettings,
-            Action::ToggleHeader,
-            Action::ToggleFullscreen,
-            Action::RenameWorkspace,
-            Action::Lock,
-            Action::Screenshot,
-            Action::Snip,
             Action::VtSwitch(3),
-        ]
+        ]);
+        all
+    }
+
+    #[test]
+    fn nullary_table_and_argument_verbs_partition_every_variant() {
+        for action in every_variant() {
+            assert_eq!(
+                !is_argument_verb(&action),
+                NULLARY.iter().any(|(n, ..)| *n == action),
+                "{action}"
+            );
+        }
     }
 
     #[test]
@@ -594,6 +611,10 @@ mod tests {
         }
     }
 
+    /// Serializes the two tests below: `$TERMINAL` is process-global state, and `cargo test` runs
+    /// this crate's tests on multiple threads, so mutating it from two tests concurrently would be
+    /// racy (`resolve`'s own tests avoid the hazard entirely by never asserting on the exact
+    /// string — see `chord::tests::super_return_runs_a_terminal`).
     static TERMINAL_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]

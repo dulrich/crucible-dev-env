@@ -43,6 +43,8 @@
 //! | `Super+Shift+D`       | `CaptureWorkspaceRoot`         | focused terminal's cwd becomes the workspace root |
 //! | `Super+Ctrl+Shift+D`  | `SetWorkspaceRoot`             | workspace-root prompt in the picker overlay |
 //! | `Super+Escape`        | `Lock`                         | spawn `lock-command` (screen lock) |
+//! | `Super+Print`         | `Screenshot`                   | capture the focused output (config `screenshot`) |
+//! | `Super+Shift+Print`   | `Snip`                         | interactive region snip           |
 //! | `Ctrl+Alt+F<n>`       | `VtSwitch(n)`                  | backend VT switch (hard-wired, independent of `Super`) |
 //!
 //! `Super+Shift+<0-9>` also binds the US shifted symbol (`exclam`, `at`, ...), which is what the

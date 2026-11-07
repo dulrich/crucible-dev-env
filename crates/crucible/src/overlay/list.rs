@@ -31,15 +31,20 @@ pub enum Applied {
 /// What the rows area of a frame shows.
 #[derive(Debug, Clone, Copy)]
 pub enum Body<'a> {
-    /// Selectable rows (display text, sanitised, without the two-space indent); the row at
-    /// [`ListState::selected`] is highlighted and the window scrolls to keep it visible.
-    Rows(&'a [String]),
+    /// Headings and selectable rows; [`ListState::selected`] indexes this slice, the row there is
+    /// highlighted and the window scrolls to keep it visible.
+    Rows(&'a [Line]),
     /// One highlighted line that is not a selectable row (display text, sanitised).
     Highlighted(&'a str),
-    /// Rows mixed with headings: `(is_heading, text)`. A heading is flush with the prompt (no
-    /// indent), never highlighted; other rows get the two-space indent and the selection
-    /// highlight. `selected` indexes this slice.
-    Sectioned(&'a [(bool, String)]),
+}
+
+/// One line of [`Body::Rows`] (display text, sanitised).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    /// A heading: flush with the prompt (no indent), never highlighted.
+    Heading(String),
+    /// A selectable row: two-space indent, highlighted when selected.
+    Row(String),
 }
 
 /// One frame's content: everything [`ListState::render`] needs besides the terminal size and style.
@@ -176,24 +181,13 @@ impl ListState {
             Body::Highlighted(_) => {}
             Body::Rows(all) => {
                 let (start, end) = window(self.selected, all.len(), body_h);
-                for (i, row) in all.iter().enumerate().take(end).skip(start) {
-                    let text = format!("  {row}");
-                    lines.push(if i == self.selected {
-                        text_line(&text, &|t| style.highlight(t))
-                    } else {
-                        text_line(&text, &plain)
-                    });
-                }
-            }
-            Body::Sectioned(all) => {
-                let (start, end) = window(self.selected, all.len(), body_h);
-                for (i, (heading, row)) in all.iter().enumerate().take(end).skip(start) {
-                    lines.push(if *heading {
-                        text_line(row, &plain)
-                    } else if i == self.selected {
-                        text_line(&format!("  {row}"), &|t| style.highlight(t))
-                    } else {
-                        text_line(&format!("  {row}"), &plain)
+                for (i, line) in all.iter().enumerate().take(end).skip(start) {
+                    lines.push(match line {
+                        Line::Heading(text) => text_line(text, &plain),
+                        Line::Row(row) if i == self.selected => {
+                            text_line(&format!("  {row}"), &|t| style.highlight(t))
+                        }
+                        Line::Row(row) => text_line(&format!("  {row}"), &plain),
                     });
                 }
             }
@@ -225,6 +219,14 @@ impl ListState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Selectable rows from display texts.
+    fn row_lines<S: ToString>(texts: impl IntoIterator<Item = S>) -> Vec<Line> {
+        texts
+            .into_iter()
+            .map(|t| Line::Row(t.to_string()))
+            .collect()
+    }
 
     fn frame<'a>(
         prompt: &'a str,
@@ -323,7 +325,7 @@ mod tests {
     fn render_has_header_rows_padding_and_status() {
         let mut l = typed("a");
         l.selected = 1;
-        let rows = vec!["one".to_string(), "two".to_string()];
+        let rows = row_lines(["one", "two"]);
         let out = l.render(
             frame("p> ", None, Body::Rows(&rows), "idle"),
             20,
@@ -349,7 +351,7 @@ mod tests {
     #[test]
     fn render_header_sits_under_the_prompt_and_shrinks_the_window() {
         let l = ListState::new();
-        let rows: Vec<String> = (0..9).map(|i| format!("r{i}")).collect();
+        let rows = row_lines((0..9).map(|i| format!("r{i}")));
         let out = l.render(
             frame("p> ", Some("H"), Body::Rows(&rows), "idle"),
             20,
@@ -365,7 +367,7 @@ mod tests {
     #[test]
     fn n1_header_is_muted_then_restored_without_a_reset() {
         let st = Style::parse(Some("n1-dark"));
-        let rows = vec!["one".to_string()];
+        let rows = row_lines(["one"]);
         let out =
             ListState::new().render(frame("p> ", Some("H"), Body::Rows(&rows), ""), 20, 8, &st);
         let line = out.split("\r\n").nth(2).unwrap();
@@ -398,7 +400,7 @@ mod tests {
 
     #[test]
     fn margin_blank_first_and_last_and_two_columns_each_side() {
-        let rows = vec!["a-very-long-row-text-indeed".to_string()];
+        let rows = row_lines(["a-very-long-row-text-indeed"]);
         let out = ListState::new().render(
             frame(
                 "p> ",
@@ -431,15 +433,15 @@ mod tests {
     #[test]
     fn sectioned_headings_sit_at_prompt_level_and_rows_are_indented() {
         let body = vec![
-            (true, "Head".to_string()),
-            (false, "row".to_string()),
-            (true, "Head2".to_string()),
-            (false, "row2".to_string()),
+            Line::Heading("Head".to_string()),
+            Line::Row("row".to_string()),
+            Line::Heading("Head2".to_string()),
+            Line::Row("row2".to_string()),
         ];
         let mut l = ListState::new();
         l.selected = 1;
         let out = l.render(
-            frame("keys> ", None, Body::Sectioned(&body), "idle"),
+            frame("keys> ", None, Body::Rows(&body), "idle"),
             40,
             10,
             &Style::Terminal,
@@ -460,7 +462,7 @@ mod tests {
 
     #[test]
     fn selection_scrolls_within_the_reduced_interior_height() {
-        let rows: Vec<String> = (0..9).map(|i| format!("r{i}")).collect();
+        let rows = row_lines((0..9).map(|i| format!("r{i}")));
         let mut l = ListState::new();
         l.selected = 8;
         // 7 rows: interior 5 = prompt + 3 body rows + status.
@@ -475,15 +477,15 @@ mod tests {
 
     #[test]
     fn tiny_terminals_never_exceed_rows_lines_or_cols_cells() {
-        let rows: Vec<String> = (0..5).map(|i| format!("row{i}")).collect();
-        let sect = vec![(true, "H".to_string()), (false, "row".to_string())];
+        let rows = row_lines((0..5).map(|i| format!("row{i}")));
+        let sect = vec![Line::Heading("H".to_string()), Line::Row("row".to_string())];
         for cols in 0..=12u16 {
             for nrows in 0..=8u16 {
                 for header in [None, Some("HDR")] {
                     for body in [
                         Body::Rows(&rows),
                         Body::Highlighted("hl"),
-                        Body::Sectioned(&sect),
+                        Body::Rows(&sect),
                     ] {
                         let out = ListState::new().render(
                             frame("p> ", header, body, "status"),
@@ -517,7 +519,7 @@ mod tests {
 
     #[test]
     fn a_three_row_terminal_keeps_the_prompt_between_blank_margins() {
-        let rows = vec!["x".to_string()];
+        let rows = row_lines(["x"]);
         let out = ListState::new().render(
             frame("p> ", None, Body::Rows(&rows), "idle"),
             20,

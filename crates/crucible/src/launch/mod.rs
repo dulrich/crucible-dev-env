@@ -12,7 +12,7 @@ use crucible_compositor::ipc::{LAUNCHER_TUI_ENV, Request, TERMINAL_ENV};
 
 use crate::cli::{Parsed, help_requested};
 use crate::fuzzy;
-use crate::overlay::list::{Body, Frame, ListState};
+use crate::overlay::list::{Body, Frame, Line, ListState};
 use crate::overlay::term::{Key, sanitize};
 use crate::overlay::{Outcome, Overlay, run_overlay};
 use crate::style::Style;
@@ -220,10 +220,11 @@ impl Overlay for Launcher {
             })
             .collect();
         let (header, texts) = table::layout(&[Col::left("class"), Col::left("name")], &cells);
+        let lines: Vec<Line> = texts.into_iter().map(Line::Row).collect();
         let frame = Frame {
             prompt: "run> ",
             header: (!cells.is_empty()).then_some(header.as_str()),
-            body: Body::Rows(&texts),
+            body: Body::Rows(&lines),
             idle_status: "",
         };
         self.list.render(frame, cols, rows, style)

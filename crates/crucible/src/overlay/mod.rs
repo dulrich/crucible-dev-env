@@ -44,21 +44,29 @@ pub trait Overlay {
     /// What Enter / Alt+Enter (`key`) does.
     fn enter(&mut self, key: Key) -> Outcome;
 
-    /// Whether an edited query clears the status line (the default); an overlay whose status must
-    /// outlive typing overrides this.
-    fn clears_status_on_edit(&self) -> bool {
-        true
+    /// Handles `key` before the shared navigation and editing, returning its outcome to skip
+    /// them; the default handles nothing.
+    fn intercept(&mut self, _key: Key) -> Option<Outcome> {
+        None
     }
 
-    /// Applies one key: the shared navigation and editing, then [`Self::enter`] for Enter.
+    /// Runs after the shared editing changed the query: the default clears the status line; an
+    /// overlay whose status must outlive typing overrides this.
+    fn after_edit(&mut self) {
+        self.list_mut().status = None;
+    }
+
+    /// Applies one key: [`Self::intercept`], then the shared navigation and editing
+    /// ([`Self::after_edit`] on an edit), then [`Self::enter`] for Enter.
     fn step(&mut self, key: Key) -> Outcome {
+        if let Some(outcome) = self.intercept(key) {
+            return outcome;
+        }
         let count = self.row_count();
         match self.list_mut().apply(key, count) {
             Applied::Exit => Outcome::Exit,
             Applied::Edited => {
-                if self.clears_status_on_edit() {
-                    self.list_mut().status = None;
-                }
+                self.after_edit();
                 Outcome::Continue
             }
             Applied::Moved | Applied::Ignored => Outcome::Continue,
