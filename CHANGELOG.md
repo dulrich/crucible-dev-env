@@ -4,6 +4,19 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.5.2 — 2026-11-07
+
+### Fixed
+
+- `crucible mem` no longer reports another session's cterm daemon: a daemon now matches only when its resolved Wayland socket path (an absolute `WAYLAND_DISPLAY`, else `XDG_RUNTIME_DIR` joined with it) equals the compositor's, so nested sessions and thin clients attach to their own daemon.
+- A `run-on` workspace emptied by an X11 window that is destroyed without being unmapped is now pruned, like any other closed `run-on` workspace.
+- `crucible msg capture` replies in request order and no longer races the connection: it passes the same admission (lock and snip refusals) as every other request, and pipelined requests are no longer answered ahead of it.
+- `scripts/deploy.sh` refuses to deploy from a checkout that is not on `master` (so every host installs the same build) and no longer re-enters itself by hostname when an ssh alias differs from the short hostname.
+
+### Changed
+
+- Internal restructuring from the 2026-11-06 code review (no config, `session.kdl` or IPC change). Picker `root` entries written with `~` are now expanded against `$HOME`.
+
 ## 0.5.1 — 2026-11-06
 
 ### Added
