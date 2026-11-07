@@ -7,10 +7,12 @@
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crucible_persist::capture::{ProcInfo, ProcSnapshot, ancestors, is_shell_program};
 use crucible_persist::{crucible_subcommand, is_cde_process};
@@ -117,6 +119,16 @@ pub struct Row {
     pub unreadable: bool,
 }
 
+impl Row {
+    /// Adds `other`'s numbers into this row (the label is kept).
+    fn absorb(&mut self, other: &Row) {
+        self.pss_kb += other.pss_kb;
+        self.swap_kb += other.swap_kb;
+        self.procs += other.procs;
+        self.unreadable |= other.unreadable;
+    }
+}
+
 /// The whole report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
@@ -136,21 +148,51 @@ fn skipped_in_label(p: &ProcInfo) -> bool {
         || (p.argv.is_empty() && is_shell_program(&p.comm))
 }
 
-/// Whether `argv` is a resident cterm daemon: argv[0] basename `cterm`, argv[1] `daemon`.
-fn is_cterm_daemon(argv: &[String]) -> bool {
+/// Whether `argv[0]` is `cterm` (basename).
+fn is_cterm(argv: &[String]) -> bool {
     argv.first()
         .is_some_and(|a| Path::new(a).file_name().is_some_and(|n| n == "cterm"))
-        && argv.get(1).is_some_and(|a| a == "daemon")
 }
 
-/// The raw value of `key` in `/proc/<pid>/environ` (compared byte-for-byte by the caller).
-fn environ_var(proc_root: &Path, pid: u32, key: &[u8]) -> Option<Vec<u8>> {
+/// Whether `argv` is a resident cterm daemon: argv[0] basename `cterm`, argv[1] `daemon`.
+fn is_cterm_daemon(argv: &[String]) -> bool {
+    is_cterm(argv) && argv.get(1).is_some_and(|a| a == "daemon")
+}
+
+/// The environment of `/proc/<pid>/environ` (read once); `None` when unreadable. Values are raw
+/// bytes, never lossily decoded.
+fn proc_env(proc_root: &Path, pid: u32) -> Option<HashMap<OsString, OsString>> {
     let env = fs::read(proc_root.join(pid.to_string()).join("environ")).ok()?;
-    env.split(|&b| b == 0).find_map(|kv| {
-        kv.strip_prefix(key)
-            .and_then(|r| r.strip_prefix(b"="))
-            .map(<[u8]>::to_vec)
-    })
+    Some(
+        env.split(|&b| b == 0)
+            .filter_map(|kv| {
+                let i = kv.iter().position(|&b| b == b'=')?;
+                Some((
+                    OsString::from_vec(kv[..i].to_vec()),
+                    OsString::from_vec(kv[i + 1..].to_vec()),
+                ))
+            })
+            .collect(),
+    )
+}
+
+/// The Wayland socket path a process connects to: `WAYLAND_DISPLAY` as is when absolute, else
+/// joined onto `XDG_RUNTIME_DIR`. `None` when `WAYLAND_DISPLAY` is unset or empty, or it is
+/// relative and `XDG_RUNTIME_DIR` is unset or empty.
+fn wayland_socket(env: &HashMap<OsString, OsString>) -> Option<PathBuf> {
+    let display = env.get(OsString::from("WAYLAND_DISPLAY").as_os_str())?;
+    if display.is_empty() {
+        return None;
+    }
+    let display = Path::new(display);
+    if display.is_absolute() {
+        return Some(display.to_path_buf());
+    }
+    let dir = env.get(OsString::from("XDG_RUNTIME_DIR").as_os_str())?;
+    if dir.as_bytes().is_empty() {
+        return None;
+    }
+    Some(Path::new(dir).join(display))
 }
 
 /// The subtree of `root` with depths; a visited set guards against cycles.
@@ -241,9 +283,82 @@ fn window_app(procs: &ProcSnapshot, tree: &[(u32, usize)]) -> String {
         .unwrap_or_else(|| "?".into())
 }
 
-/// Builds the report for the compositor `pid` from a `/proc`-shaped tree.
+/// The cterm daemon rows for the daemons serving `socket` (owned by `uid`, outside `counted`):
+/// one row per daemon (the first also holds the `thin` clients), then the per-app rows.
+#[allow(clippy::too_many_arguments)]
+fn daemon_rows(
+    proc_root: &Path,
+    procs: &ProcSnapshot,
+    kids: &HashMap<u32, Vec<u32>>,
+    pid: u32,
+    uid: u32,
+    socket: &Path,
+    counted: &HashSet<u32>,
+    top: &[u32],
+) -> (Vec<Row>, Vec<u32>) {
+    let mut daemons: Vec<u32> = procs
+        .iter()
+        .filter(|&(p, info)| {
+            p != pid
+                && !counted.contains(&p)
+                && is_cterm_daemon(&info.argv)
+                && fs::metadata(proc_root.join(p.to_string())).is_ok_and(|m| m.uid() == uid)
+                && proc_env(proc_root, p)
+                    .and_then(|env| wayland_socket(&env))
+                    .is_some_and(|s| s == socket)
+        })
+        .map(|(p, _)| p)
+        .collect();
+    daemons.sort_unstable();
+    // Thin clients (a `cterm` child of the compositor with no child of its own) belong to the
+    // daemon row, not their own rows; with several daemons, to the first.
+    let thin: Vec<u32> = if daemons.is_empty() {
+        Vec::new()
+    } else {
+        top.iter()
+            .copied()
+            .filter(|c| {
+                kids.get(c).is_none_or(Vec::is_empty)
+                    && procs
+                        .get(*c)
+                        .is_some_and(|i| !is_cterm_daemon(&i.argv) && is_cterm(&i.argv))
+            })
+            .collect()
+    };
+    let mut rows: Vec<Row> = Vec::new();
+    let mut apps: Vec<Row> = Vec::new();
+    for (i, d) in daemons.into_iter().enumerate() {
+        let windows: &[u32] = kids.get(&d).map_or(&[][..], Vec::as_slice);
+        let mut own: Vec<(u32, usize)> = vec![(d, 0)];
+        if i == 0 {
+            own.extend(thin.iter().map(|&c| (c, 0)));
+        }
+        let mut row = subtree_row(proc_root, procs, &own, String::new());
+        row.label = format!(
+            "cterm daemon (+{} window{})",
+            windows.len(),
+            if windows.len() == 1 { "" } else { "s" }
+        );
+        rows.push(row);
+        // Each window's subtree counts toward its app, summed by app name.
+        for &w in windows {
+            let tree = subtree(kids, w);
+            let label = window_app(procs, &tree);
+            let r = subtree_row(proc_root, procs, &tree, String::new());
+            match apps.iter_mut().find(|a| a.label == label) {
+                Some(a) => a.absorb(&r),
+                None => apps.push(Row { label, ..r }),
+            }
+        }
+    }
+    rows.extend(apps);
+    (rows, thin)
+}
+
+/// Builds the report for the compositor `pid` from a `/proc`-shaped tree; cterm daemons count
+/// only when owned by `uid`.
 #[must_use]
-pub fn build_report(proc_root: &Path, pid: u32) -> Report {
+pub fn build_report(proc_root: &Path, pid: u32, uid: u32) -> Report {
     let procs = ProcSnapshot::read(proc_root);
     let mut kids = procs.children();
     // The compositor is never anybody's child here (also guards a pid-1 style self-parent).
@@ -266,75 +381,14 @@ pub fn build_report(proc_root: &Path, pid: u32) -> Report {
         top_rows.push((child, subtree_row(proc_root, &procs, &tree, name(child))));
     }
     // cterm daemons serving this compositor: detached into their own session, so they are not
-    // descendants; matched by the WAYLAND_DISPLAY of the first readable compositor child.
-    let display = top
+    // descendants; matched by the resolved Wayland socket path of the first compositor child.
+    let socket = top
         .iter()
-        .find_map(|&c| environ_var(proc_root, c, b"WAYLAND_DISPLAY"));
-    if let Some(display) = display {
-        let uid = rustix::process::getuid().as_raw();
-        let mut daemons: Vec<u32> = procs
-            .iter()
-            .filter(|&(p, info)| {
-                p != pid
-                    && !counted.contains(&p)
-                    && is_cterm_daemon(&info.argv)
-                    && fs::metadata(proc_root.join(p.to_string())).is_ok_and(|m| m.uid() == uid)
-                    && environ_var(proc_root, p, b"WAYLAND_DISPLAY").as_deref()
-                        == Some(&display[..])
-            })
-            .map(|(p, _)| p)
-            .collect();
-        daemons.sort_unstable();
-        // Thin clients (a `cterm` child of the compositor with no child of its own) belong to
-        // the daemon row, not their own rows; with several daemons, to the first.
-        let thin: Vec<u32> = if daemons.is_empty() {
-            Vec::new()
-        } else {
-            top.iter()
-                .copied()
-                .filter(|c| {
-                    kids.get(c).is_none_or(Vec::is_empty)
-                        && procs.get(*c).is_some_and(|i| {
-                            !is_cterm_daemon(&i.argv)
-                                && i.argv.first().is_some_and(|a| {
-                                    Path::new(a).file_name().is_some_and(|n| n == "cterm")
-                                })
-                        })
-                })
-                .collect()
-        };
+        .find_map(|&c| proc_env(proc_root, c).and_then(|env| wayland_socket(&env)));
+    if let Some(socket) = socket {
+        let (rows, thin) = daemon_rows(proc_root, &procs, &kids, pid, uid, &socket, &counted, top);
+        children.extend(rows);
         top_rows.retain(|(p, _)| !thin.contains(p));
-        let mut apps: Vec<Row> = Vec::new();
-        for (i, d) in daemons.into_iter().enumerate() {
-            let windows: &[u32] = kids.get(&d).map_or(&[][..], Vec::as_slice);
-            let mut own: Vec<(u32, usize)> = vec![(d, 0)];
-            if i == 0 {
-                own.extend(thin.iter().map(|&c| (c, 0)));
-            }
-            let mut row = subtree_row(proc_root, &procs, &own, String::new());
-            row.label = format!(
-                "cterm daemon (+{} window{})",
-                windows.len(),
-                if windows.len() == 1 { "" } else { "s" }
-            );
-            children.push(row);
-            // Each window's subtree counts toward its app, summed by app name.
-            for &w in windows {
-                let tree = subtree(&kids, w);
-                let label = window_app(&procs, &tree);
-                let r = subtree_row(proc_root, &procs, &tree, String::new());
-                match apps.iter_mut().find(|a| a.label == label) {
-                    Some(a) => {
-                        a.pss_kb += r.pss_kb;
-                        a.swap_kb += r.swap_kb;
-                        a.procs += r.procs;
-                        a.unreadable |= r.unreadable;
-                    }
-                    None => apps.push(Row { label, ..r }),
-                }
-            }
-        }
-        children.extend(apps);
     }
     children.extend(top_rows.into_iter().map(|(_, r)| r));
     children.sort_by(|a, b| b.pss_kb.cmp(&a.pss_kb).then_with(|| a.label.cmp(&b.label)));
@@ -348,13 +402,16 @@ pub fn build_report(proc_root: &Path, pid: u32) -> Report {
         label: format!("{} (compositor)", name(pid)),
         unreadable: mem.is_none(),
     };
-    let total = Row {
-        pss_kb: cp + children.iter().map(|r| r.pss_kb).sum::<u64>(),
-        swap_kb: cs + children.iter().map(|r| r.swap_kb).sum::<u64>(),
-        procs: 1 + children.iter().map(|r| r.procs).sum::<usize>(),
+    let mut total = Row {
+        pss_kb: 0,
+        swap_kb: 0,
+        procs: 0,
         label: "TOTAL".into(),
-        unreadable: compositor.unreadable || children.iter().any(|r| r.unreadable),
+        unreadable: false,
     };
+    for r in std::iter::once(&compositor).chain(&children) {
+        total.absorb(r);
+    }
     Report {
         children,
         compositor,
@@ -409,10 +466,10 @@ pub fn run(args: &[String]) -> i32 {
         Err(code) => return code,
     };
     let proc_root = Path::new("/proc");
-    let pid = parsed.pid.or_else(|| {
-        let uid = rustix::process::getuid().as_raw();
-        find_compositor(proc_root, uid, std::process::id())
-    });
+    let uid = rustix::process::getuid().as_raw();
+    let pid = parsed
+        .pid
+        .or_else(|| find_compositor(proc_root, uid, std::process::id()));
     let Some(pid) = pid else {
         eprintln!("crucible mem: no running CDE compositor found (pass --pid <n>)");
         return 1;
@@ -421,7 +478,7 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("crucible mem: no process {pid}");
         return 1;
     }
-    print!("{}", format_report(pid, &build_report(proc_root, pid)));
+    print!("{}", format_report(pid, &build_report(proc_root, pid, uid)));
     0
 }
 
@@ -471,6 +528,15 @@ mod tests {
         }
     }
 
+    /// The fixture files are owned by the live user, so that is the uid the tests pass.
+    fn uid() -> u32 {
+        rustix::process::getuid().as_raw()
+    }
+
+    fn env(vars: &[(&str, &str)]) -> HashMap<OsString, OsString> {
+        vars.iter().map(|&(k, v)| (k.into(), v.into())).collect()
+    }
+
     fn s(a: &[&str]) -> Vec<String> {
         a.iter().map(ToString::to_string).collect()
     }
@@ -506,7 +572,7 @@ mod tests {
         // not a child of the compositor
         f.proc(50, 1, "other", &["other"], Some((9999, 0)));
 
-        let r = build_report(&f.0, 10);
+        let r = build_report(&f.0, 10, uid());
         let labels: Vec<_> = r.children.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -537,7 +603,7 @@ mod tests {
         f.proc(30, 10, "ghostty", &["ghostty"], Some((200, 0)));
         f.proc(31, 30, "bash", &["bash"], Some((10, 0)));
         f.proc(32, 31, "crucible", &["crucible", "mem"], Some((10, 0)));
-        let r = build_report(&f.0, 10);
+        let r = build_report(&f.0, 10, uid());
         let labels: Vec<_> = r.children.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["ghostty", "ghostty (overlay)"]);
     }
@@ -574,7 +640,7 @@ mod tests {
         f.proc(10, 1, "crucible", &["crucible", "--winit"], Some((100, 0)));
         f.proc(20, 10, "foot", &["foot"], Some((500, 0)));
         f.proc(21, 20, "gone", &["gone"], None);
-        let r = build_report(&f.0, 10);
+        let r = build_report(&f.0, 10, uid());
         assert_eq!(r.children[0].pss_kb, 500);
         assert!(r.children[0].unreadable);
         assert!(r.total.unreadable);
@@ -622,10 +688,23 @@ mod tests {
             Some((100, 0)),
         );
         f.proc(20, 10, "cterm", &["/x/cterm"], Some((300, 0)));
-        f.environ(20, &[("HOME", "/h"), ("WAYLAND_DISPLAY", "wayland-1")]);
+        f.environ(
+            20,
+            &[
+                ("HOME", "/h"),
+                ("XDG_RUNTIME_DIR", "/run/user/1"),
+                ("WAYLAND_DISPLAY", "wayland-1"),
+            ],
+        );
         // resident daemon on wayland-1: two windows, one running htop
         f.proc(60, 1, "cterm", &["/x/cterm", "daemon"], Some((500, 7)));
-        f.environ(60, &[("WAYLAND_DISPLAY", "wayland-1")]);
+        f.environ(
+            60,
+            &[
+                ("XDG_RUNTIME_DIR", "/run/user/1"),
+                ("WAYLAND_DISPLAY", "wayland-1"),
+            ],
+        );
         f.proc(61, 60, "bash", &["-bash"], Some((20, 0)));
         f.proc(62, 61, "htop", &["htop"], Some((30, 1)));
         f.proc(63, 60, "zsh", &["zsh"], Some((10, 0)));
@@ -635,7 +714,7 @@ mod tests {
     #[test]
     fn matching_cterm_daemon_gets_one_row_with_its_window_count() {
         let f = daemon_fixture("daemon");
-        let r = build_report(&f.0, 10);
+        let r = build_report(&f.0, 10, uid());
         let d: Vec<_> = r
             .children
             .iter()
@@ -668,7 +747,7 @@ mod tests {
     #[test]
     fn total_includes_the_daemon_row() {
         let f = daemon_fixture("daemontotal");
-        let r = build_report(&f.0, 10);
+        let r = build_report(&f.0, 10, uid());
         assert_eq!(r.children.len(), 3);
         assert_eq!(r.total.pss_kb, 100 + 300 + 560);
         assert_eq!(r.total.procs, 1 + 1 + 4);
@@ -678,9 +757,15 @@ mod tests {
     fn daemon_on_another_display_is_excluded() {
         let f = daemon_fixture("daemonother");
         f.proc(70, 1, "cterm", &["/y/cterm", "daemon"], Some((900, 0)));
-        f.environ(70, &[("WAYLAND_DISPLAY", "wayland-10")]);
+        f.environ(
+            70,
+            &[
+                ("XDG_RUNTIME_DIR", "/run/user/1"),
+                ("WAYLAND_DISPLAY", "wayland-10"),
+            ],
+        );
         f.proc(71, 70, "bash", &["bash"], Some((10, 0)));
-        let r = build_report(&f.0, 10);
+        let r = build_report(&f.0, 10, uid());
         assert_eq!(r.children.len(), 3);
         assert!(r.children.iter().all(|c| c.pss_kb != 910));
     }
@@ -695,10 +780,22 @@ mod tests {
             &["/x/cterm", "-e", "daemon"],
             Some((900, 0)),
         );
-        f.environ(80, &[("WAYLAND_DISPLAY", "wayland-1")]);
+        f.environ(
+            80,
+            &[
+                ("XDG_RUNTIME_DIR", "/run/user/1"),
+                ("WAYLAND_DISPLAY", "wayland-1"),
+            ],
+        );
         f.proc(81, 1, "cterm", &["/x/cterm"], Some((900, 0)));
-        f.environ(81, &[("WAYLAND_DISPLAY", "wayland-1")]);
-        let r = build_report(&f.0, 10);
+        f.environ(
+            81,
+            &[
+                ("XDG_RUNTIME_DIR", "/run/user/1"),
+                ("WAYLAND_DISPLAY", "wayland-1"),
+            ],
+        );
+        let r = build_report(&f.0, 10, uid());
         let labels: Vec<_> = r.children.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(labels, ["cterm daemon (+2 windows)", "htop", "zsh"]);
     }
@@ -724,7 +821,7 @@ mod tests {
             &["/x/crucible", "resume", "--cwd", "/", "--", "vim"],
             Some((3, 0)),
         );
-        let r = build_report(&f.0, 10);
+        let r = build_report(&f.0, 10, uid());
         let labels: Vec<_> = r
             .children
             .iter()
@@ -740,5 +837,130 @@ mod tests {
                 ("crucible resume", 3, 1),
             ]
         );
+    }
+
+    #[test]
+    fn wayland_socket_resolves_by_the_four_rules() {
+        assert_eq!(wayland_socket(&env(&[])), None);
+        assert_eq!(
+            wayland_socket(&env(&[("WAYLAND_DISPLAY", ""), ("XDG_RUNTIME_DIR", "/r")])),
+            None
+        );
+        assert_eq!(
+            wayland_socket(&env(&[
+                ("WAYLAND_DISPLAY", "/s/w"),
+                ("XDG_RUNTIME_DIR", "/r")
+            ])),
+            Some(PathBuf::from("/s/w"))
+        );
+        assert_eq!(
+            wayland_socket(&env(&[
+                ("WAYLAND_DISPLAY", "w-1"),
+                ("XDG_RUNTIME_DIR", "/r")
+            ])),
+            Some(PathBuf::from("/r/w-1"))
+        );
+        assert_eq!(wayland_socket(&env(&[("WAYLAND_DISPLAY", "w-1")])), None);
+        assert_eq!(
+            wayland_socket(&env(&[("WAYLAND_DISPLAY", "w-1"), ("XDG_RUNTIME_DIR", "")])),
+            None
+        );
+    }
+
+    #[test]
+    fn same_display_name_in_another_runtime_dir_is_excluded() {
+        let f = daemon_fixture("daemonforeign");
+        f.proc(70, 1, "cterm", &["/y/cterm", "daemon"], Some((900, 0)));
+        f.environ(
+            70,
+            &[
+                ("XDG_RUNTIME_DIR", "/run/user/2"),
+                ("WAYLAND_DISPLAY", "wayland-1"),
+            ],
+        );
+        f.proc(71, 70, "bash", &["bash"], Some((10, 0)));
+        let r = build_report(&f.0, 10, uid());
+        assert_eq!(r.children.len(), 3);
+        assert!(
+            r.children
+                .iter()
+                .all(|c| c.pss_kb != 910 && c.pss_kb != 900)
+        );
+        assert_eq!(r.total.pss_kb, 100 + 300 + 560);
+    }
+
+    #[test]
+    fn absolute_wayland_display_without_runtime_dir_matches() {
+        let f = Fixture::new("daemonabs");
+        f.proc(
+            10,
+            1,
+            "crucible",
+            &["/x/crucible", "--winit"],
+            Some((100, 0)),
+        );
+        f.proc(20, 10, "cterm", &["/x/cterm"], Some((300, 0)));
+        f.environ(20, &[("WAYLAND_DISPLAY", "/s/wayland-1")]);
+        f.proc(60, 1, "cterm", &["/x/cterm", "daemon"], Some((500, 0)));
+        f.environ(60, &[("WAYLAND_DISPLAY", "/s/wayland-1")]);
+        let r = build_report(&f.0, 10, uid());
+        assert_eq!(r.children.len(), 1);
+        assert_eq!(r.children[0].label, "cterm daemon (+0 windows)");
+        assert_eq!(r.children[0].pss_kb, 800);
+    }
+
+    #[test]
+    fn daemon_without_a_resolvable_socket_is_excluded() {
+        let f = daemon_fixture("daemonnosock");
+        f.proc(70, 1, "cterm", &["/y/cterm", "daemon"], Some((900, 0)));
+        f.environ(70, &[("WAYLAND_DISPLAY", "wayland-1")]);
+        let r = build_report(&f.0, 10, uid());
+        assert_eq!(r.children.len(), 3);
+        assert_eq!(r.total.pss_kb, 100 + 300 + 560);
+    }
+
+    #[test]
+    fn thin_clients_attach_to_the_matching_daemon_despite_a_lower_foreign_pid() {
+        let f = daemon_fixture("daemonlow");
+        f.proc(50, 1, "cterm", &["/y/cterm", "daemon"], Some((900, 0)));
+        f.environ(
+            50,
+            &[
+                ("XDG_RUNTIME_DIR", "/run/user/2"),
+                ("WAYLAND_DISPLAY", "wayland-1"),
+            ],
+        );
+        let r = build_report(&f.0, 10, uid());
+        let d = r
+            .children
+            .iter()
+            .find(|c| c.label.starts_with("cterm daemon"))
+            .unwrap();
+        assert_eq!((d.pss_kb, d.procs), (800, 2));
+        assert!(r.children.iter().all(|c| c.pss_kb != 900));
+    }
+
+    #[test]
+    fn row_absorb_sums_numbers_and_keeps_the_label() {
+        let mut a = Row {
+            pss_kb: 1,
+            swap_kb: 2,
+            procs: 3,
+            label: "a".into(),
+            unreadable: false,
+        };
+        let b = Row {
+            pss_kb: 10,
+            swap_kb: 20,
+            procs: 30,
+            label: "b".into(),
+            unreadable: true,
+        };
+        a.absorb(&b);
+        assert_eq!(
+            (a.pss_kb, a.swap_kb, a.procs, a.unreadable),
+            (11, 22, 33, true)
+        );
+        assert_eq!(a.label, "a");
     }
 }
