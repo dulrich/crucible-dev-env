@@ -4,6 +4,13 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.4.12 — 2026-11-06
+
+### Fixed
+
+- `run-on` windows now start: a window spawned into a hidden workspace gets its first configure, so a client that waits for it (a nested `crucible --winit`, and most toolkits) comes up instead of waiting forever. It gets its real size when its workspace is first shown.
+- Focus-follows-mouse after a workspace switch: the pane under the pointer takes focus at once, instead of after the next pointer motion. Over a gap or the header strip the workspace keeps its own focused pane. While an overlay is open or a drag is held, the refocus waits until it ends.
+
 ## 0.4.11 — 2026-11-06
 
 ### Added
