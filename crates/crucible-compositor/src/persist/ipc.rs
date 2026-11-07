@@ -18,7 +18,7 @@ use super::spawn::{DirPolicy, SpawnRequest};
 use super::workspace::{folder_workspace_name, run_on_target};
 use super::{capture_env, close_element, proc_root};
 use crate::input::{ActionError, Origin};
-use crate::ipc::{Request, Response};
+use crate::ipc::{Reply, Request, Response};
 use crate::state::{Backend, CrucibleState};
 use crucible_keys::{Action, BindTarget};
 use crucible_layout::WorkspaceLayout;
@@ -94,10 +94,25 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ///
     /// Every acting request passes the lock admission first ([`admit_request`]); `exec` then goes
     /// through the action gate (`handle_key_action`), which answers a failed action with `err`.
-    pub fn handle_ipc(&mut self, request: Request, peer: Option<u32>) -> Response {
+    pub fn handle_ipc(&mut self, request: Request, peer: Option<u32>) -> Reply {
         if let Err(err) = admit_request(self.is_session_locked(), &request) {
-            return Response::Err(err.to_string());
+            return Reply::Now(Response::Err(err.to_string()));
         }
+        if let Request::Capture(path) = request {
+            // Captured here; encoded, written and answered (`ok <w>x<h>`) off the main thread.
+            return match self
+                .ipc_capture(&path)
+                .and_then(|capture| crate::capture::spawn_encode_and_write(capture, path))
+            {
+                Ok(rx) => Reply::Later(rx),
+                Err(reason) => Reply::Now(Response::Err(reason)),
+            };
+        }
+        Reply::Now(self.answer_ipc(request, peer))
+    }
+
+    /// [`Self::handle_ipc`]'s immediate requests, after the lock admission.
+    fn answer_ipc(&mut self, request: Request, peer: Option<u32>) -> Response {
         let result = match request {
             Request::Relaunch => self.ipc_relaunch(peer),
             Request::ClosePid(pid) => return self.ipc_close_pid(pid),
@@ -150,15 +165,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Request::Rename(name) => self.ipc_rename(&name),
             Request::Delete(name) => self.ipc_delete(&name),
             Request::SetRoot(root) => self.ipc_set_root(root),
-            // The socket server answers `capture` itself (the reply follows the off-thread write);
-            // a direct call captures, encodes and writes inline.
-            Request::Capture(path) => self.ipc_capture(&path).and_then(|capture| {
-                std::fs::write(
-                    &path,
-                    crate::capture::encode_png(&capture).map_err(|e| e.to_string())?,
-                )
-                .map_err(|e| format!("cannot write {}: {e}", path.display()))
-            }),
+            // Deferred by `handle_ipc` before this point.
+            Request::Capture(_) => Err("capture is answered by handle_ipc".to_string()),
         };
         match result {
             Ok(()) => Response::Ok(String::new()),
@@ -571,6 +579,17 @@ mod tests {
     use crucible_persist::{PaneRecord, RecordNode};
 
     #[test]
+    fn locked_capture_is_refused_by_admission_with_the_capture_text() {
+        // `handle_ipc` answers this `err` at once, before `ipc_capture` or any worker runs.
+        let refused = admit_request(true, &Request::Capture("/tmp/x.png".into()));
+        assert_eq!(refused, Err(ActionError::Locked));
+        assert_eq!(
+            ActionError::Locked.to_string(),
+            crate::capture::CaptureError::Locked.to_string()
+        );
+    }
+
+    #[test]
     fn locked_refuses_every_acting_request() {
         for r in [
             Request::Exec("quit".into()),
@@ -588,6 +607,7 @@ mod tests {
             Request::RunTerm("ghostty".into()),
             Request::Relaunch,
             Request::ClosePid(7),
+            Request::Capture("/tmp/x.png".into()),
         ] {
             assert_eq!(admit_request(true, &r), Err(ActionError::Locked), "{r:?}");
             assert_eq!(admit_request(false, &r), Ok(()), "{r:?}");

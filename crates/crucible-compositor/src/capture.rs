@@ -9,11 +9,7 @@
 //! [`encode_png`] turns a [`Capture`] into PNG bytes (fast compression); callers run it off the
 //! main thread.
 
-use std::{
-    io::Write,
-    os::unix::net::UnixStream,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use smithay::{
     backend::{
@@ -24,6 +20,7 @@ use smithay::{
         },
     },
     output::Output,
+    reexports::calloop::channel::{Channel, channel},
     utils::{Rectangle, Size, Transform},
 };
 
@@ -191,41 +188,12 @@ pub fn encode_png(capture: &Capture) -> Result<Vec<u8>, EncodeError> {
     Ok(out)
 }
 
-/// Encodes `capture` and writes it to `path` on a worker thread, then answers the IPC request
-/// on `reply`: `ok <w>x<h>` once the file is written, else `err <reason>`. Logs the encode time.
-pub fn spawn_write_png(capture: Capture, path: PathBuf, mut reply: UnixStream) {
-    let spawned = std::thread::Builder::new()
-        .name("cde-capture-png".into())
-        .spawn(move || {
-            let response = match write_png(&capture, &path) {
-                Ok(()) => Response::Ok(format!("{}x{}", capture.width, capture.height)),
-                Err(reason) => {
-                    tracing::warn!(path = %path.display(), %reason, "capture: write failed");
-                    Response::Err(reason)
-                }
-            };
-            // The stream is shared with the non-blocking reader: retry a full buffer briefly.
-            let line = format!("{}\n", response.to_line());
-            let mut rest = line.as_bytes();
-            for _ in 0..200 {
-                match reply.write(rest) {
-                    Ok(n) if n == rest.len() => break,
-                    Ok(n) => rest = &rest[n..],
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(1));
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                    Err(_) => break,
-                }
-            }
-        });
-    if let Err(err) = spawned {
-        tracing::warn!(%err, "capture: cannot spawn the encoder thread");
-    }
-}
-
-/// Encodes `capture` (timed, logged at info) and writes it to `path`.
-fn write_png(capture: &Capture, path: &Path) -> Result<(), String> {
+/// Encodes `capture` (timed, logged at info): the one PNG encode step of `capture` and of the
+/// screenshot worker.
+///
+/// # Errors
+/// The encoder's failure text.
+pub fn encode_timed(capture: &Capture) -> Result<Vec<u8>, String> {
     let started = std::time::Instant::now();
     let bytes = encode_png(capture).map_err(|e| e.to_string())?;
     tracing::info!(
@@ -233,7 +201,46 @@ fn write_png(capture: &Capture, path: &Path) -> Result<(), String> {
         ms = started.elapsed().as_secs_f64() * 1000.0,
         "capture: png encoded"
     );
+    Ok(bytes)
+}
+
+/// Encodes `capture` ([`encode_timed`]) and writes it to `path`.
+///
+/// # Errors
+/// The encoder's failure text, or `cannot write <path>: <e>`.
+pub fn encode_and_write(capture: &Capture, path: &Path) -> Result<(), String> {
+    let bytes = encode_timed(capture)?;
     std::fs::write(path, &bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
+
+/// Runs [`encode_and_write`] on a worker thread; its reply (`ok <w>x<h>` or `err <reason>`)
+/// arrives as the returned channel's single message, on the main loop.
+///
+/// # Errors
+/// The thread could not be spawned.
+pub fn spawn_encode_and_write(
+    capture: Capture,
+    path: PathBuf,
+) -> Result<Channel<Response>, String> {
+    let (tx, rx) = channel::<Response>();
+    std::thread::Builder::new()
+        .name("cde-capture-png".into())
+        .spawn(move || {
+            let response = match encode_and_write(&capture, &path) {
+                Ok(()) => Response::Ok(format!("{}x{}", capture.width, capture.height)),
+                Err(reason) => {
+                    tracing::warn!(path = %path.display(), %reason, "capture: write failed");
+                    Response::Err(reason)
+                }
+            };
+            // A send error means the receiver (connection or compositor) is gone.
+            let _ = tx.send(response);
+        })
+        .map(|_| rx)
+        .map_err(|err| {
+            tracing::warn!(%err, "capture: cannot spawn the encoder thread");
+            format!("cannot spawn the encoder thread: {err}")
+        })
 }
 
 /// Lock and power admission for a capture of `output`.

@@ -20,7 +20,7 @@ use smithay::{
 use tracing::{info, warn};
 
 use crate::{
-    capture::{Capture, encode_png},
+    capture::{Capture, encode_timed},
     selection::{IMAGE_MIME, SelectionData, claim_x11_selection},
     state::{Backend, CrucibleState},
 };
@@ -70,19 +70,6 @@ pub(crate) fn file_stem(t: Stamp) -> String {
     )
 }
 
-/// The first free `<stem>.png`, `<stem>-1.png`, `<stem>-2.png`, ... given `exists`.
-#[must_use]
-pub(crate) fn unique_file_name(stem: &str, exists: impl Fn(&str) -> bool) -> String {
-    let first = format!("{stem}.png");
-    if !exists(&first) {
-        return first;
-    }
-    (1u32..)
-        .map(|n| format!("{stem}-{n}.png"))
-        .find(|name| !exists(name))
-        .expect("an unbounded counter finds a free name")
-}
-
 /// Expands a leading `~` (alone or `~/...`) to `home`; any other path is returned unchanged. With
 /// no `home` a `~` path is left as written (the write then fails and logs).
 #[must_use]
@@ -98,9 +85,13 @@ fn write_screenshot_file(dir: &Path, stamp: Stamp, png: &[u8]) -> Result<PathBuf
     use std::io::Write;
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let stem = file_stem(stamp);
-    // `create_new` makes the existence check and the create one atomic step; retry on a race.
-    let mut name = unique_file_name(&stem, |n| dir.join(n).exists());
-    for attempt in 1u32..=100 {
+    // `create_new` makes the existence check and the create one atomic step.
+    for attempt in 0u32..=100 {
+        let name = if attempt == 0 {
+            format!("{stem}.png")
+        } else {
+            format!("{stem}-{attempt}.png")
+        };
         let path = dir.join(&name);
         match std::fs::OpenOptions::new()
             .write(true)
@@ -113,9 +104,7 @@ fn write_screenshot_file(dir: &Path, stamp: Stamp, png: &[u8]) -> Result<PathBuf
                     .map(|()| path.clone())
                     .map_err(|e| format!("cannot write {}: {e}", path.display()));
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                name = format!("{stem}-{attempt}.png");
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(format!("cannot create {}: {e}", path.display())),
         }
     }
@@ -145,9 +134,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let worker = std::thread::Builder::new()
             .name("screenshot".into())
             .spawn(move || {
-                let png: Result<Arc<[u8]>, String> = encode_png(&capture)
-                    .map(Arc::from)
-                    .map_err(|e| e.to_string());
+                let png: Result<Arc<[u8]>, String> = encode_timed(&capture).map(Arc::from);
                 let file = match (&png, want_file) {
                     (Ok(png), true) => Some(
                         Stamp::now_local()
@@ -279,23 +266,19 @@ mod tests {
 
     #[test]
     fn collisions_append_an_increasing_suffix() {
-        let stem = file_stem(T);
-        let taken = |set: &'static [&'static str]| move |n: &str| set.contains(&n);
+        let dir = std::env::temp_dir().join(format!("cde-shot-suffix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cde-20261106-142530.png"), b"a").unwrap();
+        std::fs::write(dir.join("cde-20261106-142530-1.png"), b"b").unwrap();
+        let path = write_screenshot_file(&dir, T, b"c").unwrap();
+        assert_eq!(path, dir.join("cde-20261106-142530-2.png"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"c");
         assert_eq!(
-            unique_file_name(&stem, taken(&[])),
-            "cde-20261106-142530.png"
+            std::fs::read(dir.join("cde-20261106-142530.png")).unwrap(),
+            b"a"
         );
-        assert_eq!(
-            unique_file_name(&stem, taken(&["cde-20261106-142530.png"])),
-            "cde-20261106-142530-1.png"
-        );
-        assert_eq!(
-            unique_file_name(
-                &stem,
-                taken(&["cde-20261106-142530.png", "cde-20261106-142530-1.png"])
-            ),
-            "cde-20261106-142530-2.png"
-        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
