@@ -109,9 +109,13 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
             });
         }
 
-        // Send the first configure for whichever role this surface holds, if not yet sent.
-        let warm = self.warm_element_for(surface);
-        ensure_initial_configure(surface, &self.space, warm, &mut self.popups);
+        // Send the first configure for whichever role this surface holds, if not yet sent. A
+        // toplevel outside the Space still needs it: the pre-warmed overlay host, or a managed
+        // window on a hidden workspace (`run-on`), whose client otherwise waits forever.
+        let unplaced = self
+            .warm_element_for(surface)
+            .or_else(|| self.hidden_managed_for(surface));
+        ensure_initial_configure(surface, &self.space, unplaced, &mut self.popups);
     }
 }
 

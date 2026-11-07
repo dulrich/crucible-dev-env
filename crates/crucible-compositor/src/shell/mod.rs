@@ -46,6 +46,18 @@ use crate::{
 };
 
 impl<B: Backend + 'static> CrucibleState<B> {
+    /// The managed [`WindowElement`] whose root surface is `surface`, wherever it is shown or hidden
+    /// (a window on a hidden workspace is bound but not in the Space).
+    pub(crate) fn hidden_managed_for(&self, surface: &WlSurface) -> Option<WindowElement> {
+        match self
+            .layout
+            .resolve(|e| e.wl_surface().is_some_and(|s| &*s == surface))
+        {
+            Binding::Managed(id) => self.layout.element(id).cloned(),
+            _ => None,
+        }
+    }
+
     /// Finds the mapped [`WindowElement`] whose root surface is `surface`, if any.
     pub fn window_for_surface(&self, surface: &WlSurface) -> Option<WindowElement> {
         self.space
@@ -257,16 +269,18 @@ impl<B: Backend + 'static> WlrLayerShellHandler for CrucibleState<B> {
 pub fn ensure_initial_configure(
     surface: &WlSurface,
     space: &Space<WindowElement>,
-    warm: Option<WindowElement>,
+    unplaced: Option<WindowElement>,
     popups: &mut PopupManager,
 ) {
-    // Toplevel: send the first configure if relevant. `warm` is the hidden pre-warmed overlay
-    // host's toplevel for `surface` (audit E7): it is never in the Space, yet needs its configure.
+    // Toplevel: send the first configure if relevant. `unplaced` is a toplevel for `surface` that
+    // is not in the Space yet needs its configure: the hidden pre-warmed overlay host (audit E7),
+    // or a managed window on a hidden workspace (`run-on`); the latter gets an unsized configure
+    // and its real size when its workspace is first shown.
     if let Some(window) = space
         .elements()
         .find(|window| window.wl_surface().map(|s| &*s == surface).unwrap_or(false))
         .cloned()
-        .or(warm)
+        .or(unplaced)
     {
         if let Some(toplevel) = window.toplevel() {
             let initial_configure_sent = with_states(surface, |states| {
