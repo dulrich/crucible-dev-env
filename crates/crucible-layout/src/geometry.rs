@@ -116,6 +116,23 @@ impl Rect {
             && other.y < self.y + self.height
     }
 
+    /// The overlap of the two rects, or `None` when they do not overlap with non-zero area
+    /// (touching edges and disjoint rects both yield `None`).
+    #[must_use]
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        if !self.intersects(other) {
+            return None;
+        }
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        Some(Self::new(
+            x,
+            y,
+            (self.x + self.width).min(other.x + other.width) - x,
+            (self.y + self.height).min(other.y + other.height) - y,
+        ))
+    }
+
     /// Whether the point `(x, y)` lies inside the rect (left/top edges inclusive, right/bottom
     /// exclusive).
     #[must_use]
@@ -174,17 +191,9 @@ impl Rect {
     /// `hole`. A disjoint hole returns the rect whole.
     #[must_use]
     pub fn subtract(self, hole: Self) -> Vec<Self> {
-        if !self.intersects(hole) {
+        let Some(clipped) = self.intersection(hole) else {
             return vec![self];
-        }
-        let x = hole.x.max(self.x);
-        let y = hole.y.max(self.y);
-        let clipped = Self::new(
-            x,
-            y,
-            (hole.x + hole.width).min(self.x + self.width) - x,
-            (hole.y + hole.height).min(self.y + self.height) - y,
-        );
+        };
         self.frame_strips(clipped)
             .into_iter()
             .filter(|r| r.has_area())
@@ -749,6 +758,24 @@ mod tests {
             assert!(strip.width >= 0, "negative width: {strip:?}");
             assert!(strip.height >= 0, "negative height: {strip:?}");
         }
+    }
+
+    #[test]
+    fn intersection_is_the_overlap_or_none() {
+        let a = Rect::new(0, 0, 10, 10);
+        assert_eq!(
+            a.intersection(Rect::new(5, 6, 10, 10)),
+            Some(Rect::new(5, 6, 5, 4))
+        );
+        assert_eq!(
+            a.intersection(Rect::new(2, 2, 3, 3)),
+            Some(Rect::new(2, 2, 3, 3))
+        );
+        assert_eq!(a.intersection(a), Some(a));
+        // Touching edges and disjoint rects do not intersect.
+        assert_eq!(a.intersection(Rect::new(10, 0, 5, 5)), None);
+        assert_eq!(a.intersection(Rect::new(0, 10, 5, 5)), None);
+        assert_eq!(a.intersection(Rect::new(20, 20, 5, 5)), None);
     }
 
     #[test]

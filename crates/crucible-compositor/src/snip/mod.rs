@@ -7,4 +7,4 @@ pub mod mode;
 pub mod model;
 
 pub use mode::{SnipSession, crop_capture, snip_elements};
-pub use model::{Event, Outcome, OutputInfo, Snip, crop, full_frame};
+pub use model::{Event, Outcome, OutputInfo, Snip, crop};

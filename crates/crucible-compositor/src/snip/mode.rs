@@ -22,7 +22,7 @@ use smithay::{
 };
 use tracing::{info, warn};
 
-use super::model::{Event, Outcome, OutputInfo, Snip, crop, full_frame};
+use super::model::{Event, Outcome, OutputInfo, Snip, crop};
 use crate::capture::Capture;
 use crate::cursor::Cursor;
 use crate::render::{CustomRenderElements, FrameElements, OutputRenderElements};
@@ -61,7 +61,7 @@ pub struct SnipFrame {
 }
 
 /// An active snip: the selection model plus one frozen frame per output (`frames[i]` is the
-/// model's output id `i`).
+/// model's output index `i`).
 #[derive(Debug)]
 pub struct SnipSession {
     /// The selection state machine.
@@ -71,28 +71,10 @@ pub struct SnipSession {
 }
 
 impl SnipSession {
-    /// Index of the frame whose output contains the current pointer.
-    fn pointer_output(&self) -> Option<usize> {
-        let p = self.model.pointer();
-        self.frames.iter().position(|f| contains(f.rect, p))
-    }
-
     /// The rect currently selected (global logical): the drag rect, else the hover window.
     fn selection(&self) -> Option<Rect> {
         self.model.drag_rect().or_else(|| self.model.hover())
     }
-}
-
-fn contains(r: Rect, p: (i32, i32)) -> bool {
-    p.0 >= r.x && p.1 >= r.y && p.0 - r.x < r.width && p.1 - r.y < r.height
-}
-
-fn overlaps(a: Rect, b: Rect) -> bool {
-    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
-}
-
-fn is_empty(r: Rect) -> bool {
-    r.width <= 0 || r.height <= 0
 }
 
 #[allow(clippy::cast_sign_loss)]
@@ -127,27 +109,24 @@ pub fn crop_capture(capture: &Capture, rect: Rect) -> Capture {
     }
 }
 
-/// Maps a finished selection to `(frame index, output-local physical crop)`: a window crops the
-/// pointer's output, a region the drag output (the pointer's when unknown), an output its full
-/// frame. `frames` are each frame's `(global logical rect, scale)`. `None` for `Cancel` or when
-/// the output is unknown; the crop may be zero-sized (the caller refuses it).
+/// Maps a finished selection to `(frame index, output-local physical crop)`: a window or region
+/// crops its output, an output is its full capture. `frames` are each frame's `(global logical
+/// rect, scale, capture size (w, h) in physical px)`. `None` for `Cancel` or when the output is
+/// unknown; the crop may be zero-sized (the caller refuses it).
 #[must_use]
 pub fn delivery_target(
     outcome: Outcome,
-    pointer_output: Option<usize>,
-    drag_output: Option<usize>,
-    frames: &[(Rect, f64)],
+    frames: &[(Rect, f64, (i32, i32))],
 ) -> Option<(usize, Rect)> {
     let (index, rect) = match outcome {
         Outcome::Cancel => return None,
-        Outcome::Window(r) => (pointer_output?, Some(r)),
-        Outcome::Region(r) => (drag_output.or(pointer_output)?, Some(r)),
-        Outcome::Output(id) => (id, None),
+        Outcome::Window { output, rect } | Outcome::Region { output, rect } => (output, Some(rect)),
+        Outcome::Output(output) => (output, None),
     };
-    let (output, scale) = *frames.get(index)?;
+    let (output, scale, size) = *frames.get(index)?;
     let crop = match rect {
-        Some(r) => crop(r, output, scale)?,
-        None => full_frame(output, scale)?,
+        Some(r) => crop(r, output, scale, size)?,
+        None => Rect::new(0, 0, size.0, size.1),
     };
     Some((index, crop))
 }
@@ -156,38 +135,21 @@ pub fn delivery_target(
 /// frame without a selection, else up to four strips around it.
 #[must_use]
 pub fn dim_rects(w: i32, h: i32, selection: Option<Rect>) -> Vec<Rect> {
-    let Some(s) = selection.filter(|s| !is_empty(*s)) else {
-        return vec![Rect::new(0, 0, w, h)];
-    };
-    let (right, bottom) = (s.x + s.width, s.y + s.height);
-    [
-        Rect::new(0, 0, w, s.y),
-        Rect::new(0, bottom, w, h - bottom),
-        Rect::new(0, s.y, s.x, s.height),
-        Rect::new(right, s.y, w - right, s.height),
-    ]
-    .into_iter()
-    .filter(|r| !is_empty(*r))
-    .collect()
+    let frame = Rect::new(0, 0, w, h);
+    match selection.filter(|s| s.has_area()) {
+        Some(s) => frame.subtract(s),
+        None => vec![frame],
+    }
 }
 
 /// The ring strips ([`RING_PX`] thick) just inside `selection`, so a full-output selection's ring
 /// stays on screen.
 #[must_use]
 pub fn ring_rects(s: Rect) -> Vec<Rect> {
-    let t = RING_PX.min(s.width).min(s.height);
-    if t <= 0 {
-        return Vec::new();
-    }
-    [
-        Rect::new(s.x, s.y, s.width, t),
-        Rect::new(s.x, s.y + s.height - t, s.width, t),
-        Rect::new(s.x, s.y + t, t, s.height - 2 * t),
-        Rect::new(s.x + s.width - t, s.y + t, t, s.height - 2 * t),
-    ]
-    .into_iter()
-    .filter(|r| !is_empty(*r))
-    .collect()
+    s.border_strips(RING_PX)
+        .into_iter()
+        .filter_map(|r| r.intersection(s))
+        .collect()
 }
 
 /// Where the size label (`label` = its physical `(w, h)`) goes: its top-left just below-right of
@@ -229,8 +191,8 @@ where
     );
     let selection = session
         .selection()
-        .and_then(|r| crop(r, frame.rect, frame.scale))
-        .filter(|r| !is_empty(*r));
+        .and_then(|r| crop(r, frame.rect, frame.scale, (fw, fh)))
+        .filter(|r| r.has_area());
 
     let mut custom: Vec<CustomRenderElements<R>> = match cursor_at {
         Some(location) => cursor
@@ -311,7 +273,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         let mut frames = Vec::with_capacity(outputs.len());
         let mut infos = Vec::with_capacity(outputs.len());
-        for (id, output) in outputs.into_iter().enumerate() {
+        for output in outputs {
             let Some(geo) = self.space.output_geometry(&output) else {
                 warn!(output = %output.name(), "snip: not started (output has no geometry)");
                 return;
@@ -333,7 +295,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 .rev()
                 .filter_map(|w| self.space.element_geometry(w))
                 .map(|g| Rect::new(g.loc.x, g.loc.y, g.size.w, g.size.h))
-                .filter(|r| overlaps(*r, rect))
+                .filter(|r| r.intersects(rect))
                 .collect();
             let (w, h) = (
                 i32::try_from(capture.width).unwrap_or(i32::MAX),
@@ -348,7 +310,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 Some(vec![Rectangle::from_size((w, h).into())]),
             );
             infos.push(OutputInfo {
-                id,
                 rect,
                 scale,
                 windows,
@@ -385,8 +346,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let Some(session) = self.snip.as_mut() else {
             return;
         };
-        // The drag output must be read before the release clears the drag.
-        let drag = session.model.drag_output();
         let Some(outcome) = session.model.step(event) else {
             return;
         };
@@ -394,10 +353,23 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return;
         };
         self.after_snip();
-        let sizes: Vec<(Rect, f64)> = session.frames.iter().map(|f| (f.rect, f.scale)).collect();
-        match delivery_target(outcome, session.pointer_output(), drag, &sizes) {
+        let sizes: Vec<(Rect, f64, (i32, i32))> = session
+            .frames
+            .iter()
+            .map(|f| {
+                (
+                    f.rect,
+                    f.scale,
+                    (
+                        i32::try_from(f.capture.width).unwrap_or(i32::MAX),
+                        i32::try_from(f.capture.height).unwrap_or(i32::MAX),
+                    ),
+                )
+            })
+            .collect();
+        match delivery_target(outcome, &sizes) {
             None => info!(?outcome, "snip: ended"),
-            Some((_, r)) if is_empty(r) => {
+            Some((_, r)) if !r.has_area() => {
                 warn!(?outcome, "snip: ended (empty crop, nothing captured)");
             }
             Some((index, r)) => {
@@ -482,52 +454,75 @@ mod tests {
         assert_eq!((empty.width, empty.height, empty.rgba.len()), (0, 0, 0));
     }
 
-    fn frames() -> Vec<(Rect, f64)> {
+    fn frames() -> Vec<(Rect, f64, (i32, i32))> {
         vec![
-            (Rect::new(0, 0, 100, 80), 1.0),
-            (Rect::new(100, 0, 200, 100), 2.0),
+            (Rect::new(0, 0, 100, 80), 1.0, (100, 80)),
+            (Rect::new(100, 0, 200, 100), 2.0, (400, 200)),
         ]
     }
 
     #[test]
     fn delivery_target_for_each_outcome() {
         let f = frames();
-        assert_eq!(delivery_target(Outcome::Cancel, Some(0), None, &f), None);
-        // A window on the pointer's output (scale 2, offset by the output origin).
+        assert_eq!(delivery_target(Outcome::Cancel, &f), None);
+        // A window on its output (scale 2, offset by the output origin).
         assert_eq!(
             delivery_target(
-                Outcome::Window(Rect::new(110, 10, 20, 30)),
-                Some(1),
-                None,
+                Outcome::Window {
+                    output: 1,
+                    rect: Rect::new(110, 10, 20, 30)
+                },
                 &f
             ),
             Some((1, Rect::new(20, 20, 40, 60)))
         );
-        // A region on the drag output, even when the pointer is elsewhere.
+        // A region on the press output.
         assert_eq!(
             delivery_target(
-                Outcome::Region(Rect::new(10, 10, 5, 5)),
-                Some(1),
-                Some(0),
+                Outcome::Region {
+                    output: 0,
+                    rect: Rect::new(10, 10, 5, 5)
+                },
                 &f
             ),
             Some((0, Rect::new(10, 10, 5, 5)))
         );
-        // Region without a known drag output falls back to the pointer's.
+        // A whole output is its full capture.
         assert_eq!(
-            delivery_target(Outcome::Region(Rect::new(10, 10, 5, 5)), Some(0), None, &f),
-            Some((0, Rect::new(10, 10, 5, 5)))
-        );
-        // A whole output is its full physical frame.
-        assert_eq!(
-            delivery_target(Outcome::Output(1), None, None, &f),
+            delivery_target(Outcome::Output(1), &f),
             Some((1, Rect::new(0, 0, 400, 200)))
         );
-        // Unknown output / pointer.
-        assert_eq!(delivery_target(Outcome::Output(5), None, None, &f), None);
+        // Unknown output.
+        assert_eq!(delivery_target(Outcome::Output(5), &f), None);
         assert_eq!(
-            delivery_target(Outcome::Window(Rect::new(0, 0, 1, 1)), None, None, &f),
+            delivery_target(
+                Outcome::Window {
+                    output: 9,
+                    rect: Rect::new(0, 0, 1, 1)
+                },
+                &f
+            ),
             None
+        );
+    }
+
+    #[test]
+    fn delivery_crops_against_the_real_capture_size() {
+        // The capture is smaller than ceil(logical * scale): crops clamp to it, output is it.
+        let f = vec![(Rect::new(0, 0, 100, 80), 1.0, (90, 70))];
+        assert_eq!(
+            delivery_target(
+                Outcome::Region {
+                    output: 0,
+                    rect: Rect::new(50, 50, 50, 30)
+                },
+                &f
+            ),
+            Some((0, Rect::new(50, 50, 40, 20)))
+        );
+        assert_eq!(
+            delivery_target(Outcome::Output(0), &f),
+            Some((0, Rect::new(0, 0, 90, 70)))
         );
     }
 
@@ -538,7 +533,7 @@ mod tests {
         let d = dim_rects(100, 50, Some(s));
         let area: i32 = d.iter().map(|r| r.width * r.height).sum();
         assert_eq!(area, 100 * 50 - 20 * 10);
-        assert!(d.iter().all(|r| !overlaps(*r, s)));
+        assert!(d.iter().all(|r| !r.intersects(s)));
         // A full-frame selection dims nothing.
         assert!(dim_rects(100, 50, Some(Rect::new(0, 0, 100, 50))).is_empty());
     }
@@ -550,6 +545,7 @@ mod tests {
         assert_eq!(r.len(), 4);
         let area: i32 = r.iter().map(|r| r.width * r.height).sum();
         assert_eq!(area, 20 * 10 - 16 * 6);
+        assert!(r.iter().all(|r| r.intersection(s) == Some(*r)));
         assert!(ring_rects(Rect::new(0, 0, 0, 5)).is_empty());
     }
 

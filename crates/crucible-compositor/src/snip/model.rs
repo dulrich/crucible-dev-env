@@ -2,12 +2,12 @@
 //!
 //! Everything here is plain integer geometry in **global logical coordinates**, using
 //! [`crucible_layout::Rect`] (`x`, `y`, `width`, `height`, all `i32`). Points are `(i32, i32)`
-//! logical. Output scale is an `f64` (fractional scales exist); only [`crop`] and
-//! [`full_frame`] use it and they return physical, output-local pixel rects.
+//! logical. Output scale is an `f64` (fractional scales exist); only [`crop`] uses it and it
+//! returns a physical, output-local pixel rect.
 //!
 //! A press arms a drag at the press point. The drag becomes real once the pointer has moved at
 //! least [`DRAG_THRESHOLD_PX`] from the press point, measured **Euclidean** (as the header drag in
-//! `header.rs:337` does). Unlike that precedent, which treats exactly 5 px as still a click
+//! `HeaderDrag::motion` in `header/drag.rs` does). Unlike that precedent, which treats exactly 5 px as still a click
 //! (`hypot <= 5`), this follows the plan's wording: 5 px or more is a drag.
 
 use crucible_layout::Rect;
@@ -15,11 +15,9 @@ use crucible_layout::Rect;
 /// Pointer travel (Euclidean, logical px) at which a press becomes a drag.
 pub const DRAG_THRESHOLD_PX: i32 = 5;
 
-/// One output: its id, its global logical rect, its scale, and its windows topmost first.
+/// One output: its global logical rect, its scale, and its windows topmost first.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputInfo {
-    /// Plain index identifying the output; returned in [`Outcome::Output`].
-    pub id: usize,
     /// Global logical rect of the output.
     pub rect: Rect,
     /// Output scale (physical pixels per logical pixel).
@@ -48,11 +46,22 @@ pub enum Event {
 pub enum Outcome {
     /// Nothing is captured.
     Cancel,
-    /// Capture this window rect (global logical).
-    Window(Rect),
-    /// Capture this region (global logical, normalised, clamped to its output, non-empty).
-    Region(Rect),
-    /// Capture the whole output with this id.
+    /// Capture this window rect (global logical) from output `output` (the hovered output).
+    Window {
+        /// Index of the output (into the outputs the [`Snip`] was built with).
+        output: usize,
+        /// The window rect.
+        rect: Rect,
+    },
+    /// Capture this region (global logical, normalised, clamped to its output, non-empty) from
+    /// output `output` (the press output).
+    Region {
+        /// Index of the output (into the outputs the [`Snip`] was built with).
+        output: usize,
+        /// The region rect.
+        rect: Rect,
+    },
+    /// Capture the whole output with this index.
     Output(usize),
 }
 
@@ -71,18 +80,6 @@ pub struct Snip {
     /// Index into `outputs` of the output the pointer is on (last known when between outputs).
     pointer_output: Option<usize>,
     armed: Option<Armed>,
-}
-
-fn contains(r: Rect, p: (i32, i32)) -> bool {
-    p.0 >= r.x && p.1 >= r.y && p.0 - r.x < r.width && p.1 - r.y < r.height
-}
-
-fn intersect(a: Rect, b: Rect) -> Rect {
-    let x0 = a.x.max(b.x);
-    let y0 = a.y.max(b.y);
-    let x1 = (a.x + a.width).min(b.x + b.width);
-    let y1 = (a.y + a.height).min(b.y + b.height);
-    Rect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
 }
 
 fn normalised(a: (i32, i32), b: (i32, i32)) -> Rect {
@@ -109,7 +106,7 @@ impl Snip {
     }
 
     fn output_at(&self, p: (i32, i32)) -> Option<usize> {
-        self.outputs.iter().position(|o| contains(o.rect, p))
+        self.outputs.iter().position(|o| o.rect.contains(p.0, p.1))
     }
 
     /// Current pointer position (global logical).
@@ -125,25 +122,25 @@ impl Snip {
         out.windows
             .iter()
             .copied()
-            .find(|w| contains(*w, self.pointer))
-    }
-
-    /// Id of the output a real drag is pinned to (`None` when no drag is in progress).
-    #[must_use]
-    pub fn drag_output(&self) -> Option<usize> {
-        self.armed
-            .filter(|a| a.dragging)
-            .map(|a| self.outputs[a.output].id)
+            .find(|w| w.contains(self.pointer.0, self.pointer.1))
     }
 
     /// The current drag rect (normalised, clamped to the press output), once a real drag began.
     #[must_use]
     pub fn drag_rect(&self) -> Option<Rect> {
         let a = self.armed.filter(|a| a.dragging)?;
-        Some(intersect(
-            normalised(a.origin, self.pointer),
-            self.outputs[a.output].rect,
-        ))
+        Some(self.drag_region(&a))
+    }
+
+    /// The drag's rect: the press origin to the pointer clamped into the press output (the origin
+    /// lies inside it, so this equals clipping the normalised rect, zero-area results kept).
+    fn drag_region(&self, a: &Armed) -> Rect {
+        let o = self.outputs[a.output].rect;
+        let end = (
+            self.pointer.0.clamp(o.x, o.x + o.width),
+            self.pointer.1.clamp(o.y, o.y + o.height),
+        );
+        normalised(a.origin, end)
     }
 
     /// Feeds one event; returns the outcome if the selection finished.
@@ -175,14 +172,14 @@ impl Snip {
             Event::Release => {
                 let a = self.armed.take()?;
                 if a.dragging {
-                    let r = intersect(
-                        normalised(a.origin, self.pointer),
-                        self.outputs[a.output].rect,
-                    );
-                    if r.width == 0 || r.height == 0 {
-                        Some(Outcome::Cancel)
+                    let rect = self.drag_region(&a);
+                    if rect.has_area() {
+                        Some(Outcome::Region {
+                            output: a.output,
+                            rect,
+                        })
                     } else {
-                        Some(Outcome::Region(r))
+                        Some(Outcome::Cancel)
                     }
                 } else {
                     self.accept()
@@ -195,11 +192,11 @@ impl Snip {
 
     /// `Window(hover)` if hovering, else `Output` of the pointer's output.
     fn accept(&self) -> Option<Outcome> {
-        if let Some(w) = self.hover() {
-            return Some(Outcome::Window(w));
-        }
-        self.pointer_output
-            .map(|i| Outcome::Output(self.outputs[i].id))
+        let output = self.pointer_output?;
+        Some(match self.hover() {
+            Some(rect) => Outcome::Window { output, rect },
+            None => Outcome::Output(output),
+        })
     }
 }
 
@@ -212,34 +209,16 @@ fn to_i32(v: f64) -> i32 {
     v as i32
 }
 
-/// Physical frame size of an output: `ceil(logical * scale)` per axis.
-fn frame_size(output: Rect, scale: f64) -> (i32, i32) {
-    (
-        to_i32((f64::from(output.width) * scale).ceil()),
-        to_i32((f64::from(output.height) * scale).ceil()),
-    )
-}
-
-/// The whole output frame in physical pixels (the crop for [`Outcome::Output`]).
-/// `None` for a non-positive or non-finite `scale`.
-#[must_use]
-pub fn full_frame(output: Rect, scale: f64) -> Option<Rect> {
-    if !valid_scale(scale) {
-        return None;
-    }
-    let (w, h) = frame_size(output, scale);
-    Some(Rect::new(0, 0, w, h))
-}
-
 /// Converts a global logical `rect` to an output-local physical rect: origin floored, far edge
-/// ceiled (outward rounding), then clamped to the output's frame. `None` for an invalid `scale`.
+/// ceiled (outward rounding), then clamped to the capture's real `size` `(w, h)` in physical
+/// pixels. `None` for an invalid `scale`.
 /// A rect entirely outside the frame yields a zero-sized rect.
 #[must_use]
-pub fn crop(rect: Rect, output: Rect, scale: f64) -> Option<Rect> {
+pub fn crop(rect: Rect, output: Rect, scale: f64, size: (i32, i32)) -> Option<Rect> {
     if !valid_scale(scale) {
         return None;
     }
-    let (fw, fh) = frame_size(output, scale);
+    let (fw, fh) = size;
     let lx0 = f64::from(rect.x - output.x) * scale;
     let ly0 = f64::from(rect.y - output.y) * scale;
     let lx1 = f64::from(rect.x - output.x + rect.width) * scale;
@@ -255,9 +234,8 @@ pub fn crop(rect: Rect, output: Rect, scale: f64) -> Option<Rect> {
 mod tests {
     use super::*;
 
-    fn out(id: usize, rect: Rect, windows: Vec<Rect>) -> OutputInfo {
+    fn out(rect: Rect, windows: Vec<Rect>) -> OutputInfo {
         OutputInfo {
-            id,
             rect,
             scale: 1.0,
             windows,
@@ -270,11 +248,10 @@ mod tests {
         Snip::new(
             vec![
                 out(
-                    0,
                     o0,
                     vec![Rect::new(100, 100, 300, 300), Rect::new(0, 0, 500, 500)],
                 ),
-                out(1, o1, vec![Rect::new(1100, 50, 200, 200)]),
+                out(o1, vec![Rect::new(1100, 50, 200, 200)]),
             ],
             (900, 700),
         )
@@ -309,11 +286,13 @@ mod tests {
         s.step(Event::Press);
         mv(&mut s, 605, 600);
         assert_eq!(s.drag_rect(), Some(Rect::new(600, 600, 5, 0)));
-        assert_eq!(s.drag_output(), Some(0));
         mv(&mut s, 605, 603);
         assert_eq!(
             s.step(Event::Release),
-            Some(Outcome::Region(Rect::new(600, 600, 5, 3)))
+            Some(Outcome::Region {
+                output: 0,
+                rect: Rect::new(600, 600, 5, 3)
+            })
         );
     }
 
@@ -333,10 +312,12 @@ mod tests {
         s.step(Event::Press);
         mv(&mut s, 1200, 900);
         assert_eq!(s.drag_rect(), Some(Rect::new(900, 700, 100, 100)));
-        assert_eq!(s.drag_output(), Some(0));
         assert_eq!(
             s.step(Event::Release),
-            Some(Outcome::Region(Rect::new(900, 700, 100, 100)))
+            Some(Outcome::Region {
+                output: 0,
+                rect: Rect::new(900, 700, 100, 100)
+            })
         );
     }
 
@@ -353,7 +334,13 @@ mod tests {
             s.step(Event::Press);
             mv(&mut s, end.0, end.1);
             assert_eq!(s.drag_rect(), Some(want));
-            assert_eq!(s.step(Event::Release), Some(Outcome::Region(want)));
+            assert_eq!(
+                s.step(Event::Release),
+                Some(Outcome::Region {
+                    output: 0,
+                    rect: want
+                })
+            );
         }
     }
 
@@ -366,12 +353,18 @@ mod tests {
         s.step(Event::Press);
         assert_eq!(
             s.step(Event::Release),
-            Some(Outcome::Window(Rect::new(100, 100, 300, 300)))
+            Some(Outcome::Window {
+                output: 0,
+                rect: Rect::new(100, 100, 300, 300)
+            })
         );
         // Window via Enter.
         assert_eq!(
             s.step(Event::Enter),
-            Some(Outcome::Window(Rect::new(100, 100, 300, 300)))
+            Some(Outcome::Window {
+                output: 0,
+                rect: Rect::new(100, 100, 300, 300)
+            })
         );
         // Output via Enter on background of output 1.
         mv(&mut s, 1700, 500);
@@ -396,18 +389,17 @@ mod tests {
     fn crop_scale_one_and_two() {
         let o = Rect::new(0, 0, 100, 50);
         assert_eq!(
-            crop(Rect::new(10, 5, 20, 10), o, 1.0),
+            crop(Rect::new(10, 5, 20, 10), o, 1.0, (100, 50)),
             Some(Rect::new(10, 5, 20, 10))
         );
         assert_eq!(
-            crop(Rect::new(10, 5, 20, 10), o, 2.0),
+            crop(Rect::new(10, 5, 20, 10), o, 2.0, (200, 100)),
             Some(Rect::new(20, 10, 40, 20))
         );
         assert_eq!(
-            crop(Rect::new(11, 7, 3, 3), o, 2.0),
+            crop(Rect::new(11, 7, 3, 3), o, 2.0, (200, 100)),
             Some(Rect::new(22, 14, 6, 6))
         );
-        assert_eq!(full_frame(o, 2.0), Some(Rect::new(0, 0, 200, 100)));
     }
 
     #[test]
@@ -415,7 +407,7 @@ mod tests {
         let o = Rect::new(0, 0, 100, 100);
         // 1.5x: x 1..2 -> 1.5..3.0 -> floor 1, ceil 3.
         assert_eq!(
-            crop(Rect::new(1, 1, 1, 1), o, 1.5),
+            crop(Rect::new(1, 1, 1, 1), o, 1.5, (150, 150)),
             Some(Rect::new(1, 1, 2, 2))
         );
     }
@@ -424,11 +416,11 @@ mod tests {
     fn crop_clamps_far_edge() {
         let o = Rect::new(0, 0, 100, 50);
         assert_eq!(
-            crop(Rect::new(90, 40, 50, 50), o, 2.0),
+            crop(Rect::new(90, 40, 50, 50), o, 2.0, (200, 100)),
             Some(Rect::new(180, 80, 20, 20))
         );
         assert_eq!(
-            crop(Rect::new(-10, -10, 20, 20), o, 1.0),
+            crop(Rect::new(-10, -10, 20, 20), o, 1.0, (100, 50)),
             Some(Rect::new(0, 0, 10, 10))
         );
     }
@@ -437,18 +429,16 @@ mod tests {
     fn crop_multi_output_is_local() {
         let o1 = Rect::new(1000, 200, 800, 600);
         assert_eq!(
-            crop(Rect::new(1101, 251, 10, 10), o1, 2.0),
+            crop(Rect::new(1101, 251, 10, 10), o1, 2.0, (1600, 1200)),
             Some(Rect::new(202, 102, 20, 20))
         );
-        assert_eq!(full_frame(o1, 1.0), Some(Rect::new(0, 0, 800, 600)));
     }
 
     #[test]
     fn crop_rejects_bad_scale() {
         let o = Rect::new(0, 0, 10, 10);
         for s in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert_eq!(crop(o, o, s), None);
-            assert_eq!(full_frame(o, s), None);
+            assert_eq!(crop(o, o, s, (10, 10)), None);
         }
     }
 }
