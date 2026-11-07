@@ -40,7 +40,7 @@ use smithay::{
 use tracing::{error, info, warn};
 
 use crate::{
-    render::{FrameView, frame_elements},
+    render::{frame_elements, frame_view},
     state::{Backend, CrucibleState},
 };
 
@@ -91,17 +91,7 @@ impl Backend for WinitData {
         output: &Output,
     ) -> Result<crate::capture::Capture, crate::capture::CaptureError> {
         let inputs = state.capture_inputs(output);
-        let view = FrameView {
-            output,
-            space: &state.space,
-            session_lock: &state.session_lock,
-            layout: &state.layout,
-            projection: &state.projection,
-            tiling: &state.config.tiling,
-            dnd_icon: None,
-            snip: state.snip.as_ref(),
-            inputs: &inputs,
-        };
+        let view = frame_view!(state, output, &inputs, None);
         let renderer = state.backend_data.backend.renderer();
         crate::capture::render_capture::<_, GlesRenderbuffer>(
             renderer,
@@ -291,17 +281,7 @@ pub fn run_winit() {
             let damage_tracker = &mut state.backend_data.damage_tracker;
             let age = backend.buffer_age().unwrap_or(0);
             let locked = state.session_lock.is_locked();
-            let view = FrameView {
-                output: &output,
-                space: &state.space,
-                session_lock: &state.session_lock,
-                layout: &state.layout,
-                projection: &state.projection,
-                tiling: &state.config.tiling,
-                dnd_icon: state.dnd_icon.as_ref(),
-                snip: state.snip.as_ref(),
-                inputs: &inputs,
-            };
+            let view = frame_view!(state, &output, &inputs, state.dnd_icon.as_ref());
             let header_text = &mut state.header_text;
             let cursor = &mut state.cursor;
             let render_res = backend.bind().and_then(|(renderer, mut fb)| {

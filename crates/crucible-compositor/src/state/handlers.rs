@@ -21,7 +21,7 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{
             CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
-            get_parent, is_sync_subsurface, with_states,
+            is_sync_subsurface, with_states,
         },
         output::OutputHandler,
         seat::WaylandFocus,
@@ -32,7 +32,7 @@ use smithay::{
     xwayland::XWaylandClientData,
 };
 
-use super::{Backend, ClientState, CrucibleState};
+use super::{Backend, ClientState, CrucibleState, root_surface};
 use crate::{
     focus::{KeyboardFocusTarget, PointerFocusTarget},
     shell::ensure_initial_configure,
@@ -67,10 +67,7 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
         // Notify the mapped window (if any) that its root surface committed, so its cached state
         // (size/geometry) refreshes. Walk up to the root surface first for subsurfaces.
         if !is_sync_subsurface(surface) {
-            let mut root = surface.clone();
-            while let Some(parent) = get_parent(&root) {
-                root = parent;
-            }
+            let root = root_surface(surface);
             // The hidden warm overlay host is not in the Space (audit E7); it still needs on_commit.
             if let Some(window) = self
                 .window_for_surface(&root)
@@ -151,7 +148,10 @@ impl<B: Backend + 'static> SeatHandler for CrucibleState<B> {
             .and_then(|s| dh.get_client(s.id()).ok());
         set_data_device_focus(dh, seat, client.clone());
         set_primary_focus(dh, seat, client);
-        self.sync_activation(clears_activation(target));
+        // Only "no focus" clears activation: a popup or layer surface taking keys keeps its
+        // toplevel activated, and a new window target is activated by its raise
+        // (`Space::raise_element(.., true)` deactivates the rest).
+        self.sync_activation(target.is_none());
         // Keyboard focus never moves pointer focus: a pointer lock the user left by keyboard
         // (Super chord, workspace switch, overlay, lock screen) is released here.
         let keyboard = target.and_then(|t| t.wl_surface().map(|s| s.into_owned()));
@@ -165,13 +165,6 @@ impl<B: Backend + 'static> SeatHandler for CrucibleState<B> {
     fn led_state_changed(&mut self, _seat: &Seat<Self>, led_state: LedState) {
         self.backend_data.update_led_state(led_state);
     }
-}
-
-/// Whether a keyboard-focus change to `target` leaves no window activated. Only "no focus" does:
-/// a popup or layer surface taking keys keeps its toplevel activated, and a new window target is
-/// activated by its raise (`Space::raise_element(.., true)` deactivates the rest).
-fn clears_activation(target: Option<&KeyboardFocusTarget>) -> bool {
-    target.is_none()
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
@@ -248,17 +241,6 @@ impl<B: Backend + 'static> smithay::wayland::tablet_manager::TabletSeatHandler
 // above). One invocation therefore wires compositor + shm + output + xdg-shell + layer-shell +
 // seat + data-device + primary-selection (and any future globals) at once.
 delegate_dispatch2!(@<B: Backend + 'static> CrucibleState<B>);
-
-#[cfg(test)]
-mod activation_tests {
-    use super::clears_activation;
-
-    #[test]
-    fn only_losing_all_focus_clears_activation() {
-        // Window, popup, layer and lock targets need live surfaces; the rule is "None only".
-        assert!(clears_activation(None));
-    }
-}
 
 #[cfg(test)]
 mod decoration_tests {

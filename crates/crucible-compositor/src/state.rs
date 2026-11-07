@@ -29,6 +29,7 @@ mod pending_focus;
 mod surface_output;
 
 pub use pending_focus::{PendingFocus, defer_focus};
+pub(crate) use surface_output::root_surface;
 pub use surface_output::{
     send_dmabuf_feedback, send_dnd_icon_frames, take_presentation_feedback,
     update_primary_scanout_output,
@@ -274,10 +275,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub xwm: Option<X11Wm>,
     /// The X11 `DISPLAY` number XWayland is serving (e.g. `1` for `:1`), once known.
     pub xdisplay: Option<u32>,
-    /// Once-only latch for the `autostart` commands (see [`crate::autostart`]).
-    pub autostart_gate: crate::autostart::AutostartGate,
-    /// Latch for the session start at the first XWayland outcome (see [`crate::autostart`]).
-    pub session_start_gate: crate::autostart::AutostartGate,
+    /// The once-only session start and `autostart` sequence (see [`crate::autostart`]).
+    pub startup: crate::autostart::Startup,
     /// The active configuration (defaults until a config file is applied); see
     /// [`Self::apply_config`].
     pub config: Config,
@@ -411,7 +410,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         );
         let idle_notifier_state =
             smithay::wayland::idle_notify::IdleNotifierState::new(&dh, handle.clone());
-        let idle_inhibit_state = crate::idle::new_inhibit_manager::<B>(&dh);
+        let idle_inhibit_state =
+            smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<CrucibleState<B>>(&dh);
         crate::identity_protocol::create_global::<B>(&dh);
         let mut seat_state = SeatState::new();
 
@@ -487,8 +487,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             snip: None,
             xwm: None,
             xdisplay: None,
-            autostart_gate: crate::autostart::AutostartGate::default(),
-            session_start_gate: crate::autostart::AutostartGate::default(),
+            startup: crate::autostart::Startup::default(),
             // Only `keyboard` is pre-seeded (the seat was built from it above); the first
             // `apply_config` sees no keyboard change and leaves the keymap alone.
             config: Config {

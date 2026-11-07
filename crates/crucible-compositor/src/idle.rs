@@ -4,9 +4,9 @@
 //! ## Layout
 //! The decision logic is **pure** and Smithay-free (top of this module): [`IdleMachine`] is fed
 //! activity events and ticks carrying an elapsed [`Duration`] (no clock, so tests never sleep) and
-//! answers with an [`IdleStep`]; [`inhibitor_visible`] and [`is_inhibited`] decide inhibition. The
-//! compositor glue below measures time, computes which inhibitors are visible, fires the locker
-//! and calls the backend power hook ([`Backend::set_outputs_powered`]).
+//! answers with an [`IdleStep`]. The compositor glue below measures time, computes which
+//! inhibitors are visible, fires the locker and calls the backend power hook
+//! ([`Backend::set_outputs_powered`]).
 //!
 //! ## Timer
 //! A calloop `Timer` ticks every [`TICK`] (1 s). It runs even with idle off; an off configuration
@@ -29,14 +29,13 @@ use smithay::{
     reexports::wayland_server::protocol::wl_surface::WlSurface,
     utils::IsAlive,
     wayland::{
-        compositor::get_parent,
-        idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState},
+        idle_inhibit::IdleInhibitHandler,
         idle_notify::{IdleNotifierHandler, IdleNotifierState},
     },
 };
 use tracing::{debug, info};
 
-use crate::state::{Backend, CrucibleState};
+use crate::state::{Backend, CrucibleState, root_surface};
 
 /// The idle timer's tick interval.
 pub const TICK: Duration = Duration::from_secs(1);
@@ -134,20 +133,6 @@ impl IdleMachine {
     }
 }
 
-/// Whether an idle-inhibitor surface counts as visible: a surface that is not a managed workspace
-/// window (layer, overlay, lock, popup) always does; a managed window does only while mapped,
-/// i.e. on an output's active workspace.
-#[must_use]
-pub fn inhibitor_visible(managed_window: bool, mapped: bool) -> bool {
-    !managed_window || mapped
-}
-
-/// Idle is inhibited by a visible inhibitor surface, or a fullscreen window on an active workspace.
-#[must_use]
-pub fn is_inhibited(visible_inhibitors: usize, active_fullscreen_windows: usize) -> bool {
-    visible_inhibitors > 0 || active_fullscreen_windows > 0
-}
-
 // ---- compositor glue -------------------------------------------------------------------------
 
 /// Idle runtime state held by [`CrucibleState`].
@@ -180,13 +165,6 @@ impl<B: Backend + 'static> IdleInhibitHandler for CrucibleState<B> {
     }
 }
 
-/// Creates the idle-inhibit global state.
-pub(crate) fn new_inhibit_manager<B: Backend + 'static>(
-    dh: &smithay::reexports::wayland_server::DisplayHandle,
-) -> IdleInhibitManagerState {
-    IdleInhibitManagerState::new::<CrucibleState<B>>(dh)
-}
-
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Marks input activity: restarts the idle period, wakes blanked outputs and tells
     /// `ext-idle-notify` clients. Called for every input event; never consumes the event.
@@ -211,11 +189,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// Restarts the idle period after a config change.
-    pub(crate) fn idle_config_changed(&mut self) {
-        self.idle.machine.reset();
-    }
-
     /// Whether idle is currently inhibited (see the module docs); also pushes the answer into the
     /// `ext-idle-notify` state.
     fn compute_idle_inhibited(&mut self) -> bool {
@@ -231,14 +204,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .inhibitors
             .iter()
             .filter(|surface| {
-                let mut root = (*surface).clone();
-                while let Some(parent) = get_parent(&root) {
-                    root = parent;
-                }
-                inhibitor_visible(
-                    managed.contains(&root),
-                    self.window_for_surface(&root).is_some(),
-                )
+                let root = root_surface(surface);
+                // A surface that is not a managed workspace window (layer, overlay, lock, popup)
+                // always counts; a managed window only while mapped (on an active workspace).
+                !managed.contains(&root) || self.window_for_surface(&root).is_some()
             })
             .count();
         let world = &self.layout.world;
@@ -246,7 +215,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .output_ids()
             .filter(|id| world.output_fullscreen(*id).is_some())
             .count();
-        let inhibited = is_inhibited(visible, fullscreen);
+        // A visible inhibitor surface, or a fullscreen window on an active workspace.
+        let inhibited = visible > 0 || fullscreen > 0;
         self.idle_notifier_state.set_is_inhibited(inhibited);
         inhibited
     }
@@ -410,20 +380,5 @@ mod tests {
         let c = cfg(Some(3), None);
         assert!(m.tick(secs(2), false, false, &c) == IdleStep::default());
         assert!(m.tick(secs(1), false, false, &c).lock);
-    }
-
-    #[test]
-    fn inhibitor_visibility_rules() {
-        assert!(inhibitor_visible(false, false)); // layer/overlay/lock surface
-        assert!(inhibitor_visible(true, true)); // window on an active workspace
-        assert!(!inhibitor_visible(true, false)); // window on a background workspace
-    }
-
-    #[test]
-    fn inhibition_predicate() {
-        assert!(!is_inhibited(0, 0));
-        assert!(is_inhibited(1, 0));
-        assert!(is_inhibited(0, 1));
-        assert!(is_inhibited(2, 3));
     }
 }

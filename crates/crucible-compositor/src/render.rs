@@ -146,6 +146,26 @@ pub struct FrameView<'a> {
     pub inputs: &'a FrameInputs,
 }
 
+/// Builds a [`FrameView`] from `state`'s disjoint fields (a macro, not a method: a `&self`
+/// method would borrow all of `state` and conflict with the renderer borrow of
+/// `state.backend_data` the caller holds). `dnd` is the drag icon to draw (`None` for captures).
+macro_rules! frame_view {
+    ($state:expr, $output:expr, $inputs:expr, $dnd:expr) => {
+        $crate::render::FrameView {
+            output: $output,
+            space: &$state.space,
+            session_lock: &$state.session_lock,
+            layout: &$state.layout,
+            projection: &$state.projection,
+            tiling: &$state.config.tiling,
+            dnd_icon: $dnd,
+            snip: $state.snip.as_ref(),
+            inputs: $inputs,
+        }
+    };
+}
+pub(crate) use frame_view;
+
 /// The output-local physical cursor location when `pointer` (global, logical) lies inside
 /// `output_geo`; `None` otherwise. Both backends draw the cursor only on the output under it.
 #[must_use]

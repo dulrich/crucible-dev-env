@@ -117,7 +117,7 @@ pub struct UdevData {
     /// The GPU chosen for rendering when a device has no render node of its own.
     primary_gpu: DrmNode,
     /// Multi-GPU renderer manager (EGL/GLES per GPU, with cross-GPU import).
-    gpus: GpuManager<GbmGlesBackend<GlesRenderer, DrmDeviceFd>>,
+    gpus: GpuManager<UdevGles>,
     /// Per-DRM-device state, keyed by the device's [`DrmNode`].
     backends: HashMap<DrmNode, BackendData>,
     /// Keyboards currently present, tracked so LED state can be pushed to them.
@@ -127,7 +127,36 @@ pub struct UdevData {
     dmabuf_state: Option<(DmabufState, DmabufGlobal)>,
 }
 
+type UdevGles = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
+
 impl UdevData {
+    /// The renderer for a device whose render node is `render_node`: the same-GPU single renderer
+    /// when it is the primary GPU, otherwise the cross-GPU one (which needs the scanout `format`).
+    ///
+    /// An associated function over the `gpus` field (not `&mut self`) so the caller keeps its
+    /// split borrow of `backend_data.backends` beside the renderer.
+    pub(super) fn renderer_for<'a>(
+        gpus: &'a mut GpuManager<UdevGles>,
+        primary_gpu: DrmNode,
+        render_node: DrmNode,
+        format: smithay::backend::allocator::Fourcc,
+    ) -> Result<UdevRenderer<'a>, smithay::backend::renderer::multigpu::Error<UdevGles, UdevGles>>
+    {
+        if primary_gpu == render_node {
+            gpus.single_renderer(&render_node)
+        } else {
+            gpus.renderer(&primary_gpu, &render_node, format)
+        }
+    }
+
+    /// Every `(node, crtc)` that has an output surface.
+    pub(super) fn crtcs(&self) -> Vec<(DrmNode, crtc::Handle)> {
+        self.backends
+            .iter()
+            .flat_map(|(node, gpu)| gpu.surfaces.keys().map(move |crtc| (*node, *crtc)))
+            .collect()
+    }
+
     /// Powers one output off (`DrmCompositor::clear`, DPMS off) and marks it off. A failure (e.g. the
     /// session is paused) is logged and leaves the output unmarked, so it keeps rendering. Returns
     /// whether the output is now off.
@@ -245,12 +274,7 @@ impl Backend for UdevData {
     /// rendering. On: clears every off mark and schedules exactly one full-redraw render per
     /// output that was off; its `queue_frame` re-enables the CRTC.
     fn set_outputs_powered(state: &mut CrucibleState<Self>, on: bool) {
-        let crtcs: Vec<(DrmNode, crtc::Handle)> = state
-            .backend_data
-            .backends
-            .iter()
-            .flat_map(|(node, gpu)| gpu.surfaces.keys().map(move |crtc| (*node, *crtc)))
-            .collect();
+        let crtcs = state.backend_data.crtcs();
         if on {
             for (node, crtc) in crtcs {
                 let Some(surface) = state
@@ -413,13 +437,12 @@ pub fn run_udev() {
                 let nodes: Vec<DrmNode> = data.backend_data.backends.keys().copied().collect();
                 let was_off: Vec<(DrmNode, crtc::Handle)> = data
                     .backend_data
-                    .backends
-                    .iter()
-                    .flat_map(|(node, gpu)| {
-                        gpu.surfaces
-                            .iter()
-                            .filter(|(_, surface)| surface.power.is_off())
-                            .map(move |(crtc, _)| (*node, *crtc))
+                    .crtcs()
+                    .into_iter()
+                    .filter(|(node, crtc)| {
+                        data.backend_data.backends[node].surfaces[crtc]
+                            .power
+                            .is_off()
                     })
                     .collect();
                 for node in &nodes {
@@ -433,18 +456,10 @@ pub fn run_udev() {
                 // wake. The wake path schedules the render of every output that was off, so only
                 // the outputs that stayed on are re-kicked here (never two renders per CRTC).
                 data.idle_activity();
-                for node in nodes {
-                    let crtcs: Vec<crtc::Handle> = data
-                        .backend_data
-                        .backends
-                        .get(&node)
-                        .map(|gpu| gpu.surfaces.keys().copied().collect())
-                        .unwrap_or_default();
-                    for crtc in crtcs {
-                        if !was_off.contains(&(node, crtc)) {
-                            data.handle
-                                .insert_idle(move |data| data.render_surface(node, crtc));
-                        }
+                for (node, crtc) in data.backend_data.crtcs() {
+                    if !was_off.contains(&(node, crtc)) {
+                        data.handle
+                            .insert_idle(move |data| data.render_surface(node, crtc));
                     }
                 }
             }

@@ -160,7 +160,7 @@ pub(super) struct SurfaceData {
 pub(super) enum FlipAction {
     /// Normal: deliver feedback and schedule the next repaint.
     Schedule,
-    /// Deliver nothing more and schedule nothing (output off, or a stale flip from before a
+    /// Deliver nothing more and schedule nothing (a stale flip from before a
     /// power-off arriving after the wake render already runs its own chain).
     Drop,
 }
@@ -193,12 +193,14 @@ impl PowerMark {
         std::mem::take(&mut self.off)
     }
 
-    /// Decides a page-flip completion. `had_frame` is whether the compositor still had a pending
-    /// frame for it (`frame_submitted` returned `Some`).
+    /// Decides a page-flip completion of an output that is on. `had_frame` is whether the
+    /// compositor still had a pending frame for it (`frame_submitted` returned `Some`).
     pub(super) fn on_flip(&mut self, had_frame: bool) -> FlipAction {
-        if self.off {
-            return FlipAction::Drop;
-        }
+        // The handler returns before `frame_submitted` while off, so `on_flip` only sees live flips.
+        debug_assert!(
+            !self.off,
+            "on_flip while off: the handler drops the flip first"
+        );
         if std::mem::take(&mut self.stale_flip) && !had_frame {
             return FlipAction::Drop;
         }
@@ -495,9 +497,9 @@ mod tests {
         assert!(!mark.is_off());
         assert_eq!(mark.on_flip(true), FlipAction::Schedule);
         mark.powered_off();
+        // A flip pending at clear() time completing while off: the handler drops it on `is_off`
+        // before `frame_submitted`, so `on_flip` is never consulted.
         assert!(mark.is_off());
-        // A flip pending at clear() time completing while off: no follow-up render.
-        assert_eq!(mark.on_flip(false), FlipAction::Drop);
         assert!(mark.wake());
         assert!(!mark.is_off());
         // A second wake schedules nothing more (no double render).

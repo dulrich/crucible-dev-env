@@ -139,27 +139,10 @@ const XRDB_WAIT: Duration = Duration::from_secs(1);
 /// How often the session start polls the running merge.
 const XRDB_POLL: Duration = Duration::from_millis(10);
 
-/// What one poll of the running merge decides ([`xrdb_wait_step`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum XrdbWait {
-    /// Still running and within [`XRDB_WAIT`]: poll again.
-    Poll,
-    /// Finished (or its status is unreadable): start the session.
-    Start,
-    /// Still running past [`XRDB_WAIT`]: start the session anyway and leave it to finish.
-    GiveUp,
-}
-
-/// Decides one poll: `finished` is whether the merge has exited (or cannot be waited on).
+/// Whether a still-running merge has waited past [`XRDB_WAIT`] and must be given up on.
 /// **Pure.**
-fn xrdb_wait_step(finished: bool, elapsed: Duration) -> XrdbWait {
-    if finished {
-        XrdbWait::Start
-    } else if elapsed < XRDB_WAIT {
-        XrdbWait::Poll
-    } else {
-        XrdbWait::GiveUp
-    }
+fn xrdb_timed_out(elapsed: Duration) -> bool {
+    elapsed >= XRDB_WAIT
 }
 
 /// Logs a finished merge's outcome.
@@ -312,29 +295,25 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let timer = self
             .handle
             .insert_source(Timer::immediate(), move |_, _, data| {
-                let Some((mut child, file)) = pending.take() else {
+                let Some((child, file)) = pending.as_mut() else {
                     return TimeoutAction::Drop;
                 };
-                let status = child.try_wait();
-                let finished = !matches!(status, Ok(None));
-                match xrdb_wait_step(finished, started.elapsed()) {
-                    XrdbWait::Poll => {
-                        pending = Some((child, file));
+                match child.try_wait() {
+                    Ok(None) if !xrdb_timed_out(started.elapsed()) => {
                         return TimeoutAction::ToDuration(XRDB_POLL);
                     }
-                    XrdbWait::Start => match status {
-                        Ok(Some(exit)) => log_merge(&file, Ok(exit)),
-                        Err(err) => log_merge(&file, Err(err)),
-                        // `finished` is false for `Ok(None)`, so this step never sees it.
-                        Ok(None) => {}
-                    },
-                    XrdbWait::GiveUp => {
+                    Ok(None) => {
                         warn!(
                             file = %file.display(),
                             "xrdb -merge still running after {XRDB_WAIT:?}; starting the session"
                         );
-                        reap_merge_later(child, file);
+                        // The closure is `FnMut`, so the child is moved out of `pending` here.
+                        if let Some((child, file)) = pending.take() {
+                            reap_merge_later(child, file);
+                        }
                     }
+                    Ok(Some(exit)) => log_merge(file, Ok(exit)),
+                    Err(err) => log_merge(file, Err(err)),
                 }
                 data.on_xwayland_outcome(OutcomeSite::Ready);
                 TimeoutAction::Drop
@@ -520,18 +499,13 @@ mod tests {
 
     #[test]
     fn the_session_waits_for_the_xrdb_merge_but_never_past_the_limit() {
-        use super::{XRDB_WAIT, XrdbWait, xrdb_wait_step};
+        use super::{XRDB_WAIT, xrdb_timed_out};
         use std::time::Duration;
-        // A finished merge starts the session at once, even at the limit.
-        assert_eq!(xrdb_wait_step(true, Duration::ZERO), XrdbWait::Start);
-        assert_eq!(xrdb_wait_step(true, XRDB_WAIT * 2), XrdbWait::Start);
         // A running merge is polled until the limit, then given up on.
-        assert_eq!(xrdb_wait_step(false, Duration::ZERO), XrdbWait::Poll);
-        assert_eq!(
-            xrdb_wait_step(false, XRDB_WAIT - Duration::from_millis(1)),
-            XrdbWait::Poll
-        );
-        assert_eq!(xrdb_wait_step(false, XRDB_WAIT), XrdbWait::GiveUp);
+        assert!(!xrdb_timed_out(Duration::ZERO));
+        assert!(!xrdb_timed_out(XRDB_WAIT - Duration::from_millis(1)));
+        assert!(xrdb_timed_out(XRDB_WAIT));
+        assert!(xrdb_timed_out(XRDB_WAIT * 2));
     }
 
     #[test]

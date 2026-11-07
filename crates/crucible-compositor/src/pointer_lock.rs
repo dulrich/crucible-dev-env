@@ -30,14 +30,14 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::backend::ObjectId;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point, Rectangle};
-use smithay::wayland::compositor::{RegionAttributes, get_parent};
+use smithay::wayland::compositor::RegionAttributes;
 use smithay::wayland::pointer_constraints::{
     PointerConstraint, PointerConstraintsHandler, PointerConstraintsState, with_pointer_constraint,
 };
 use smithay::wayland::relative_pointer::RelativePointerManagerState;
 use smithay::wayland::seat::WaylandFocus;
 
-use crate::state::{Backend, CrucibleState};
+use crate::state::{Backend, CrucibleState, root_surface};
 use tracing::debug;
 
 /// The kind of an active constraint, as seen by [`constrained_motion`].
@@ -191,11 +191,6 @@ pub fn clamp_to_fullscreen(
     }
 }
 
-/// Whether `hint` (surface-local) lies inside a surface of `size`, i.e. may be applied on unlock.
-pub fn hint_applies(hint: Point<f64, Logical>, size: smithay::utils::Size<i32, Logical>) -> bool {
-    Rectangle::from_size(size).contains(hint.to_i32_floor())
-}
-
 /// The globals plus CDE's constraint bookkeeping.
 #[derive(Debug)]
 pub struct PointerLockState {
@@ -225,15 +220,6 @@ impl PointerLockState {
             last_fullscreen_confine: None,
         }
     }
-}
-
-/// The topmost parent of `surface` (itself when it is not a subsurface).
-fn root_surface(surface: &WlSurface) -> WlSurface {
-    let mut root = surface.clone();
-    while let Some(parent) = get_parent(&root) {
-        root = parent;
-    }
-    root
 }
 
 fn kind_of(constraint: &PointerConstraint) -> ConstraintKind {
@@ -445,7 +431,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return;
         };
         let size = bbox_from_surface_tree(surface, (0, 0)).size;
-        if hint_applies(hint, size) {
+        // The hint (surface-local) is applied on unlock only while inside the surface.
+        if Rectangle::from_size(size).contains(hint.to_i32_floor()) {
             self.pointer.set_location(hint + origin);
         }
     }
@@ -741,13 +728,5 @@ mod tests {
             g(true, false, false, true).failed(),
             vec!["keyboard-elsewhere"]
         );
-    }
-
-    #[test]
-    fn hint_applies_only_inside_surface() {
-        let size = (200, 100).into();
-        assert!(hint_applies(p(10.0, 10.0), size));
-        assert!(!hint_applies(p(-1.0, 10.0), size));
-        assert!(!hint_applies(p(200.0, 10.0), size));
     }
 }

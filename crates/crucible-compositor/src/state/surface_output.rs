@@ -24,6 +24,15 @@ use smithay::{
 };
 
 use super::{Backend, CrucibleState, DndIcon};
+
+/// The topmost parent of `surface` (itself when it is not a subsurface).
+pub(crate) fn root_surface(surface: &WlSurface) -> WlSurface {
+    let mut root = surface.clone();
+    while let Some(parent) = get_parent(&root) {
+        root = parent;
+    }
+    root
+}
 use crate::element::WindowElement;
 
 /// Sets the preferred fractional scale of every surface in the tree rooted at `root` to `output`'s.
@@ -106,10 +115,7 @@ impl<B: Backend + 'static> FractionalScaleHandler for CrucibleState<B> {
     /// Initial preferred scale (E1): the surface's (or its root's) primary scan-out output, else
     /// the output its root's role places it on, else the model's focused output.
     fn new_fractional_scale(&mut self, surface: WlSurface) {
-        let mut root = surface.clone();
-        while let Some(parent) = get_parent(&root) {
-            root = parent;
-        }
+        let root = root_surface(&surface);
         let scanout =
             |s: &WlSurface| with_states(s, |states| surface_primary_scanout_output(s, states));
         let output = scanout(&surface)

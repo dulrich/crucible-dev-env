@@ -30,7 +30,7 @@ use smithay::{
 use tracing::{debug, error, warn};
 
 use crate::{
-    render::{FrameView, frame_elements},
+    render::{frame_elements, frame_view},
     state::{
         CrucibleState, send_dmabuf_feedback, take_presentation_feedback,
         update_primary_scanout_output,
@@ -201,29 +201,18 @@ impl CrucibleState<UdevData> {
         let format = self.backend_data.backends[&node].surfaces[&crtc]
             .drm_output
             .format();
-        let mut renderer = if primary_gpu == render_node {
-            self.backend_data.gpus.single_renderer(&render_node)
-        } else {
-            self.backend_data
-                .gpus
-                .renderer(&primary_gpu, &render_node, format)
-        }
+        let mut renderer = UdevData::renderer_for(
+            &mut self.backend_data.gpus,
+            primary_gpu,
+            render_node,
+            format,
+        )
         .unwrap();
 
         // Compose from disjoint field borrows: `renderer` holds `self.backend_data.gpus`; the
         // cursor is the separate `self.cursor` field.
         let locked = self.session_lock.is_locked();
-        let view = FrameView {
-            output: &output,
-            space: &self.space,
-            session_lock: &self.session_lock,
-            layout: &self.layout,
-            projection: &self.projection,
-            tiling: &self.config.tiling,
-            dnd_icon: self.dnd_icon.as_ref(),
-            snip: self.snip.as_ref(),
-            inputs: &inputs,
-        };
+        let view = frame_view!(self, &output, &inputs, self.dnd_icon.as_ref());
         let (elements, clear_color) =
             frame_elements(view, &mut self.header_text, &mut self.cursor, &mut renderer);
 
@@ -396,25 +385,14 @@ impl CrucibleState<UdevData> {
         let render_node = device.render_node.unwrap_or(primary_gpu);
         let format = surface.drm_output.format();
         let inputs = self.capture_inputs(output);
-        let mut renderer = if primary_gpu == render_node {
-            self.backend_data.gpus.single_renderer(&render_node)
-        } else {
-            self.backend_data
-                .gpus
-                .renderer(&primary_gpu, &render_node, format)
-        }
+        let mut renderer = UdevData::renderer_for(
+            &mut self.backend_data.gpus,
+            primary_gpu,
+            render_node,
+            format,
+        )
         .map_err(|e| CaptureError::Render(e.to_string()))?;
-        let view = FrameView {
-            output,
-            space: &self.space,
-            session_lock: &self.session_lock,
-            layout: &self.layout,
-            projection: &self.projection,
-            tiling: &self.config.tiling,
-            dnd_icon: None,
-            snip: self.snip.as_ref(),
-            inputs: &inputs,
-        };
+        let view = frame_view!(self, output, &inputs, None);
         crate::capture::render_capture::<_, GlesRenderbuffer>(
             &mut renderer,
             view,

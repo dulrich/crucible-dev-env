@@ -194,7 +194,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         self.config = config;
         if delta.idle {
-            self.idle_config_changed();
+            self.idle.machine.reset();
         }
         self.apply_output_scales();
         if delta.warm {

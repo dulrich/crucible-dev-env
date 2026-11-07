@@ -1,6 +1,6 @@
 //! Once-per-process `autostart` command launching.
 //!
-//! The pure [`AutostartGate`] guarantees the configured `autostart` lines run at most once per CDE
+//! The pure [`Startup`] guarantees the configured `autostart` lines run at most once per CDE
 //! process, however many first-XWayland-outcome sites reach it. [`CrucibleState::run_autostart`]
 //! is called from each such site in [`crate::xwayland`] and never from config hot reload.
 
@@ -12,19 +12,6 @@ use crate::{
     persist::{SpawnKind, SpawnRequest},
     state::{Backend, CrucibleState},
 };
-
-/// A once-only latch: [`Self::take`] returns `true` exactly once.
-#[derive(Debug, Default)]
-pub struct AutostartGate {
-    fired: bool,
-}
-
-impl AutostartGate {
-    /// `true` on the first call, `false` on every later one.
-    pub fn take(&mut self) -> bool {
-        !std::mem::replace(&mut self.fired, true)
-    }
-}
 
 /// Where the first XWayland outcome (or its fallback) was observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,16 +35,50 @@ pub struct OutcomeActions {
     pub autostart: bool,
 }
 
-/// Decides what to run at `site`. The session starts at the very first site of any kind (at most
-/// once); autostart waits for a real XWayland outcome, so the fallback timer never fires it.
-pub fn outcome_actions(
-    session: &mut AutostartGate,
-    autostart: &mut AutostartGate,
-    site: OutcomeSite,
-) -> OutcomeActions {
-    OutcomeActions {
-        start_session: session.take(),
-        autostart: site != OutcomeSite::Timer && autostart.take(),
+/// The startup sequence: the session starts at the very first site of any kind, autostart at the
+/// first real XWayland outcome (never the fallback timer, never before the session start), each
+/// at most once.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Startup {
+    /// No site has arrived.
+    #[default]
+    Waiting,
+    /// The session has started (by the fallback timer); autostart still awaits a real outcome.
+    SessionStarted,
+    /// Both the session start and autostart have run.
+    Done,
+}
+
+impl Startup {
+    /// Advances on `site` and returns what the caller runs now.
+    pub fn advance(&mut self, site: OutcomeSite) -> OutcomeActions {
+        let real = site != OutcomeSite::Timer;
+        let (next, actions) = match (*self, real) {
+            (Self::Waiting, true) => (
+                Self::Done,
+                OutcomeActions {
+                    start_session: true,
+                    autostart: true,
+                },
+            ),
+            (Self::Waiting, false) => (
+                Self::SessionStarted,
+                OutcomeActions {
+                    start_session: true,
+                    autostart: false,
+                },
+            ),
+            (Self::SessionStarted, true) => (
+                Self::Done,
+                OutcomeActions {
+                    start_session: false,
+                    autostart: true,
+                },
+            ),
+            (state, _) => (state, OutcomeActions::default()),
+        };
+        *self = next;
+        actions
     }
 }
 
@@ -65,7 +86,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Handles one XWayland outcome site: starts the session at the first site, then runs the
     /// autostart commands at the first real outcome. Each happens at most once per process.
     pub fn on_xwayland_outcome(&mut self, site: OutcomeSite) {
-        let actions = outcome_actions(&mut self.session_start_gate, &mut self.autostart_gate, site);
+        let actions = self.startup.advance(site);
         if actions.start_session {
             self.start_session();
         }
@@ -104,14 +125,14 @@ mod tests {
     fn session_starts_once_across_every_outcome_site() {
         use OutcomeSite::*;
         for first in [Ready, Crashed, StartFailed, Timer] {
-            let (mut session, mut auto) = (AutostartGate::default(), AutostartGate::default());
-            let a = outcome_actions(&mut session, &mut auto, first);
+            let mut startup = Startup::default();
+            let a = startup.advance(first);
             assert!(a.start_session, "{first:?}");
             assert_eq!(a.autostart, first != Timer, "{first:?}");
             let mut starts = 1;
             let mut autos = usize::from(a.autostart);
             for later in [Ready, Crashed, StartFailed, Timer, Ready] {
-                let a = outcome_actions(&mut session, &mut auto, later);
+                let a = startup.advance(later);
                 starts += usize::from(a.start_session);
                 autos += usize::from(a.autostart);
             }
@@ -120,10 +141,21 @@ mod tests {
     }
 
     #[test]
-    fn gate_fires_once_then_never_again() {
-        let mut gate = AutostartGate::default();
-        assert!(gate.take());
-        assert!(!gate.take());
-        assert!(!gate.take());
+    fn startup_settles_to_done_and_never_acts_again() {
+        let mut startup = Startup::default();
+        assert!(!startup.advance(OutcomeSite::Timer).autostart);
+        assert_eq!(startup, Startup::SessionStarted);
+        // The timer again does nothing; a real outcome then runs autostart only.
+        assert_eq!(
+            startup.advance(OutcomeSite::Timer),
+            OutcomeActions::default()
+        );
+        let a = startup.advance(OutcomeSite::Ready);
+        assert!(!a.start_session && a.autostart);
+        assert_eq!(startup, Startup::Done);
+        assert_eq!(
+            startup.advance(OutcomeSite::Ready),
+            OutcomeActions::default()
+        );
     }
 }

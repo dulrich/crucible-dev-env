@@ -124,13 +124,14 @@ fn arrow_pixel(x: i32, y: i32, s: f64) -> [u8; 4] {
 /// A classic pointer: dark outline, light fill, tip at the top-left pixel `(0, 0)` (its hotspot).
 /// The artwork is sampled at `round(11·s) x round(17·s)` physical pixels and padded with
 /// transparent pixels right/bottom to [`padded_dims`]'s physical size so it displays 1:1. Returns
-/// `(bytes, width, height)`; the bytes are 4 per pixel in the byte order expected by
+/// `(bytes, phys, logical)` (the padded physical size and the logical size it displays at); the
+/// bytes are 4 per pixel in the byte order expected by
 /// [`Fourcc::Argb8888`](smithay::backend::allocator::Fourcc::Argb8888) on little-endian hosts
 /// (`[B, G, R, A]`).
 #[must_use]
-pub fn default_cursor_bitmap(s: f64) -> (Vec<u8>, i32, i32) {
+pub fn default_cursor_bitmap(s: f64) -> (Vec<u8>, Size<i32, Physical>, Size<i32, Logical>) {
     let (aw, ah) = arrow_extent(s);
-    let (phys, _) = padded_dims(aw, ah, s, s);
+    let (phys, logical) = padded_dims(aw, ah, s, s);
     let (w, h) = (phys.w, phys.h);
     let mut data = vec![0u8; (w * h * 4) as usize];
     for y in 0..ah {
@@ -139,7 +140,7 @@ pub fn default_cursor_bitmap(s: f64) -> (Vec<u8>, i32, i32) {
             data[idx..idx + 4].copy_from_slice(&arrow_pixel(x, y, s));
         }
     }
-    (data, w, h)
+    (data, phys, logical)
 }
 
 /// One uploaded cursor bitmap (theme image or arrow) and its 1:1 display geometry.
@@ -176,6 +177,14 @@ impl CursorBuffer {
             hotspot,
         }
     }
+}
+
+/// The built-in arrow for scale `s` in `arrows`, rasterized on first use per quantized scale.
+fn arrow_in(arrows: &mut HashMap<u32, CursorBuffer>, s: f64) -> &CursorBuffer {
+    arrows.entry(quantize_scale(s)).or_insert_with(|| {
+        let (bytes, phys, logical) = default_cursor_bitmap(s);
+        CursorBuffer::upload(&bytes, phys, logical, Point::default())
+    })
 }
 
 /// The compositor's cursor: the single owner of the cursor state.
@@ -225,17 +234,6 @@ impl Cursor {
         self.named.clear();
     }
 
-    /// The built-in arrow for scale `s`, rasterized on first use per quantized scale.
-    fn arrow_buffer(&mut self, s: f64) -> &CursorBuffer {
-        self.arrows.entry(quantize_scale(s)).or_insert_with(|| {
-            let (bytes, w, h) = default_cursor_bitmap(s);
-            let (aw, ah) = arrow_extent(s);
-            let (phys, logical) = padded_dims(aw, ah, s, s);
-            debug_assert_eq!((phys.w, phys.h), (w, h));
-            CursorBuffer::upload(&bytes, phys, logical, Point::default())
-        })
-    }
-
     /// Makes sure the buffer for `icon` at scale `s` is cached (theme image, else `None`).
     fn ensure_named(&mut self, icon: CursorIcon, s: f64) {
         let key = (icon, quantize_scale(s));
@@ -253,16 +251,12 @@ impl Cursor {
     /// The buffer to draw for `icon` at scale `s`: the theme image, else the built-in arrow.
     fn buffer_for(&mut self, icon: CursorIcon, s: f64) -> &CursorBuffer {
         self.ensure_named(icon, s);
-        if self
-            .named
-            .get(&(icon, quantize_scale(s)))
-            .is_some_and(Option::is_some)
-        {
-            return self.named[&(icon, quantize_scale(s))]
-                .as_ref()
-                .expect("checked above");
+        // Disjoint fields, so the `named` borrow can be returned while `arrows` is the fallback.
+        let Self { named, arrows, .. } = self;
+        match named.get(&(icon, quantize_scale(s))) {
+            Some(Some(buffer)) => buffer,
+            _ => arrow_in(arrows, s),
         }
-        self.arrow_buffer(s)
     }
 
     /// Renders the cursor with its hotspot at the output-local physical `location`.
@@ -350,9 +344,9 @@ mod tests {
     /// Checks the arrow at scale `s`: size, 1:1 rule, tip, filled interior, transparent outside.
     fn check(s: f64) {
         let (aw, ah) = arrow_extent(s);
-        let (data, w, h) = default_cursor_bitmap(s);
-        let (phys, logical) = padded_dims(aw, ah, s, s);
-        assert_eq!((w, h), (phys.w, phys.h));
+        let (data, phys, logical) = default_cursor_bitmap(s);
+        assert_eq!(padded_dims(aw, ah, s, s), (phys, logical));
+        let (w, h) = (phys.w, phys.h);
         assert!(w >= aw && h >= ah);
         assert_eq!((f64::from(logical.w) * s).round() as i32, w);
         assert_eq!((f64::from(logical.h) * s).round() as i32, h);
@@ -386,7 +380,8 @@ mod tests {
     #[test]
     fn arrow_at_scale_one_is_the_artwork() {
         assert_eq!(arrow_extent(1.0), (ARROW_W, ARROW_H));
-        let (data, w, h) = default_cursor_bitmap(1.0);
+        let (data, phys, _) = default_cursor_bitmap(1.0);
+        let (w, h) = (phys.w, phys.h);
         assert_eq!((w, h), (11, 17));
         // Tip and the end of the bottom row.
         assert_eq!(pixel(&data, w, 0, 0), BORDER_PIXEL);
@@ -405,12 +400,12 @@ mod tests {
     #[test]
     fn buffers_are_cached_per_quantized_scale_and_arrow_has_a_zero_hotspot() {
         let mut cursor = Cursor::default();
-        let _ = cursor.arrow_buffer(1.5);
-        let _ = cursor.arrow_buffer(1.5 + 1e-6);
+        let _ = arrow_in(&mut cursor.arrows, 1.5);
+        let _ = arrow_in(&mut cursor.arrows, 1.5 + 1e-6);
         assert_eq!(cursor.arrows.len(), 1);
-        let _ = cursor.arrow_buffer(2.0);
+        let _ = arrow_in(&mut cursor.arrows, 2.0);
         assert_eq!(cursor.arrows.len(), 2);
-        let b = cursor.arrow_buffer(1.0);
+        let b = arrow_in(&mut cursor.arrows, 1.0);
         assert_eq!(b.logical, Size::from((11, 17)));
         assert_eq!(b.hotspot, Point::default());
     }
