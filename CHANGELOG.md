@@ -4,6 +4,23 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.5.0 — 2026-11-06
+
+### Changed (breaking)
+
+- Size settings now need an explicit unit, written as a KDL type annotation. `(px)N` is logical pixels. Header `size` also accepts `(pt)N` (points, converted as round(N × 96 / 72), so `(pt)14` is 19 px, matching a terminal's 14 pt font). The affected keys are tiling `gap` / `ring` / `ring-inset`, header `size` / `divider` / `inset`, and cursor `size`. A bare number, an unknown unit, or `(pt)` on a key that takes pixels only is a config error, and with an invalid config CDE runs on its defaults. Migrate before restarting:
+
+  ```kdl
+  // 0.4.x
+  header { size 14; divider 1 inset=6 }
+  tiling { terminal gap=6 ring=3 }
+  // 0.5.0
+  header { size (px)14; divider (px)1 inset=(px)6 }   // or size (pt)10.5
+  tiling { terminal gap=(px)6 ring=(px)3 }
+  ```
+
+  0.4.x ignores the annotations, so a migrated config reads the same on both versions.
+
 ## 0.4.13 — 2026-11-06
 
 ### Fixed
