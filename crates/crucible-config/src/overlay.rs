@@ -183,8 +183,8 @@ pub enum TerminalKind {
     /// as its background plus zero centred padding (see [`Self::overlay_args`]); its terminal
     /// spawns get a window-identity grant.
     Cterm,
-    /// `urxvt` or `rxvt-unicode`: no default-binding args, but with an N1 style the opaque surround
-    /// as its background (`-bg #rrggbb`) and a zero internal border (`-b 0`).
+    /// `urxvt` or `rxvt-unicode`: no scrollbar (`+sb`) whatever the style, and with an N1 style
+    /// the opaque surround as its background (`-bg #rrggbb`) and a zero internal border (`-b 0`).
     Urxvt,
     /// Anything else (including `footclient`, `ghostty-foo`, an empty program): no defaults.
     Other,
@@ -215,7 +215,9 @@ impl TerminalKind {
                 .iter()
                 .flat_map(|action| ["-o".to_string(), format!("key-bindings.{action}=none")])
                 .collect(),
-            Self::Cterm | Self::Urxvt | Self::Other => Vec::new(),
+            // An overlay never scrolls back; urxvt shows a scrollbar by default.
+            Self::Urxvt => vec!["+sb".to_string()],
+            Self::Cterm | Self::Other => Vec::new(),
         }
     }
 
@@ -310,7 +312,7 @@ mod tests {
         for p in ["urxvt", "/usr/bin/urxvt", "rxvt-unicode"] {
             assert_eq!(
                 unset.effective_terminal_args(p),
-                ["-bg", "#3a3a3b", "-b", "0"].map(String::from),
+                ["+sb", "-bg", "#3a3a3b", "-b", "0"].map(String::from),
                 "{p}"
             );
         }
@@ -319,7 +321,10 @@ mod tests {
             ..OverlayConfig::default()
         };
         assert_eq!(term_style.effective_terminal_args("foot"), foot);
-        assert!(term_style.effective_terminal_args("urxvt").is_empty());
+        assert_eq!(
+            term_style.effective_terminal_args("urxvt"),
+            ["+sb"].map(String::from)
+        );
         assert_eq!(term_style.effective_terminal_args("ghostty"), defaults);
         let dark = OverlayConfig {
             style: OverlayStyle::N1Dark,
