@@ -228,6 +228,19 @@ The pointer cursor theme and size, both optional (each child may appear once). W
 
 CDE reads the theme from the installed cursor themes (`XCURSOR_PATH`, the XDG data dirs, `~/.icons`, following `Inherits=`), picks the image nearest `size × output scale` and draws it 1:1. When no theme can be loaded it draws a built-in arrow. It also advertises `wp_cursor_shape_manager_v1`, so clients can ask for a named shape. When `theme` or `size` is set, CDE exports `XCURSOR_THEME` / `XCURSOR_SIZE` to the programs it spawns (including XWayland); a hot reload rebuilds CDE's own cursor and applies the new values to later spawns only.
 
+### `screenshot`
+
+```kdl
+screenshot {
+    destination "clipboard"
+    directory "~/Pictures/Screenshots"
+}
+```
+
+Where a screenshot goes, both children optional (each may appear once). `destination` is `"clipboard"` (the default: the PNG becomes the clipboard selection as `image/png`, readable by Wayland and X11 apps), `"file"` (write a PNG into `directory`) or `"both"`. `directory` defaults to `~/Pictures/Screenshots`; a leading `~` is expanded to `$HOME` when the screenshot is taken, and the directory is created (with its parents) on the first file write. Files are named `cde-<YYYYmmdd-HHMMSS>.png` in local time, e.g. `cde-20261106-142530.png`; if that name exists, `-1`, `-2`, ... is appended and an existing file is never overwritten. An unknown destination value, an empty directory, a repeated child or an unknown child is a located config error. Every failure while taking a screenshot (locked session, powered-off output, encode or write error) is logged as a warning and does nothing else.
+
+Default binds: `Super+Print` runs `screenshot` (the whole focused output, without the pointer cursor) and `Super+Shift+Print` runs `snip` (region snip; not implemented yet, it logs and does nothing). A bare `Print` is left unbound so applications receive it. Neither action runs while the session is locked.
+
 ### `output`
 
 ```kdl
@@ -299,6 +312,8 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `capture-workspace-root` | (default chord `Super+Shift+D`) Make the focused terminal's current directory the active **workspace root**, the folder new terminals and apps in this workspace start in (running windows are untouched). Fails and changes nothing if the focused window is not a terminal. Not the picker `root` config folders |
 | `set-workspace-root` | (default chord `Super+Ctrl+Shift+D`) Open the workspace-root prompt in the picker overlay, prefilled with the current root; an empty answer clears it. `crucible msg root <path>` / `root -` does the same over IPC |
 | `lock` | Lock the screen: spawn `lock-command` (default chord `Super+Escape`) |
+| `screenshot` | Capture the focused output and deliver it per [`screenshot`](#screenshot) (default chord `Super+Print`) |
+| `snip` | Region snip (default chord `Super+Shift+Print`; not implemented yet, logs only) |
 | `none` | Unbind the chord |
 
 `<dir>` is `left`, `right`, `up` or `down`; `<n>` is a signed integer such as `1`, `+1` or `-1`.

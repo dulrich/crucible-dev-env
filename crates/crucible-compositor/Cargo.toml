@@ -25,6 +25,9 @@ rustix.workspace = true
 # Error enums for the udev backend's device-add error type (WS-6), mirroring anvil.
 thiserror.workspace = true
 
+# Local time for screenshot file names (`libc::localtime_r`, `screenshot.rs`).
+libc.workspace = true
+
 # PNG encoding for built-in screenshots (`capture.rs`, plan 34).
 png.workspace = true
 

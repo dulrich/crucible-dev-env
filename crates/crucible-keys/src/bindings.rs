@@ -234,6 +234,7 @@ impl Default for Bindings {
         bind(sup, &[Keysym::m, Keysym::M], Action::MarkWindow);
         bind(sup, &[Keysym::p, Keysym::P], Action::OpenPicker);
         bind(sup, &[Keysym::Escape], Action::Lock);
+        bind(sup, &[Keysym::Print], Action::Screenshot);
 
         // ---- Super+Shift ----
         bind(sup_shift, &[Keysym::Return], Action::RunTerminal);
@@ -282,6 +283,7 @@ impl Default for Bindings {
         );
         bind(sup_shift, &[Keysym::w, Keysym::W], Action::CloseWorkspace);
         bind(sup_shift, &[Keysym::c, Keysym::C], Action::CloseWindow);
+        bind(sup_shift, &[Keysym::Print], Action::Snip);
 
         // ---- workspace slots: Super+<d> switches, Super+Shift+<d> pins ----
         for (d, shifted) in SHIFTED_DIGITS.iter().enumerate() {
@@ -581,6 +583,18 @@ mod tests {
     }
 
     #[test]
+    fn screenshot_binds_are_on_super_print_and_bare_print_is_unbound() {
+        let b = Bindings::default();
+        let shift = Modifiers {
+            shift: true,
+            ..sup()
+        };
+        assert_eq!(b.get(sup(), Keysym::Print), Some(&Action::Screenshot));
+        assert_eq!(b.get(shift, Keysym::Print), Some(&Action::Snip));
+        assert_eq!(b.get(Modifiers::default(), Keysym::Print), None);
+    }
+
+    #[test]
     fn override_replaces_only_the_named_chord() {
         let b = Bindings::with_overrides(&[pair("Super+Q", "quit")]).unwrap();
         let mut expected = Bindings::default();
@@ -681,6 +695,8 @@ mod tests {
             ("close-workspace", Action::CloseWorkspace),
             ("close-all-workspaces", Action::CloseAllWorkspaces),
             ("lock", Action::Lock),
+            ("screenshot", Action::Screenshot),
+            ("snip", Action::Snip),
             (
                 "move-workspace-to-output -2",
                 Action::MoveWorkspaceToOutput(-2),

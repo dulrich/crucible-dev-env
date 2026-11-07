@@ -8,6 +8,7 @@ mod idle;
 mod keyboard;
 mod output;
 mod overlay;
+mod screenshot;
 mod tiling;
 
 use kdl::KdlDocument;
@@ -65,6 +66,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "header" => config.header = header::parse_header(node)?,
             "keyboard" => config.keyboard = keyboard::parse_keyboard(node)?,
             "cursor" => config.cursor = cursor::parse_cursor(node)?,
+            "screenshot" => config.screenshot = screenshot::parse_screenshot(node)?,
             "idle" => config.idle = idle::parse_idle(node)?,
             "output" => {
                 let (name, out) = output::parse_output(node)?;

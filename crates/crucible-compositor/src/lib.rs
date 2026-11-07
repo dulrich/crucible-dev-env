@@ -86,3 +86,6 @@ pub mod identity_protocol;
 
 /// Built-in screenshots: offscreen capture and PNG encoding (plan 34).
 pub mod capture;
+
+/// Screenshot delivery: clipboard image selection, file save (plan 34).
+pub mod screenshot;

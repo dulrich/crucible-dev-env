@@ -370,6 +370,37 @@ pub struct CursorConfig {
     pub size: Option<u32>,
 }
 
+/// Where a screenshot goes (`screenshot { destination ... }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScreenshotDestination {
+    /// Publish a PNG as the clipboard selection (the default).
+    #[default]
+    Clipboard,
+    /// Write a PNG file into the screenshot directory.
+    File,
+    /// Both the clipboard and a file.
+    Both,
+}
+
+/// Screenshot delivery (`screenshot { destination "clipboard"; directory "~/Pictures/Screenshots" }`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenshotConfig {
+    /// Where a capture goes.
+    pub destination: ScreenshotDestination,
+    /// The directory files are written to, as written in the config (a leading `~` is expanded to
+    /// `$HOME` by the compositor at use). Never empty. Created on first write.
+    pub directory: PathBuf,
+}
+
+impl Default for ScreenshotConfig {
+    fn default() -> Self {
+        Self {
+            destination: ScreenshotDestination::default(),
+            directory: PathBuf::from("~/Pictures/Screenshots"),
+        }
+    }
+}
+
 /// The parsed CDE configuration. `Default` is CDE's behaviour with no config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -396,6 +427,8 @@ pub struct Config {
     pub idle: IdleConfig,
     /// Pointer cursor theme and size (both unset by default).
     pub cursor: CursorConfig,
+    /// Screenshot destination and directory.
+    pub screenshot: ScreenshotConfig,
     /// The screen locker the `lock` action spawns (`lock-command`), split on whitespace into
     /// program + arguments (no shell quoting). Default `"swaylock"`.
     pub lock_command: String,
@@ -442,6 +475,7 @@ impl Default for Config {
             keyboard: KeyboardConfig::default(),
             idle: IdleConfig::default(),
             cursor: CursorConfig::default(),
+            screenshot: ScreenshotConfig::default(),
             launcher: LauncherConfig::default(),
             binds: Vec::new(),
             outputs: BTreeMap::new(),

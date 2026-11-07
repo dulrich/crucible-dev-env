@@ -8,7 +8,7 @@
 //!
 //! The data-device, primary-selection and pointer DnD-grab handlers sit beside them.
 
-use std::os::fd::OwnedFd;
+use std::{io::Write, os::fd::OwnedFd, sync::Arc};
 
 use smithay::{
     input::{
@@ -38,6 +38,49 @@ use smithay::{
 use tracing::{error, warn};
 
 use crate::state::{Backend, CrucibleState, DndIcon};
+
+/// What a compositor-set selection carries (the seat's `SelectionUserData`).
+#[derive(Debug, Clone)]
+pub enum SelectionData {
+    /// Owned by an X11 client; reads are forwarded to XWayland.
+    X11,
+    /// A compositor-owned PNG (a screenshot): reads are served from these bytes.
+    Image(Arc<[u8]>),
+}
+
+/// The only mime type a compositor image selection offers.
+pub(crate) const IMAGE_MIME: &str = "image/png";
+
+/// Writes `bytes` to `fd` and closes it. A reader that went away (EPIPE) is not an error.
+///
+/// # Errors
+/// Any write error other than a broken pipe.
+pub(crate) fn write_image(bytes: &[u8], fd: OwnedFd) -> std::io::Result<()> {
+    let mut file = std::fs::File::from(fd);
+    match file.write_all(bytes) {
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other,
+    }
+}
+
+/// Serves a compositor image selection read for `mime_type` on a worker thread (a large PNG must
+/// not block the event loop on a slow reader). Other mime types just close the fd.
+pub(crate) fn serve_image(bytes: &Arc<[u8]>, mime_type: &str, fd: OwnedFd) {
+    if mime_type != IMAGE_MIME {
+        return;
+    }
+    let bytes = Arc::clone(bytes);
+    let spawned = std::thread::Builder::new()
+        .name("selection-image".into())
+        .spawn(move || {
+            if let Err(err) = write_image(&bytes, fd) {
+                warn!(?err, "Failed to write the image selection");
+            }
+        });
+    if let Err(err) = spawned {
+        warn!(?err, "Failed to spawn the image selection writer");
+    }
+}
 
 /// Flush queued X11 requests (notably `SetSelectionOwner`) to the X server.
 ///
@@ -78,6 +121,14 @@ pub(crate) fn x11_send_selection<B: Backend + 'static>(
 ) {
     match selection {
         SelectionTarget::Clipboard => {
+            // A compositor image selection is not a client source: serve it directly
+            // (`request_data_device_client_selection` would answer `ServerSideSelection`).
+            if let Some(SelectionData::Image(bytes)) =
+                current_data_device_selection_userdata(&state.seat).as_deref()
+            {
+                serve_image(bytes, &mime_type, fd);
+                return;
+            }
             if let Err(err) = request_data_device_client_selection(&state.seat, mime_type, fd) {
                 error!(?err, "Failed to send Wayland clipboard to XWayland");
             }
@@ -98,10 +149,20 @@ pub(crate) fn x11_new_selection<B: Backend + 'static>(
 ) {
     match selection {
         SelectionTarget::Clipboard => {
-            set_data_device_selection(&state.display_handle, &state.seat, mime_types, ());
+            set_data_device_selection(
+                &state.display_handle,
+                &state.seat,
+                mime_types,
+                SelectionData::X11,
+            );
         }
         SelectionTarget::Primary => {
-            set_primary_selection(&state.display_handle, &state.seat, mime_types, ());
+            set_primary_selection(
+                &state.display_handle,
+                &state.seat,
+                mime_types,
+                SelectionData::X11,
+            );
         }
     }
 }
@@ -113,12 +174,19 @@ pub(crate) fn x11_cleared_selection<B: Backend + 'static>(
 ) {
     match selection {
         SelectionTarget::Clipboard => {
-            if current_data_device_selection_userdata(&state.seat).is_some() {
+            // Only an X11-owned selection: an X11 client clearing must not wipe a screenshot.
+            if matches!(
+                current_data_device_selection_userdata(&state.seat).as_deref(),
+                Some(SelectionData::X11)
+            ) {
                 clear_data_device_selection(&state.display_handle, &state.seat);
             }
         }
         SelectionTarget::Primary => {
-            if current_primary_selection_userdata(&state.seat).is_some() {
+            if matches!(
+                current_primary_selection_userdata(&state.seat).as_deref(),
+                Some(SelectionData::X11)
+            ) {
                 clear_primary_selection(&state.display_handle, &state.seat);
             }
         }
@@ -129,7 +197,7 @@ pub(crate) fn x11_cleared_selection<B: Backend + 'static>(
 // reached from the `XwmHandler` impl in `crate::xwayland`). Without it a Wayland client's clipboard (e.g. a
 // Firefox screenshot) is invisible to XWayland clients: `xclip -t TARGETS` finds no owner.
 impl<B: Backend + 'static> SelectionHandler for CrucibleState<B> {
-    type SelectionUserData = ();
+    type SelectionUserData = SelectionData;
 
     /// A Wayland client set (or cleared) a selection: advertise its mime types to XWayland.
     fn new_selection(
@@ -157,8 +225,12 @@ impl<B: Backend + 'static> SelectionHandler for CrucibleState<B> {
         mime_type: String,
         fd: std::os::fd::OwnedFd,
         _seat: Seat<Self>,
-        _user_data: &(),
+        user_data: &SelectionData,
     ) {
+        if let SelectionData::Image(bytes) = user_data {
+            serve_image(bytes, &mime_type, fd);
+            return;
+        }
         if let Some(xwm) = self.xwm.as_mut()
             && let Err(err) = xwm.send_selection(ty, mime_type, fd)
         {
@@ -246,5 +318,47 @@ impl<B: Backend + 'static> ext_data_control::DataControlHandler for CrucibleStat
 impl<B: Backend + 'static> wlr_data_control::DataControlHandler for CrucibleState<B> {
     fn data_control_state(&mut self) -> &mut wlr_data_control::DataControlState {
         &mut self.wlr_data_control_state
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{io::Read, os::unix::net::UnixStream};
+
+    use super::*;
+
+    #[test]
+    fn write_image_delivers_the_bytes_and_closes_the_fd() {
+        let (a, mut b) = UnixStream::pair().unwrap();
+        let bytes: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        let want = bytes.clone();
+        let t = std::thread::spawn(move || write_image(&bytes, OwnedFd::from(a)));
+        let mut got = Vec::new();
+        b.read_to_end(&mut got).unwrap(); // EOF proves the fd was closed
+        t.join().unwrap().unwrap();
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn serve_image_writes_png_on_a_worker_and_ignores_other_mimes() {
+        let bytes: Arc<[u8]> = Arc::from(&b"\x89PNG-bytes"[..]);
+        let (a, mut b) = UnixStream::pair().unwrap();
+        serve_image(&bytes, IMAGE_MIME, OwnedFd::from(a));
+        let mut got = Vec::new();
+        b.read_to_end(&mut got).unwrap();
+        assert_eq!(got, &bytes[..]);
+        let (a, mut b) = UnixStream::pair().unwrap();
+        serve_image(&bytes, "text/plain", OwnedFd::from(a));
+        let mut got = Vec::new();
+        b.read_to_end(&mut got).unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn a_closed_reader_is_not_an_error() {
+        let (a, b) = UnixStream::pair().unwrap();
+        drop(b);
+        let big = vec![0u8; 1 << 20];
+        assert!(write_image(&big, OwnedFd::from(a)).is_ok());
     }
 }

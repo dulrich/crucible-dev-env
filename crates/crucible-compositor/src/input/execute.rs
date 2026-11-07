@@ -170,6 +170,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Action::ToggleHeader => self.toggle_header(),
             Action::OpenSettings => self.open_settings(),
             Action::Lock => self.spawn_locker(),
+            Action::Screenshot => {
+                if let Err(reason) = self.screenshot_focused_output() {
+                    warn!(reason, "screenshot not taken");
+                }
+            }
+            Action::Snip => debug!("snip: not implemented yet"),
             Action::CloseWindow => self.close_focused_window(),
             Action::SetLayout(name) => self.set_layout(&name),
             // Auto-names skip live AND saved names, so a fresh "2" never overwrites a saved "2".
@@ -353,6 +359,8 @@ fn apply_model_action(world: &mut World, action: &Action) -> Option<Result<(), L
         | Action::CloseWindow
         | Action::SetLayout(_)
         | Action::Lock
+        | Action::Screenshot
+        | Action::Snip
         | Action::VtSwitch(_) => return None,
     }
     Some(Ok(()))

@@ -170,6 +170,11 @@ pub enum Action {
     /// independently of the `Super` leader. The nested `winit` backend never sees these, so this
     /// verb is routed to a no-op there.
     VtSwitch(i32),
+    /// Capture the focused output and deliver it per config `screenshot { destination }`.
+    /// `Super+Print`.
+    Screenshot,
+    /// Start the interactive region snip. `Super+Shift+Print`.
+    Snip,
 }
 
 impl std::fmt::Display for Action {
@@ -216,6 +221,8 @@ impl std::fmt::Display for Action {
             Self::ToggleFullscreen => f.write_str("toggle-fullscreen"),
             Self::RenameWorkspace => f.write_str("rename-workspace"),
             Self::Lock => f.write_str("lock"),
+            Self::Screenshot => f.write_str("screenshot"),
+            Self::Snip => f.write_str("snip"),
             Self::VtSwitch(n) => write!(f, "vt-switch {n}"),
         }
     }
@@ -299,7 +306,9 @@ impl Action {
             | Self::RunOn { .. }
             | Self::OpenPicker
             | Self::OpenLauncher
-            | Self::OpenSettings => Area::LaunchAndOverlays,
+            | Self::OpenSettings
+            | Self::Screenshot
+            | Self::Snip => Area::LaunchAndOverlays,
             Self::Quit | Self::Lock | Self::SetLayout(_) | Self::VtSwitch(_) => {
                 Area::SessionAndSystem
             }
@@ -424,6 +433,8 @@ impl FromStr for Action {
             "delete-workspace" => nullary(Self::DeleteWorkspace),
             "close-all-workspaces" => nullary(Self::CloseAllWorkspaces),
             "lock" => nullary(Self::Lock),
+            "screenshot" => nullary(Self::Screenshot),
+            "snip" => nullary(Self::Snip),
             "move-workspace-to-output" => unary(Self::MoveWorkspaceToOutput(delta(words.get(1))?)),
             "slot" => unary(Self::Slot(slot_index(words.get(1))?)),
             "pin-slot" => unary(Self::PinSlot(slot_index(words.get(1))?)),
@@ -493,6 +504,8 @@ mod tests {
             Action::ToggleFullscreen,
             Action::RenameWorkspace,
             Action::Lock,
+            Action::Screenshot,
+            Action::Snip,
             Action::VtSwitch(3),
         ]
     }
