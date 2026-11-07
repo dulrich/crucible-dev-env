@@ -387,7 +387,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Resolves the owner first, so a repeated unmap/destroy resolves to [`Binding::None`] and
     /// returns [`Teardown::Absent`] — no error, no log storm. For a managed window the model close
     /// runs first; only if it succeeds are the binding and the `Space` mapping released.
+    /// A managed close then runs [`Self::managed_closed`] (recovery record, ephemeral prune), so
+    /// every close path — Wayland destroy, X11 unmap or destroy-without-unmap — gets it once.
     pub fn unmap_matching(&mut self, pred: impl Fn(&WindowElement) -> bool) -> Teardown {
+        let teardown = self.teardown_matching(pred);
+        if let Teardown::Managed(id) = teardown {
+            self.managed_closed(id);
+        }
+        teardown
+    }
+
+    /// [`Self::unmap_matching`] without the managed-close hook: tears the element down but leaves
+    /// the recovery record and ephemeral workspaces alone. Only the lost-window path uses it, since
+    /// its placeholder is not yet pending and a prune would remove the workspace it stands in for.
+    pub(crate) fn teardown_matching(&mut self, pred: impl Fn(&WindowElement) -> bool) -> Teardown {
         match self.layout.resolve(&pred) {
             Binding::Managed(id) => match self.layout.close_managed(id) {
                 Ok(released) => {

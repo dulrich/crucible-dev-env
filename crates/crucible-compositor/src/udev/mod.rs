@@ -274,8 +274,6 @@ impl Backend for UdevData {
                 state.backend_data.power_off_surface(node, crtc);
             }
             info!("idle: outputs powered off");
-            // Outputs that just went dark may complete a pending lock.
-            state.lock_confirm_if_presented();
         }
     }
 

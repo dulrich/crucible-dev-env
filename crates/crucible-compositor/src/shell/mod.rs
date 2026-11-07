@@ -40,7 +40,7 @@ use tracing::warn;
 
 use crate::{
     element::WindowElement,
-    layout::{Binding, Teardown},
+    layout::Binding,
     persist::identity::{Destruction, classify_destruction},
     state::{Backend, CrucibleState},
 };
@@ -153,11 +153,7 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
             self.window_lost(id, matches);
             return;
         }
-        if let Teardown::Managed(id) = self.unmap_matching(matches) {
-            self.forget_recovery(id);
-            // An ephemeral `run-on` workspace goes with its last window.
-            self.prune_ephemeral();
-        }
+        self.unmap_matching(matches);
     }
 
     fn popup_destroyed(&mut self, _surface: PopupSurface) {

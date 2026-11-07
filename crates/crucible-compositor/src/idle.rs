@@ -270,6 +270,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if step.blank {
             info!("idle: blanking outputs");
             B::set_outputs_powered(self, false);
+            // Outputs that just went dark may complete a pending lock. Harmless on winit: no output
+            // reports powered off there, so it only confirms what the render path would anyway.
+            self.lock_confirm_if_presented();
         }
         if step.lock {
             info!("idle: locking the session");

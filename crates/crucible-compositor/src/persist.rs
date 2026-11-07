@@ -781,6 +781,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.persist.recovery.remove(&id);
     }
 
+    /// Bookkeeping after managed window `id` closed (mirror of `unmanaged_closed`): forgets its
+    /// recovery record, and an ephemeral `run-on` workspace goes with its last window.
+    pub(crate) fn managed_closed(&mut self, id: WindowId) {
+        self.forget_recovery(id);
+        self.prune_ephemeral();
+    }
+
     /// The workspace holding `pane`.
     fn workspace_of_pane(&self, pane: PaneId) -> Option<WorkspaceId> {
         self.live_workspaces().into_iter().find_map(|(_, ws)| {
@@ -844,7 +851,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
             &live,
         );
         self.persist.placement.reserved.insert(slot.pane, order);
-        self.unmap_matching(close);
+        // Hook-free: the recovery record is already gone and the placeholder is not pending yet, so
+        // the managed-close prune would remove the ephemeral workspace it is about to fill.
+        self.teardown_matching(close);
         let target = Target::Lost(LostSlot {
             pane: slot.pane,
             lost: id,
