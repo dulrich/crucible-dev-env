@@ -26,8 +26,7 @@ as a static lib, meson $MESON_VER run as \`python3 -I meson.py\`, ninja $NINJA_V
 it for scripts/foot/install.sh. Dev host only: needs gcc, python3, pkg-config,
 wayland-scanner, unzip, curl or wget, and the foot -dev packages.
 
-Sources are sha256-pinned and cached under target/foot-build/dl/ (seeded from
-target/spike-foot/dl/ when present). Output, under target/foot-build/:
+Sources are sha256-pinned and cached under target/foot-build/dl/. Output, under target/foot-build/:
   foot-$FOOT_VER-<arch>.tar.gz       top dir foot-$FOOT_VER/ with bin/, share/
   foot-$FOOT_VER-<arch>.ldd.txt      ldd of foot and footclient; any \`not found\` fails the build
 
@@ -49,7 +48,6 @@ fi
 repo=$(cd "$here/../.." && pwd)
 work=$repo/target/foot-build
 dl=$work/dl
-spike=$repo/target/spike-foot/dl
 arch=$(uname -m)
 [ "$arch" = x86_64 ] || {
 	echo "build.sh: only x86_64 is pinned (ninja-linux.zip); got $arch" >&2
@@ -82,9 +80,6 @@ for pin in "${pins[@]}"; do
 	IFS='|' read -r name rel url sum <<<"$pin"
 	f=$dl/$rel
 	mkdir -p "$(dirname "$f")"
-	if ! sha_ok "$f" "$sum" && sha_ok "$spike/$rel" "$sum"; then
-		cp "$spike/$rel" "$f"
-	fi
 	if ! sha_ok "$f" "$sum"; then
 		echo "build.sh: fetching $name" >&2
 		fetch "$url" "$f.part"
