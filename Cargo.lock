@@ -301,7 +301,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "crucible"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crucible-compositor",
  "crucible-config",
@@ -314,7 +314,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-compositor"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crucible-config",
  "crucible-keys",
@@ -339,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-config"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "kdl",
  "thiserror 2.0.18",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "crucible-keys"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crucible-layout",
  "thiserror 2.0.18",
@@ -357,14 +357,14 @@ dependencies = [
 
 [[package]]
 name = "crucible-layout"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "crucible-persist"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crucible-layout",
  "kdl",

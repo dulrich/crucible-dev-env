@@ -4,6 +4,16 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.5.1 — 2026-11-06
+
+### Added
+
+- Screenshots. `Super+Print` runs the new `screenshot` action: it captures the focused output (without the pointer cursor) and delivers a PNG. A bare `Print` stays unbound, so applications still receive it.
+- Snip. `Super+Shift+Print` runs the new `snip` action: every output freezes and dims, then click a window to capture it, drag to capture a region (its pixel size is shown), or click the background or press `Enter` for the whole output. `Esc`, a right-click or `Super+Shift+Print` again cancels. While snipping, applications receive no input and only `snip` and VT switching run (IPC requests too).
+- A `screenshot { destination; directory }` config block. `destination` is `"clipboard"` (the default), `"file"` or `"both"`; files go to `directory` (default `~/Pictures/Screenshots`) as `cde-<YYYYmmdd-HHMMSS>.png` and never overwrite an existing file.
+- The clipboard image (`image/png`) is readable by Wayland, data-control (e.g. `wl-paste`) and X11 clients.
+- `crucible msg capture <abs path>` writes a PNG of the focused output and answers `ok <w>x<h>`. The running compositor must be restarted onto 0.5.1 for it, and for the new actions.
+
 ## 0.5.0 — 2026-11-06
 
 ### Changed (breaking)
