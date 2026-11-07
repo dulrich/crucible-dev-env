@@ -25,6 +25,7 @@
 //! | `run <command>`            | `ok` (spawned) / `err <reason>`                           |
 //! | `relaunch`                 | `ok` (placeholder swapped for its app) / `err <reason>`   |
 //! | `close-pid <n>`            | `ok <count>` / `err no window for pid <n>`                |
+//! | `capture <path>`           | `ok <w>x<h>` (PNG of the focused output written) / `err <reason>` |
 //!
 //! `relaunch` is the only request that depends on the caller: the compositor reads the peer PID
 //! (`SO_PEERCRED`) and accepts it only from an app relaunch placeholder (`crucible relaunch`).
@@ -112,6 +113,9 @@ pub enum Request {
     /// `close-pid <n>` — politely ask every managed window of process `n` to close (xdg `close` /
     /// X11 `WM_DELETE_WINDOW`; an X11 window without it is destroyed); answers `ok <count>`.
     ClosePid(u32),
+    /// `capture <path>` — write a PNG of the focused output (no cursor) to `path`; answers
+    /// `ok <w>x<h>` once the file is written. Refused while locked. A debug request (plan 34).
+    Capture(PathBuf),
 }
 
 /// Parses the pid argument of `close-pid`: plain decimal digits, a non-zero `u32`.
@@ -156,7 +160,8 @@ impl Request {
             | Request::RunTui(_)
             | Request::RunTerm(_)
             | Request::Relaunch
-            | Request::ClosePid(_) => true,
+            | Request::ClosePid(_)
+            | Request::Capture(_) => true,
         }
     }
 
@@ -195,6 +200,7 @@ impl Request {
             "run-tui" => need(arg).map(Request::RunTui),
             "run-term" => need(arg).map(Request::RunTerm),
             "close-pid" => parse_pid(verb, arg).map(Request::ClosePid),
+            "capture" => need(arg).map(|p| Request::Capture(PathBuf::from(p))),
             other => Err(format!("unknown request {other:?}")),
         }
     }
@@ -219,6 +225,7 @@ impl Request {
             Request::RunTui(c) => format!("run-tui {}", encode_field(c)),
             Request::RunTerm(c) => format!("run-term {}", encode_field(c)),
             Request::ClosePid(n) => format!("close-pid {n}"),
+            Request::Capture(p) => format!("capture {}", encode_field(&p.to_string_lossy())),
         }
     }
 }
@@ -506,6 +513,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 }
                 for line in take_lines(&mut buf) {
                     let response = match Request::parse(&line) {
+                        Ok(Request::Capture(path)) => {
+                            // Captured here; encoded, written and answered off the main thread.
+                            match data.ipc_capture(&path) {
+                                Err(reason) => Response::Err(reason),
+                                Ok(capture) => {
+                                    if let Ok(reply_io) = io.try_clone() {
+                                        crate::capture::spawn_write_png(capture, path, reply_io);
+                                        continue;
+                                    }
+                                    Response::Err("cannot clone the IPC stream".into())
+                                }
+                            }
+                        }
                         Ok(req) => {
                             debug!(?req, "IPC request");
                             data.handle_ipc(req, peer)
@@ -547,6 +567,7 @@ mod tests {
             Request::Relaunch,
             Request::Open("a:b\tc".into()),
             Request::OpenFolder(PathBuf::from("/tmp/x:y/100%")),
+            Request::Capture(PathBuf::from("/tmp/shot:1 100%.png")),
             Request::New("n\nl".into()),
             Request::Rename("r\r".into()),
             Request::Delete("d:\t100%".into()),

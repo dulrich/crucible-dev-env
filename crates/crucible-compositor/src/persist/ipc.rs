@@ -150,6 +150,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Request::Rename(name) => self.ipc_rename(&name),
             Request::Delete(name) => self.ipc_delete(&name),
             Request::SetRoot(root) => self.ipc_set_root(root),
+            // The socket server answers `capture` itself (the reply follows the off-thread write);
+            // a direct call captures, encodes and writes inline.
+            Request::Capture(path) => self.ipc_capture(&path).and_then(|capture| {
+                std::fs::write(
+                    &path,
+                    crate::capture::encode_png(&capture).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| format!("cannot write {}: {e}", path.display()))
+            }),
         };
         match result {
             Ok(()) => Response::Ok(String::new()),

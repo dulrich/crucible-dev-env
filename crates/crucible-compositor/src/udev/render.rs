@@ -17,8 +17,9 @@ use smithay::{
     backend::{
         SwapBuffersError,
         drm::{DrmAccessError, DrmError, DrmEventMetadata, DrmNode, compositor::FrameFlags},
-        renderer::damage::Error as OutputDamageTrackerError,
+        renderer::{damage::Error as OutputDamageTrackerError, gles::GlesRenderbuffer},
     },
+    output::Output,
     reexports::{
         calloop::timer::{TimeoutAction, Timer},
         drm::control::crtc,
@@ -365,6 +366,59 @@ fn recovery_for(err: &SwapBuffersError) -> Recovery {
             Some(DrmError::TestFailed(_)) => Recovery::ResetAndRetry,
             _ => Recovery::Fatal,
         },
+    }
+}
+
+impl CrucibleState<UdevData> {
+    /// Captures `output` offscreen with no cursor (plan 34): the same renderer selection as
+    /// [`CrucibleState::render_surface`] (the output's render node, cross-GPU through the primary
+    /// GPU with the scanout format), rendering into a [`GlesRenderbuffer`] and reading it back.
+    pub(super) fn capture_surface(
+        &mut self,
+        output: &Output,
+    ) -> Result<crate::capture::Capture, crate::capture::CaptureError> {
+        use crate::capture::CaptureError;
+        let id = *output
+            .user_data()
+            .get::<UdevOutputId>()
+            .ok_or(CaptureError::NoOutput)?;
+        let primary_gpu = self.backend_data.primary_gpu;
+        let device = self
+            .backend_data
+            .backends
+            .get(&id.device_id)
+            .ok_or(CaptureError::NoOutput)?;
+        let surface = device
+            .surfaces
+            .get(&id.crtc)
+            .ok_or(CaptureError::NoOutput)?;
+        let render_node = device.render_node.unwrap_or(primary_gpu);
+        let format = surface.drm_output.format();
+        let inputs = self.capture_inputs(output);
+        let mut renderer = if primary_gpu == render_node {
+            self.backend_data.gpus.single_renderer(&render_node)
+        } else {
+            self.backend_data
+                .gpus
+                .renderer(&primary_gpu, &render_node, format)
+        }
+        .map_err(|e| CaptureError::Render(e.to_string()))?;
+        let view = FrameView {
+            output,
+            space: &self.space,
+            session_lock: &self.session_lock,
+            layout: &self.layout,
+            projection: &self.projection,
+            tiling: &self.config.tiling,
+            dnd_icon: None,
+            inputs: &inputs,
+        };
+        crate::capture::render_capture::<_, GlesRenderbuffer>(
+            &mut renderer,
+            view,
+            &mut self.header_text,
+            &mut self.cursor,
+        )
     }
 }
 

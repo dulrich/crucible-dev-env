@@ -25,6 +25,9 @@ rustix.workspace = true
 # Error enums for the udev backend's device-add error type (WS-6), mirroring anvil.
 thiserror.workspace = true
 
+# PNG encoding for built-in screenshots (`capture.rs`, plan 34).
+png.workspace = true
+
 # Glyph rasterization for compositor-drawn text (`text.rs`, plan 06 WP-5).
 fontdue.workspace = true
 

@@ -226,6 +226,13 @@ impl Backend for UdevData {
         output::reflow_outputs(state);
     }
 
+    fn capture_output(
+        state: &mut CrucibleState<Self>,
+        output: &Output,
+    ) -> Result<crate::capture::Capture, crate::capture::CaptureError> {
+        state.capture_surface(output)
+    }
+
     fn output_powered_off(&self, output: &Output) -> bool {
         output
             .user_data()

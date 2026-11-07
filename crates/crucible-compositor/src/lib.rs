@@ -83,3 +83,6 @@ pub mod pointer_lock;
 
 /// The `crucible-window-identity-v1` protocol server (authenticated per-window identity).
 pub mod identity_protocol;
+
+/// Built-in screenshots: offscreen capture and PNG encoding (plan 34).
+pub mod capture;

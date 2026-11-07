@@ -147,6 +147,21 @@ pub trait Backend {
     fn output_powered_off(&self, _output: &Output) -> bool {
         false
     }
+    /// Renders `output` offscreen with no cursor and reads it back (plan 34). Called by
+    /// [`CrucibleState::capture_output`] after the lock and power admission. The default (test
+    /// backends) cannot capture.
+    ///
+    /// # Errors
+    /// [`crate::capture::CaptureError`] when the render or readback fails.
+    fn capture_output(
+        _state: &mut CrucibleState<Self>,
+        _output: &Output,
+    ) -> Result<crate::capture::Capture, crate::capture::CaptureError>
+    where
+        Self: Sized + 'static,
+    {
+        Err(crate::capture::CaptureError::Unsupported)
+    }
     /// Powers every output `on` (wake) or off (idle blanking). Called by the idle machine only on a
     /// change, never redundantly. The default (nested `winit`) logs and does nothing; the udev
     /// backend powers the DRM outputs (WP-3). An associated fn taking the whole state, like

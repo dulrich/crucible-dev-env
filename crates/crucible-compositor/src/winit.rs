@@ -21,8 +21,10 @@ use smithay::{
         allocator::dmabuf::Dmabuf,
         egl::EGLDevice,
         renderer::{
-            ImportDma, ImportMemWl, damage::Error as OutputDamageTrackerError,
-            damage::OutputDamageTracker, gles::GlesRenderer,
+            ImportDma, ImportMemWl,
+            damage::Error as OutputDamageTrackerError,
+            damage::OutputDamageTracker,
+            gles::{GlesRenderbuffer, GlesRenderer},
         },
         winit::{self, WinitEvent},
     },
@@ -82,6 +84,30 @@ impl DmabufHandler for CrucibleState<WinitData> {
 impl Backend for WinitData {
     fn seat_name(&self) -> String {
         String::from("winit")
+    }
+
+    fn capture_output(
+        state: &mut CrucibleState<Self>,
+        output: &Output,
+    ) -> Result<crate::capture::Capture, crate::capture::CaptureError> {
+        let inputs = state.capture_inputs(output);
+        let view = FrameView {
+            output,
+            space: &state.space,
+            session_lock: &state.session_lock,
+            layout: &state.layout,
+            projection: &state.projection,
+            tiling: &state.config.tiling,
+            dnd_icon: None,
+            inputs: &inputs,
+        };
+        let renderer = state.backend_data.backend.renderer();
+        crate::capture::render_capture::<_, GlesRenderbuffer>(
+            renderer,
+            view,
+            &mut state.header_text,
+            &mut state.cursor,
+        )
     }
 
     fn reset_buffers(&mut self, _output: &Output) {}
