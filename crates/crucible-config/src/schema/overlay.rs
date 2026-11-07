@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::error::ConfigError;
 use crate::model::{LauncherConfig, PickerConfig};
-use crate::overlay::{OverlayConfig, OverlayStyle};
+use crate::overlay::OverlayConfig;
 use crate::reader::NodeReader;
 
 /// Parses the `picker` block into its `root` directories and the `slots` badge setting.
@@ -15,8 +15,7 @@ pub(super) fn parse_picker(node: NodeReader<'_>) -> Result<PickerConfig, ConfigE
         match child.name() {
             "root" => {
                 child.no_properties()?;
-                let dir = child.string_arg("a directory string")?;
-                child.nonempty("directory", dir)?;
+                let dir = child.nonempty_string_arg("a directory string", "directory")?;
                 out.roots.push(PathBuf::from(dir));
             }
             "slots" => {
@@ -60,12 +59,11 @@ pub(super) fn parse_launcher(node: NodeReader<'_>) -> Result<LauncherConfig, Con
 
 pub(super) fn parse_overlay(node: NodeReader<'_>) -> Result<OverlayConfig, ConfigError> {
     let mut out = OverlayConfig::default();
-    for child in node.children(&[])? {
+    for child in node.children_strict(&[], &[])? {
         let child = child?;
-        child.no_properties()?;
         match child.name() {
             "border" => out.border = child.bool_arg()?,
-            "style" => out.style = child.enum_arg("a style string", &OverlayStyle::NAMES)?,
+            "style" => out.style = child.enum_arg("a style string")?,
             "terminal-args" => out.terminal_args = Some(child.string_list()?),
             _ => return Err(child.unknown_node("overlay")),
         }
@@ -77,7 +75,7 @@ pub(super) fn parse_overlay(node: NodeReader<'_>) -> Result<OverlayConfig, Confi
 mod tests {
     use super::super::{err_at, parse};
     use crate::error::ConfigError;
-    use crate::model::Config;
+    use crate::model::{Config, Named};
     use crate::overlay::OverlayStyle;
     use std::path::PathBuf;
 

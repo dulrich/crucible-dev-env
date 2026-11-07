@@ -5,6 +5,34 @@ use std::path::{Path, PathBuf};
 
 use crate::overlay::OverlayConfig;
 
+/// A closed set of config spellings: one `NAMES` table, in the order error messages list them,
+/// drives both parsing ([`Named::from_name`]) and printing ([`Named::as_str`]).
+pub trait Named: Copy + Eq + 'static {
+    /// Every variant with its config spelling. A variant missing here is a programming error
+    /// (each implementor's test matches its variants exhaustively).
+    const NAMES: &'static [(Self, &'static str)];
+
+    /// The config spelling.
+    ///
+    /// # Panics
+    /// If `self` is missing from [`Named::NAMES`].
+    #[must_use]
+    fn as_str(self) -> &'static str {
+        Self::NAMES
+            .iter()
+            .find_map(|(value, name)| (*value == self).then_some(*name))
+            .expect("every variant is listed in Named::NAMES")
+    }
+
+    /// Parses the exact spelling; anything else is `None`.
+    #[must_use]
+    fn from_name(name: &str) -> Option<Self> {
+        Self::NAMES
+            .iter()
+            .find_map(|(value, n)| (*n == name).then_some(*value))
+    }
+}
+
 /// The terminal CDE spawns for `Super+Return` / `Super+Shift+Return`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalConfig {
@@ -160,30 +188,13 @@ pub enum HeaderMode {
     Toggle,
 }
 
-impl HeaderMode {
+impl Named for HeaderMode {
     /// Every mode with its config spelling, in the order error messages list them.
-    pub const NAMES: [(Self, &'static str); 3] = [
+    const NAMES: &'static [(Self, &'static str)] = &[
         (Self::Off, "off"),
         (Self::Always, "always"),
         (Self::Toggle, "toggle"),
     ];
-
-    /// The config spelling.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        Self::NAMES
-            .iter()
-            .find_map(|(mode, name)| (*mode == self).then_some(*name))
-            .unwrap_or("toggle")
-    }
-
-    /// Parses the exact spelling; anything else is `None`.
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::NAMES
-            .iter()
-            .find_map(|(mode, n)| (*n == name).then_some(*mode))
-    }
 }
 
 /// Whether a never-toggled output's `toggle`-mode strip starts shown or hidden (`header { start }`).
@@ -195,19 +206,13 @@ pub enum HeaderStart {
     Hidden,
 }
 
-impl HeaderStart {
+impl Named for HeaderStart {
     /// Every value with its config spelling, in the order error messages list them.
-    pub const NAMES: [(Self, &'static str); 2] = [(Self::Shown, "shown"), (Self::Hidden, "hidden")];
+    const NAMES: &'static [(Self, &'static str)] =
+        &[(Self::Shown, "shown"), (Self::Hidden, "hidden")];
+}
 
-    /// The config spelling.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Shown => "shown",
-            Self::Hidden => "hidden",
-        }
-    }
-
+impl HeaderStart {
     /// Whether this start state is "shown".
     #[must_use]
     pub fn is_shown(self) -> bool {
@@ -382,13 +387,21 @@ pub enum ScreenshotDestination {
     Both,
 }
 
+impl Named for ScreenshotDestination {
+    const NAMES: &'static [(Self, &'static str)] = &[
+        (Self::Clipboard, "clipboard"),
+        (Self::File, "file"),
+        (Self::Both, "both"),
+    ];
+}
+
 /// Screenshot delivery (`screenshot { destination "clipboard"; directory "~/Pictures/Screenshots" }`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenshotConfig {
     /// Where a capture goes.
     pub destination: ScreenshotDestination,
-    /// The directory files are written to, as written in the config (a leading `~` is expanded to
-    /// `$HOME` by the compositor at use). Never empty. Created on first write.
+    /// The directory files are written to, as written in the config (a leading `~` or `~/` is expanded to
+    /// `$HOME` by [`crate::load`] when `$HOME` is set). Never empty. Created on first write.
     pub directory: PathBuf,
 }
 
@@ -488,6 +501,63 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overlay::OverlayStyle;
+
+    /// Every `all` variant is in `NAMES` (same count, each round-trips through its spelling).
+    fn assert_names_round_trip<T: Named + std::fmt::Debug>(all: &[T]) {
+        assert_eq!(T::NAMES.len(), all.len(), "NAMES lists every variant");
+        for v in all {
+            assert_eq!(T::from_name(v.as_str()), Some(*v), "{v:?}");
+        }
+        assert_eq!(T::from_name("no-such-name"), None);
+    }
+
+    #[test]
+    fn header_mode_names_round_trip() {
+        // The exhaustive match fails to compile when a variant is added without listing it here.
+        let _ = |m: HeaderMode| match m {
+            HeaderMode::Off | HeaderMode::Always | HeaderMode::Toggle => (),
+        };
+        assert_names_round_trip(&[HeaderMode::Off, HeaderMode::Always, HeaderMode::Toggle]);
+    }
+
+    #[test]
+    fn header_start_names_round_trip() {
+        let _ = |m: HeaderStart| match m {
+            HeaderStart::Shown | HeaderStart::Hidden => (),
+        };
+        assert_names_round_trip(&[HeaderStart::Shown, HeaderStart::Hidden]);
+    }
+
+    #[test]
+    fn overlay_style_names_round_trip() {
+        let _ = |m: OverlayStyle| match m {
+            OverlayStyle::Terminal
+            | OverlayStyle::N1Dark
+            | OverlayStyle::N1Med
+            | OverlayStyle::N1Light => (),
+        };
+        assert_names_round_trip(&[
+            OverlayStyle::Terminal,
+            OverlayStyle::N1Dark,
+            OverlayStyle::N1Med,
+            OverlayStyle::N1Light,
+        ]);
+    }
+
+    #[test]
+    fn screenshot_destination_names_round_trip() {
+        let _ = |m: ScreenshotDestination| match m {
+            ScreenshotDestination::Clipboard
+            | ScreenshotDestination::File
+            | ScreenshotDestination::Both => (),
+        };
+        assert_names_round_trip(&[
+            ScreenshotDestination::Clipboard,
+            ScreenshotDestination::File,
+            ScreenshotDestination::Both,
+        ]);
+    }
 
     #[test]
     fn rgb_to_rgba_f32_is_opaque_and_unit_scaled() {

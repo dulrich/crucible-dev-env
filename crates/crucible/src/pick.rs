@@ -4,7 +4,7 @@
 //! Enter sends); the runner, key decoding, shared state and frame scaffolding are in
 //! [`crate::overlay`]. The state machine and rendering are pure.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crucible_compositor::ipc::{Candidate, CandidateKind, Request, Response, parse_candidates};
 use crucible_persist::PickTarget;
@@ -48,13 +48,18 @@ fn tilde(path: &str, home: Option<&str>) -> String {
 /// `typed` with a leading `~` (alone or before `/`) expanded to `home`; `None` when `~` needs a
 /// `$HOME` that is unset. Anything else is returned as typed.
 fn expand_tilde(typed: &str, home: Option<&str>) -> Option<String> {
-    match typed.strip_prefix('~') {
-        Some("") => home.map(str::to_string),
-        Some(rest) if rest.starts_with('/') => {
-            home.map(|h| format!("{}{rest}", h.trim_end_matches('/')))
-        }
-        _ => Some(typed.to_string()),
+    let expanded = crucible_config::expand_tilde(Path::new(typed), home);
+    let needs_home = typed == "~" || typed.starts_with("~/");
+    if needs_home && expanded == Path::new(typed) {
+        return None;
     }
+    // `~/x` joins onto `home` (a trailing `/` on `home` is dropped); other input is as typed.
+    let mut out = expanded.to_string_lossy().into_owned();
+    // `Path` drops a typed trailing `/` (`~/` -> `/home/u`); typed input keeps it.
+    if typed.starts_with('~') && typed.ends_with('/') && !out.ends_with('/') {
+        out.push('/');
+    }
+    Some(out)
 }
 
 /// One selectable row.
@@ -824,6 +829,14 @@ mod tests {
             Some("/home/u/x")
         );
         assert_eq!(expand_tilde("~", None), None);
+        assert_eq!(
+            expand_tilde("~/", Some("/home/u")).as_deref(),
+            Some("/home/u/")
+        );
+        assert_eq!(
+            expand_tilde("~/x/", Some("/home/u")).as_deref(),
+            Some("/home/u/x/")
+        );
     }
 
     #[test]

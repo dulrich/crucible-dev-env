@@ -27,7 +27,7 @@ pub use error::{ConfigError, Location};
 pub use model::{
     AppTiling, Config, CursorConfig, DEFAULT_DIVIDER_COLOR, DEFAULT_HEADER_FONT,
     HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderConfig,
-    HeaderMode, HeaderStart, IdleConfig, KeyboardConfig, LauncherConfig, PickerConfig, Rgb,
+    HeaderMode, HeaderStart, IdleConfig, KeyboardConfig, LauncherConfig, Named, PickerConfig, Rgb,
     ScreenshotConfig, ScreenshotDestination, TerminalConfig, TerminalTiling, TilingConfig,
     clamp_ring, substitute_gap,
 };
@@ -59,14 +59,51 @@ pub fn config_path() -> Option<PathBuf> {
     )
 }
 
-/// Reads and parses the config at `path`; a missing file is `Ok(Config::default())`.
+/// Expands a leading `~` (alone or `~/...`) to `home`. Anything else is returned unchanged
+/// (literal): `~user/...`, a `~` that is not the first component, and any path when `home` is
+/// `None` or empty.
+#[must_use]
+pub fn expand_tilde(path: &Path, home: Option<&str>) -> PathBuf {
+    match (path.strip_prefix("~"), home) {
+        (Ok(rest), Some(home)) if !home.is_empty() => {
+            if rest.as_os_str().is_empty() {
+                PathBuf::from(home)
+            } else {
+                Path::new(home).join(rest)
+            }
+        }
+        _ => path.to_path_buf(),
+    }
+}
+
+/// [`parse`], then `picker.roots` and `screenshot.directory` are resolved against `home` with
+/// [`expand_tilde`], so no consumer ever sees a `~` the config meant as `$HOME`. `parse(text)` is
+/// `parse_with_home(text, None)`.
+///
+/// # Errors
+/// As [`parse`].
+pub fn parse_with_home(text: &str, home: Option<&str>) -> Result<Config, ConfigError> {
+    let mut config = parse(text)?;
+    for root in &mut config.picker.roots {
+        *root = expand_tilde(root, home);
+    }
+    config.screenshot.directory = expand_tilde(&config.screenshot.directory, home);
+    Ok(config)
+}
+
+/// Reads and parses the config at `path`, resolving `~` against `$HOME` (read once); a missing
+/// file is the default config, resolved the same way.
 ///
 /// # Errors
 /// [`ConfigError::Io`] for an unreadable file, otherwise as [`parse`].
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
+    load_with_home(path, std::env::var("HOME").ok().as_deref())
+}
+
+fn load_with_home(path: &Path, home: Option<&str>) -> Result<Config, ConfigError> {
     match std::fs::read_to_string(path) {
-        Ok(text) => parse(&text),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+        Ok(text) => parse_with_home(&text, home),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => parse_with_home("", home),
         Err(source) => Err(ConfigError::Io {
             path: path.to_path_buf(),
             source,
@@ -100,18 +137,68 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("cde-config-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let missing = dir.join("absent.kdl");
-        assert_eq!(load(&missing).unwrap(), Config::default());
+        assert_eq!(load_with_home(&missing, None).unwrap(), Config::default());
 
         let good = dir.join("good.kdl");
         std::fs::write(&good, "tiling {\n    terminal gap=(px)2 ring=(px)1\n}\n").unwrap();
-        assert_eq!(load(&good).unwrap().tiling.terminal.gap, 2);
+        assert_eq!(load_with_home(&good, None).unwrap().tiling.terminal.gap, 2);
 
         let bad = dir.join("bad.kdl");
         std::fs::write(&bad, "nope\n").unwrap();
-        assert!(matches!(load(&bad), Err(ConfigError::UnknownNode { .. })));
+        assert!(matches!(
+            load_with_home(&bad, None),
+            Err(ConfigError::UnknownNode { .. })
+        ));
 
         // A directory in place of the file is an I/O error, not "missing".
-        assert!(matches!(load(&dir), Err(ConfigError::Io { .. })));
+        assert!(matches!(
+            load_with_home(&dir, None),
+            Err(ConfigError::Io { .. })
+        ));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn tilde_expands_only_as_a_leading_component() {
+        let h = Some("/home/u");
+        assert_eq!(
+            expand_tilde(Path::new("~/Pictures/Screenshots"), h),
+            Path::new("/home/u/Pictures/Screenshots")
+        );
+        assert_eq!(expand_tilde(Path::new("~"), h), Path::new("/home/u"));
+        assert_eq!(
+            expand_tilde(Path::new("/abs/~/x"), h),
+            Path::new("/abs/~/x")
+        );
+        assert_eq!(
+            expand_tilde(Path::new("~other/x"), h),
+            Path::new("~other/x")
+        );
+        assert_eq!(expand_tilde(Path::new("~/x"), None), Path::new("~/x"));
+        assert_eq!(expand_tilde(Path::new("~/x"), Some("")), Path::new("~/x"));
+    }
+
+    #[test]
+    fn picker_roots_and_screenshot_directory_resolve_at_the_boundary() {
+        let text =
+            "picker { root \"~/code\"; root \"/abs\"; }\nscreenshot { directory \"~/shots\"; }\n";
+        let c = parse_with_home(text, Some("/home/u")).unwrap();
+        assert_eq!(
+            c.picker.roots,
+            [PathBuf::from("/home/u/code"), PathBuf::from("/abs")]
+        );
+        assert_eq!(c.screenshot.directory, PathBuf::from("/home/u/shots"));
+        // The default screenshot directory resolves too.
+        assert_eq!(
+            parse_with_home("", Some("/home/u"))
+                .unwrap()
+                .screenshot
+                .directory,
+            PathBuf::from("/home/u/Pictures/Screenshots")
+        );
+        // No home: literal, exactly what `parse` returns.
+        let literal = parse_with_home(text, None).unwrap();
+        assert_eq!(literal.picker.roots[0], PathBuf::from("~/code"));
+        assert_eq!(literal, parse(text).unwrap());
     }
 }

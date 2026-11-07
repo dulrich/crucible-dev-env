@@ -3,33 +3,21 @@
 use std::path::PathBuf;
 
 use crate::error::ConfigError;
-use crate::model::{ScreenshotConfig, ScreenshotDestination};
+use crate::model::ScreenshotConfig;
 use crate::reader::NodeReader;
 
 pub(super) fn parse_screenshot(node: NodeReader<'_>) -> Result<ScreenshotConfig, ConfigError> {
     let mut out = ScreenshotConfig::default();
-    for child in node.children(&[])? {
+    for child in node.children_strict(&[], &[])? {
         let child = child?;
-        child.no_properties()?;
         match child.name() {
             "destination" => {
-                let value = child.string_arg("\"clipboard\", \"file\" or \"both\"")?;
-                out.destination = match value {
-                    "clipboard" => ScreenshotDestination::Clipboard,
-                    "file" => ScreenshotDestination::File,
-                    "both" => ScreenshotDestination::Both,
-                    other => {
-                        return Err(child.invalid(
-                            "destination",
-                            format!("`{other}` is not one of clipboard, file, both"),
-                        ));
-                    }
-                };
+                out.destination =
+                    child.enum_arg_as("\"clipboard\", \"file\" or \"both\"", "destination")?;
             }
             "directory" => {
-                let path = child.string_arg("a directory path")?;
-                child.nonempty("directory", path)?;
-                out.directory = PathBuf::from(path);
+                out.directory =
+                    PathBuf::from(child.nonempty_string_arg("a directory path", "directory")?);
             }
             _ => return Err(child.unknown_node("screenshot")),
         }
@@ -90,6 +78,15 @@ mod tests {
             );
             assert_eq!(at.line, 2, "{bad}");
         }
+    }
+
+    #[test]
+    fn screenshot_bad_destination_keeps_its_error_text() {
+        let (err, _) = err_at("screenshot { destination \"clip\"; }\n");
+        assert_eq!(
+            err.to_string(),
+            "1:14: `destination` destination: `clip` is not one of clipboard, file, both"
+        );
     }
 
     #[test]

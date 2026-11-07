@@ -6,12 +6,10 @@ use crate::reader::NodeReader;
 
 pub(super) fn parse_output(node: NodeReader<'_>) -> Result<(String, OutputConfig), ConfigError> {
     node.no_properties()?;
-    let name = node.string_arg("a connector name string")?;
-    node.nonempty("connector name", name)?;
+    let name = node.nonempty_string_arg("a connector name string", "connector name")?;
     let mut out = OutputConfig::default();
     for child in node.children_keeping_args(&[])? {
         let child = child?;
-        child.no_properties()?;
         match child.name() {
             "scale" => {
                 let n = child.float_arg()?;
@@ -30,7 +28,7 @@ pub(super) fn parse_output(node: NodeReader<'_>) -> Result<(String, OutputConfig
             _ => return Err(child.unknown_node("output")),
         }
     }
-    Ok((name.to_string(), out))
+    Ok((name, out))
 }
 
 #[cfg(test)]

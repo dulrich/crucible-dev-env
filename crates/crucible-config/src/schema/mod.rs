@@ -36,7 +36,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
     })?;
 
     let mut config = Config::default();
-    for node in Children::new(text, doc.nodes(), &["output", "autostart"]) {
+    for node in Children::new(text, doc.nodes(), &["output", "autostart"], None) {
         let node = node?;
         match node.name() {
             "terminal" => parse_terminal(node, &mut config.terminal)?,
@@ -80,15 +80,13 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "binds" => config.binds = parse_binds(node)?,
             "lock-command" => {
                 node.no_properties()?;
-                let cmd = node.string_arg("a command string")?;
-                node.nonempty("command", cmd)?;
-                config.lock_command = cmd.to_string();
+                config.lock_command = node.nonempty_string_arg("a command string", "command")?;
             }
             "autostart" => {
                 node.no_properties()?;
-                let cmd = node.string_arg("a command string")?;
-                node.nonempty("command", cmd)?;
-                config.autostart.push(cmd.to_string());
+                config
+                    .autostart
+                    .push(node.nonempty_string_arg("a command string", "command")?);
             }
             _ => return Err(node.unknown_node("the top level")),
         }
@@ -98,9 +96,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
 
 fn parse_terminal(node: NodeReader<'_>, out: &mut TerminalConfig) -> Result<(), ConfigError> {
     node.allow_properties(&["exec-flag"])?;
-    let cmd = node.string_arg("a command string")?;
-    node.nonempty("command", cmd)?;
-    out.command = Some(cmd.to_string());
+    out.command = Some(node.nonempty_string_arg("a command string", "command")?);
     if let Some((flag, _)) = node.string_prop("exec-flag", "a string")? {
         node.nonempty("property `exec-flag`", flag)?;
         out.exec_flag = flag.to_string();

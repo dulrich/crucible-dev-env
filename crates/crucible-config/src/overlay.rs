@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::model::Rgb;
+use crate::model::{Named, Rgb};
 
 /// The four colours of one N1 palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,24 +54,17 @@ pub enum OverlayStyle {
     N1Light,
 }
 
-impl OverlayStyle {
+impl Named for OverlayStyle {
     /// Every style with its config / environment spelling, in the order error messages list them.
-    pub const NAMES: [(Self, &'static str); 4] = [
+    const NAMES: &'static [(Self, &'static str)] = &[
         (Self::Terminal, "terminal"),
         (Self::N1Dark, "n1-dark"),
         (Self::N1Med, "n1-med"),
         (Self::N1Light, "n1-light"),
     ];
+}
 
-    /// The config / environment spelling.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        Self::NAMES
-            .iter()
-            .find_map(|(style, name)| (*style == self).then_some(*name))
-            .unwrap_or("terminal")
-    }
-
+impl OverlayStyle {
     /// The N1 palette the overlay TUIs paint and the compositor derives its border from, or
     /// `None` for [`OverlayStyle::Terminal`]. Its `bg` is the opaque surround foot gets.
     #[must_use]
@@ -82,14 +75,6 @@ impl OverlayStyle {
             Self::N1Med => Some(N1_MED),
             Self::N1Light => Some(N1_LIGHT),
         }
-    }
-
-    /// Parses the exact spelling; anything else is `None`.
-    #[must_use]
-    pub fn from_name(name: &str) -> Option<Self> {
-        Self::NAMES
-            .iter()
-            .find_map(|(style, n)| (*n == name).then_some(*style))
     }
 }
 
@@ -440,7 +425,7 @@ mod tests {
     fn style_names_roundtrip_in_table_order() {
         let names: Vec<&str> = OverlayStyle::NAMES.iter().map(|(_, n)| *n).collect();
         assert_eq!(names, ["terminal", "n1-dark", "n1-med", "n1-light"]);
-        for (style, name) in OverlayStyle::NAMES {
+        for &(style, name) in OverlayStyle::NAMES {
             assert_eq!(style.as_str(), name);
             assert_eq!(OverlayStyle::from_name(name), Some(style));
         }

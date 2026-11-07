@@ -83,9 +83,20 @@ pub fn warm_key(config: &Config, terminal: String) -> WarmKey {
     }
 }
 
-/// The config-only decisions of applying `new` over `old`, computed once by [`Self::between`]
-/// so [`CrucibleState::apply_config`] applies them as one delta.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// What [`ConfigDelta::between`] needs beyond the two configs: the live state the decisions are
+/// made against and the environment the resolutions read, injected so the decisions stay pure.
+pub struct LiveEnv<'a> {
+    /// The cursor theme and size currently loaded (`None` before the first apply).
+    pub cursor_loaded: Option<(&'a str, u32)>,
+    /// Environment lookup for the cursor theme resolution (`XCURSOR_THEME` / `XCURSOR_SIZE`).
+    pub env: &'a dyn Fn(&str) -> Option<String>,
+    /// The terminal the keys crate resolves when the config names none.
+    pub fallback_terminal: &'a str,
+}
+
+/// The decisions of applying `new` over `old`, computed once by [`Self::between`] so
+/// [`CrucibleState::apply_config`] acts on them as one delta.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConfigDelta {
     /// The tiling insets or the header changed: the applied projection must be forgotten so
     /// every window is re-placed (and re-configured) with the new geometry.
@@ -95,17 +106,36 @@ pub struct ConfigDelta {
     pub keyboard: bool,
     /// The `(old, new)` maximum configured output scale, for the XWayland scale note.
     pub max_scale: (f64, f64),
+    /// The idle timers changed: the idle machinery is re-armed.
+    pub idle: bool,
+    /// The resolved `(theme, size)` to load, when it differs from what is loaded (startup:
+    /// nothing loaded yet); `None` keeps the loaded theme.
+    pub cursor: Option<(String, u32)>,
+    /// The overlay host's warm key changed (terminal, exec flag, overlay args, launcher entries or
+    /// output scales): the hidden warm overlay host restarts.
+    pub warm: bool,
 }
 
 impl ConfigDelta {
-    /// The delta from `old` to `new`.
+    /// The delta from `old` to `new` against the live state in `live`.
     #[must_use]
-    pub fn between(old: &Config, new: &Config) -> Self {
+    pub fn between(old: &Config, new: &Config, live: &LiveEnv<'_>) -> Self {
         let header_changed = old.header != new.header;
+        let (theme, size) = crate::cursor::theme::resolve(&new.cursor, live.env);
+        let cursor = (live.cursor_loaded != Some((theme.as_str(), size))).then_some((theme, size));
+        let terminal = |c: &Config| {
+            pick_terminal(
+                c.terminal.command.as_deref(),
+                live.fallback_terminal.to_string(),
+            )
+        };
         Self {
             relayout: old.tiling != new.tiling || header_changed,
             keyboard: old.keyboard != new.keyboard,
             max_scale: (old.max_output_scale(), new.max_output_scale()),
+            idle: old.idle != new.idle,
+            cursor,
+            warm: warm_key(old, terminal(old)) != warm_key(new, terminal(new)),
         }
     }
 }
@@ -123,8 +153,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ///
     /// Public so the persist tick's config reload can call it; safe to call before any output exists.
     pub fn apply_config(&mut self, config: Config) {
-        let old_overlay_terminal = warm_key(&self.config, self.terminal_program());
-        let delta = ConfigDelta::between(&self.config, &config);
+        let fallback_terminal = crucible_keys::terminal_command();
+        let delta = ConfigDelta::between(
+            &self.config,
+            &config,
+            &LiveEnv {
+                cursor_loaded: self.cursor.loaded(),
+                env: &|k| std::env::var(k).ok(),
+                fallback_terminal: &fallback_terminal,
+            },
+        );
         let (bindings, bind_error) = plan_bindings(&self.bindings, &config);
         if let Some(err) = bind_error {
             error!(%err, "invalid binds in config; keeping the previous bindings");
@@ -149,20 +187,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.reload_keyboard_layouts(&config);
         }
         crate::xwayland::note_xwayland_scale_change(delta.max_scale.0, delta.max_scale.1);
-        let idle_changed = self.config.idle != config.idle;
-        // Build (startup: nothing loaded yet) or rebuild (reload) the cursor theme when what it
-        // resolves to differs from what is loaded; this clears the image cache.
-        let (theme, size) =
-            crate::cursor::theme::resolve(&config.cursor, |k| std::env::var(k).ok());
-        if self.cursor.loaded() != Some((theme.as_str(), size)) {
-            self.cursor.set_theme(&theme, size);
+        // Build (startup: nothing loaded yet) or rebuild (reload) the cursor theme; this clears
+        // the image cache.
+        if let Some((theme, size)) = &delta.cursor {
+            self.cursor.set_theme(theme, *size);
         }
         self.config = config;
-        if idle_changed {
+        if delta.idle {
             self.idle_config_changed();
         }
         self.apply_output_scales();
-        if old_overlay_terminal != warm_key(&self.config, self.terminal_program()) {
+        if delta.warm {
             self.warm_config_changed();
         }
         self.apply_layout();
@@ -246,11 +281,25 @@ mod tests {
         c
     }
 
+    /// A live state with the default cursor loaded, no environment and `foot` as the fallback.
+    fn live() -> LiveEnv<'static> {
+        LiveEnv {
+            cursor_loaded: Some(("default", 24)),
+            env: &|_| None,
+            fallback_terminal: "foot",
+        }
+    }
+
+    fn delta(old: &Config, new: &Config) -> ConfigDelta {
+        ConfigDelta::between(old, new, &live())
+    }
+
     #[test]
     fn delta_no_change_is_inert() {
         let c = Config::default();
-        let d = ConfigDelta::between(&c, &c.clone());
+        let d = delta(&c, &c.clone());
         assert!(!d.relayout);
+        assert!(!d.idle && !d.warm && d.cursor.is_none());
         assert_eq!(d.max_scale, (1.0, 1.0));
     }
 
@@ -259,7 +308,7 @@ mod tests {
         let old = Config::default();
         let mut new = old.clone();
         new.tiling.app.gap = old.tiling.app.gap + 1;
-        assert!(ConfigDelta::between(&old, &new).relayout);
+        assert!(delta(&old, &new).relayout);
     }
 
     #[test]
@@ -270,7 +319,7 @@ mod tests {
             (HeaderMode::Toggle, HeaderMode::Off),
             (HeaderMode::Always, HeaderMode::Toggle),
         ] {
-            let d = ConfigDelta::between(&header_mode(from), &header_mode(to));
+            let d = delta(&header_mode(from), &header_mode(to));
             assert!(d.relayout, "{from:?} -> {to:?}");
         }
     }
@@ -284,9 +333,64 @@ mod tests {
         new.outputs = crucible_config::parse("output \"DP-1\" { scale 2; }\n")
             .unwrap()
             .outputs;
-        let d = ConfigDelta::between(&old, &new);
+        let d = delta(&old, &new);
         assert!(d.relayout);
         assert_eq!(d.max_scale, (1.0, 2.0));
+    }
+
+    #[test]
+    fn delta_idle_follows_the_idle_timers_only() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.idle.lock_after = Some(300);
+        assert!(delta(&old, &new).idle);
+        assert!(!delta(&new, &new.clone()).idle);
+        assert!(!delta(&old, &header_mode(crucible_config::HeaderMode::Off)).idle);
+    }
+
+    #[test]
+    fn delta_cursor_is_the_resolved_theme_when_it_differs_from_loaded() {
+        let old = Config::default();
+        let mut new = old.clone();
+        // The loaded default theme resolves again: nothing to do.
+        assert_eq!(delta(&old, &new).cursor, None);
+        new.cursor.theme = Some("Adwaita".into());
+        new.cursor.size = Some(32);
+        assert_eq!(delta(&old, &new).cursor, Some(("Adwaita".to_string(), 32)));
+        // Nothing loaded yet (startup): the resolved default is loaded.
+        let startup = LiveEnv {
+            cursor_loaded: None,
+            ..live()
+        };
+        assert_eq!(
+            ConfigDelta::between(&old, &old, &startup).cursor,
+            Some(("default".to_string(), 24))
+        );
+        // The environment feeds the resolution.
+        let env = |k: &str| (k == "XCURSOR_THEME").then(|| "Env".to_string());
+        let with_env = LiveEnv {
+            env: &env,
+            ..live()
+        };
+        assert_eq!(
+            ConfigDelta::between(&old, &old, &with_env).cursor,
+            Some(("Env".to_string(), 24))
+        );
+    }
+
+    #[test]
+    fn delta_warm_tracks_the_resolved_terminal_and_overlay_inputs() {
+        let old = Config::default();
+        let mut new = old.clone();
+        new.launcher.tui = vec!["k9s".into()];
+        assert!(delta(&old, &new).warm);
+        // A configured terminal equal to the fallback resolves to the same warm key.
+        let mut same = old.clone();
+        same.terminal.command = Some("foot".into());
+        assert!(!delta(&old, &same).warm);
+        let mut other = old.clone();
+        other.terminal.command = Some("ghostty".into());
+        assert!(delta(&old, &other).warm);
     }
 
     #[test]

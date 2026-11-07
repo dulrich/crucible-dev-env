@@ -96,33 +96,6 @@ fn u32_arg_in_checks_the_range_and_quotes_the_integer() {
 }
 
 #[test]
-fn u32_prop_in_reports_range_at_the_node_and_overflow_at_the_property() {
-    let f = |r: NodeReader<'_>| r.u32_prop_in("inset", 0..=32).map(|_| ());
-    assert_eq!(
-        read_err("n 1 inset=33\n", f),
-        "1:1: `n` property `inset`: 33 is outside 0..=32"
-    );
-    assert_eq!(
-        read_err("n 1 inset=-1\n", f),
-        "1:5: `n` property `inset`: -1 is outside 0..=4294967295"
-    );
-    let text = "n 1 inset=32\nm 1\n";
-    let d = doc(text);
-    assert_eq!(
-        NodeReader::new(text, &d.nodes()[0])
-            .u32_prop_in("inset", 0..=32)
-            .unwrap(),
-        Some(32)
-    );
-    assert_eq!(
-        NodeReader::new(text, &d.nodes()[1])
-            .u32_prop_in("inset", 0..=32)
-            .unwrap(),
-        None
-    );
-}
-
-#[test]
 fn hex_prop_validates_at_the_property() {
     let f = |r: NodeReader<'_>| r.hex_prop("c").map(|_| ());
     assert_eq!(
@@ -141,22 +114,60 @@ fn hex_prop_validates_at_the_property() {
     );
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Thing(u8);
+
+impl Named for Thing {
+    const NAMES: &'static [(Self, &'static str)] =
+        &[(Self(1), "a"), (Self(2), "b"), (Self(3), "c")];
+}
+
 #[test]
 fn enum_arg_lists_names_in_table_order() {
-    const NAMES: [(u8, &str); 3] = [(1, "a"), (2, "b"), (3, "c")];
     let text = "n \"b\"\nm \"z\"\n";
     let d = doc(text);
     assert_eq!(
         NodeReader::new(text, &d.nodes()[0])
-            .enum_arg("a thing", &NAMES)
-            .unwrap(),
+            .enum_arg::<Thing>("a thing")
+            .unwrap()
+            .0,
         2
     );
     assert_eq!(
         NodeReader::new(text, &d.nodes()[1])
-            .enum_arg("a thing", &NAMES)
-            .unwrap_err()
+            .enum_arg::<Thing>("a thing")
+            .err()
+            .unwrap()
             .to_string(),
         "2:1: `m` argument: `z` is not one of a, b, c"
     );
+}
+
+#[test]
+fn nonempty_string_arg_rejects_blank_with_the_what() {
+    let f = |r: NodeReader<'_>| r.nonempty_string_arg("a name", "name").map(|_| ());
+    assert_eq!(read_err("n \" \"\n", f), "1:1: `n` name: must not be empty");
+    let text = "n \"x\"\n";
+    let d = doc(text);
+    assert_eq!(
+        NodeReader::new(text, &d.nodes()[0])
+            .nonempty_string_arg("a name", "name")
+            .unwrap(),
+        "x"
+    );
+}
+
+#[test]
+fn children_strict_rejects_child_properties_except_exempt() {
+    let text = "block {\n    a k=1\n    d k=1\n}\n";
+    let d = doc(text);
+    let block = NodeReader::new(text, &d.nodes()[0]);
+    let mut it = block.children_strict(&[], &["d"]).unwrap();
+    assert!(matches!(
+        it.next().unwrap(),
+        Err(ConfigError::UnknownProperty { .. })
+    ));
+    let mut it = block.children_strict(&[], &["a", "d"]).unwrap();
+    assert_eq!(it.next().unwrap().unwrap().name(), "a");
+    assert_eq!(it.next().unwrap().unwrap().name(), "d");
 }

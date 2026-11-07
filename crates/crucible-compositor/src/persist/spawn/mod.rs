@@ -16,6 +16,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crucible_config::Named;
 use crucible_layout::WorkspaceId;
 use crucible_persist::{
     Invocation, ResumeMode, ResumeWrapper, WindowRecord, child_path, preflight_command,

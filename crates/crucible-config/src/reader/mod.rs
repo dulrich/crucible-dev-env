@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use crate::error::{ConfigError, Location};
-use crate::model::Rgb;
+use crate::model::{Named, Rgb};
 
 /// Converts a char offset into a 1-based line/column.
 pub(crate) fn locate(text: &str, offset: usize) -> Location {
@@ -44,6 +44,14 @@ impl SizeUnits {
             Self::PxOrPt => "a (px) or (pt) size",
         }
     }
+}
+
+/// Where a size that does not fit a `u32` is reported: an argument's at the node (with its
+/// range), a property's at the property (against `0..=u32::MAX`).
+#[derive(Clone, Copy)]
+enum SizeSite {
+    Argument,
+    Property,
 }
 
 /// One node of the parsed document together with the source text its locations refer to.
@@ -146,12 +154,12 @@ impl<'a> NodeReader<'a> {
         }
     }
 
-    /// Exactly one positional argument.
-    fn single_arg(&self, expected: &'static str) -> Result<&'a KdlValue, ConfigError> {
-        let mut all = self.args().into_iter();
-        let (first, _) = all.next().ok_or_else(|| self.missing(expected))?;
-        if let Some((_, at)) = all.next() {
-            return Err(self.unexpected_at(at));
+    /// Exactly one positional argument, as its entry (value, type annotation and location).
+    fn single_arg(&self, expected: &'static str) -> Result<&'a KdlEntry, ConfigError> {
+        let mut all = self.node.entries().iter().filter(|e| e.name().is_none());
+        let first = all.next().ok_or_else(|| self.missing(expected))?;
+        if let Some(e) = all.next() {
+            return Err(self.unexpected_at(locate(self.text, e.span().offset())));
         }
         Ok(first)
     }
@@ -159,6 +167,7 @@ impl<'a> NodeReader<'a> {
     /// Exactly one argument, a `#true` / `#false`.
     pub(crate) fn bool_arg(&self) -> Result<bool, ConfigError> {
         self.single_arg("a #true or #false")?
+            .value()
             .as_bool()
             .ok_or_else(|| self.wrong_type("argument", "#true or #false"))
     }
@@ -166,6 +175,7 @@ impl<'a> NodeReader<'a> {
     /// Exactly one argument, an integer.
     pub(crate) fn int_arg(&self) -> Result<i128, ConfigError> {
         self.single_arg("an integer")?
+            .value()
             .as_integer()
             .ok_or_else(|| self.wrong_type("argument", "an integer"))
     }
@@ -185,29 +195,28 @@ impl<'a> NodeReader<'a> {
             })
     }
 
-    /// Exactly one string argument naming one of `names` (a `const NAMES` table); anything else
-    /// is an `InvalidValue` at the node listing the names in table order.
-    pub(crate) fn enum_arg<T: Copy>(
+    /// Exactly one string argument naming a [`Named`] value; anything else is an `InvalidValue`
+    /// at the node listing the names in table order.
+    pub(crate) fn enum_arg<T: Named>(&self, label: &'static str) -> Result<T, ConfigError> {
+        self.enum_arg_as(label, "argument")
+    }
+
+    /// [`NodeReader::enum_arg`] whose `InvalidValue` names the value `what` (`destination`).
+    pub(crate) fn enum_arg_as<T: Named>(
         &self,
         label: &'static str,
-        names: &[(T, &str)],
+        what: &str,
     ) -> Result<T, ConfigError> {
         let s = self.string_arg(label)?;
-        names
-            .iter()
-            .find_map(|(value, name)| (*name == s).then_some(*value))
-            .ok_or_else(|| {
-                let list: Vec<&str> = names.iter().map(|(_, name)| *name).collect();
-                self.invalid(
-                    "argument",
-                    format!("`{s}` is not one of {}", list.join(", ")),
-                )
-            })
+        T::from_name(s).ok_or_else(|| {
+            let list: Vec<&str> = T::NAMES.iter().map(|(_, name)| *name).collect();
+            self.invalid(what, format!("`{s}` is not one of {}", list.join(", ")))
+        })
     }
 
     /// Exactly one argument, a number: a KDL float (`1.4167`) or an integer (`2`, widened).
     pub(crate) fn float_arg(&self) -> Result<f64, ConfigError> {
-        let value = self.single_arg("a number")?;
+        let value = self.single_arg("a number")?.value();
         #[allow(clippy::cast_precision_loss)]
         value
             .as_float()
@@ -237,6 +246,17 @@ impl<'a> NodeReader<'a> {
     /// Exactly one string argument.
     pub(crate) fn string_arg(&self, label: &'static str) -> Result<&'a str, ConfigError> {
         Ok(self.string_args(&[label])?[0])
+    }
+
+    /// Exactly one string argument that is not blank; `what` names it in the error.
+    pub(crate) fn nonempty_string_arg(
+        &self,
+        label: &'static str,
+        what: &str,
+    ) -> Result<String, ConfigError> {
+        let s = self.string_arg(label)?;
+        self.nonempty(what, s)?;
+        Ok(s.to_string())
     }
 
     /// All positional arguments, all strings (`terminal-args`).
@@ -283,69 +303,23 @@ impl<'a> NodeReader<'a> {
         self.allow_properties(&[])
     }
 
-    /// A non-negative integer property `key`, if present.
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "kept beside the px readers for unitless integer properties"
-        )
-    )]
-    pub(crate) fn u32_prop(&self, key: &str) -> Result<Option<u32>, ConfigError> {
-        let Some(entry) = self.node.entry(key) else {
-            return Ok(None);
-        };
-        let at = locate(self.text, entry.span().offset());
-        let what = format!("property `{key}`");
-        let n = entry
-            .value()
-            .as_integer()
-            .ok_or_else(|| self.wrong_type_at(at, &what, "an integer"))?;
-        u32::try_from(n)
-            .map(Some)
-            .map_err(|_| self.invalid_at(at, &what, format!("{n} is outside 0..={}", u32::MAX)))
-    }
-
-    /// A non-negative integer property `key` within `range`, if present. A negative or oversize
-    /// value is [`NodeReader::u32_prop`]'s error at the property; a value outside `range` is an
-    /// `InvalidValue` at the **node** (where the checks it replaces always reported it).
-    #[cfg_attr(
-        not(test),
-        allow(
-            dead_code,
-            reason = "kept beside the px readers for unitless integer properties"
-        )
-    )]
-    pub(crate) fn u32_prop_in(
-        &self,
-        key: &str,
-        range: RangeInclusive<u32>,
-    ) -> Result<Option<u32>, ConfigError> {
-        let Some(n) = self.u32_prop(key)? else {
-            return Ok(None);
-        };
-        if !range.contains(&n) {
-            return Err(self.invalid(
-                &format!("property `{key}`"),
-                format!("{n} is outside {}..={}", range.start(), range.end()),
-            ));
-        }
-        Ok(Some(n))
-    }
-
     // ---- unit-annotated sizes -----------------------------------------------------------
 
     /// Reads one size entry that must carry a unit annotation: `(px)N` (an integer) or, when
-    /// `unit` is [`SizeUnits::PxOrPt`], `(pt)N` (integer or decimal, converted to px as
-    /// `N * 96 / 72` rounded half away from zero). Returns the px value and the value as
-    /// written (`(pt)80 = 107px`) for range messages. `key` names the key in unit errors.
+    /// `units` is [`SizeUnits::PxOrPt`], `(pt)N` (integer or decimal, converted to px as
+    /// `N * 96 / 72` rounded half away from zero), and checks the px value against `range`.
+    /// `key` names the key in unit errors; `site` says where a value that does not fit a `u32`
+    /// is reported. A value outside `range` is an `InvalidValue` at the **node**, quoting the
+    /// value as written (`(pt)80 = 107px`).
     fn size_entry(
         &self,
         entry: &KdlEntry,
         key: &str,
         what: &str,
         units: SizeUnits,
-    ) -> Result<(i128, String), ConfigError> {
+        range: &RangeInclusive<u32>,
+        site: SizeSite,
+    ) -> Result<u32, ConfigError> {
         let at = locate(self.text, entry.span().offset());
         let value = entry.value();
         let written = value.to_string();
@@ -353,12 +327,12 @@ impl<'a> NodeReader<'a> {
         let Some(ty) = entry.ty().map(|t| t.value()) else {
             return Err(self.invalid_at(at, what, format!("`{key}` needs a unit: {accepted}")));
         };
-        match (ty, units) {
+        let (px, as_written) = match (ty, units) {
             ("px", _) => {
                 let n = value
                     .as_integer()
                     .ok_or_else(|| self.wrong_type_at(at, what, "an integer"))?;
-                Ok((n, format!("(px){n}")))
+                (n, format!("(px){n}"))
             }
             ("pt", SizeUnits::PxOrPt) => {
                 #[allow(clippy::cast_precision_loss)]
@@ -383,29 +357,46 @@ impl<'a> NodeReader<'a> {
                 }
                 #[allow(clippy::cast_possible_truncation)]
                 let px = px as i128;
-                Ok((px, format!("(pt){written} = {px}px")))
+                (px, format!("(pt){written} = {px}px"))
             }
-            ("pt", SizeUnits::Px) => Err(self.invalid_at(
-                at,
-                what,
-                format!("`{key}` accepts only (px), e.g. (px){written}"),
-            )),
-            (other, _) => Err(self.invalid_at(
-                at,
-                what,
-                format!("`{key}` has unknown unit ({other}); use {accepted}"),
-            )),
+            ("pt", SizeUnits::Px) => {
+                return Err(self.invalid_at(
+                    at,
+                    what,
+                    format!("`{key}` accepts only (px), e.g. (px){written}"),
+                ));
+            }
+            (other, _) => {
+                return Err(self.invalid_at(
+                    at,
+                    what,
+                    format!("`{key}` has unknown unit ({other}); use {accepted}"),
+                ));
+            }
+        };
+        let Ok(n) = u32::try_from(px) else {
+            return Err(match site {
+                SizeSite::Property => self.invalid_at(
+                    at,
+                    what,
+                    format!("{as_written} is outside 0..={}", u32::MAX),
+                ),
+                SizeSite::Argument => self.out_of_range(what, &as_written, range),
+            });
+        };
+        if range.contains(&n) {
+            Ok(n)
+        } else {
+            Err(self.out_of_range(what, &as_written, range))
         }
     }
 
-    /// The single positional argument entry, with the existing missing/unexpected errors.
-    fn single_arg_entry(&self, expected: &'static str) -> Result<&'a KdlEntry, ConfigError> {
-        let mut all = self.node.entries().iter().filter(|e| e.name().is_none());
-        let first = all.next().ok_or_else(|| self.missing(expected))?;
-        if let Some(e) = all.next() {
-            return Err(self.unexpected_at(locate(self.text, e.span().offset())));
-        }
-        Ok(first)
+    /// `InvalidValue` at the node: `written` is outside `range`.
+    fn out_of_range(&self, what: &str, written: &str, range: &RangeInclusive<u32>) -> ConfigError {
+        self.invalid(
+            what,
+            format!("{written} is outside {}..={}", range.start(), range.end()),
+        )
     }
 
     fn size_arg_in(
@@ -413,18 +404,9 @@ impl<'a> NodeReader<'a> {
         units: SizeUnits,
         range: RangeInclusive<u32>,
     ) -> Result<u32, ConfigError> {
-        let entry = self.single_arg_entry(units.expected())?;
+        let entry = self.single_arg(units.expected())?;
         let key = self.name();
-        let (n, written) = self.size_entry(entry, key, "argument", units)?;
-        u32::try_from(n)
-            .ok()
-            .filter(|n| range.contains(n))
-            .ok_or_else(|| {
-                self.invalid(
-                    "argument",
-                    format!("{written} is outside {}..={}", range.start(), range.end()),
-                )
-            })
+        self.size_entry(entry, key, "argument", units, &range, SizeSite::Argument)
     }
 
     /// Exactly one `(px)N` argument within `range` (header `divider`, cursor `size`). A bare
@@ -440,8 +422,8 @@ impl<'a> NodeReader<'a> {
         self.size_arg_in(SizeUnits::PxOrPt, range)
     }
 
-    /// A `(px)N` property `key` within `range`, if present. Unit errors are at the property; a
-    /// value outside `range` is an `InvalidValue` at the node (as [`NodeReader::u32_prop_in`]).
+    /// A `(px)N` property `key` within `range`, if present. Unit and overflow errors are at the
+    /// property; a value outside `range` is an `InvalidValue` at the node.
     pub(crate) fn px_prop_in(
         &self,
         key: &str,
@@ -451,18 +433,8 @@ impl<'a> NodeReader<'a> {
             return Ok(None);
         };
         let what = format!("property `{key}`");
-        let (n, written) = self.size_entry(entry, key, &what, SizeUnits::Px)?;
-        let n = u32::try_from(n).map_err(|_| {
-            let at = locate(self.text, entry.span().offset());
-            self.invalid_at(at, &what, format!("{written} is outside 0..={}", u32::MAX))
-        })?;
-        if !range.contains(&n) {
-            return Err(self.invalid(
-                &what,
-                format!("{written} is outside {}..={}", range.start(), range.end()),
-            ));
-        }
-        Ok(Some(n))
+        self.size_entry(entry, key, &what, SizeUnits::Px, &range, SizeSite::Property)
+            .map(Some)
     }
 
     /// A non-negative `(px)N` property `key`, if present (tiling `gap` / `ring` / `ring-inset`).
@@ -505,29 +477,47 @@ impl<'a> NodeReader<'a> {
 
     /// Iterates the children of a block node, rejecting properties and arguments on the block
     /// itself. A child whose name is not in `repeatable` may appear once; a second occurrence is
-    /// [`ConfigError::Duplicate`] at that second child, raised before the caller sees it.
+    /// [`ConfigError::Duplicate`] at that second child, raised before the caller sees it. Children
+    /// may carry properties (the caller validates them).
     pub(crate) fn children(
         &self,
         repeatable: &'static [&'static str],
     ) -> Result<Children<'a>, ConfigError> {
         self.no_properties()?;
         self.no_args()?;
-        Ok(self.children_unchecked(repeatable))
+        Ok(self.children_unchecked(repeatable, None))
     }
 
-    /// Like [`NodeReader::children`] but leaves the block node's own arguments to the caller
-    /// (`output "DP-1" { … }`, whose one argument the caller reads first).
+    /// Like [`NodeReader::children`] but every child must be property-free except those named in
+    /// `exempt` (`None` of them: pass `&[]`); a property elsewhere is an `UnknownProperty`
+    /// raised before the caller sees the child.
+    pub(crate) fn children_strict(
+        &self,
+        repeatable: &'static [&'static str],
+        exempt: &'static [&'static str],
+    ) -> Result<Children<'a>, ConfigError> {
+        self.no_properties()?;
+        self.no_args()?;
+        Ok(self.children_unchecked(repeatable, Some(exempt)))
+    }
+
+    /// Like [`NodeReader::children_strict`] but leaves the block node's own arguments to the
+    /// caller (`output "DP-1" { … }`, whose one argument the caller reads first).
     pub(crate) fn children_keeping_args(
         &self,
         repeatable: &'static [&'static str],
     ) -> Result<Children<'a>, ConfigError> {
         self.no_properties()?;
-        Ok(self.children_unchecked(repeatable))
+        Ok(self.children_unchecked(repeatable, Some(&[])))
     }
 
-    fn children_unchecked(&self, repeatable: &'static [&'static str]) -> Children<'a> {
+    fn children_unchecked(
+        &self,
+        repeatable: &'static [&'static str],
+        strict: Option<&'static [&'static str]>,
+    ) -> Children<'a> {
         let nodes = self.node.children().map_or(&[][..], KdlDocument::nodes);
-        Children::new(self.text, nodes, repeatable)
+        Children::new(self.text, nodes, repeatable, strict)
     }
 }
 
@@ -536,19 +526,23 @@ pub(crate) struct Children<'a> {
     text: &'a str,
     nodes: std::slice::Iter<'a, KdlNode>,
     repeatable: &'static [&'static str],
+    strict: Option<&'static [&'static str]>,
     seen: Vec<&'a str>,
 }
 
 impl<'a> Children<'a> {
+    /// `strict` is `Some(exempt)` to reject properties on every child not named in `exempt`.
     pub(crate) fn new(
         text: &'a str,
         nodes: &'a [KdlNode],
         repeatable: &'static [&'static str],
+        strict: Option<&'static [&'static str]>,
     ) -> Self {
         Self {
             text,
             nodes: nodes.iter(),
             repeatable,
+            strict,
             seen: Vec::new(),
         }
     }
@@ -568,6 +562,12 @@ impl<'a> Iterator for Children<'a> {
                 }));
             }
             self.seen.push(name);
+        }
+        if let Some(exempt) = self.strict
+            && !exempt.contains(&name)
+            && let Err(err) = reader.no_properties()
+        {
+            return Some(Err(err));
         }
         Some(Ok(reader))
     }

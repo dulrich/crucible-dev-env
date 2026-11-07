@@ -6,9 +6,8 @@ use crate::reader::NodeReader;
 
 pub(super) fn parse_idle(node: NodeReader<'_>) -> Result<IdleConfig, ConfigError> {
     let mut out = IdleConfig::default();
-    for child in node.children(&[])? {
+    for child in node.children_strict(&[], &[])? {
         let child = child?;
-        child.no_properties()?;
         let slot = match child.name() {
             "lock-after" => &mut out.lock_after,
             "blank-after" => &mut out.blank_after,

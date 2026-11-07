@@ -6,9 +6,8 @@ use crate::reader::NodeReader;
 
 pub(super) fn parse_keyboard(node: NodeReader<'_>) -> Result<KeyboardConfig, ConfigError> {
     let mut out = KeyboardConfig::default();
-    for child in node.children(&[])? {
+    for child in node.children_strict(&[], &[])? {
         let child = child?;
-        child.no_properties()?;
         match child.name() {
             "layouts" => {
                 let layouts = child.string_list()?;

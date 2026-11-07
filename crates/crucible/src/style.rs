@@ -8,7 +8,7 @@
 //! background.
 
 use crucible_compositor::ipc::OVERLAY_STYLE_ENV;
-use crucible_config::{OverlayStyle, Palette, Rgb};
+use crucible_config::{Named, OverlayStyle, Palette, Rgb};
 
 /// The overlay style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -70,16 +70,6 @@ pub(crate) fn file_stem(t: Stamp) -> String {
     )
 }
 
-/// Expands a leading `~` (alone or `~/...`) to `home`; any other path is returned unchanged. With
-/// no `home` a `~` path is left as written (the write then fails and logs).
-#[must_use]
-pub(crate) fn expand_tilde(path: &Path, home: Option<&str>) -> PathBuf {
-    match (path.strip_prefix("~"), home) {
-        (Ok(rest), Some(home)) if !home.is_empty() => Path::new(home).join(rest),
-        _ => path.to_path_buf(),
-    }
-}
-
 /// Creates `dir` and writes `png` to the first free `cde-<stamp>.png` in it (never overwriting).
 fn write_screenshot_file(dir: &Path, stamp: Stamp, png: &[u8]) -> Result<PathBuf, String> {
     use std::io::Write;
@@ -125,10 +115,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let destination = self.config.screenshot.destination;
         let want_clipboard = destination != ScreenshotDestination::File;
         let want_file = destination != ScreenshotDestination::Clipboard;
-        let dir = expand_tilde(
-            &self.config.screenshot.directory,
-            std::env::var("HOME").ok().as_deref(),
-        );
+        // Already resolved against `$HOME` when the config was loaded.
+        let dir = self.config.screenshot.directory.clone();
         let (tx, rx) = channel::<Delivery>();
         let started = std::time::Instant::now();
         let worker = std::thread::Builder::new()
@@ -279,25 +267,6 @@ mod tests {
             b"a"
         );
         std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
-    fn tilde_expands_only_as_a_leading_component() {
-        let h = Some("/home/u");
-        assert_eq!(
-            expand_tilde(Path::new("~/Pictures/Screenshots"), h),
-            Path::new("/home/u/Pictures/Screenshots")
-        );
-        assert_eq!(expand_tilde(Path::new("~"), h), Path::new("/home/u"));
-        assert_eq!(
-            expand_tilde(Path::new("/abs/~/x"), h),
-            Path::new("/abs/~/x")
-        );
-        assert_eq!(
-            expand_tilde(Path::new("~other/x"), h),
-            Path::new("~other/x")
-        );
-        assert_eq!(expand_tilde(Path::new("~/x"), None), Path::new("~/x"));
     }
 
     #[test]

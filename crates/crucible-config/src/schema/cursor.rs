@@ -9,14 +9,11 @@ const MAX_SIZE: u32 = 256;
 
 pub(super) fn parse_cursor(node: NodeReader<'_>) -> Result<CursorConfig, ConfigError> {
     let mut out = CursorConfig::default();
-    for child in node.children(&[])? {
+    for child in node.children_strict(&[], &[])? {
         let child = child?;
-        child.no_properties()?;
         match child.name() {
             "theme" => {
-                let name = child.string_arg("a theme name")?;
-                child.nonempty("theme", name)?;
-                out.theme = Some(name.to_string());
+                out.theme = Some(child.nonempty_string_arg("a theme name", "theme")?);
             }
             "size" => out.size = Some(child.px_arg_in(1..=MAX_SIZE)?),
             _ => return Err(child.unknown_node("cursor")),

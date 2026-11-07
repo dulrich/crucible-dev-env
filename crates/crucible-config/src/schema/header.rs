@@ -3,24 +3,18 @@
 use crate::error::ConfigError;
 use crate::model::{
     HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderConfig,
-    HeaderMode, HeaderStart,
 };
 use crate::reader::NodeReader;
 
 pub(super) fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigError> {
     let mut out = HeaderConfig::default();
-    for child in node.children(&[])? {
+    for child in node.children_strict(&[], &["divider"])? {
         let child = child?;
-        if child.name() != "divider" {
-            child.no_properties()?;
-        }
         match child.name() {
-            "mode" => out.mode = child.enum_arg("a mode string", &HeaderMode::NAMES)?,
-            "start" => out.start = child.enum_arg("a start string", &HeaderStart::NAMES)?,
+            "mode" => out.mode = child.enum_arg("a mode string")?,
+            "start" => out.start = child.enum_arg("a start string")?,
             "font" => {
-                let s = child.string_arg("a font path or family string")?;
-                child.nonempty("font", s)?;
-                out.font = s.to_string();
+                out.font = child.nonempty_string_arg("a font path or family string", "font")?;
             }
             "size" => out.size = child.font_size_arg_in(HEADER_SIZE_MIN..=HEADER_SIZE_MAX)?,
             "divider" => {
@@ -44,7 +38,7 @@ pub(super) fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigE
 mod tests {
     use super::super::parse;
     use crate::error::ConfigError;
-    use crate::model::{Config, HeaderMode, Rgb};
+    use crate::model::{Config, HeaderMode, Named, Rgb};
 
     #[test]
     fn header_defaults_and_modes() {
@@ -75,7 +69,7 @@ mod tests {
 
     #[test]
     fn header_start_default_and_parse() {
-        use crate::model::HeaderStart;
+        use crate::model::{HeaderStart, Named};
         assert_eq!(Config::default().header.start, HeaderStart::Hidden);
         for (name, start) in [
             ("shown", HeaderStart::Shown),
@@ -258,7 +252,7 @@ mod tests {
     fn mode_names_roundtrip_in_table_order() {
         let names: Vec<&str> = HeaderMode::NAMES.iter().map(|(_, n)| *n).collect();
         assert_eq!(names, ["off", "always", "toggle"]);
-        for (mode, name) in HeaderMode::NAMES {
+        for &(mode, name) in HeaderMode::NAMES {
             assert_eq!(mode.as_str(), name);
             assert_eq!(HeaderMode::from_name(name), Some(mode));
         }
