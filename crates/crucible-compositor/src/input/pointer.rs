@@ -16,7 +16,7 @@ use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER};
 
 use tracing::{info, warn};
 
-use super::hover::{HoverTarget, hover_entered, hover_pane_key};
+use super::hover::{HoverTarget, SwitchHover, hover_entered, hover_pane_key, switch_hover_action};
 use super::modal::{
     DeferredHover, HoverDecision, InputMode, deferred_hover_action, hover_decision, hover_tracks,
     press_route,
@@ -505,6 +505,45 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.hover_target = current.clone();
         if let (DeferredHover::Focus, Some(target)) = (action, current) {
             self.focus_hover_target(target, managed);
+        }
+    }
+
+    /// Focus-follows-mouse after a workspace switch: when the workspace shown on the output under
+    /// the pointer changed since the last re-layout, focus moves to the pane under the pointer as
+    /// if the pointer had just entered it, instead of waiting for the next pointer motion. Only a
+    /// pane is focused (over a gap or the header strip the switched workspace keeps its own
+    /// focus). An overlay or a pointer grab defers it to a later re-layout
+    /// ([`switch_hover_action`]). Called at the end of every
+    /// [`apply_layout`](Self::apply_layout).
+    pub(crate) fn hover_after_workspace_switch(&mut self) {
+        let location = self.pointer.current_location();
+        let shown = self
+            .space
+            .output_under(location)
+            .next()
+            .and_then(crate::layout::model_output_id)
+            .and_then(|id| self.layout.world.output(id))
+            .map(|o| o.active_workspace());
+        let mode = self.input_mode();
+        let action = switch_hover_action(
+            self.hover_workspace.as_ref(),
+            shown.as_ref(),
+            self.config.focus_follows_mouse,
+            mode.is_locked(),
+            matches!(mode, InputMode::Normal),
+            self.pointer.is_grabbed(),
+        );
+        match action {
+            SwitchHover::Wait => {}
+            SwitchHover::Settle => self.hover_workspace = shown,
+            SwitchHover::Refocus => {
+                self.hover_workspace = shown;
+                let (current, managed) = self.hover_under_pointer();
+                self.hover_target = current.clone();
+                if let Some(target @ HoverTarget::Pane(_)) = current {
+                    self.focus_hover_target(target, managed);
+                }
+            }
         }
     }
 

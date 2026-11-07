@@ -279,6 +279,9 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// A focus-follows-mouse enter that a mapped overlay held back (overlays are modal). The next
     /// overlay open applies it first, so the overlay follows the pointer to its output.
     pub hover_deferred: bool,
+    /// The workspace last seen shown on the output under the pointer; a change refocuses the pane
+    /// under the pointer ([`Self::hover_after_workspace_switch`]).
+    pub hover_workspace: Option<crucible_layout::WorkspaceId>,
     /// Workspace persistence, IPC and picker state; see [`crate::persist`].
     pub persist: crate::persist::PersistState,
     /// Workspace header strip toggle and consumed-button record.
@@ -482,6 +485,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             bindings: Bindings::default(),
             hover_target: None,
             hover_deferred: false,
+            hover_workspace: None,
             persist: crate::persist::PersistState::new(store_dir),
             header: crate::header::HeaderState::default(),
             header_text: crate::text::TextRenderer::from_font(None),

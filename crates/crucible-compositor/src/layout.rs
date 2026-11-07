@@ -142,6 +142,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let flips_seen = !flipped.is_empty();
         self.fullscreen_applied = fullscreen;
         if diff.is_empty() && flipped.is_empty() {
+            self.hover_after_workspace_switch();
             return;
         }
 
@@ -204,6 +205,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
 
         self.projection = next;
+        // After the Space matches the model, so the pointer resolves against what is shown.
+        self.hover_after_workspace_switch();
     }
 
     /// The pane under global pointer `location` on any bound output's active workspace, using the
