@@ -25,7 +25,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitStatus};
 
 use crate::cli::{Parsed, help_requested};
-use crate::tty::RawGuard;
+use crate::tty::{RawGuard, install_noop_handler};
 
 /// Usage text for `crucible resume --help`.
 pub const USAGE: &str = "usage: crucible resume [--now [--exit] | --lost] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). With --now, --exit exits with the command's exit code instead of starting a shell afterwards (--exit without --now is a usage error). If the command exits abnormally (a crash signal or a nonzero exit code other than a Ctrl+C), a crash banner offers Enter to run it again or Ctrl+C for a shell (or to close the terminal with --exit). --lost (CDE's placeholder for a terminal whose window was lost when its terminal process died) adds a line to the banner saying so; Enter re-runs the command as usual, and with no command the shell starts at once. --lost excludes --now. Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
@@ -243,29 +243,13 @@ fn run_command(shell: &OsString, cmd: &str) -> Option<ExitStatus> {
     }
 }
 
-extern "C" fn noop_handler(_: libc::c_int) {}
-
 /// Installs a do-nothing handler for SIGINT and SIGQUIT so a Ctrl+C aimed at the restored command
 /// does not kill `resume`. A handler (not `SIG_IGN`) is used because caught dispositions reset to
 /// default across `exec`, so the spawned command and the final shell get normal signal semantics.
 fn ignore_interrupts_while_resident() {
     for sig in [libc::SIGINT, libc::SIGQUIT] {
-        // SAFETY: `sigaction` is called with a zero-initialised (valid) `sigaction` struct whose
-        // handler is an `extern "C"` function that does nothing, which is trivially
-        // async-signal-safe; the mask is emptied via `sigemptyset` on a valid pointer and the old
-        // action pointer is null, which `sigaction` permits.
-        #[allow(unsafe_code)]
-        unsafe {
-            let mut act: libc::sigaction = std::mem::zeroed();
-            act.sa_sigaction = noop_handler as extern "C" fn(libc::c_int) as libc::sighandler_t;
-            act.sa_flags = libc::SA_RESTART;
-            libc::sigemptyset(&raw mut act.sa_mask);
-            if libc::sigaction(sig, &raw const act, std::ptr::null_mut()) != 0 {
-                eprintln!(
-                    "crucible resume: cannot install signal handler: {}",
-                    std::io::Error::last_os_error()
-                );
-            }
+        if let Err(e) = install_noop_handler(sig, true) {
+            eprintln!("crucible resume: cannot install signal handler: {e}");
         }
     }
 }

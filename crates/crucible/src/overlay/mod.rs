@@ -10,7 +10,7 @@ use crucible_compositor::ipc::{Request, Response, SOCKET_ENV};
 
 use crate::client::{Client, ClientError, socket_from_env};
 use crate::style::Style;
-use crate::tty::{RawGuard, window_size};
+use crate::tty::{RawGuard, redraw_on_resize, window_size};
 
 pub mod list;
 pub mod term;
@@ -121,6 +121,11 @@ pub fn run_overlay<O: Overlay>(
         eprintln!("crucible {name}: stdin is not a terminal");
         return 1;
     };
+    // A resize (an X11 terminal mapping at its default size first) interrupts the read below,
+    // and the loop redraws at the new size.
+    if let Err(e) = redraw_on_resize() {
+        eprintln!("crucible {name}: cannot watch for resizes: {e}");
+    }
     let code = event_loop(name, &mut overlay, &mut client);
     drop(guard);
     code

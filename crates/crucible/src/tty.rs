@@ -94,3 +94,64 @@ pub fn window_size() -> (u16, u16) {
         _ => (80, 24),
     }
 }
+
+extern "C" fn noop_handler(_: libc::c_int) {}
+
+/// Installs a do-nothing handler for `sig`. With `restart` a blocking read resumes after the
+/// signal (`SA_RESTART`); without it the read returns `Interrupted`, which is how a loop learns of
+/// the signal. A handler (not `SIG_IGN`) resets to the default across `exec`, so spawned commands
+/// get normal signal semantics. Reports why it failed.
+pub fn install_noop_handler(sig: libc::c_int, restart: bool) -> std::io::Result<()> {
+    // SAFETY: `sigaction` is called with a zero-initialised (valid) `sigaction` struct whose
+    // handler is an `extern "C"` function that does nothing, which is trivially
+    // async-signal-safe; the mask is emptied via `sigemptyset` on a valid pointer and the old
+    // action pointer is null, which `sigaction` permits.
+    #[allow(unsafe_code)]
+    unsafe {
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = noop_handler as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        act.sa_flags = if restart { libc::SA_RESTART } else { 0 };
+        libc::sigemptyset(&raw mut act.sa_mask);
+        if libc::sigaction(sig, &raw const act, std::ptr::null_mut()) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// Makes a terminal resize interrupt a blocking stdin read, so an overlay redraws at the new size
+/// at once. An X11 terminal (urxvt) maps at its own default size and is resized afterwards, and on
+/// a height shrink it drops the top lines; without a redraw the overlay stays clipped until a key.
+pub fn redraw_on_resize() -> std::io::Result<()> {
+    install_noop_handler(libc::SIGWINCH, false)
+}
+
+#[cfg(test)]
+mod signal_tests {
+    use super::install_noop_handler;
+
+    #[test]
+    fn an_interrupting_handler_makes_a_blocking_read_return_interrupted() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+        // SIGUSR2 is unused by the test harness; the handler is installed without SA_RESTART.
+        install_noop_handler(libc::SIGUSR2, false).unwrap();
+        let (mut reader, _writer) = UnixStream::pair().unwrap();
+        // SAFETY: `pthread_self` has no preconditions; the id is only used by `pthread_kill`
+        // below, while this thread is still alive (it is blocked in `read`).
+        #[allow(unsafe_code)]
+        let me = unsafe { libc::pthread_self() } as usize;
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            // SAFETY: `me` is the live test thread blocked in `read`; SIGUSR2 has a no-op handler.
+            #[allow(unsafe_code)]
+            unsafe {
+                libc::pthread_kill(me as libc::pthread_t, libc::SIGUSR2);
+            }
+        });
+        let mut buf = [0u8; 8];
+        let err = reader.read(&mut buf).unwrap_err();
+        killer.join().unwrap();
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    }
+}
