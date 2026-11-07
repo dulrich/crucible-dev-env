@@ -539,7 +539,7 @@ mod tests {
         let p = RenamePrompt::new("x".into());
         assert_eq!(
             p.render(40, 6),
-            "\x1b[H\x1b[2J\r\n rename> x_\r\n\r\n\r\n\r\n"
+            "\x1b[H\x1b[2J\r\n  rename> x_\r\n\r\n\r\n\r\n"
         );
     }
 

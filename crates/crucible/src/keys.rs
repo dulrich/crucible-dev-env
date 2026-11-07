@@ -355,13 +355,13 @@ mod tests {
             &lines[..8],
             [
                 "",
-                " keys> _",
-                " Panes & windows",
-                "   Super+W        close-pane",
-                " Launch & overlays",
-                "   Super+Return   open-launcher",
-                " Session & system",
-                "   Super+Shift+Q  quit",
+                "  keys> _",
+                "  Panes & windows",
+                "    Super+W        close-pane",
+                "  Launch & overlays",
+                "    Super+Return   open-launcher",
+                "  Session & system",
+                "    Super+Shift+Q  quit",
             ]
         );
         assert!(

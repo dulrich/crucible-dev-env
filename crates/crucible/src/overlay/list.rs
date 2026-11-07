@@ -9,6 +9,10 @@ use super::Outcome;
 use super::term::{Key, fit, sanitize, window};
 use crate::style::Style;
 
+/// Blank columns each side of the overlay text: two, so the side margin looks as wide as the one
+/// blank line at the top and bottom (a terminal cell is about twice as tall as it is wide).
+pub const SIDE_MARGIN: usize = 2;
+
 /// What [`ListState::apply`] did with a key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Applied {
@@ -122,8 +126,8 @@ impl ListState {
     }
 
     /// Renders the whole screen for a `cols` x `rows` terminal (raw-mode line endings) inside a
-    /// one-cell blank margin (first and last lines blank, one leading space, one free column on
-    /// the right; the highlight covers the fitted text only). Never more than `rows` lines nor a
+    /// blank margin (first and last lines blank, [`SIDE_MARGIN`] leading spaces and as many free
+    /// columns on the right; the highlight covers the fitted text only). Never more than `rows` lines nor a
     /// line wider than `cols`; on tiny sizes the prompt wins, then the status line, then the rows.
     /// Inside: the `prompt` + query line, the optional column `header` (display text, sanitised, without the
     /// indent; dimmed, never highlighted, and it costs the rows window one row so selection indices
@@ -137,15 +141,17 @@ impl ListState {
             body,
             idle_status,
         } = frame;
-        // One blank cell of margin on every side; the interior saturates to nothing on tiny sizes.
-        let width = usize::from(cols).saturating_sub(2);
+        // A blank margin: one line top and bottom, [`SIDE_MARGIN`] columns each side. The interior
+        // saturates to nothing on tiny sizes, and a line with no room for text stays empty.
+        let width = usize::from(cols).saturating_sub(2 * SIDE_MARGIN);
+        let pad = " ".repeat(SIDE_MARGIN);
         let rows = usize::from(rows);
         let inner = rows.saturating_sub(2);
         let text_line = |text: &str, wrap: &dyn Fn(&str) -> String| -> String {
-            if cols == 0 || text.is_empty() {
+            if width == 0 || text.is_empty() {
                 String::new()
             } else {
-                format!(" {}", wrap(&fit(text, width)))
+                format!("{pad}{}", wrap(&fit(text, width)))
             }
         };
         let plain = |t: &str| t.to_string();
@@ -326,7 +332,7 @@ mod tests {
         );
         assert_eq!(
             out,
-            "\x1b[H\x1b[2J\r\n p> a_\r\n   one\r\n \x1b[7m  two\x1b[0m\r\n\r\n\r\n idle\r\n"
+            "\x1b[H\x1b[2J\r\n  p> a_\r\n    one\r\n  \x1b[7m  two\x1b[0m\r\n\r\n\r\n  idle\r\n"
         );
         l.status = Some("shown".into());
         assert!(
@@ -336,7 +342,7 @@ mod tests {
                 8,
                 &Style::Terminal
             )
-            .ends_with(" shown\r\n")
+            .ends_with("\r\n  shown\r\n")
         );
     }
 
@@ -352,7 +358,7 @@ mod tests {
         );
         assert_eq!(
             out,
-            "\x1b[H\x1b[2J\r\n p> _\r\n \x1b[2m  H\x1b[22m\r\n \x1b[7m  r0\x1b[0m\r\n   r1\r\n   r2\r\n idle\r\n"
+            "\x1b[H\x1b[2J\r\n  p> _\r\n  \x1b[2m  H\x1b[22m\r\n  \x1b[7m  r0\x1b[0m\r\n    r1\r\n    r2\r\n  idle\r\n"
         );
     }
 
@@ -363,9 +369,10 @@ mod tests {
         let out =
             ListState::new().render(frame("p> ", Some("H"), Body::Rows(&rows), ""), 20, 8, &st);
         let line = out.split("\r\n").nth(2).unwrap();
-        assert_eq!(line, format!(" {}", st.dim("  H")));
+        assert_eq!(line, format!("  {}", st.dim("  H")));
         assert!(
-            line.starts_with(" \x1b[38;2;123;123;125m") && line.ends_with("\x1b[38;2;233;233;234m")
+            line.starts_with("  \x1b[38;2;123;123;125m")
+                && line.ends_with("\x1b[38;2;233;233;234m")
         );
         assert!(!line.contains("\x1b[0m"));
     }
@@ -390,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn margin_blank_first_and_last_leading_space_and_free_right_column() {
+    fn margin_blank_first_and_last_and_two_columns_each_side() {
         let rows = vec!["a-very-long-row-text-indeed".to_string()];
         let out = ListState::new().render(
             frame(
@@ -408,16 +415,16 @@ mod tests {
         assert_eq!(lines[0], "");
         assert_eq!(lines[5], "");
         for l in &lines[1..5] {
-            assert!(l.is_empty() || l.starts_with(' '), "{l:?}");
+            assert!(l.is_empty() || l.starts_with("  "), "{l:?}");
         }
         let plain: Vec<String> = lines
             .iter()
             .map(|l| l.replace("\x1b[7m", "").replace("\x1b[0m", ""))
             .collect();
-        assert!(plain.iter().all(|l| l.chars().count() <= 11), "{plain:?}");
+        assert!(plain.iter().all(|l| l.chars().count() <= 10), "{plain:?}");
         assert_eq!(
-            plain[4], " a-very-lon",
-            "status fitted to cols - 2 with the margin"
+            plain[4], "  a-very-l",
+            "status fitted to cols - 4 with the margin"
         );
     }
 
@@ -441,11 +448,11 @@ mod tests {
         assert_eq!(
             &lines[1..6],
             [
-                " keys> _",
-                " Head",
-                " \x1b[7m  row\x1b[0m",
-                " Head2",
-                "   row2"
+                "  keys> _",
+                "  Head",
+                "  \x1b[7m  row\x1b[0m",
+                "  Head2",
+                "    row2"
             ]
         );
         assert!(!out.contains("\x1b[7m Head"));
@@ -517,6 +524,6 @@ mod tests {
             3,
             &Style::Terminal,
         );
-        assert_eq!(lines_of(&out), ["", " p> _", ""]);
+        assert_eq!(lines_of(&out), ["", "  p> _", ""]);
     }
 }
