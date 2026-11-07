@@ -38,11 +38,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.raw_output_rects()
             .into_iter()
             .map(|(id, rect)| {
-                // A fullscreen output reserves no header; its stored visibility is untouched.
-                let reserved = if self.layout.world.output_fullscreen(id).is_some() {
-                    0
+                // `header_shown` is false on a fullscreen output (its stored visibility is untouched).
+                let reserved = if self.header_shown(id) {
+                    crate::header::strip_height(self.config.header.size)
                 } else {
-                    crate::header::reserved_height(&self.config.header, self.header.is_visible(id))
+                    0
                 };
                 (id, rect.shrink_top(reserved))
             })

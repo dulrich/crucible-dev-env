@@ -23,7 +23,6 @@ use super::modal::{
 };
 use crate::element::WindowElement;
 use crate::focus::{KeyboardFocusTarget, PointerFocusTarget};
-use crate::header::{HeaderPress, ReleaseAction, drag_action};
 use crate::pointer_lock::{MotionOutcome, clamp_to_fullscreen, constrained_motion};
 use crate::state::{Backend, CrucibleState};
 use smithay::wayland::seat::WaylandFocus;
@@ -256,54 +255,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Only called when [`press_route`] allows a header click (`Normal` mode).
     fn consume_header_press(&mut self, button: u32) -> bool {
         let at = self.pointer.current_location();
-        let Some((output, workspace)) = self.header_hit(at.x.floor() as i32, at.y.floor() as i32)
-        else {
+        let Some(press) = self.header_hit(at.x.floor() as i32, at.y.floor() as i32) else {
             return false;
         };
-        self.header
-            .press(button, HeaderPress { output, workspace }, (at.x, at.y));
+        self.header.press(button, press, (at.x, at.y));
         true
     }
 
     /// Whether the input mode is `Normal` (no lock or overlay).
     pub(crate) fn input_is_normal(&self) -> bool {
         matches!(self.input_mode(), InputMode::Normal)
-    }
-
-    /// Applies a consumed header press at its release: a click, a reorder or nothing, per
-    /// [`drag_action`]. Re-checks the input mode (a lock or overlay may have opened since
-    /// the press).
-    fn finish_header_press(&mut self, press: HeaderPress, dragged: bool) {
-        let at = self.pointer.current_location();
-        let release = self.header_hit(at.x.floor() as i32, at.y.floor() as i32);
-        let normal = matches!(self.input_mode(), InputMode::Normal);
-        let orders = self.header_orders();
-        match drag_action(press, release, normal, dragged, &orders) {
-            ReleaseAction::None => {}
-            ReleaseAction::Click(p) => self.header_click(p.output, p.workspace),
-            ReleaseAction::Reorder { workspace, to } => {
-                if let Err(err) =
-                    self.with_model(|world| world.reorder_workspace(workspace, to).map(|_| ()))
-                {
-                    tracing::warn!(%err, "header drag: workspace reorder failed");
-                }
-            }
-            ReleaseAction::MoveToOutput {
-                workspace,
-                output,
-                to,
-            } => {
-                match self
-                    .with_model(|world| world.move_workspace_to_output_at(workspace, output, to))
-                {
-                    Ok(()) => {}
-                    Err(err @ crucible_layout::LayoutError::LastWorkspace(_)) => {
-                        tracing::debug!(%err, "header drag: the last workspace stays on its output");
-                    }
-                    Err(err) => tracing::warn!(%err, "header drag: workspace move failed"),
-                }
-            }
-        }
     }
 
     /// Re-resolves pointer focus at the current location (a synthetic motion with no movement):
