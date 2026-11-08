@@ -27,9 +27,9 @@ pub use error::{ConfigError, Location};
 pub use model::{
     AppTiling, Config, CursorConfig, DEFAULT_DIVIDER_COLOR, DEFAULT_HEADER_FONT,
     HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderConfig,
-    HeaderMode, HeaderStart, IdleConfig, KeyboardConfig, LauncherConfig, Named, PickerConfig, Rgb,
-    ScreenshotConfig, ScreenshotDestination, TerminalConfig, TerminalTiling, TilingConfig,
-    clamp_ring, substitute_gap,
+    HeaderMode, HeaderStart, IdleConfig, KeyboardConfig, LauncherConfig, Named, NightLightConfig,
+    PickerConfig, Rgb, ScreenshotConfig, ScreenshotDestination, TerminalConfig, TerminalTiling,
+    TilingConfig, clamp_ring, substitute_gap,
 };
 pub use overlay::{
     FOOT_UNBOUND_ACTIONS, GHOSTTY_OVERLAY_DEFAULT_ARGS, N1_DARK, N1_LIGHT, N1_MED, OverlayConfig,

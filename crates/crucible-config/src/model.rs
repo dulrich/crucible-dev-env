@@ -365,6 +365,20 @@ pub struct IdleConfig {
     pub blank_after: Option<u32>,
 }
 
+/// Built-in night light (`night-light { temperature 4500; start "21:00"; end "07:00"; fade-minutes 30 }`).
+/// `start`/`end` are local minutes of the day (`0..1440`), `start != end`; the window may wrap midnight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NightLightConfig {
+    /// Colour temperature in kelvin inside the window. `2500..=6500`, default 4500.
+    pub temperature: u32,
+    /// Window start, minutes after local midnight (`0..1440`).
+    pub start: u16,
+    /// Window end (exclusive), minutes after local midnight (`0..1440`); never equal to `start`.
+    pub end: u16,
+    /// Minutes of linear fade before `start` and after `end`. `0..=180`, default 30; 0 is a hard step.
+    pub fade_minutes: u16,
+}
+
 /// Pointer cursor theme and size (`cursor { theme "Adwaita"; size (px)24 }`); `None` defers to the
 /// `XCURSOR_THEME`/`XCURSOR_SIZE` environment, then to `default`/24.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -438,6 +452,8 @@ pub struct Config {
     pub keyboard: KeyboardConfig,
     /// Idle lock and blank timers (both off by default).
     pub idle: IdleConfig,
+    /// Night light schedule; `None` (no `night-light` block) leaves the display ramp untouched.
+    pub night_light: Option<NightLightConfig>,
     /// Pointer cursor theme and size (both unset by default).
     pub cursor: CursorConfig,
     /// Screenshot destination and directory.
@@ -487,6 +503,7 @@ impl Default for Config {
             header: HeaderConfig::default(),
             keyboard: KeyboardConfig::default(),
             idle: IdleConfig::default(),
+            night_light: None,
             cursor: CursorConfig::default(),
             screenshot: ScreenshotConfig::default(),
             launcher: LauncherConfig::default(),

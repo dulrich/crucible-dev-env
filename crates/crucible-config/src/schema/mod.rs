@@ -6,6 +6,7 @@ mod cursor;
 mod header;
 mod idle;
 mod keyboard;
+mod night_light;
 mod output;
 mod overlay;
 mod screenshot;
@@ -68,6 +69,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "cursor" => config.cursor = cursor::parse_cursor(node)?,
             "screenshot" => config.screenshot = screenshot::parse_screenshot(node)?,
             "idle" => config.idle = idle::parse_idle(node)?,
+            "night-light" => config.night_light = Some(night_light::parse_night_light(node)?),
             "output" => {
                 let (name, out) = output::parse_output(node)?;
                 if config.outputs.insert(name.clone(), out).is_some() {

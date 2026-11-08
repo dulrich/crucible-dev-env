@@ -45,6 +45,9 @@ pub mod render;
 /// `zwp_linux_dmabuf_v1` global creation and import notification shared by both backends.
 pub mod dmabuf;
 
+/// Night light: scheduled colour temperature as a per-CRTC gamma ramp (pure model first).
+pub mod night_light;
+
 /// The compositor-drawn pointer cursor (the single cursor owner).
 pub mod cursor;
 

@@ -215,6 +215,27 @@ Any input event (key, pointer, touch, gesture) restarts the idle period and wake
 
 Blanking powers the monitors off on the TTY (DRM) backend; under the nested `winit` backend it does nothing. CDE also advertises `ext-idle-notify-v1` and `zwp-idle-inhibit-manager-v1`, so third-party idle clients and idle-inhibiting apps work whether or not an `idle` block is present.
 
+### `night-light`
+
+```kdl
+night-light {
+    temperature 4500   // K, 2500..=6500, default 4500
+    start "21:00"      // HH:MM local, required
+    end "07:00"        // HH:MM local, required
+    fade-minutes 30    // 0..=180, default 30
+}
+```
+
+A built-in night light: a scheduled colour-temperature shift, applied as a gamma ramp on every active output. It is **off** without the block, and CDE then never writes a ramp. `start` and `end` are required and written `"HH:MM"` (exactly two digits each, 00-23 and 00-59); `start == end` is an error, and a window with `end` earlier than `start` wraps midnight. Each child may appear once. A value out of range, a malformed time or an unknown child is a located config error (never rounded or clamped).
+
+- `temperature` — the colour temperature in kelvin while the window is active. 6500 K is no tint; lower is warmer.
+- Schedule — the full `temperature` holds from `start` (inclusive) to `end` (exclusive) in local time. Over the `fade-minutes` before `start` the temperature falls linearly from 6500 K, and over the `fade-minutes` after `end` it rises linearly back to 6500 K. `fade-minutes 0` is a hard step.
+- Overlap rule — if the daytime gap between `end` and the next `start` is shorter than `2 * fade-minutes`, the two fades overlap, and inside the gap the **lower** (warmer) of the two ramp values applies; the result never exceeds 6500 K.
+
+The `night-light` verb (`night-light on|off|toggle|auto|<kelvin>`, no default chord, also `crucible msg exec night-light 4000`) arrives with this block: `on` forces the configured `temperature` (4500 K without a block), `off` forces 6500 K, `toggle` flips between them, `auto` returns to the schedule, and a number forces that temperature (2500-6500). A forced value holds until `auto` or a restart. A hot reload applies a changed block.
+
+Night light works on the TTY (DRM) backend only; under the nested `winit` backend it has no effect. Screenshots are unaffected, because the ramp is applied at scanout.
+
 ### `cursor`
 
 ```kdl
@@ -365,6 +386,12 @@ header {
 idle {
     lock-after 300
     blank-after 600
+}
+night-light {
+    temperature 4500
+    start "21:00"
+    end "07:00"
+    fade-minutes 30
 }
 cursor {
     theme "Adwaita"
