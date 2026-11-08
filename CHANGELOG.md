@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.5.3 — 2026-11-07
+
+### Added
+
+- `unpin-workspace` verb (unbound by default): clears every slot pin naming the active workspace, removing its `Super+<digit>` shortcuts without deleting the workspace. Bind it with `bind "<chord>" "unpin-workspace"` or run `crucible msg exec unpin-workspace`.
+
 ## 0.5.2 — 2026-11-07
 
 ### Fixed
