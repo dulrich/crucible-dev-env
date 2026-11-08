@@ -4,6 +4,13 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.5.4 — 2026-11-08
+
+### Added
+
+- Night light: a scheduled colour-temperature shift applied as a gamma ramp on every active output, configured by a new `night-light { temperature; start; end; fade-minutes }` block (default 4500 K, range 2500-6500 K; `start`/`end` are `"HH:MM"` local and may wrap midnight; hot-reloadable). Without the block, and without using the verb, CDE never writes a ramp.
+- `night-light on|off|toggle|auto|<kelvin>` verb (unbound by default; also `crucible msg exec night-light 4000`): forces a temperature until `auto` or a restart. Night light works on the TTY (DRM) backend only; under nested `winit` it has no effect, and screenshots are unaffected.
+
 ## 0.5.3 — 2026-11-07
 
 ### Added
