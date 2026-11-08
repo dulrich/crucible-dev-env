@@ -283,6 +283,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             error!(%err, "cannot arm the persistence timer; auto-save disabled");
         }
         self.start_idle_timer();
+        self.start_night_light_timer();
     }
 
     /// The startup session step, called once by each backend after its initial outputs are

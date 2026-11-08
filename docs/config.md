@@ -232,7 +232,7 @@ A built-in night light: a scheduled colour-temperature shift, applied as a gamma
 - Schedule — the full `temperature` holds from `start` (inclusive) to `end` (exclusive) in local time. Over the `fade-minutes` before `start` the temperature falls linearly from 6500 K, and over the `fade-minutes` after `end` it rises linearly back to 6500 K. `fade-minutes 0` is a hard step.
 - Overlap rule — if the daytime gap between `end` and the next `start` is shorter than `2 * fade-minutes`, the two fades overlap, and inside the gap the **lower** (warmer) of the two ramp values applies; the result never exceeds 6500 K.
 
-The `night-light` verb (`night-light on|off|toggle|auto|<kelvin>`, no default chord, also `crucible msg exec night-light 4000`) arrives with this block: `on` forces the configured `temperature` (4500 K without a block), `off` forces 6500 K, `toggle` flips between them, `auto` returns to the schedule, and a number forces that temperature (2500-6500). A forced value holds until `auto` or a restart. A hot reload applies a changed block.
+The `night-light` verb (`night-light on|off|toggle|auto|<kelvin>`, no default chord, also `crucible msg exec night-light 4000`) overrides it: `on` forces the configured `temperature` (4500 K without a block), `off` forces 6500 K, `toggle` flips between them, `auto` returns to the schedule, and a number forces that temperature (2500-6500). A forced value holds until `auto` or a restart. A hot reload applies a changed block.
 
 Night light works on the TTY (DRM) backend only; under the nested `winit` backend it has no effect. Screenshots are unaffected, because the ramp is applied at scanout.
 
@@ -334,6 +334,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `capture-workspace-root` | (default chord `Super+Shift+D`) Make the focused terminal's current directory the active **workspace root**, the folder new terminals and apps in this workspace start in (running windows are untouched). Fails and changes nothing if the focused window is not a terminal. Not the picker `root` config folders |
 | `set-workspace-root` | (default chord `Super+Ctrl+Shift+D`) Open the workspace-root prompt in the picker overlay, prefilled with the current root; an empty answer clears it. `crucible msg root <path>` / `root -` does the same over IPC |
 | `lock` | Lock the screen: spawn `lock-command` (default chord `Super+Escape`) |
+| `night-light <on\|off\|toggle\|auto\|kelvin>` | Set the [night light](#night-light): `on` forces the configured `temperature` (4500 K without a block), `off` forces 6500 K, `toggle` flips between them, `auto` returns to the schedule, a number (2500-6500) forces that temperature. Held until `auto` or a restart. No default chord; `crucible msg exec night-light 4000` works |
 | `screenshot` | Capture the focused output and deliver it per [`screenshot`](#screenshot) (default chord `Super+Print`) |
 | `snip` | Interactive snip: click a window, drag a region, click the background or `Enter` for the output; `Esc`, right-click or the chord again cancels (default chord `Super+Shift+Print`) |
 | `none` | Unbind the chord |

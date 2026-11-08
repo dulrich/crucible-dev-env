@@ -27,6 +27,40 @@ use crucible_layout::Direction;
 /// connects back to the compositor.
 pub const DEFAULT_TERMINALS: &[&str] = &["foot", "alacritty", "kitty", "weston-terminal"];
 
+/// The argument of [`Action::NightLight`]. The compositor maps it onto its own night-light model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NightLightArg {
+    /// `on`: force the configured night temperature.
+    On,
+    /// `off`: force no tint (6500 K).
+    Off,
+    /// `toggle`: `off` when tinted, else `on`.
+    Toggle,
+    /// `auto`: clear the override and follow the schedule.
+    Auto,
+    /// `<kelvin>`: a fixed temperature, [`NightLightArg::MIN_KELVIN`] to [`NightLightArg::MAX_KELVIN`].
+    Kelvin(u32),
+}
+
+impl NightLightArg {
+    /// The lowest accepted temperature.
+    pub const MIN_KELVIN: u32 = 2500;
+    /// The highest accepted temperature (no tint).
+    pub const MAX_KELVIN: u32 = 6500;
+}
+
+impl std::fmt::Display for NightLightArg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::On => f.write_str("on"),
+            Self::Off => f.write_str("off"),
+            Self::Toggle => f.write_str("toggle"),
+            Self::Auto => f.write_str("auto"),
+            Self::Kelvin(k) => write!(f, "{k}"),
+        }
+    }
+}
+
 /// A CDE verb triggered by an intercepted `Super`-leader chord (or, for [`Action::VtSwitch`], a
 /// libinput `Ctrl+Alt+F<n>` chord independent of the leader).
 ///
@@ -161,6 +195,9 @@ pub enum Action {
     /// Spawn the configured `lock-command` (a screen locker, e.g. `swaylock`) detached. The lock
     /// itself starts only when the locker makes its `ext-session-lock-v1` request. `Super+Escape`.
     Lock,
+    /// Set the night-light (colour temperature) state: `on`, `off`, `toggle`, `auto` or a fixed
+    /// temperature in kelvin (2500-6500). Unbound by default.
+    NightLight(NightLightArg),
 
     /// Switch to virtual terminal `n` (only meaningful on the udev/DRM backend).
     ///
@@ -240,6 +277,7 @@ impl std::fmt::Display for Action {
             Self::MoveWindowToWorkspace(n) => write!(f, "move-window-to-workspace {n}"),
             Self::Slot(n) => write!(f, "slot {n}"),
             Self::PinSlot(n) => write!(f, "pin-slot {n}"),
+            Self::NightLight(arg) => write!(f, "night-light {arg}"),
             Self::MoveWorkspaceToOutput(n) => write!(f, "move-workspace-to-output {n}"),
             Self::VtSwitch(n) => write!(f, "vt-switch {n}"),
             // Every nullary verb returned from `NULLARY` above.
@@ -312,7 +350,7 @@ impl Action {
             | Self::PinSlot(_) => Area::Workspaces,
             Self::MoveWorkspaceToOutput(_) => Area::Outputs,
             Self::Run(_) | Self::RunInTerminal(_) | Self::RunOn { .. } => Area::LaunchAndOverlays,
-            Self::SetLayout(_) | Self::VtSwitch(_) => Area::SessionAndSystem,
+            Self::SetLayout(_) | Self::NightLight(_) | Self::VtSwitch(_) => Area::SessionAndSystem,
             // Every nullary verb returned from `NULLARY` above.
             _ => unreachable!("{self:?} has no NULLARY row"),
         }
@@ -375,6 +413,26 @@ impl FromStr for Action {
                 Err(_) => Err(bad(format!("`{arg}` is not a slot number 0-9"))),
             }
         };
+        let night_light_arg = |arg: Option<&&str>| -> Result<NightLightArg, ActionParseError> {
+            let arg =
+                arg.ok_or_else(|| bad("expected on, off, toggle, auto or a kelvin value".into()))?;
+            let (min, max) = (NightLightArg::MIN_KELVIN, NightLightArg::MAX_KELVIN);
+            match arg.to_ascii_lowercase().as_str() {
+                "on" => Ok(NightLightArg::On),
+                "off" => Ok(NightLightArg::Off),
+                "toggle" => Ok(NightLightArg::Toggle),
+                "auto" => Ok(NightLightArg::Auto),
+                digits if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) => {
+                    match digits.parse::<u32>() {
+                        Ok(k) if (min..=max).contains(&k) => Ok(NightLightArg::Kelvin(k)),
+                        _ => Err(bad(format!("`{arg}` is out of range ({min}-{max} K)"))),
+                    }
+                }
+                _ => Err(bad(format!(
+                    "`{arg}` is not on, off, toggle, auto or a kelvin value"
+                ))),
+            }
+        };
         // `nullary` rejects any argument; `unary` rejects a second one.
         let nullary = |action: Self| match words.get(1) {
             None => Ok(action),
@@ -433,6 +491,7 @@ impl FromStr for Action {
             "move-workspace-to-output" => unary(Self::MoveWorkspaceToOutput(delta(words.get(1))?)),
             "slot" => unary(Self::Slot(slot_index(words.get(1))?)),
             "pin-slot" => unary(Self::PinSlot(slot_index(words.get(1))?)),
+            "night-light" => unary(Self::NightLight(night_light_arg(words.get(1))?)),
             other => Err(bad(format!("unknown action `{other}`"))),
         }
     }
@@ -473,6 +532,7 @@ mod tests {
             | Action::MoveWindowToWorkspace(_)
             | Action::Slot(_)
             | Action::PinSlot(_)
+            | Action::NightLight(_)
             | Action::MoveWorkspaceToOutput(_)
             | Action::VtSwitch(_) => true,
             Action::Quit
@@ -521,6 +581,8 @@ mod tests {
             Action::MoveWindowToWorkspace(2),
             Action::Slot(3),
             Action::PinSlot(0),
+            Action::NightLight(NightLightArg::Kelvin(4500)),
+            Action::NightLight(NightLightArg::Toggle),
             Action::MoveWorkspaceToOutput(-2),
             Action::VtSwitch(3),
         ]);
@@ -553,6 +615,41 @@ mod tests {
     }
 
     #[test]
+    fn night_light_grammar_accepts_exactly_one_valid_argument() {
+        for (text, arg) in [
+            ("night-light on", NightLightArg::On),
+            ("night-light off", NightLightArg::Off),
+            ("night-light toggle", NightLightArg::Toggle),
+            ("night-light auto", NightLightArg::Auto),
+            ("night-light 2500", NightLightArg::Kelvin(2500)),
+            ("night-light 4000", NightLightArg::Kelvin(4000)),
+            ("night-light 6500", NightLightArg::Kelvin(6500)),
+        ] {
+            assert_eq!(
+                text.parse::<Action>(),
+                Ok(Action::NightLight(arg)),
+                "{text}"
+            );
+            assert_eq!(Action::NightLight(arg).to_string(), text);
+        }
+        for text in [
+            "night-light",
+            "night-light on off",
+            "night-light 4000 5000",
+            "night-light 2499",
+            "night-light 6501",
+            "night-light 0",
+            "night-light -4000",
+            "night-light +4000",
+            "night-light 4000.5",
+            "night-light 99999999999999",
+            "night-light warm",
+        ] {
+            assert!(text.parse::<Action>().is_err(), "{text} must not parse");
+        }
+    }
+
+    #[test]
     fn vt_switch_displays_but_does_not_parse() {
         assert_eq!(Action::VtSwitch(3).to_string(), "vt-switch 3");
         assert_eq!(
@@ -571,6 +668,10 @@ mod tests {
             (Action::MoveWorkspaceToOutput(1), Area::Outputs),
             (Action::OpenSettings, Area::LaunchAndOverlays),
             (Action::Lock, Area::SessionAndSystem),
+            (
+                Action::NightLight(NightLightArg::Auto),
+                Area::SessionAndSystem,
+            ),
         ];
         for (action, area) in reps {
             assert_eq!(action.area(), area, "{action}");

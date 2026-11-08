@@ -307,6 +307,7 @@ fn drop_mapped_output(state: &mut CrucibleState<UdevData>, key: UdevOutputId) {
     let Some(surface) = device.surfaces.remove(&key.crtc) else {
         return;
     };
+    state.night_light.cache.remove(&(key.device_id, key.crtc));
     // Migrate this output's model workspaces (and their windows) onto a survivor before
     // unmapping the Smithay output, so no window is destroyed on disconnect.
     state.unregister_output(&surface.output);
@@ -447,6 +448,9 @@ impl CrucibleState<UdevData> {
             power: PowerMark::default(),
         };
         device.surfaces.insert(crtc, surface);
+        // A new CRTC has no night-light record: make sure it is tinted if the schedule says so.
+        self.night_light.cache.remove(&(node, crtc));
+        self.evaluate_night_light();
 
         // Register this connector with the model now that the `device` borrow is released: the first
         // compositor output adopts the existing `World::new()` output; subsequent connectors get

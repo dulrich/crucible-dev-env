@@ -67,7 +67,7 @@ use smithay::{
     output::Output,
     reexports::{
         calloop::EventLoop,
-        drm::control::crtc,
+        drm::control::{Device as ControlDevice, crtc},
         input::{DeviceCapability, Libinput},
         wayland_server::{Display, protocol::wl_surface::WlSurface},
     },
@@ -75,10 +75,11 @@ use smithay::{
         DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
     },
 };
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     element::WindowElement,
+    night_light::{Decision, model::ramp},
     render::OutputRenderElements,
     state::{Backend, CrucibleState},
 };
@@ -218,6 +219,21 @@ impl DmabufHandler for CrucibleState<UdevData> {
     }
 }
 
+/// Sends the `kelvin` ramp to `crtc`, sized from its gamma LUT; a CRTC without one is left alone.
+fn write_gamma(
+    device: &impl ControlDevice,
+    crtc: crtc::Handle,
+    kelvin: u32,
+) -> std::io::Result<()> {
+    let len = device.get_crtc(crtc)?.gamma_length() as usize;
+    if len == 0 {
+        debug!(?crtc, "night light: CRTC has no gamma LUT");
+        return Ok(());
+    }
+    let (red, green, blue) = ramp(kelvin, len);
+    device.set_gamma(crtc, &red, &green, &blue)
+}
+
 impl Backend for UdevData {
     // Real input devices deliver relative pointer motion and gestures.
     const HAS_RELATIVE_MOTION: bool = true;
@@ -298,6 +314,32 @@ impl Backend for UdevData {
                 state.backend_data.power_off_surface(node, crtc);
             }
             info!("idle: outputs powered off");
+        }
+    }
+
+    /// Writes the night-light ramp to every CRTC whose cache entry says it is needed. A paused
+    /// device is skipped and left dirty (drm-rs calls bypass Smithay's pause state); a failed write
+    /// warns once per CRTC per failure streak and is retried on the next evaluation.
+    fn apply_night_light(state: &mut CrucibleState<Self>, kelvin: u32) {
+        let enabled = state.night_light_enabled();
+        let cache = &mut state.night_light.cache;
+        for (node, gpu) in &state.backend_data.backends {
+            let device = gpu.drm_output_manager.device();
+            let active = device.is_active();
+            for crtc in gpu.surfaces.keys() {
+                let key = (*node, *crtc);
+                if cache.decide(&key, kelvin, active, enabled) == Decision::Skip {
+                    continue;
+                }
+                match write_gamma(device, *crtc, kelvin) {
+                    Ok(()) => cache.record_success(key, kelvin),
+                    Err(err) => {
+                        if cache.record_failure(key) {
+                            warn!(%err, ?crtc, kelvin, "night light: gamma write failed; will retry");
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -431,6 +473,7 @@ pub fn run_udev() {
             }
             SessionEvent::ActivateSession => {
                 info!("resuming session");
+                data.night_light.cache.invalidate_all();
                 if let Err(err) = libinput_context.resume() {
                     error!("Failed to resume libinput context: {:?}", err);
                 }
@@ -456,6 +499,7 @@ pub fn run_udev() {
                 // wake. The wake path schedules the render of every output that was off, so only
                 // the outputs that stayed on are re-kicked here (never two renders per CRTC).
                 data.idle_activity();
+                data.evaluate_night_light();
                 for (node, crtc) in data.backend_data.crtcs() {
                     if !was_off.contains(&(node, crtc)) {
                         data.handle

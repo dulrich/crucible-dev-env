@@ -301,6 +301,9 @@ impl CrucibleState<UdevData> {
                             error!(%err, "Failed to reset DRM device state");
                         }
                     }
+                    // The reset may have dropped the gamma LUT: re-send the ramp.
+                    self.night_light.cache.invalidate_where(|(n, _)| *n == node);
+                    self.evaluate_night_light();
                     true
                 }
                 Recovery::Drop => {

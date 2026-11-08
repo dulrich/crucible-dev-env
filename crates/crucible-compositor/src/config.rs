@@ -192,6 +192,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some((theme, size)) = &delta.cursor {
             self.cursor.set_theme(theme, *size);
         }
+        let night_light_changed = self.config.night_light != config.night_light;
         self.config = config;
         if delta.idle {
             self.idle.machine.reset();
@@ -199,6 +200,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.apply_output_scales();
         if delta.warm {
             self.warm_config_changed();
+        }
+        if night_light_changed {
+            self.evaluate_night_light();
         }
         self.apply_layout();
     }

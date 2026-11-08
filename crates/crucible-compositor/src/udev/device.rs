@@ -325,6 +325,7 @@ impl CrucibleState<UdevData> {
         let plan = plan::plan_disconnect(&output::output_strip(&self.space), &departing);
         output::apply_plan(self, &plan);
 
+        self.night_light.cache.remove_where(|(n, _)| *n == node);
         if let Some(backend_data) = self.backend_data.backends.remove(&node) {
             if let Some(render_node) = backend_data.render_node {
                 self.backend_data.gpus.as_mut().remove_node(&render_node);

@@ -174,6 +174,19 @@ pub trait Backend {
         let _ = state;
         tracing::info!(on, "idle: output power change ignored by this backend");
     }
+    /// Applies the night-light temperature `kelvin` to every output, writing only what changed
+    /// (see [`crate::night_light::ApplyCache`]). The default (nested `winit`, test backends) has no
+    /// gamma control: it logs once, and only when a tint is wanted.
+    fn apply_night_light(state: &mut CrucibleState<Self>, kelvin: u32)
+    where
+        Self: Sized + 'static,
+    {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        let _ = state;
+        if kelvin < crate::night_light::model::IDENTITY_KELVIN {
+            LOGGED.call_once(|| tracing::info!("night light needs the TTY backend; ignored here"));
+        }
+    }
 }
 
 /// Central, backend-agnostic compositor state driven by the calloop event loop.
@@ -304,6 +317,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub idle_inhibit_state: smithay::wayland::idle_inhibit::IdleInhibitManagerState,
     /// Idle timers' state machine and the inhibiting surfaces.
     pub idle: crate::idle::IdleRuntime,
+    /// Night-light override and per-CRTC apply cache; see [`crate::night_light`].
+    pub night_light: crate::night_light::NightLight,
     /// The icon of the active pointer drag-and-drop grab, if any; composed at the pointer by
     /// [`crate::render::frame_elements`] and cleared when the drag ends.
     pub dnd_icon: Option<DndIcon>,
@@ -504,6 +519,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             idle_notifier_state,
             idle_inhibit_state,
             idle: crate::idle::IdleRuntime::default(),
+            night_light: crate::night_light::NightLight::default(),
             dnd_icon: None,
             pending_keyboard_focus: PendingFocus::default(),
         }

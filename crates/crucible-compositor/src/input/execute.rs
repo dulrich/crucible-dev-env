@@ -179,6 +179,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Action::ToggleHeader => self.toggle_header(),
             Action::OpenSettings => self.open_settings(),
             Action::Lock => self.spawn_locker(),
+            Action::NightLight(arg) => self.night_light_verb(arg),
             Action::Screenshot => {
                 if let Err(reason) = self.screenshot_focused_output() {
                     warn!(reason, "screenshot not taken");
@@ -369,6 +370,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Option<Result<(), L
         | Action::CloseWindow
         | Action::SetLayout(_)
         | Action::Lock
+        | Action::NightLight(_)
         | Action::Screenshot
         | Action::Snip
         | Action::VtSwitch(_) => return None,
