@@ -177,6 +177,7 @@ fn every_action_form_parses() {
         ),
         ("slot 3", Action::Slot(3)),
         ("pin-slot 0", Action::PinSlot(0)),
+        ("unpin-workspace", Action::UnpinWorkspace),
         ("open-picker", Action::OpenPicker),
         ("open-launcher", Action::OpenLauncher),
         ("open-settings", Action::OpenSettings),

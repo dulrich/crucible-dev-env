@@ -138,6 +138,8 @@ pub enum Action {
     Slot(u8),
     /// Pin the active workspace to slot `n` (0-9). `Super+Shift+<digit>`.
     PinSlot(u8),
+    /// Clear every slot pin naming the active workspace; a no-op when it has none. Unbound by default.
+    UnpinWorkspace,
     /// Move the focused output's active workspace `delta` outputs along the output order
     /// (wraparound). `Super+Ctrl+]` (`1`) / `Super+Ctrl+[` (`-1`). No-op with one output.
     MoveWorkspaceToOutput(i64),
@@ -188,6 +190,7 @@ const NULLARY: &[(Action, &str, Area)] = &[
     (Action::SetWorkspaceRoot, "set-workspace-root", Area::Workspaces),
     (Action::CloseWorkspace, "close-workspace", Area::Workspaces),
     (Action::DeleteWorkspace, "delete-workspace", Area::Workspaces),
+    (Action::UnpinWorkspace, "unpin-workspace", Area::Workspaces),
     (Action::CloseAllWorkspaces, "close-all-workspaces", Area::Workspaces),
     (Action::OpenPicker, "open-picker", Area::LaunchAndOverlays),
     (Action::OpenLauncher, "open-launcher", Area::LaunchAndOverlays),
@@ -483,6 +486,7 @@ mod tests {
             | Action::SetWorkspaceRoot
             | Action::CloseWorkspace
             | Action::DeleteWorkspace
+            | Action::UnpinWorkspace
             | Action::CloseAllWorkspaces
             | Action::OpenPicker
             | Action::OpenLauncher

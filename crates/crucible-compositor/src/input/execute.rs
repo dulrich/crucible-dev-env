@@ -165,6 +165,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Action::CloseAllWorkspaces => self.close_all_workspaces(),
             Action::Slot(n) => self.slot_open(n),
             Action::PinSlot(n) => self.pin_slot(n),
+            Action::UnpinWorkspace => self.unpin_workspace(),
             Action::MoveWorkspaceToOutput(delta) => self.move_active_workspace_to_output(delta),
             Action::RenameWorkspace => self.open_picker(PickerMode::Rename),
             Action::SetWorkspaceRoot => self.open_picker(PickerMode::Root),
@@ -356,6 +357,7 @@ fn apply_model_action(world: &mut World, action: &Action) -> Option<Result<(), L
         | Action::CloseAllWorkspaces
         | Action::Slot(_)
         | Action::PinSlot(_)
+        | Action::UnpinWorkspace
         | Action::MoveWorkspaceToOutput(_)
         | Action::OpenPicker
         | Action::OpenLauncher

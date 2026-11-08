@@ -502,6 +502,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.save_slots();
     }
 
+    /// `Action::UnpinWorkspace`: clears every slot pin naming the active workspace and saves the
+    /// pins when any was cleared.
+    pub(crate) fn unpin_workspace(&mut self) {
+        let ws = self.layout.world.active_workspace_id();
+        let Some(name) = self.layout.world.workspace(ws).map(|w| w.name.clone()) else {
+            return;
+        };
+        if self.persist.slots.unpin_name(&name) {
+            info!(workspace = name, "slots unpinned");
+            self.save_slots();
+        } else {
+            info!(workspace = name, "unpin-workspace: no slot pins");
+        }
+    }
+
     /// Applies `event` to the pending slot pin (see [`pin_transition`]), pinning when it says so.
     pub(super) fn pin_event(&mut self, event: PinEvent) {
         let (pin, rest) = pin_transition(self.persist.workspace.pending_pin, event);
