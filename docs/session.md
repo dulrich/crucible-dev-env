@@ -17,7 +17,7 @@ The dev tree's `cargo build` rebuilds then no longer change what boots: the inst
 
 ## Launch from tty1
 
-Add this block to `~/.profile`. It runs the installed launcher, so the host needs no checkout (`scripts/deploy.sh` installs `cde-session`, `crucible` and `cde-wallpaper-rotate` into `~/.local/bin`). It fires only on `/dev/tty1`, only when no Wayland session is already running, and is skipped while `~/.config/cde/no-autolaunch` exists:
+Add this block to `~/.profile`. It runs the installed launcher, so the host needs no checkout (the deploy script installs `cde-session`, `crucible` and `cde-wallpaper-rotate` into `~/.local/bin`). It fires only on `/dev/tty1`, only when no Wayland session is already running, and is skipped while `~/.config/cde/no-autolaunch` exists:
 
 ```sh
 if [ "$(tty)" = /dev/tty1 ] && [ -z "$WAYLAND_DISPLAY" ] && [ ! -e "$HOME/.config/cde/no-autolaunch" ]; then

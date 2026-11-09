@@ -43,7 +43,7 @@ Cron example:
 USAGE
 }
 
-# Installed-copy stamp: scripts/deploy.sh generates ~/.local/bin/cde-wallpaper-rotate from this
+# Installed-copy stamp: the deploy script generates ~/.local/bin/cde-wallpaper-rotate from this
 # file with the guard path rewritten, stamped_id set and the build-id.sh source line replaced.
 # shellcheck disable=SC2034
 stamped_id=
