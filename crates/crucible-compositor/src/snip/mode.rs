@@ -266,6 +266,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Freezes every output and enters snip mode; any capture failure logs and does not enter.
     fn start_snip(&mut self) {
+        // Snip wins over a reveal hold: release it before the freeze captures.
+        self.clear_reveal_holds();
         let outputs: Vec<Output> = self.space.outputs().cloned().collect();
         if outputs.is_empty() {
             warn!("snip: not started (no output)");

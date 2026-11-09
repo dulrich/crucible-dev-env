@@ -63,6 +63,7 @@ use placement::{configure_placement, suspend_toplevel};
 use crucible_layout::{
     FocusChange, LayoutChange, LayoutError, PaneId, Projection, Rect, WindowId, WorkspaceId, World,
 };
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point};
 use tracing::{debug, warn};
 
@@ -133,14 +134,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     let logical = self.placed_rect(*id, *rect, *fullscreen);
                     // Configure first, then position via map_element so the element is mapped (or
                     // re-mapped, for a window returning from hidden) at the right place.
-                    configure_placement(&element, logical, *resized, *fullscreen);
-                    self.space.map_element(element, logical.loc, false);
+                    let revealed = configure_placement(&element, logical, *resized, *fullscreen);
+                    self.space.map_element(element.clone(), logical.loc, false);
+                    if let Some(serial) = revealed {
+                        self.begin_reveal_hold(&element, serial);
+                    }
                 }
                 LayoutChange::Hide { id } => {
                     if let Some(element) = self.layout.element(*id).cloned() {
                         self.space.unmap_elem(&element);
                         // After the unmap: tell the client it is no longer visible.
                         suspend_toplevel(&element);
+                        // Hidden again: nothing left to wait for.
+                        if let Some(root) = element.wl_surface() {
+                            self.forget_reveal(&root);
+                        }
                     }
                 }
                 LayoutChange::ShellState { id, fullscreen } => {
@@ -392,6 +400,122 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 Teardown::Absent
             }
         }
+    }
+}
+
+/// Reveal-hold wiring (plan 38): the pure model is [`crate::reveal_hold`].
+impl<B: Backend + 'static> CrucibleState<B> {
+    /// Starts (or extends) a reveal hold for `element`, just re-shown by a configure `serial`
+    /// that cleared `Suspended`, on the output it landed on. Only an xdg toplevel whose committed
+    /// buffer is a placeholder holds ([`is_placeholder_buffer`]); a client that kept a full-size
+    /// buffer (foot) never does. Lock and snip win: no new hold while either is active.
+    pub(crate) fn begin_reveal_hold(
+        &mut self,
+        element: &WindowElement,
+        serial: smithay::utils::Serial,
+    ) {
+        use crate::reveal_hold::{REVEAL_HOLD_TIMEOUT, is_placeholder_buffer};
+        use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+
+        if self.session_lock.is_locked() || self.snip.is_some() {
+            return;
+        }
+        let Some(root) = element.toplevel().map(|t| t.wl_surface().clone()) else {
+            return;
+        };
+        let Some(output) = self.space.outputs_for_element(element).first().cloned() else {
+            return;
+        };
+        let (buffer, surface) =
+            smithay::backend::renderer::utils::with_renderer_surface_state(&root, |s| {
+                (
+                    s.buffer_size().map(|size| (size.w, size.h)),
+                    s.surface_size().map(|size| (size.w, size.h)),
+                )
+            })
+            .unwrap_or((None, None));
+        if !is_placeholder_buffer(buffer, surface) {
+            return;
+        }
+        let deadline = std::time::Instant::now() + REVEAL_HOLD_TIMEOUT;
+        let started = self
+            .reveal_holds
+            .begin(output.clone(), root, u32::from(serial), deadline);
+        if started {
+            debug!(output = %output.name(), "reveal hold: begun");
+            let key = output;
+            let armed =
+                self.handle
+                    .insert_source(Timer::from_deadline(deadline), move |_, (), data| {
+                        data.expire_reveal_holds();
+                        // A stale timer (its hold already released) finds nothing held and ends; a
+                        // timer that fired a hair early re-arms for the hold's real deadline.
+                        match data.reveal_holds.deadline(&key) {
+                            Some(next) => TimeoutAction::ToInstant(next),
+                            None => TimeoutAction::Drop,
+                        }
+                    });
+            if let Err(err) = armed {
+                // Without its timer the hold could never end: do not hold.
+                warn!(%err, "reveal hold: cannot arm the deadline timer; not holding");
+                self.clear_reveal_holds();
+            }
+        }
+    }
+
+    /// Releases every hold past its deadline.
+    pub(crate) fn expire_reveal_holds(&mut self) {
+        let released = self.reveal_holds.expire(std::time::Instant::now());
+        self.release_reveal_holds(released);
+    }
+
+    /// A root surface committed with the committed configure `serial` (see the commit handler).
+    pub(crate) fn reveal_commit(&mut self, root: &WlSurface, serial: u32) {
+        let released = self.reveal_holds.commit(root, serial);
+        self.release_reveal_holds(released);
+    }
+
+    /// Forgets `root` in every hold (destroyed, hidden again, closed).
+    pub(crate) fn forget_reveal(&mut self, root: &WlSurface) {
+        if self.reveal_holds.is_empty() {
+            return;
+        }
+        let released = self.reveal_holds.forget(root);
+        self.release_reveal_holds(released);
+    }
+
+    /// Lock and snip win: drops every hold.
+    pub(crate) fn clear_reveal_holds(&mut self) {
+        let released = self.reveal_holds.clear_all();
+        self.release_reveal_holds(released);
+    }
+
+    /// Every release path ends here: enqueue a real render of each released output (backend hook)
+    /// and answer the captures deferred on it. Run from the idle queue so a release inside a
+    /// commit or destroy callback never renders or captures re-entrantly.
+    fn release_reveal_holds(&mut self, released: Vec<smithay::output::Output>) {
+        if released.is_empty() {
+            return;
+        }
+        self.handle.insert_idle(move |data| {
+            for output in &released {
+                debug!(output = %output.name(), "reveal hold: released");
+                B::schedule_render(data, output);
+            }
+            data.run_deferred_captures(&released);
+        });
+    }
+
+    /// Whether the render pass should composite `output`: a held output is skipped (it keeps its
+    /// previous frame and still gets frame callbacks). The lock screen is never held.
+    pub(crate) fn render_admission(
+        &self,
+        output: &smithay::output::Output,
+    ) -> crate::reveal_hold::RenderAdmission {
+        if self.session_lock.is_locked() {
+            return crate::reveal_hold::RenderAdmission::Render;
+        }
+        self.reveal_holds.admission(output)
     }
 }
 

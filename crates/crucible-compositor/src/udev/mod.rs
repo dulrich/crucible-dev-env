@@ -286,6 +286,27 @@ impl Backend for UdevData {
             .is_some_and(|surface| surface.power.is_off())
     }
 
+    /// Enqueues a real `render_surface` for a released reveal hold, as the wake path does; a
+    /// powered-off output is not woken (`render_surface` re-checks the same guard).
+    fn schedule_render(state: &mut CrucibleState<Self>, output: &Output) {
+        let Some(id) = output.user_data().get::<UdevOutputId>().copied() else {
+            return;
+        };
+        let off = state
+            .backend_data
+            .backends
+            .get(&id.device_id)
+            .and_then(|gpu| gpu.surfaces.get(&id.crtc))
+            .is_none_or(|surface| surface.power.is_off());
+        if off {
+            return;
+        }
+        let (node, crtc) = (id.device_id, id.crtc);
+        state
+            .handle
+            .insert_idle(move |data| data.render_surface(node, crtc));
+    }
+
     /// Off: `DrmCompositor::clear()` (DPMS off) on every output; a failure leaves that output
     /// rendering. On: clears every off mark and schedules exactly one full-redraw render per
     /// output that was off; its `queue_frame` re-enables the CRTC.

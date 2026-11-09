@@ -139,6 +139,7 @@ impl<B: Backend + 'static> XdgShellHandler for CrucibleState<B> {
         // (not on the `Space`) also covers a toplevel destroyed while hidden on an inactive
         // workspace or behind a pane stack. A repeated destroy resolves to nothing and is a no-op.
         let target = surface.wl_surface().clone();
+        self.forget_reveal(&target);
         if self.warm_toplevel_destroyed(&target) {
             return;
         }

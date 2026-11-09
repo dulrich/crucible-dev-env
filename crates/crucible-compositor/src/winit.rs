@@ -271,7 +271,10 @@ pub fn run_winit() {
         }
 
         // Compose and present the frame: mapped surfaces from the Space, with the cursor on top.
-        {
+        // A reveal-held output (plan 38) composites nothing: the last swap stays on screen, and
+        // frame callbacks below still go out. The loop renders every iteration, so a release
+        // needs no render hook here.
+        if state.render_admission(&output) == crate::reveal_hold::RenderAdmission::Render {
             // Inputs that need `&mut state` as a whole (incl. the dead-cursor reset) are built
             // before the backend borrow below; the frame is then composed from disjoint field
             // borrows beside the renderer.

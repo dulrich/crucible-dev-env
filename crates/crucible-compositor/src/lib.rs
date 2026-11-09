@@ -30,6 +30,9 @@ pub mod focus;
 /// Bridge from the pure `crucible-layout` model to the Smithay `Space` (placement/visibility/focus).
 pub mod layout;
 
+/// Reveal hold: keep the previous frame while an unsuspended window repaints (plan 38).
+pub mod reveal_hold;
+
 /// XWayland integration: server lifecycle and X11 window management.
 pub mod xwayland;
 

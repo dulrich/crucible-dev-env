@@ -163,6 +163,15 @@ pub trait Backend {
     {
         Err(crate::capture::CaptureError::Unsupported)
     }
+    /// Enqueues a real render of `output` after a reveal hold released it (plan 38). The default
+    /// (nested `winit`, test backends) does nothing: the winit loop renders every iteration. The
+    /// udev backend schedules `render_surface` the way its idle-wake path does, skipping a
+    /// powered-off output, so a held output with no pending flip is restarted.
+    fn schedule_render(_state: &mut CrucibleState<Self>, _output: &Output)
+    where
+        Self: Sized + 'static,
+    {
+    }
     /// Powers every output `on` (wake) or off (idle blanking). Called by the idle machine only on a
     /// change, never redundantly. The default (nested `winit`) logs and does nothing; the udev
     /// backend powers the DRM outputs (WP-3). An associated fn taking the whole state, like
@@ -328,6 +337,10 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// The active snip session (frozen frames + selection), `None` outside snip mode; see
     /// [`crate::snip`].
     pub snip: Option<crate::snip::SnipSession>,
+    /// Outputs held on their previous frame while a re-shown window repaints (plan 38).
+    pub reveal_holds: crate::reveal_hold::RevealHolds<Output, WlSurface>,
+    /// IPC captures of a held output, answered once the hold releases.
+    pub pending_captures: Vec<crate::capture::PendingCapture>,
 }
 
 /// The icon surface a client attached to a pointer drag, with its accumulated hotspot offset.
@@ -499,6 +512,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             seat_name,
             suppressed_keys: SuppressedKeys::new(),
             snip: None,
+            reveal_holds: crate::reveal_hold::RevealHolds::default(),
+            pending_captures: Vec::new(),
             xwm: None,
             xdisplay: None,
             startup: crate::autostart::Startup::default(),

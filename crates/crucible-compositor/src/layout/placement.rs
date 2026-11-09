@@ -3,7 +3,7 @@
 use crucible_config::TilingConfig;
 use crucible_layout::{GapConfig, Rect, WindowId};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgState;
-use smithay::utils::{Logical, Point, Rectangle, Size};
+use smithay::utils::{Logical, Point, Rectangle, Serial, Size};
 
 use crate::element::WindowElement;
 use crate::state::{Backend, CrucibleState};
@@ -82,26 +82,34 @@ impl<B: Backend + 'static> CrucibleState<B> {
 /// whenever it differs from their X geometry — a move alone counts — and have their
 /// `_NET_WM_STATE_FULLSCREEN` set to match. Kept free of `self` so it does not borrow the whole
 /// state.
+///
+/// Returns the serial of the configure sent when it cleared `Suspended` (the window was hidden and
+/// is being re-shown), `None` otherwise: the reveal hold waits on a commit acking that serial.
 pub(super) fn configure_placement(
     element: &WindowElement,
     rect: Rectangle<i32, Logical>,
     resized: bool,
     fullscreen: bool,
-) {
+) -> Option<Serial> {
+    let mut reveal = None;
     if let Some(toplevel) = element.toplevel() {
         // Every managed toplevel is tiled on all four edges so the client fills its tile instead
         // of drawing floating-window chrome (shadow margins, own sizing). Never `Maximized`.
-        let states_changed = toplevel.with_pending_state(|state| {
+        let (states_changed, unsuspended) = toplevel.with_pending_state(|state| {
             // A placed window is visible: clear any `Suspended` set while it was hidden.
-            let changed = apply_shell_states(&mut state.states, fullscreen)
-                | apply_suspended(&mut state.states, false);
+            let shell = apply_shell_states(&mut state.states, fullscreen);
+            let unsuspended = apply_suspended(&mut state.states, false);
+            let changed = shell | unsuspended;
             if resized || changed {
                 state.size = Some(rect.size);
             }
-            changed
+            (changed, unsuspended)
         });
         if resized || states_changed {
-            toplevel.send_configure();
+            let serial = toplevel.send_configure();
+            if unsuspended {
+                reveal = Some(serial);
+            }
         }
     } else if let Some(surface) = element.x11_surface() {
         if surface.is_fullscreen() != fullscreen {
@@ -111,6 +119,7 @@ pub(super) fn configure_placement(
             let _ = surface.configure(Some(rect));
         }
     }
+    reveal
 }
 
 /// Marks a window being hidden (unmapped, kept alive) as `xdg_toplevel` `Suspended` and sends the

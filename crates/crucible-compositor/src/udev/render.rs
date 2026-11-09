@@ -191,6 +191,16 @@ impl CrucibleState<UdevData> {
         if surface.power.is_off() {
             return;
         }
+        // Reveal hold (plan 38): keep the previous frame, submit nothing, but let clients draw.
+        // The release enqueues the render that restarts this output (no flip is pending then).
+        if self.render_admission(&output) == crate::reveal_hold::RenderAdmission::Skip {
+            self.finish_frame(
+                &output,
+                self.clock.now().into(),
+                Some(Duration::from_secs(1)),
+            );
+            return;
+        }
         let render_node = device.render_node.unwrap_or(primary_gpu);
 
         // Dead-cursor reset plus this output's owned frame inputs (the cursor only when the

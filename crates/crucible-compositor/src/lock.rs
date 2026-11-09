@@ -438,6 +438,8 @@ impl<B: Backend + 'static> SessionLockHandler for CrucibleState<B> {
         }
         info!("lock: lock accepted; blanking every output");
         self.session_lock.reset_surfaces();
+        // The lock wins over a reveal hold (and so releases any deferred capture).
+        self.clear_reveal_holds();
         self.close_mapped_overlay();
         // The lock wins over snip: drop the selection and its frozen frames now.
         self.discard_snip();

@@ -57,6 +57,7 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
 
     fn destroyed(&mut self, surface: &WlSurface) {
         self.forget_surface_identity(surface);
+        self.forget_reveal(surface);
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -74,6 +75,21 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
                 .or_else(|| self.warm_element_for(&root))
             {
                 window.on_commit();
+            }
+
+            // Reveal hold (plan 38): only the toplevel's ROOT surface commit counts, with the
+            // configure serial of the committed cached state (what that commit applied), never
+            // the role's `last_acked`, which can already be newer than the committed state.
+            if *surface == root && !self.reveal_holds.is_empty() {
+                let serial = self
+                    .window_for_surface(&root)
+                    .and_then(|w| w.toplevel().cloned())
+                    .and_then(|t| {
+                        t.with_cached_state(|s| s.last_acked.as_ref().map(|c| u32::from(c.serial)))
+                    });
+                if let Some(serial) = serial {
+                    self.reveal_commit(&root, serial);
+                }
             }
 
             // X2: grant a deferred keyboard focus once its root surface has its first buffer.

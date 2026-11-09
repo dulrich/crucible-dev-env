@@ -20,7 +20,7 @@ use smithay::{
         },
     },
     output::Output,
-    reexports::calloop::channel::{Channel, channel},
+    reexports::calloop::channel::{Channel, Sender, channel},
     utils::{Rectangle, Size, Transform},
 };
 
@@ -223,6 +223,30 @@ pub fn spawn_encode_and_write(
     path: PathBuf,
 ) -> Result<Channel<Response>, String> {
     let (tx, rx) = channel::<Response>();
+    spawn_encode_and_write_to(capture, path, tx)?;
+    Ok(rx)
+}
+
+/// An IPC `capture` of a held output (plan 38), answered on `tx` once the hold releases.
+#[derive(Debug)]
+pub struct PendingCapture {
+    /// The (held) output to capture.
+    pub output: Output,
+    /// The absolute PNG path.
+    pub path: PathBuf,
+    /// The reply channel the connection is waiting on.
+    pub tx: Sender<Response>,
+}
+
+/// [`spawn_encode_and_write`] answering on a caller-supplied `tx`.
+///
+/// # Errors
+/// The thread could not be spawned.
+pub fn spawn_encode_and_write_to(
+    capture: Capture,
+    path: PathBuf,
+    tx: Sender<Response>,
+) -> Result<(), String> {
     std::thread::Builder::new()
         .name("cde-capture-png".into())
         .spawn(move || {
@@ -236,7 +260,7 @@ pub fn spawn_encode_and_write(
             // A send error means the receiver (connection or compositor) is gone.
             let _ = tx.send(response);
         })
-        .map(|_| rx)
+        .map(|_| ())
         .map_err(|err| {
             tracing::warn!(%err, "capture: cannot spawn the encoder thread");
             format!("cannot spawn the encoder thread: {err}")
@@ -291,6 +315,52 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .focused_smithay_output()
             .ok_or_else(|| CaptureError::NoOutput.to_string())?;
         self.capture_output(&output).map_err(|e| e.to_string())
+    }
+
+    /// Defers `path`'s capture of `output` until its reveal hold releases. `None` when the
+    /// capture should proceed now (not held, relative path, or refused: those answer as today).
+    pub fn defer_capture_if_held(&mut self, path: &Path) -> Option<Channel<Response>> {
+        let output = self.focused_smithay_output()?;
+        if !path.is_absolute()
+            || !self.reveal_holds.is_held(&output)
+            || admit_capture(
+                self.session_lock.is_locked(),
+                self.backend_data.output_powered_off(&output),
+            )
+            .is_err()
+        {
+            return None;
+        }
+        let (tx, rx) = channel::<Response>();
+        self.pending_captures.push(PendingCapture {
+            output,
+            path: path.to_path_buf(),
+            tx,
+        });
+        Some(rx)
+    }
+
+    /// Performs and answers the captures deferred on any of the `released` outputs, under
+    /// today's admission rules (a lock or power-off since then answers `err`).
+    pub(crate) fn run_deferred_captures(&mut self, released: &[Output]) {
+        let (due, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.pending_captures)
+            .into_iter()
+            .partition(|p| released.contains(&p.output));
+        self.pending_captures = rest;
+        for pending in due {
+            match self.capture_output(&pending.output) {
+                Ok(capture) => {
+                    if let Err(reason) =
+                        spawn_encode_and_write_to(capture, pending.path, pending.tx.clone())
+                    {
+                        let _ = pending.tx.send(Response::Err(reason));
+                    }
+                }
+                Err(err) => {
+                    let _ = pending.tx.send(Response::Err(err.to_string()));
+                }
+            }
+        }
     }
 
     /// The frame view inputs for a capture of `output`: [`CrucibleState::begin_frame`]'s, with the

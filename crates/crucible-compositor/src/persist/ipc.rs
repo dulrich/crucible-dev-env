@@ -100,6 +100,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return Reply::Now(Response::Err(err.to_string()));
         }
         if let Request::Capture(path) = request {
+            // A held output (plan 38) is captured after its release, so the capture shows what the
+            // user sees; refusals (relative path, locked, powered off) still answer at once.
+            if let Some(rx) = self.defer_capture_if_held(&path) {
+                return Reply::Later(rx);
+            }
             // Captured here; encoded, written and answered (`ok <w>x<h>`) off the main thread.
             return match self
                 .ipc_capture(&path)
