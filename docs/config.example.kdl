@@ -1,0 +1,104 @@
+// CDE example config: every setting, at its built-in default.
+//
+// Copy to ~/.config/cde/config.kdl and edit. Every key is optional; delete
+// what you don't change. Full reference: docs/config.md.
+//
+// Uncommented lines are the defaults: a config made of only those lines
+// behaves exactly like no config file at all. Lines starting `/-` (a KDL
+// "slashdash" comment, which disables the whole node) are settings that are
+// off or unset by default, shown with an example value; delete the `/-` to
+// turn one on. Both properties are checked by
+// crates/crucible-config/tests/example_config.rs.
+
+// The terminal for Super+Shift+Return. Unset = $TERMINAL, else foot.
+/-terminal "foot" exec-flag="-e"
+
+tiling {
+    // CDE-spawned terminals: padding the terminal draws, focus ring inside it.
+    // Optional: ring-inset=(px)4 frame="#3a3a3a" (frame around unfocused tiles).
+    terminal gap=(px)6 ring=(px)3 ring-inset=(px)0
+    // Every other window: inset by gap, ring outside it, rest of gap painted fill.
+    app gap=(px)0 ring=(px)0 fill="#737373"
+    // Arguments added to terminal spawns; {gap} is the terminal gap (foot shown).
+    /-terminal-args "-o" "pad={gap}x{gap} center"
+}
+
+focus-follows-mouse #true
+confine-pointer-to-fullscreen #true
+restore-session #true
+
+// Split on whitespace, no shell quoting.
+lock-command "swaylock"
+
+// Repeatable; each runs once per CDE start via /bin/sh -c. None by default.
+/-autostart "dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"
+
+picker {
+    // Repeatable: each directory's subdirectories become picker candidates.
+    /-root "~/code"
+    slots #false
+}
+
+launcher {
+    // Extra TUI programs (names or * globs), listed when found on PATH.
+    /-tui "lazydocker" "k9s"
+}
+
+overlay {
+    border #true
+    style "n1-med" // "terminal" | "n1-dark" | "n1-med" | "n1-light"
+    // Replaces the per-terminal defaults (see docs/config.md); an empty node turns them off.
+    /-terminal-args
+}
+
+header {
+    mode "toggle"   // "off" | "always" | "toggle"
+    start "hidden"  // "shown" | "hidden" (toggle mode, first run per monitor)
+    font "DejaVu Sans"
+    size (px)14     // or (pt)N
+    divider (px)0 inset=(px)0 color="#cdd0d6"
+    slots #false
+}
+
+keyboard {
+    layouts "us" // e.g. "us" "es"; set-layout <name> switches by name
+}
+
+// Idle timers, in seconds. Both off by default.
+idle {
+    /-lock-after 300
+    /-blank-after 600
+}
+
+// Off without the block. start/end are local "HH:MM"; end < start wraps
+// midnight. temperature 2500..=6500 K (default 4500), fade-minutes 0..=180
+// (default 30). The night-light verb overrides it until `night-light auto`.
+/-night-light {
+    temperature 4500
+    start "21:00"
+    end "07:00"
+    fade-minutes 30
+}
+
+// Unset = $XCURSOR_THEME / $XCURSOR_SIZE, else "default" and 24.
+cursor {
+    /-theme "Adwaita"
+    /-size (px)24
+}
+
+screenshot {
+    destination "clipboard" // "clipboard" | "file" | "both"
+    directory "~/Pictures/Screenshots"
+}
+
+// One block per connector; no block = scale 1.
+/-output "DP-1" {
+    scale 1.4167
+}
+
+// Each bind replaces one default chord; "none" unbinds it. Defaults: README.
+binds {
+    /-bind "Super+Backslash" "split right"
+    /-bind "Super+Ctrl+N" "night-light toggle"
+    /-bind "Super+Shift+Q" "none"
+}

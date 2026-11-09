@@ -4,7 +4,9 @@ CDE reads one KDL (v2) file: `$XDG_CONFIG_HOME/cde/config.kdl`, falling back to 
 
 Units: every size key carries an explicit KDL type annotation naming its unit — tiling `gap` / `ring` / `ring-inset`, header `size` / `divider` / `inset` and cursor `size`. `(px)N` is N logical pixels and must be an integer; header `size` (a font size) also accepts `(pt)N` (integer or decimal), converted to px as N × 96 / 72 rounded half away from zero. A bare number on a size key (`gap=6`, `size 14`), an unknown unit (`(em)`, `(PX)` — units are case-sensitive) or `(pt)` on a px-only key is a located config error naming the accepted units. Other numbers (seconds, scale, keyboard repeat) stay unannotated.
 
-Reload: WP-5 reloads on file change; until then restart.
+Reload: CDE re-reads the file when it changes. A few settings apply only to later spawns or the next CDE start; their sections say so.
+
+Starting file: [`config.example.kdl`](config.example.kdl) lists every setting at its built-in default, with the off-by-default ones commented out. Scripting CDE over its socket: [`scripting.md`](scripting.md).
 
 ## Schema
 
@@ -232,7 +234,7 @@ A built-in night light: a scheduled colour-temperature shift, applied as a gamma
 - Schedule — the full `temperature` holds from `start` (inclusive) to `end` (exclusive) in local time. Over the `fade-minutes` before `start` the temperature falls linearly from 6500 K, and over the `fade-minutes` after `end` it rises linearly back to 6500 K. `fade-minutes 0` is a hard step.
 - Overlap rule — if the daytime gap between `end` and the next `start` is shorter than `2 * fade-minutes`, the two fades overlap, and inside the gap the **lower** (warmer) of the two ramp values applies; the result never exceeds 6500 K.
 
-The `night-light` verb (`night-light on|off|toggle|auto|<kelvin>`, no default chord, also `crucible msg exec night-light 4000`) overrides it: `on` forces the configured `temperature` (4500 K without a block), `off` forces 6500 K, `toggle` flips between them, `auto` returns to the schedule, and a number forces that temperature (2500-6500). A forced value holds until `auto` or a restart. A hot reload applies a changed block.
+The `night-light` verb (`night-light on|off|toggle|auto|<kelvin>`, no default chord, also `crucible msg exec night-light 4000`) overrides it: `on` forces the configured `temperature` (4500 K without a block), `off` forces 6500 K, `toggle` flips between them, `auto` returns to the schedule, and a number forces that temperature (2500-6500). A forced value holds until `auto` or a restart. A hot reload applies a changed block, but while a forced value holds the schedule is ignored, so after testing with the verb run `night-light auto`. Scripts driving it: [`scripting.md`](scripting.md#night-light).
 
 Night light works on the TTY (DRM) backend only; under the nested `winit` backend it has no effect. Screenshots are unaffected, because the ramp is applied at scanout.
 
