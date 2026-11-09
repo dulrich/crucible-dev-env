@@ -4,6 +4,13 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.5.7 — 2026-11-09
+
+### Changed
+
+- The deploy script builds every host on the deploying machine with that host's `target-cpu` (host-a native, host-b broadwell, du-c300 silvermont) and ships the binary over ssh, so a target needs no checkout and no cargo. Each staged binary must pass its `--build` check on the target before anything is installed. `all` now covers du-c300 and continues past a failed host with a `RESULT: <host> FAILED <reason>` line.
+- The deploy also installs `cde-session` (the tty1 launcher) and `cde-wallpaper-rotate` next to `crucible`, with the build id stamped in. `cde-session` runs the sibling `crucible` without a checkout. `docs/session.md`'s `~/.profile` block now execs it.
+
 ## 0.5.6 — 2026-11-08
 
 ### Fixed
