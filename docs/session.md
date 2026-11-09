@@ -17,15 +17,17 @@ The dev tree's `cargo build` rebuilds then no longer change what boots: the inst
 
 ## Launch from tty1
 
-Add this block to `~/.profile` (adjust the checkout path to where you cloned the repo). It fires only on `/dev/tty1`, only when no Wayland session is already running, and is skipped while `~/.config/cde/no-autolaunch` exists:
+Add this block to `~/.profile`. It runs the installed launcher, so the host needs no checkout (`scripts/deploy.sh` installs `cde-session`, `crucible` and `cde-wallpaper-rotate` into `~/.local/bin`). It fires only on `/dev/tty1`, only when no Wayland session is already running, and is skipped while `~/.config/cde/no-autolaunch` exists:
 
 ```sh
 if [ "$(tty)" = /dev/tty1 ] && [ -z "$WAYLAND_DISPLAY" ] && [ ! -e "$HOME/.config/cde/no-autolaunch" ]; then
-    CDE_BIN="$HOME/.local/bin/crucible" exec "$HOME/code/crucible-dev-env/scripts/cde.sh"
+    exec "$HOME/.local/bin/cde-session"
 fi
 ```
 
-`cde.sh` picks the compositor mode from `CDE_MODE`, which defaults to `--tty-udev`, so no mode flag is passed here. With `CDE_BIN` set, it skips `cargo build` and runs that binary; it exits 1 if `CDE_BIN` is not an executable file. It still writes the ghostty wrapper (the fallback `$TERMINAL`, used only when `config.kdl` sets no `terminal`; foot is the configured default), logs to `/tmp/cde/`, and sets the first wallpaper.
+`cde-session` is `scripts/cde.sh` generated at deploy time: `CDE_BIN` defaults to the sibling `crucible`, it never runs `cargo` or `git`, and it logs the deployed build id instead of a git head. On a development checkout you can still `exec` `scripts/cde.sh` directly (it builds the dev tree unless `CDE_BIN` is set).
+
+`cde-session` (and `cde.sh`) picks the compositor mode from `CDE_MODE`, which defaults to `--tty-udev`, so no mode flag is passed here. With `CDE_BIN` set, it skips `cargo build` and runs that binary; it exits 1 if `CDE_BIN` is not an executable file. It still writes the ghostty wrapper (the fallback `$TERMINAL`, used only when `config.kdl` sets no `terminal`; foot is the configured default), logs to `/tmp/cde/`, and sets the first wallpaper.
 
 After a crash or a failed start, read `/tmp/cde/latest.log`.
 
@@ -41,7 +43,7 @@ See [`config.md`](config.md#autostart) for the `autostart` semantics.
 
 ## Wallpaper
 
-`cde.sh` sets the first wallpaper at startup. To rotate it under CDE, run `scripts/wallpaper-rotate.sh` from cron (`scripts/wallpaper-rotate.sh --help` shows the options and an example line). Set `WALLPAPER_DIR` to the directory of images to rotate through. If you also have an X session that rotates wallpapers with `feh`, give the two cron jobs separate names or state files so they do not overwrite each other.
+`cde.sh` sets the first wallpaper at startup. To rotate it under CDE, run `~/.local/bin/cde-wallpaper-rotate` (the installed `scripts/wallpaper-rotate.sh`) from cron (`cde-wallpaper-rotate --help` shows the options and an example line). Set `WALLPAPER_DIR` to the directory of images to rotate through. If you also have an X session that rotates wallpapers with `feh`, give the two cron jobs separate names or state files so they do not overwrite each other.
 
 ## Reverting and falling back to i3
 

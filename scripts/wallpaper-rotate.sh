@@ -43,6 +43,10 @@ Cron example:
 USAGE
 }
 
+# Installed-copy stamp: scripts/deploy.sh generates ~/.local/bin/cde-wallpaper-rotate from this
+# file with the guard path rewritten, stamped_id set and the build-id.sh source line replaced.
+# shellcheck disable=SC2034
+stamped_id=
 # shellcheck source=lib/build-id.sh
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/lib/build-id.sh"
 case " $* " in *" --help "* | *" -h "*) usage; exit 0 ;; esac
