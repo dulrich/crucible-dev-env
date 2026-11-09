@@ -373,7 +373,7 @@ pub struct NightLightConfig {
     pub temperature: u32,
     /// Window start, minutes after local midnight (`0..1440`).
     pub start: u16,
-    /// Window end (exclusive), minutes after local midnight (`0..1440`); never equal to `start`.
+    /// Window end (exclusive), minutes after local midnight (`0..1440`); equal to `start` means all day.
     pub end: u16,
     /// Minutes of linear fade before `start` and after `end`. `0..=180`, default 30; 0 is a hard step.
     pub fade_minutes: u16,

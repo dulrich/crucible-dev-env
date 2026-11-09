@@ -41,7 +41,7 @@ pub enum Verb {
 ///
 /// Full `temperature` inside `[start, end)` (wrapping midnight when `end < start`), a linear ramp
 /// from 6500 K over the `fade_minutes` before `start` and back up over the `fade_minutes` after
-/// `end`, 6500 K otherwise. Where the daytime gap is shorter than `2 * fade_minutes` the two ramps
+/// `end`, 6500 K otherwise. `start == end` is all day: the full `temperature` at every minute, no fade. Where the daytime gap is shorter than `2 * fade_minutes` the two ramps
 /// overlap and the lower (warmer) value wins. `fade_minutes == 0` is a hard step.
 #[must_use]
 pub fn target_kelvin(cfg: &NightLightConfig, minute_of_day: u16) -> u32 {
@@ -283,6 +283,20 @@ mod tests {
         let c = cfg("21:00", "07:00", 0);
         assert_eq!(target_kelvin(&c, 20 * 60 + 59), 6500);
         assert_eq!(target_kelvin(&c, 21 * 60), 4500);
+    }
+
+    #[test]
+    fn start_equal_to_end_is_all_day() {
+        for fade in [0, 30, 180] {
+            let c = cfg("07:00", "07:00", fade);
+            for minute in 0..1440 {
+                assert_eq!(
+                    target_kelvin(&c, minute),
+                    4500,
+                    "fade {fade} minute {minute}"
+                );
+            }
+        }
     }
 
     #[test]

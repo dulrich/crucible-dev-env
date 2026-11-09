@@ -4,6 +4,16 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.5.5 — 2026-11-08
+
+### Changed
+
+- `night-light` with `start` equal to `end` (e.g. `start "00:00"; end "00:00"`) now means all day: the configured `temperature` around the clock, with no fade. It was a config error before, so no existing config changes meaning.
+
+### Added
+
+- `docs/config.example.kdl`, a starting config with every setting at its built-in default (checked by a test), and `docs/scripting.md`, on driving CDE from external scripts over its socket.
+
 ## 0.5.4 — 2026-11-08
 
 ### Added

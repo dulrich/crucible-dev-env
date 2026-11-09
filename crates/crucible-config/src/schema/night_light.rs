@@ -51,16 +51,9 @@ pub(super) fn parse_night_light(node: NodeReader<'_>) -> Result<NightLightConfig
     let Some((start, _)) = start else {
         return Err(node.missing("a `start` child"));
     };
-    let Some((end, end_at)) = end else {
+    let Some((end, _)) = end else {
         return Err(node.missing("an `end` child"));
     };
-    if start == end {
-        return Err(node.invalid_at(
-            end_at,
-            "end",
-            "must differ from `start` (an empty or all-day window is not allowed)".to_string(),
-        ));
-    }
     Ok(NightLightConfig {
         temperature,
         start,
@@ -169,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn start_and_end_are_required_and_must_differ() {
+    fn start_and_end_are_required_and_equal_means_all_day() {
         let (err, _) = err_at("night-light { end \"07:00\"; }\n");
         assert!(
             matches!(err, ConfigError::MissingArgument { .. }),
@@ -185,9 +178,11 @@ mod tests {
             matches!(err, ConfigError::MissingArgument { .. }),
             "{err:?}"
         );
-        let (err, at) = err_at("night-light {\n start \"07:00\"\n end \"07:00\"\n}\n");
-        assert!(matches!(err, ConfigError::InvalidValue { .. }), "{err:?}");
-        assert_eq!(at.line, 3);
+        let n = parse("night-light {\n start \"07:00\"\n end \"07:00\"\n}\n")
+            .unwrap()
+            .night_light
+            .unwrap();
+        assert_eq!((n.start, n.end), (7 * 60, 7 * 60));
     }
 
     #[test]
