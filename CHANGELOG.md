@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.5.6 — 2026-11-08
+
+### Fixed
+
+- Switching workspaces or cycling a pane stack no longer flashes the background for clients that drop their content while suspended (e.g. cterm): CDE keeps the previous frame on screen until the revealed window has repainted, for at most 80 ms. An IPC `capture` of a held output waits for the release.
+
 ## 0.5.5 — 2026-11-08
 
 ### Changed
