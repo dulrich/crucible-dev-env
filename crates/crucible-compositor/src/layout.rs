@@ -137,7 +137,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     let revealed = configure_placement(&element, logical, *resized, *fullscreen);
                     self.space.map_element(element.clone(), logical.loc, false);
                     if let Some(serial) = revealed {
-                        self.begin_reveal_hold(&element, serial);
+                        self.begin_reveal_hold(&element, logical, serial);
                     }
                 }
                 LayoutChange::Hide { id } => {
@@ -412,6 +412,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub(crate) fn begin_reveal_hold(
         &mut self,
         element: &WindowElement,
+        placed: smithay::utils::Rectangle<i32, smithay::utils::Logical>,
         serial: smithay::utils::Serial,
     ) {
         use crate::reveal_hold::{REVEAL_HOLD_TIMEOUT, is_placeholder_buffer};
@@ -423,7 +424,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let Some(root) = element.toplevel().map(|t| t.wl_surface().clone()) else {
             return;
         };
-        let Some(output) = self.space.outputs_for_element(element).first().cloned() else {
+        // Not `outputs_for_element`: Smithay fills that only in `Space::refresh`, and a window
+        // returning from hidden was unmapped, so its fresh entry has no outputs yet.
+        let geometries: Vec<_> = self
+            .space
+            .outputs()
+            .filter_map(|o| {
+                self.space
+                    .output_geometry(o)
+                    .map(|g| (o.clone(), (g.loc.x, g.loc.y, g.size.w, g.size.h)))
+            })
+            .collect();
+        let Some(output) = crate::reveal_hold::output_for_rect(
+            &geometries,
+            (placed.loc.x, placed.loc.y, placed.size.w, placed.size.h),
+        ) else {
             return;
         };
         let (buffer, surface) =

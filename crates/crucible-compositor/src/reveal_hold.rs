@@ -159,6 +159,31 @@ impl<O: Hash + Eq + Clone, W: PartialEq> RevealHolds<O, W> {
     }
 }
 
+/// A logical rect as `(x, y, w, h)`.
+pub type RectXywh = (i32, i32, i32, i32);
+
+/// The output a just-placed window lands on: the one its rect overlaps most. **Pure**. Rects are
+/// `(x, y, w, h)` in global logical space. `None` when it overlaps no output.
+#[must_use]
+pub fn output_for_rect<O: Clone>(outputs: &[(O, RectXywh)], rect: RectXywh) -> Option<O> {
+    let overlap = |(ox, oy, ow, oh): RectXywh| {
+        let (rx, ry, rw, rh) = rect;
+        let w = (ox + ow).min(rx + rw) - ox.max(rx);
+        let h = (oy + oh).min(ry + rh) - oy.max(ry);
+        if w > 0 && h > 0 {
+            i64::from(w) * i64::from(h)
+        } else {
+            0
+        }
+    };
+    outputs
+        .iter()
+        .map(|(o, g)| (o, overlap(*g)))
+        .filter(|(_, area)| *area > 0)
+        .max_by_key(|(_, area)| *area)
+        .map(|(o, _)| o.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +298,13 @@ mod tests {
         assert_eq!(h.admission(&"B"), RenderAdmission::Render);
         h.expire(now + REVEAL_HOLD_TIMEOUT);
         assert_eq!(h.admission(&"A"), RenderAdmission::Render);
+    }
+
+    #[test]
+    fn output_for_rect_picks_the_most_overlapped_output() {
+        let outs = [("A", (0, 0, 100, 100)), ("B", (100, 0, 100, 100))];
+        assert_eq!(output_for_rect(&outs, (10, 10, 50, 50)), Some("A"));
+        assert_eq!(output_for_rect(&outs, (80, 0, 100, 100)), Some("B"));
+        assert_eq!(output_for_rect(&outs, (500, 500, 10, 10)), None);
     }
 }
