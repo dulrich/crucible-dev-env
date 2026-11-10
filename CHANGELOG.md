@@ -4,6 +4,13 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.5.8 — 2026-11-09
+
+### Changed
+
+- The keyboard layout can be switched while the session is locked: `Super+E` / `Super+S` (any `set-layout` bind) work at the lock screen, and `crucible msg exec set-layout <name>` is admitted while locked, so a layout can also be fixed over ssh. Every other acting request still answers `err session locked`, and VT switching stays chord-only.
+- The default `lock-command` is now `swaylock --indicator-idle-visible`, so with two or more `keyboard` layouts swaylock shows the active layout name without a keypress. A `lock-command` you set yourself is unchanged.
+
 ## 0.5.7 — 2026-11-09
 
 ### Changed
