@@ -33,13 +33,17 @@ fn run_response(spawned: Result<u32, String>) -> Response {
 }
 
 /// The lock admission for an IPC request: while `locked`, every request that acts
-/// ([`Request::acts`]) is refused; `candidates`, `bindings` and `save` stay allowed. No `exec`
-/// action is allowed while locked (`vt-switch`, the only one that would be, is not parseable).
+/// ([`Request::acts`]) is refused; `candidates`, `bindings` and `save` stay allowed. The one
+/// exception is an `exec` whose text parses to an action the lock rule allows
+/// ([`Action::allowed_while_locked`]), i.e. `set-layout` (`vt-switch` is not parseable). An
+/// unparsable or other `exec` is refused as `session locked`, without parse detail.
 fn admit_request(locked: bool, request: &Request) -> Result<(), ActionError> {
-    if locked && request.acts() {
-        Err(ActionError::Locked)
-    } else {
-        Ok(())
+    if !locked || !request.acts() {
+        return Ok(());
+    }
+    match request {
+        Request::Exec(line) if parse_exec(line).is_ok_and(|a| a.allowed_while_locked()) => Ok(()),
+        _ => Err(ActionError::Locked),
     }
 }
 
@@ -621,6 +625,25 @@ mod tests {
             Response::Err(ActionError::Locked.to_string()),
             Response::Err("session locked".into())
         );
+    }
+
+    #[test]
+    fn locked_admits_only_exec_of_a_lock_allowed_action() {
+        for line in ["set-layout us", "set-layout"] {
+            let r = Request::Exec(line.into());
+            let want = if line == "set-layout" {
+                Err(ActionError::Locked)
+            } else {
+                Ok(())
+            };
+            assert_eq!(admit_request(true, &r), want, "{line}");
+            assert_eq!(admit_request(false, &r), Ok(()), "{line}");
+        }
+        for line in ["focus left", "vt-switch 2", "garbage ~~", "none", ""] {
+            let r = Request::Exec(line.into());
+            assert_eq!(admit_request(true, &r), Err(ActionError::Locked), "{line}");
+            assert_eq!(admit_request(false, &r), Ok(()), "{line}");
+        }
     }
 
     #[test]

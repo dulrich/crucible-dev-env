@@ -14,7 +14,7 @@ use crate::state::{Backend, CrucibleState};
 /// [`WindowElement`] in production; any `PartialEq` handle in tests).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InputMode<O = WindowElement> {
-    /// The session is locked: only the lock surface receives input; only VT switching runs.
+    /// The session is locked: only the lock surface receives input; only VT switching and `set-layout` run.
     Locked,
     /// Snip mode (`snip` action): every output shows a frozen frame and all pointer and key
     /// input feeds the selection; clients receive nothing. Only `Snip` and `VtSwitch` run.

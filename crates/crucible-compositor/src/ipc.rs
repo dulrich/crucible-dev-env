@@ -149,7 +149,8 @@ impl Request {
     }
 
     /// Whether this request acts (changes the model, spawns, or touches overlays). Acting requests
-    /// are refused while the session is locked; `candidates`, `bindings` and `save` are not acting.
+    /// are classified here; `candidates`, `bindings` and `save` are not acting. Admission while
+    /// locked is `admit_request`'s job, which refuses them all but `exec set-layout`.
     #[must_use]
     pub fn acts(&self) -> bool {
         match self {

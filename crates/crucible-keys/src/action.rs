@@ -357,11 +357,12 @@ impl Action {
     }
 
     /// The lock rule: whether this action may run while the session is locked. Only VT switching
-    /// does; every other key goes to the locker and every acting IPC request is refused. The
+    /// and `set-layout` do (the locker shows the active layout, so it must be switchable); every
+    /// other key goes to the locker and every other acting IPC request is refused. The
     /// compositor's keyboard filter and its action gate share this one predicate.
     #[must_use]
     pub fn allowed_while_locked(&self) -> bool {
-        matches!(self, Self::VtSwitch(_))
+        matches!(self, Self::VtSwitch(_) | Self::SetLayout(_))
     }
 
     /// The snip rule: whether this action may run while snip mode is active. Only `snip` (which
@@ -695,11 +696,11 @@ mod tests {
     }
 
     #[test]
-    fn only_vt_switch_is_allowed_while_locked() {
+    fn only_vt_switch_and_set_layout_are_allowed_while_locked() {
         for action in every_variant() {
             assert_eq!(
                 action.allowed_while_locked(),
-                matches!(action, Action::VtSwitch(_)),
+                matches!(action, Action::VtSwitch(_) | Action::SetLayout(_)),
                 "{action}"
             );
         }

@@ -128,8 +128,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
                         ctrl: modifiers.ctrl,
                     };
                     // The one admission gate (`admit`, shared with the action gate): while locked
-                    // only VT switching runs (every other key goes to the locker); while snipping
-                    // only `snip` (cancel) and VT switches run as chords.
+                    // only VT switching and `set-layout` run (every other key goes to the
+                    // locker); while snipping only `snip` (cancel) and VT switches run as chords.
                     let action = crucible_keys::resolve(&state.bindings, mods, keysym)
                         .filter(|a| super::execute::admit(mode, a).is_ok());
                     // The single snip branch: every press is intercepted; a non-admitted one

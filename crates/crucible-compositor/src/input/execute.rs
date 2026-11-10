@@ -56,7 +56,7 @@ pub(crate) enum ActionError {
 /// locker, or feeds it to the selection while snipping); IPC `exec` reaches it through the gate.
 ///
 /// # Errors
-/// [`ActionError::Locked`] while locked for every action but a VT switch;
+/// [`ActionError::Locked`] while locked for every action but a VT switch and `set-layout`;
 /// [`ActionError::Snipping`] while snipping for every action but `snip` and a VT switch.
 pub(crate) fn admit<O>(mode: &InputMode<O>, action: &Action) -> Result<(), ActionError> {
     if mode.is_locked() && !action.allowed_while_locked() {
@@ -432,10 +432,16 @@ mod tests {
     }
 
     #[test]
-    fn locked_admits_only_vt_switch() {
+    fn locked_admits_only_vt_switch_and_set_layout() {
         assert_eq!(
             admit(&InputMode::<()>::Locked, &Action::VtSwitch(2)),
             Ok(())
+        );
+        let layout = Action::SetLayout("us".into());
+        assert_eq!(admit(&InputMode::<()>::Locked, &layout), Ok(()));
+        assert_eq!(
+            admit(&InputMode::<()>::Snip, &layout),
+            Err(ActionError::Snipping)
         );
         for action in [
             Action::Quit,

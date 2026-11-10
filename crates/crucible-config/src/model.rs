@@ -459,7 +459,8 @@ pub struct Config {
     /// Screenshot destination and directory.
     pub screenshot: ScreenshotConfig,
     /// The screen locker the `lock` action spawns (`lock-command`), split on whitespace into
-    /// program + arguments (no shell quoting). Default `"swaylock"`.
+    /// program + arguments (no shell quoting). Default
+    /// `"swaylock --indicator-idle-visible"` (shows the keyboard layout name while idle).
     pub lock_command: String,
     /// Shell command lines run once per CDE start (`autostart`, repeatable), in file order, via
     /// `/bin/sh -c`. Default empty.
@@ -509,7 +510,7 @@ impl Default for Config {
             launcher: LauncherConfig::default(),
             binds: Vec::new(),
             outputs: BTreeMap::new(),
-            lock_command: "swaylock".to_string(),
+            lock_command: "swaylock --indicator-idle-visible".to_string(),
             autostart: Vec::new(),
         }
     }

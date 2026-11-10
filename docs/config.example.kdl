@@ -28,7 +28,7 @@ confine-pointer-to-fullscreen #true
 restore-session #true
 
 // Split on whitespace, no shell quoting.
-lock-command "swaylock"
+lock-command "swaylock --indicator-idle-visible"
 
 // Repeatable; each runs once per CDE start via /bin/sh -c. None by default.
 /-autostart "dbus-update-activation-environment --systemd WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE"

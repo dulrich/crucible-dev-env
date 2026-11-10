@@ -171,7 +171,10 @@ binds {
 
     #[test]
     fn lock_command_defaults_to_swaylock_and_rejects_empty_or_duplicate() {
-        assert_eq!(Config::default().lock_command, "swaylock");
+        assert_eq!(
+            Config::default().lock_command,
+            "swaylock --indicator-idle-visible"
+        );
         let c = parse("lock-command \"swaylock -f -c 000000\"\n").unwrap();
         assert_eq!(c.lock_command, "swaylock -f -c 000000");
         let (err, _) = err_at("lock-command \"  \"\n");

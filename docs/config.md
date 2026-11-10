@@ -84,11 +84,11 @@ restore-session #false
 lock-command "swaylock -f -c 000000"
 ```
 
-The screen locker the `lock` action (default `Super+Escape`) spawns, detached (not into a pane). Default `"swaylock"`; must not be empty. The string is split on whitespace into the program and its arguments (no shell quoting). A failed spawn only logs a warning.
+The screen locker the `lock` action (default `Super+Escape`) spawns, detached (not into a pane). Default `"swaylock --indicator-idle-visible"`; must not be empty. With two or more `keyboard` layouts swaylock shows the active layout name in its indicator; `--indicator-idle-visible` shows the indicator (and so the layout) without a keypress. The string is split on whitespace into the program and its arguments (no shell quoting). A failed spawn only logs a warning.
 
 #### Screen lock
 
-CDE implements `ext-session-lock-v1`, so any Wayland locker (swaylock, gtklock, waylock, …) works. While locked only the locker is shown (over black) and only it receives input; no CDE chord runs except VT switching (`Ctrl+Alt+F<n>`). If the locker dies the screen stays black and locked; running the locker again (from a VT, or over ssh with `WAYLAND_DISPLAY` set) takes over the lock, and unlocking it unlocks the session.
+CDE implements `ext-session-lock-v1`, so any Wayland locker (swaylock, gtklock, waylock, …) works. While locked only the locker is shown (over black) and only it receives input; no CDE chord runs except VT switching (`Ctrl+Alt+F<n>`) and `set-layout` (by default `Super+E` / `Super+S`), so you can switch the keyboard layout before typing your password. Over ssh the same works with `CDE_SOCKET=$XDG_RUNTIME_DIR/cde/<wayland-socket>.sock crucible msg exec set-layout us` (the socket is the file in `$XDG_RUNTIME_DIR/cde/` named after the compositor's Wayland socket, for example `wayland-1.sock`). If the locker dies the screen stays black and locked; running the locker again (from a VT, or over ssh with `WAYLAND_DISPLAY` set) takes over the lock, and unlocking it unlocks the session.
 
 ### `autostart`
 
@@ -329,7 +329,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `open-picker` | Open the workspace picker (`crucible pick`) |
 | `open-launcher` | Open the program launcher (`crucible launch`) |
 | `open-settings` | Open the settings overlay (`crucible keys`): the effective keybindings, grouped under area headings (panes & windows, stacks, workspaces, outputs, launch & overlays, session & system) until you type, then one flat filtered list; Enter runs the selected binding |
-| `set-layout <name>` | Switch the keyboard to the layout `<name>` from `keyboard { layouts … }` (by position in that list; unknown name is a logged no-op). Defaults `Super+E` = `set-layout us`, `Super+S` = `set-layout es` |
+| `set-layout <name>` | Switch the keyboard to the layout `<name>` from `keyboard { layouts … }` (by position in that list; unknown name is a logged no-op). Also runs while the session is locked. Defaults `Super+E` = `set-layout us`, `Super+S` = `set-layout es` |
 | `toggle-header` | Show/hide the workspace header strip on the focused output (`header { mode "toggle" }` only; a no-op in `always` and `off`) |
 | `toggle-fullscreen` | Toggle fullscreen for the focused window (see [Fullscreen](#fullscreen)). No-op on an empty pane. Default `Super+F` |
 | `rename-workspace` | Rename the active workspace (the picker in rename mode) |

@@ -110,7 +110,7 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+Shift+D` | Capture the focused terminal's current directory as the active workspace's root (where its new terminals start) |
 | `Super+Ctrl+Shift+D` | Set or clear the active workspace's root in a picker prompt |
 | `Super+Print` / `Super+Shift+Print` | Screenshot the focused output / region snip (see `screenshot` in `docs/config.md`; a bare `Print` stays with applications) |
-| `Super+Escape` | Lock the screen (spawns `lock-command`, default `swaylock`; see `docs/config.md`) |
+| `Super+Escape` | Lock the screen (spawns `lock-command`, default `swaylock --indicator-idle-visible`; see `docs/config.md`) |
 | `Super+Shift+]` / `Super+Shift+[` | Move the focused window to the next / previous workspace |
 | `Super+M` | Mark the focused window; press again in another pane (any workspace or monitor) to move it there; press again in its own pane to cancel |
 | `Super+Shift+M` | Like `Super+M`, but swaps: the marked window takes the focused pane's active window's place and that window takes the marked one's; with no mark it marks; into an empty pane it moves |
