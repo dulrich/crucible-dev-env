@@ -20,6 +20,7 @@ mod model;
 mod overlay;
 mod reader;
 mod schema;
+mod theme;
 
 use std::path::{Path, PathBuf};
 
@@ -36,6 +37,10 @@ pub use overlay::{
     OverlayStyle, Palette, TerminalKind,
 };
 pub use schema::parse;
+pub use theme::{
+    Milli, ThemeConfig, ThemeFont, ThemeTarget, render as render_theme, theme_dir, theme_dir_from,
+    theme_spawn_args,
+};
 
 /// Resolves the config path from the two environment values (`None` or empty = unset).
 #[must_use]

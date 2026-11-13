@@ -284,7 +284,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return;
         }
         let program = self.terminal_program();
-        let args = with_terminal_args(&self.config.overlay.effective_terminal_args(&program), args);
+        let args = with_terminal_args(
+            &crate::config::overlay_terminal_args(
+                &self.config,
+                &program,
+                crucible_config::theme_dir().as_deref(),
+            ),
+            args,
+        );
         if let Some(pid) = self.spawn(SpawnRequest::new(program, args, SpawnKind::Overlay)) {
             self.persist
                 .placement
@@ -467,7 +474,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
         );
         let program = self.terminal_program();
         let args = with_terminal_args(
-            &self.config.overlay.effective_terminal_args(&program),
+            &crate::config::overlay_terminal_args(
+                &self.config,
+                &program,
+                crucible_config::theme_dir().as_deref(),
+            ),
             Invocation::OverlayHost {
                 socket: socket.clone(),
             }

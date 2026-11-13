@@ -98,3 +98,6 @@ pub mod screenshot;
 
 /// Snip mode: the pure selection state machine (plan 34 WP-3); the compositor side arrives in WP-4.
 pub mod snip;
+
+/// Writing the `theme` block's per-terminal fragment files (plan 41).
+pub mod terminal_theme;

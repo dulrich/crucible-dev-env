@@ -502,6 +502,8 @@ pub struct Config {
     pub idle: IdleConfig,
     /// Night light schedule; `None` (no `night-light` block) leaves the display ramp untouched.
     pub night_light: Option<NightLightConfig>,
+    /// Terminal theme (`theme`); `None` writes no fragment files and adds no spawn arguments.
+    pub theme: Option<crate::theme::ThemeConfig>,
     /// Pointer cursor theme and size (both unset by default).
     pub cursor: CursorConfig,
     /// Screenshot destination and directory.
@@ -553,6 +555,7 @@ impl Default for Config {
             keyboard: KeyboardConfig::default(),
             idle: IdleConfig::default(),
             night_light: None,
+            theme: None,
             cursor: CursorConfig::default(),
             screenshot: ScreenshotConfig::default(),
             launcher: LauncherConfig::default(),

@@ -249,6 +249,44 @@ The `night-light` verb (`night-light on|off|toggle|auto|<kelvin>`, no default ch
 
 Night light works on the TTY (DRM) backend only; under the nested `winit` backend it has no effect. Screenshots are unaffected, because the ramp is applied at scanout.
 
+### `theme`
+
+```kdl
+theme {
+    font "JetBrains Mono" size=(pt)11.5  // family, optional size in points
+    foreground "#dcdccc"
+    background "#111111"
+    cursor "#dcdccc"
+    alpha 0.9                            // background opacity, 0.0..=1.0
+    palette 1 "#f62b5a"                  // ANSI colour 0-15, once per index
+}
+```
+
+One font and colour set for every supported terminal (foot, cterm, urxvt, ghostty). Every child is optional and only what is set is emitted; a terminal keeps its own value for anything the theme leaves out. Each child may appear once, except `palette`, which may appear once per index. `size` is in points: `(pt)11.5` or a bare `11.5`, greater than 0 and at most 200 (`(px)` is rejected; terminals size fonts in points). Colours are `"#rrggbb"`. A colour that is not `#rrggbb`, an `alpha` outside 0.0..=1.0, a palette index outside 0..=15, a repeated palette index or an unknown child is a located config error. Decimals are kept to three places.
+
+**Files.** With the block, CDE writes one fragment per terminal to `$XDG_CONFIG_HOME/cde/terminal-theme/` (default `~/.config/cde/terminal-theme/`) on start and on every config reload: `foot.ini`, `cterm.kdl`, `urxvt.Xresources`, `ghostty.conf`. The directory is created as needed, each file is replaced atomically, and a file whose content is unchanged is not rewritten. A write failure is logged as a warning and never fails the config apply. Without the block nothing is written, and removing the block does **not** delete the existing files: CDE just stops updating them (and stops merging or passing them, below). `crucible terminal-theme <foot|cterm|urxvt|ghostty>` prints a fragment without writing anything.
+
+**How each terminal reads its fragment.** A theme value wins over the terminal's own config only where the fragment is read after it.
+
+- foot — add `include=~/.config/cde/terminal-theme/foot.ini` to your `foot.ini` (keys after the include override the theme).
+- cterm — add `include "~/.config/cde/terminal-theme/cterm.kdl"` to cterm's `config.kdl`.
+- urxvt — merged by CDE: when XWayland starts, `xrdb -merge` loads `~/.Xresources` and then `urxvt.Xresources`, so the theme wins. When a reload changes the urxvt fragment while XWayland runs, CDE re-merges it; new urxvt windows pick it up, open ones keep their colours.
+- ghostty — passed by CDE: with the block, CDE adds `--config-file=<dir>/ghostty.conf` to every terminal and overlay spawn whose program is `ghostty` or `ghostty-cde` (before the exec flag). Without the block nothing is added. Adding or removing the block restarts a pre-started ghostty overlay terminal. Ghosttys you start yourself do not get it.
+
+| Key | foot (`[main]` / `[colors-dark]`) | cterm | urxvt | ghostty |
+| --- | --- | --- | --- | --- |
+| `font` | `font=<family>:size=<N>` | `font "<family>" size=N` | `URxvt.font: xft:<family>:size=<N>` | `font-family`, `font-size` |
+| `foreground` | `foreground=rrggbb` | `colors { foreground }` | `URxvt*foreground` | `foreground` |
+| `background` | `background=rrggbb` | `colors { background }` | `URxvt*background` | `background` |
+| `cursor` | `cursor=<text> <cursor>` | `colors { cursor }` | `URxvt*cursorColor` | `cursor-color` |
+| `alpha` | `alpha=` | `colors { alpha }` | `[NN]` prefix on the background | `background-opacity` |
+| `palette i` | `regular0-7` / `bright0-7` | `colors { palette i }` | `*color0-15` | `palette = i=#rrggbb` |
+
+**What a terminal cannot express.**
+
+- foot's `cursor=` takes the text colour and the cursor colour together; CDE uses the theme's `background` as the text colour, or foot's default background (`002b36`) when the theme sets none.
+- urxvt has no separate opacity key: `alpha` below 1.0 becomes a `[NN]` percentage prefix on `URxvt*background` (`alpha 0.9` → `[90]#111111`), so it needs `background` in the theme, and it shows only with a 32-bit visual (`URxvt.depth: 32`, which stays in your own `~/.Xresources`; the theme never emits it). Without `background`, `alpha` is not emitted for urxvt; with `alpha 1.0` the background is written plain.
+
 ### `cursor`
 
 ```kdl
@@ -370,7 +408,7 @@ Not a config key. A window goes fullscreen when it asks (Wayland `xdg_toplevel.s
 
 ### X11 apps (XWayland)
 
-Not a config key. When XWayland starts, CDE loads `$HOME/.Xresources` into it with `xrdb -merge` (when the file exists and `xrdb` is installed), as an X session's startup would, so X11 apps such as urxvt get their resources. Edits take effect on the next CDE start, or run `xrdb -merge ~/.Xresources` yourself from a CDE terminal.
+Not a config key. When XWayland starts, CDE loads `$HOME/.Xresources` into it with `xrdb -merge` (when the file exists and `xrdb` is installed), as an X session's startup would, so X11 apps such as urxvt get their resources; with a [`theme`](#theme) block the urxvt theme fragment is merged after it. Edits take effect on the next CDE start, or run `xrdb -merge ~/.Xresources` yourself from a CDE terminal.
 
 ## Complete example
 

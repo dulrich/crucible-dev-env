@@ -10,6 +10,7 @@ mod night_light;
 mod output;
 mod overlay;
 mod screenshot;
+mod theme;
 mod tiling;
 
 use kdl::KdlDocument;
@@ -70,6 +71,7 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "screenshot" => config.screenshot = screenshot::parse_screenshot(node)?,
             "idle" => config.idle = idle::parse_idle(node)?,
             "night-light" => config.night_light = Some(night_light::parse_night_light(node)?),
+            "theme" => config.theme = Some(theme::parse_theme(node)?),
             "output" => {
                 let (name, out) = output::parse_output(node)?;
                 if config.outputs.insert(name.clone(), out).is_some() {

@@ -456,6 +456,62 @@ impl<'a> NodeReader<'a> {
         })
     }
 
+    /// A point-size property `key` (`size=(pt)11.5` or a bare `size=11.5`), if present, with its
+    /// location. Any other annotation is an `InvalidValue` at the property; a non-number a
+    /// `WrongType`.
+    pub(crate) fn pt_prop(&self, key: &str) -> Result<Option<(f64, Location)>, ConfigError> {
+        let Some(entry) = self.node.entry(key) else {
+            return Ok(None);
+        };
+        let at = locate(self.text, entry.span().offset());
+        let what = format!("property `{key}`");
+        if let Some(ty) = entry.ty().map(|t| t.value())
+            && ty != "pt"
+        {
+            return Err(self.invalid_at(
+                at,
+                &what,
+                format!("`{key}` is in points: write (pt)N or a bare number, not ({ty})"),
+            ));
+        }
+        let value = entry.value();
+        #[allow(clippy::cast_precision_loss)]
+        let n = value
+            .as_float()
+            .or_else(|| value.as_integer().map(|n| n as f64))
+            .ok_or_else(|| self.wrong_type_at(at, &what, "a number"))?;
+        Ok(Some((n, at)))
+    }
+
+    /// Exactly one `"#rrggbb"` string argument, validated.
+    pub(crate) fn hex_arg(&self) -> Result<Rgb, ConfigError> {
+        let s = self.string_arg("a \"#rrggbb\" string")?;
+        Rgb::from_hex(s)
+            .ok_or_else(|| self.invalid("argument", format!("`{s}` is not a #rrggbb colour")))
+    }
+
+    /// Exactly two arguments, an integer then a string (`palette 1 "#f62b5a"`), with the
+    /// integer's location.
+    pub(crate) fn int_string_args(
+        &self,
+        labels: [&'static str; 2],
+    ) -> Result<(i128, Location, &'a str), ConfigError> {
+        let all = self.args();
+        let (Some((n, n_at)), Some((s, s_at))) = (all.first(), all.get(1)) else {
+            return Err(self.missing(if all.is_empty() { labels[0] } else { labels[1] }));
+        };
+        if let Some((_, at)) = all.get(2) {
+            return Err(self.unexpected_at(*at));
+        }
+        let n = n
+            .as_integer()
+            .ok_or_else(|| self.wrong_type_at(*n_at, "argument 1", "an integer"))?;
+        let s = s
+            .as_string()
+            .ok_or_else(|| self.wrong_type_at(*s_at, "argument 2", "a string"))?;
+        Ok((n, *n_at, s))
+    }
+
     /// A string property `key`, if present, with its location; `expected` words a type error.
     pub(crate) fn string_prop(
         &self,

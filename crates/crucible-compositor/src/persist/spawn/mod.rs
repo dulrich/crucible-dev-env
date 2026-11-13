@@ -67,6 +67,27 @@ pub fn with_terminal_args(terminal_args: &[String], args: Vec<OsString>) -> Vec<
         .collect()
 }
 
+/// The arguments a tiling terminal spawn of `program` (basename `basename`; `configured` when it
+/// is the configured terminal) puts before the exec flag: the effective `tiling.terminal-args`,
+/// then the `theme`'s spawn arguments (ghostty's `--config-file=` into `theme_dir`; nothing
+/// without a `theme`). **Pure.**
+#[must_use]
+pub fn tiling_terminal_args(
+    config: &crucible_config::Config,
+    program: &str,
+    basename: &str,
+    configured: bool,
+    theme_dir: Option<&Path>,
+) -> Vec<String> {
+    let mut args = config.tiling.effective_terminal_args(basename, configured);
+    args.extend(crucible_config::theme_spawn_args(
+        config.theme.as_ref(),
+        program,
+        theme_dir,
+    ));
+    args
+}
+
 /// One spawn: `program args…`, optionally in `cwd`, remembered as a CDE spawn of `kind` with
 /// `origin` (the saved record it stands for, if any).
 #[derive(Debug, Clone)]
@@ -270,10 +291,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .unwrap_or(program);
         let configured = same_program(program, &self.terminal_program());
         with_terminal_args(
-            &self
-                .config
-                .tiling
-                .effective_terminal_args(basename, configured),
+            &tiling_terminal_args(
+                &self.config,
+                program,
+                basename,
+                configured,
+                crucible_config::theme_dir().as_deref(),
+            ),
             args,
         )
     }
@@ -493,6 +517,33 @@ mod tests {
         let got: Vec<&str> = got.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(got, ["--a=1", "--b", "-e", "/c", "pick"]);
         assert_eq!(with_terminal_args(&[], base.clone()), base);
+    }
+
+    #[test]
+    fn theme_adds_ghostty_config_file_to_tiling_args_only_with_a_theme() {
+        let plain = crucible_config::Config::default();
+        let themed = crucible_config::parse("theme { alpha 0.9; }\n").unwrap();
+        let dir = p("/c/cde/terminal-theme");
+        let base = plain.tiling.effective_terminal_args("ghostty", true);
+        assert_eq!(
+            tiling_terminal_args(&plain, "ghostty", "ghostty", true, dir),
+            base
+        );
+        let got = tiling_terminal_args(&themed, "/x/ghostty-cde", "ghostty-cde", true, dir);
+        assert_eq!(
+            got.last().map(String::as_str),
+            Some("--config-file=/c/cde/terminal-theme/ghostty.conf")
+        );
+        // Before the exec flag, after the tiling args.
+        let argv = with_terminal_args(&got, vec!["-e".into(), "sh".into()]);
+        assert_eq!(
+            argv[argv.len() - 3],
+            "--config-file=/c/cde/terminal-theme/ghostty.conf"
+        );
+        assert_eq!(
+            tiling_terminal_args(&themed, "foot", "foot", true, dir),
+            plain.tiling.effective_terminal_args("foot", true)
+        );
     }
 
     fn p(s: &str) -> Option<&Path> {

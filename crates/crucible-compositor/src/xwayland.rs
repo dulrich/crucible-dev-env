@@ -98,30 +98,71 @@ pub(crate) fn note_xwayland_scale_change(old_default: f64, new_default: f64) {
     }
 }
 
-/// The X resources file loaded into XWayland: `$HOME/.Xresources` when it exists. **Pure** (takes
-/// `home` and an existence check) so it is unit-testable.
-fn xresources_file(home: Option<&Path>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    let file = home?.join(".Xresources");
-    exists(&file).then_some(file)
+/// The X resources files loaded into XWayland, in merge order: `$HOME/.Xresources`, then the
+/// `theme` block's urxvt fragment (`theme_file`), each only when it exists, so the theme wins over
+/// the user's own resources. **Pure** (takes `home`, the fragment and an existence check) so it
+/// is unit-testable.
+fn xresources_files(
+    home: Option<&Path>,
+    theme_file: Option<&Path>,
+    exists: impl Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    home.map(|h| h.join(".Xresources"))
+        .into_iter()
+        .chain(theme_file.map(Path::to_path_buf))
+        .filter(|f| exists(f))
+        .collect()
 }
 
-/// Loads `~/.Xresources` into the new X server, as an X session's startup would (`xrdb -merge`),
-/// so X11 apps such as urxvt see their resources. Runs only when the file exists; a missing `xrdb`
-/// is logged at debug and a failed start as a warning. Returns the running merge, which the caller
-/// waits on ([`CrucibleState::start_session_after_merge`]) before anything X11 is spawned: an app
-/// reads its resources once, at startup.
-fn merge_xresources(display_number: u32) -> Option<(Child, PathBuf)> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let file = xresources_file(home.as_deref(), Path::is_file)?;
-    let child = std::process::Command::new("xrdb")
-        .arg("-merge")
-        .arg(&file)
+/// The command merging `files` in order: `xrdb -merge <file>` for one, else one `/bin/sh` loop
+/// running `xrdb -merge` per file (so a single child is waited on). **Pure.**
+fn merge_command(files: &[PathBuf]) -> (String, Vec<std::ffi::OsString>) {
+    match files {
+        [one] => ("xrdb".into(), vec!["-merge".into(), one.into()]),
+        _ => {
+            let mut args: Vec<std::ffi::OsString> = vec![
+                "-c".into(),
+                "s=0; for f do xrdb -merge \"$f\" || s=1; done; exit \"$s\"".into(),
+                "sh".into(),
+            ];
+            args.extend(files.iter().map(Into::into));
+            ("/bin/sh".into(), args)
+        }
+    }
+}
+
+/// Starts `xrdb -merge` of `files` (in order) against display `display_number`.
+fn spawn_merge(display_number: u32, files: &[PathBuf]) -> std::io::Result<Child> {
+    let (program, args) = merge_command(files);
+    std::process::Command::new(program)
+        .args(args)
         .env("DISPLAY", format!(":{display_number}"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
-    match child {
+        .spawn()
+}
+
+/// Re-merges the `theme` urxvt fragment into a running XWayland after a config reload changed
+/// it; the merge is reaped on a thread. New urxvt windows see the change, open ones keep theirs.
+pub(crate) fn remerge_xresources(display_number: u32, file: &Path) {
+    match spawn_merge(display_number, &[file.to_path_buf()]) {
+        Ok(child) => reap_merge_later(child, file.to_path_buf()),
+        Err(err) => debug!(%err, "xrdb -merge of the terminal theme could not be started"),
+    }
+}
+
+/// Loads `~/.Xresources` and then the `theme` urxvt fragment (when set) into the new X server,
+/// as an X session's startup would (`xrdb -merge`), so X11 apps such as urxvt see their resources.
+/// Runs only when a file exists; a missing `xrdb` is logged at debug and a failed start as a
+/// warning. Returns the running merge, which the caller waits on
+/// ([`CrucibleState::start_session_after_merge`]) before anything X11 is spawned: an app reads its
+/// resources once, at startup.
+fn merge_xresources(display_number: u32, theme_file: Option<&Path>) -> Option<(Child, PathBuf)> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let files = xresources_files(home.as_deref(), theme_file, Path::is_file);
+    let file = files.last()?.clone();
+    match spawn_merge(display_number, &files) {
         Ok(child) => Some((child, file)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             debug!("xrdb not installed; X resources not loaded");
@@ -275,7 +316,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
                     display = display_number,
                     "XWayland ready (DISPLAY=:{display_number})"
                 );
-                merge = merge_xresources(display_number);
+                let theme_file = crate::terminal_theme::urxvt_fragment(
+                    self.config.theme.as_ref(),
+                    crucible_config::theme_dir().as_deref(),
+                );
+                merge = merge_xresources(display_number, theme_file.as_deref());
             }
             Err(err) => {
                 error!(%err, "Failed to attach X11 window manager");
@@ -494,7 +539,7 @@ impl<B: Backend + 'static> XwmHandler for CrucibleState<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::{xresources_file, xwayland_scale};
+    use super::{merge_command, xresources_files, xwayland_scale};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -509,14 +554,35 @@ mod tests {
     }
 
     #[test]
-    fn xresources_file_is_home_xresources_when_present() {
+    fn xresources_files_are_home_then_theme_when_present() {
         let home = Path::new("/home/u");
+        let theme = Path::new("/c/cde/terminal-theme/urxvt.Xresources");
         assert_eq!(
-            xresources_file(Some(home), |_| true),
-            Some(PathBuf::from("/home/u/.Xresources"))
+            xresources_files(Some(home), None, |_| true),
+            [PathBuf::from("/home/u/.Xresources")]
         );
-        assert_eq!(xresources_file(Some(home), |_| false), None);
-        assert_eq!(xresources_file(None, |_| true), None);
+        assert!(xresources_files(Some(home), None, |_| false).is_empty());
+        assert!(xresources_files(None, None, |_| true).is_empty());
+        assert_eq!(
+            xresources_files(Some(home), Some(theme), |_| true),
+            [PathBuf::from("/home/u/.Xresources"), theme.to_path_buf()]
+        );
+        assert_eq!(
+            xresources_files(Some(home), Some(theme), |p| p == theme),
+            [theme.to_path_buf()]
+        );
+    }
+
+    #[test]
+    fn one_file_runs_xrdb_directly_and_several_run_in_order() {
+        let a = PathBuf::from("/a");
+        let (program, args) = merge_command(std::slice::from_ref(&a));
+        assert_eq!(program, "xrdb");
+        assert_eq!(args, ["-merge", "/a"]);
+        let (program, args) = merge_command(&[a, PathBuf::from("/b")]);
+        assert_eq!(program, "/bin/sh");
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[2..], ["sh", "/a", "/b"]);
     }
 
     #[test]

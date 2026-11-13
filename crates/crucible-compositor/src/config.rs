@@ -8,7 +8,7 @@
 
 use crucible_config::{Config, ConfigError};
 use crucible_keys::{BindError, Bindings};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::state::{Backend, CrucibleState};
 
@@ -66,10 +66,29 @@ pub struct WarmKey {
     pub output_scales: Vec<(String, u32)>,
 }
 
-/// The [`WarmKey`] of `config` given the resolved `terminal` program.
+/// The arguments an overlay spawn of `program` puts before the exec flag: the effective
+/// `overlay.terminal-args`, then the `theme`'s spawn arguments (ghostty's `--config-file=` into
+/// `theme_dir`; nothing without a `theme`). **Pure.**
 #[must_use]
-pub fn warm_key(config: &Config, terminal: String) -> WarmKey {
-    let overlay_args = config.overlay.effective_terminal_args(&terminal);
+pub fn overlay_terminal_args(
+    config: &Config,
+    program: &str,
+    theme_dir: Option<&std::path::Path>,
+) -> Vec<String> {
+    let mut args = config.overlay.effective_terminal_args(program);
+    args.extend(crucible_config::theme_spawn_args(
+        config.theme.as_ref(),
+        program,
+        theme_dir,
+    ));
+    args
+}
+
+/// The [`WarmKey`] of `config` given the resolved `terminal` program and the theme fragment
+/// directory (the theme's ghostty `--config-file=` is part of the overlay args).
+#[must_use]
+pub fn warm_key(config: &Config, terminal: String, theme_dir: Option<&std::path::Path>) -> WarmKey {
+    let overlay_args = overlay_terminal_args(config, &terminal, theme_dir);
     WarmKey {
         terminal,
         exec_flag: config.terminal.exec_flag.clone(),
@@ -92,6 +111,8 @@ pub struct LiveEnv<'a> {
     pub env: &'a dyn Fn(&str) -> Option<String>,
     /// The terminal the keys crate resolves when the config names none.
     pub fallback_terminal: &'a str,
+    /// The `theme` fragment directory ([`crucible_config::theme_dir`]).
+    pub theme_dir: Option<&'a std::path::Path>,
 }
 
 /// The decisions of applying `new` over `old`, computed once by [`Self::between`] so
@@ -135,7 +156,8 @@ impl ConfigDelta {
             max_scale: (old.max_output_scale(), new.max_output_scale()),
             idle: old.idle != new.idle,
             cursor,
-            warm: warm_key(old, terminal(old)) != warm_key(new, terminal(new)),
+            warm: warm_key(old, terminal(old), live.theme_dir)
+                != warm_key(new, terminal(new), live.theme_dir),
         }
     }
 }
@@ -154,6 +176,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Public so the persist tick's config reload can call it; safe to call before any output exists.
     pub fn apply_config(&mut self, config: Config) {
         let fallback_terminal = crucible_keys::terminal_command();
+        let theme_dir = crucible_config::theme_dir();
         let delta = ConfigDelta::between(
             &self.config,
             &config,
@@ -161,6 +184,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 cursor_loaded: self.cursor.loaded(),
                 env: &|k| std::env::var(k).ok(),
                 fallback_terminal: &fallback_terminal,
+                theme_dir: theme_dir.as_deref(),
             },
         );
         let (bindings, bind_error) = plan_bindings(&self.bindings, &config);
@@ -193,6 +217,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.cursor.set_theme(theme, *size);
         }
         let night_light_changed = self.config.night_light != config.night_light;
+        if let Some(theme) = &config.theme {
+            self.write_terminal_theme(theme);
+        }
         self.config = config;
         if delta.idle {
             self.idle.machine.reset();
@@ -205,6 +232,32 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.evaluate_night_light();
         }
         self.apply_layout();
+    }
+
+    /// Writes the `theme` fragments (unchanged files are left alone). When the urxvt fragment
+    /// changed and XWayland is already running, it is re-merged so new urxvt windows pick it up.
+    /// Failures are logged at `warn!`; a config apply never fails on them.
+    fn write_terminal_theme(&self, theme: &crucible_config::ThemeConfig) {
+        let Some(dir) = crucible_config::theme_dir() else {
+            warn!("neither XDG_CONFIG_HOME nor HOME is set; terminal theme files not written");
+            return;
+        };
+        match crate::terminal_theme::write_fragments(theme, &dir) {
+            Ok(changed) => {
+                if !changed.is_empty() {
+                    info!(dir = %dir.display(), ?changed, "terminal theme files written");
+                }
+                if changed.contains(&crucible_config::ThemeTarget::Urxvt)
+                    && let Some(display) = self.xdisplay
+                {
+                    crate::xwayland::remerge_xresources(
+                        display,
+                        &dir.join(crucible_config::ThemeTarget::Urxvt.file_name()),
+                    );
+                }
+            }
+            Err(err) => warn!(dir = %dir.display(), %err, "cannot write the terminal theme files"),
+        }
     }
 
     /// Recompiles the keymap from `config.keyboard.layouts`. A reload resets the active layout
@@ -291,6 +344,7 @@ mod tests {
             cursor_loaded: Some(("default", 24)),
             env: &|_| None,
             fallback_terminal: "foot",
+            theme_dir: Some(std::path::Path::new("/c/cde/terminal-theme")),
         }
     }
 
@@ -406,8 +460,14 @@ mod tests {
             },
             ..Config::default()
         };
-        assert_eq!(warm_key(&a, "t".into()), warm_key(&a.clone(), "t".into()));
-        assert_ne!(warm_key(&a, "t".into()), warm_key(&b, "t".into()));
+        assert_eq!(
+            warm_key(&a, "t".into(), None),
+            warm_key(&a.clone(), "t".into(), None)
+        );
+        assert_ne!(
+            warm_key(&a, "t".into(), None),
+            warm_key(&b, "t".into(), None)
+        );
     }
 
     #[test]
@@ -415,21 +475,56 @@ mod tests {
         let c = Config::default();
         let defaults = crucible_config::TerminalKind::Ghostty.overlay_default_args();
         assert_eq!(
-            warm_key(&c, "/tmp/cde/ghostty-cde".into()).overlay_args,
+            warm_key(&c, "/tmp/cde/ghostty-cde".into(), None).overlay_args,
             defaults
         );
         let foot = crucible_config::TerminalKind::Foot.overlay_default_args();
         assert_eq!(
-            warm_key(&c, "foot".into()).overlay_args[..foot.len()],
+            warm_key(&c, "foot".into(), None).overlay_args[..foot.len()],
             foot[..]
         );
-        assert!(warm_key(&c, "footclient".into()).overlay_args.is_empty());
+        assert!(
+            warm_key(&c, "footclient".into(), None)
+                .overlay_args
+                .is_empty()
+        );
         let mut opt_out = c.clone();
         opt_out.overlay.terminal_args = Some(vec![]);
         assert_ne!(
-            warm_key(&c, "ghostty".into()),
-            warm_key(&opt_out, "ghostty".into())
+            warm_key(&c, "ghostty".into(), None),
+            warm_key(&opt_out, "ghostty".into(), None)
         );
+    }
+
+    #[test]
+    fn theme_adds_ghostty_config_file_to_overlay_args_and_restarts_the_warm_host() {
+        let plain = Config::default();
+        let themed = crucible_config::parse("theme { alpha 0.9; }\n").unwrap();
+        let dir = std::path::Path::new("/c/cde/terminal-theme");
+        let defaults = crucible_config::TerminalKind::Ghostty.overlay_default_args();
+        // No theme: byte-identical to the overlay args alone.
+        assert_eq!(
+            overlay_terminal_args(&plain, "ghostty", Some(dir)),
+            defaults
+        );
+        let mut want = defaults.clone();
+        want.push("--config-file=/c/cde/terminal-theme/ghostty.conf".into());
+        assert_eq!(overlay_terminal_args(&themed, "ghostty", Some(dir)), want);
+        assert_eq!(
+            overlay_terminal_args(&themed, "foot", Some(dir)),
+            overlay_terminal_args(&plain, "foot", Some(dir))
+        );
+        // Adding the theme restarts a ghostty warm host; a theme edit does not.
+        // The fallback terminal here is foot, whose overlay args a theme does not touch.
+        assert!(!delta(&plain, &themed).warm);
+        let mut on_ghostty = plain.clone();
+        on_ghostty.terminal.command = Some("ghostty".into());
+        let mut themed_ghostty = themed.clone();
+        themed_ghostty.terminal.command = Some("ghostty".into());
+        assert!(delta(&on_ghostty, &themed_ghostty).warm);
+        let mut edited = themed_ghostty.clone();
+        edited.theme.as_mut().unwrap().alpha = None;
+        assert!(!delta(&themed_ghostty, &edited).warm);
     }
 
     #[test]
@@ -438,8 +533,14 @@ mod tests {
         let scaled = crucible_config::parse("output \"DP-1\" { scale 1.4167; }\n").unwrap();
         let again = crucible_config::parse("output \"DP-1\" { scale 1.4167; }\n").unwrap();
         // A rescale restarts the hidden overlay host; an unchanged scale keeps it warm.
-        assert_ne!(warm_key(&one, "t".into()), warm_key(&scaled, "t".into()));
-        assert_eq!(warm_key(&scaled, "t".into()), warm_key(&again, "t".into()));
+        assert_ne!(
+            warm_key(&one, "t".into(), None),
+            warm_key(&scaled, "t".into(), None)
+        );
+        assert_eq!(
+            warm_key(&scaled, "t".into(), None),
+            warm_key(&again, "t".into(), None)
+        );
     }
 
     #[test]

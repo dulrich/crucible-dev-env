@@ -85,6 +85,19 @@ idle {
     fade-minutes 30
 }
 
+// One font and colour set for every terminal. Off without the block; with it CDE writes
+// ~/.config/cde/terminal-theme/{foot.ini,cterm.kdl,urxvt.Xresources,ghostty.conf} on start and
+// every reload (foot and cterm `include` theirs; CDE merges urxvt's and passes ghostty's).
+// Every child optional; palette once per index 0-15; alpha 0.0..=1.0; size in points.
+/-theme {
+    font "JetBrains Mono" size=(pt)11.5
+    foreground "#dcdccc"
+    background "#111111"
+    cursor "#dcdccc"
+    alpha 0.9
+    palette 1 "#f62b5a"
+}
+
 // Unset = $XCURSOR_THEME / $XCURSOR_SIZE, else "default" and 24.
 cursor {
     /-theme "Adwaita"
