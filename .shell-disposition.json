@@ -4,6 +4,7 @@
     {"path":"scripts/cde.sh","disposition":"bash","modes":["exec"],"strict":"legacy","legacy-findings":0,"reason":"BASH_SOURCE self-location; status-collecting flow, no set -e by design"},
     {"path":"scripts/deploy.sh","disposition":"bash","modes":["exec"],"strict":"legacy","legacy-findings":0,"reason":"host-mutating deploy built on captured per-step failures (no set -e by design); trap EXIT cleanup, BASH_SOURCE, arrays"},
     {"path":"scripts/foot/build.sh","disposition":"bash","modes":["exec"],"strict":"required","legacy-findings":0,"reason":"arrays (pins, meson argv), here-strings into read, BASH_SOURCE"},
+    {"path":"docs/spikes/terminal-matrix/matrix.sh","disposition":"bash","modes":["exec"],"strict":"required","legacy-findings":0,"reason":"BASH_SOURCE self-location, process substitution into read and mapfile, local variables for the /proc measurement flow"},
     {"path":"scripts/foot/install.sh","disposition":"bash","modes":["exec"],"strict":"required","legacy-findings":0,"reason":"local -a / read -ra here-strings, (( )) version compare, [[ =~ ]], mapfile with process substitution"},
     {"path":"scripts/lib/build-id.sh","disposition":"lib-sh","modes":["source"]},
     {"path":"scripts/wallpaper-rotate.sh","disposition":"bash","modes":["exec"],"strict":"legacy","legacy-findings":0,"reason":"arrays, mapfile-style read -d '' with process substitution, SECONDS; BASH_SOURCE; no set -e by design"}
