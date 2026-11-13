@@ -1,6 +1,6 @@
 # GPU routing: iGPU for the desktop, dGPU for heavy work (notes, 2026-11-13)
 
-Status: **deferred** — a measurement spike, then a feature sprint. This note expands the short `FEEDBACK.md` todo ("auto-magic iGPU/GPU split routing") so the spike starts from facts, not prose.
+Status: **deferred** — a measurement spike, then a feature sprint. This note expands a short "auto-magic iGPU/GPU split routing" wish so the spike starts from facts, not prose.
 
 ## Goal
 
