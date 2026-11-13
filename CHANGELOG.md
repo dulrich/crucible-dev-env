@@ -4,6 +4,18 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.6.0 — 2026-11-13
+
+### Changed
+
+- **Breaking (config):** `tiling.terminal-args` now has built-in per-terminal padding defaults for cterm, foot, urxvt and ghostty (`{gap}` is the terminal gap), so a configured terminal with a known basename and no `terminal-args` is padded for the focus ring. To restore the pre-0.6 behaviour, add an empty `terminal-args` node; to turn the default off for one program, add an empty `terminal-args program="<basename>"` node. A repeated `terminal-args` node is no longer an error: the last one wins.
+
+### Added
+
+- `tiling.terminal-args` takes an optional `program="<basename>"` property, so each terminal can carry its own arguments.
+- A `theme` block (font, foreground, background, cursor, alpha, 16-colour palette) renders one fragment per terminal into `$XDG_CONFIG_HOME/cde/terminal-theme/` on start and reload: foot and cterm include it, CDE merges the urxvt one via `xrdb` after `~/.Xresources`, and ghostty spawns get `--config-file`. Without the block nothing is written. `crucible terminal-theme <terminal>` prints a fragment.
+- `docs/terminals/`: the supported-terminal list (cterm, foot and urxvt full, ghostty basic) with per-terminal pages, and the terminal matrix measurements in `docs/spikes/terminal-matrix/`.
+
 ## 0.5.9 — 2026-11-13
 
 ### Added
