@@ -54,7 +54,7 @@ Pre-alpha, but **the MVP (Phases 0–3 of the roadmap) is implemented** and CDE 
 - **Overlays** — the workspace picker, program launcher and settings view, with numbered workspace slots.
 - **Desktop basics** — screen lock, auto-lock and screen blanking on idle, keyboard layout switching, fullscreen (Wayland and X11, games included), closing windows, a session launcher for tty1, and a `crucible msg` control socket.
 
-**Not yet:** a status bar, screen sharing (screencopy), and a built-in terminal (foot is the default for now).
+**Not yet:** a status bar and screen sharing (screencopy). Terminals: cterm (the crucible-term project) is the configured terminal on every host; the supported list, with foot, urxvt and ghostty, is in [`docs/terminals/README.md`](docs/terminals/README.md).
 
 ## Running
 
