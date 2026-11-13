@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.5.9 — 2026-11-13
+
+### Added
+
+- `night-light` takes an optional `day-temperature` (kelvin, `temperature`..=6500, default 6500): the temperature outside the `start`-`end` window and the end the fades run to, so a mild tint can hold during the day too. Without it nothing changes. A `day-temperature` warmer than `temperature` is a config error; `night-light off` still forces 6500 K.
+
 ## 0.5.8 — 2026-11-09
 
 ### Changed
