@@ -71,10 +71,11 @@ idle {
 }
 
 // Off without the block. start/end are local "HH:MM"; end < start wraps
-// midnight; start == end is on all day. temperature 2500..=6500 K (default 4500), fade-minutes 0..=180
-// (default 30). The night-light verb overrides it until `night-light auto`.
+// midnight; start == end is on all day. temperature 2500..=6500 K (default 4500), day-temperature
+// temperature..=6500 K outside the window (default 6500, no tint), fade-minutes 0..=180 (default 30). The night-light verb overrides it until `night-light auto`.
 /-night-light {
     temperature 4500
+    day-temperature 6500
     start "21:00"
     end "07:00"
     fade-minutes 30

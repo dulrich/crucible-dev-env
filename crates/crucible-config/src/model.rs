@@ -371,6 +371,9 @@ pub struct IdleConfig {
 pub struct NightLightConfig {
     /// Colour temperature in kelvin inside the window. `2500..=6500`, default 4500.
     pub temperature: u32,
+    /// Colour temperature in kelvin outside the window (and the end the fades run to).
+    /// `temperature..=6500`, default 6500 (no tint).
+    pub day_temperature: u32,
     /// Window start, minutes after local midnight (`0..1440`).
     pub start: u16,
     /// Window end (exclusive), minutes after local midnight (`0..1440`); equal to `start` means all day.

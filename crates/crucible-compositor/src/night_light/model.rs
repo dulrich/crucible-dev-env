@@ -40,9 +40,10 @@ pub enum Verb {
 /// The temperature the schedule alone wants at `minute_of_day` (0..1440; larger values wrap).
 ///
 /// Full `temperature` inside `[start, end)` (wrapping midnight when `end < start`), a linear ramp
-/// from 6500 K over the `fade_minutes` before `start` and back up over the `fade_minutes` after
-/// `end`, 6500 K otherwise. `start == end` is all day: the full `temperature` at every minute, no fade. Where the daytime gap is shorter than `2 * fade_minutes` the two ramps
-/// overlap and the lower (warmer) value wins. `fade_minutes == 0` is a hard step.
+/// from `day_temperature` over the `fade_minutes` before `start` and back up over the `fade_minutes`
+/// after `end`, `day_temperature` (6500 K by default) otherwise. `start == end` is all day: the full
+/// `temperature` at every minute, no fade. Where the daytime gap is shorter than `2 * fade_minutes`
+/// the two ramps overlap and the lower (warmer) value wins. `fade_minutes == 0` is a hard step.
 #[must_use]
 pub fn target_kelvin(cfg: &NightLightConfig, minute_of_day: u16) -> u32 {
     let m = i64::from(minute_of_day) % MINUTES_PER_DAY;
@@ -57,7 +58,7 @@ pub fn target_kelvin(cfg: &NightLightConfig, minute_of_day: u16) -> u32 {
         return cfg.temperature;
     }
     let fade = i64::from(cfg.fade_minutes);
-    let full = i64::from(IDENTITY_KELVIN);
+    let full = i64::from(cfg.day_temperature);
     let mut kelvin = full;
     if fade > 0 {
         let until_start = (start - m).rem_euclid(MINUTES_PER_DAY);
@@ -69,7 +70,7 @@ pub fn target_kelvin(cfg: &NightLightConfig, minute_of_day: u16) -> u32 {
             kelvin = kelvin.min(rounded_lerp(night, full, since_end, fade));
         }
     }
-    u32::try_from(kelvin).expect("kelvin between night and 6500 is positive")
+    u32::try_from(kelvin).expect("kelvin between night and day temperatures is positive")
 }
 
 /// `a + (b - a) * num / den`, rounded to nearest (`a <= b`, `0 <= num <= den`, `den > 0`).
@@ -172,6 +173,7 @@ mod tests {
         };
         NightLightConfig {
             temperature: 4500,
+            day_temperature: 6500,
             start: hm(start),
             end: hm(end),
             fade_minutes: fade,
@@ -275,6 +277,38 @@ mod tests {
             let want = after_end(since_end).min(before_start(until_start));
             assert_eq!(i64::from(target_kelvin(&c, minute)), want, "{minute}");
             assert!(target_kelvin(&c, minute) < 6500);
+        }
+    }
+
+    #[test]
+    fn day_temperature_holds_outside_the_window_and_bounds_the_fades() {
+        let c = NightLightConfig {
+            temperature: 3500,
+            day_temperature: 5500,
+            ..cfg("21:00", "07:00", 30)
+        };
+        assert_eq!(target_kelvin(&c, 12 * 60), 5500);
+        assert_eq!(target_kelvin(&c, 21 * 60 - 30), 5500);
+        assert_eq!(target_kelvin(&c, 21 * 60 - 15), 4500);
+        assert_eq!(target_kelvin(&c, 22 * 60), 3500);
+        assert_eq!(target_kelvin(&c, 7 * 60 + 15), 4500);
+        assert_eq!(target_kelvin(&c, 7 * 60 + 30), 5500);
+        for m in 0..1440u16 {
+            assert!((3500..=5500).contains(&target_kelvin(&c, m)), "{m}");
+        }
+        // A schedule-driven tint is in force all day; `off` still forces no tint.
+        assert_eq!(effective_kelvin(Some(&c), None, 12 * 60), 5500);
+        assert_eq!(
+            effective_kelvin(Some(&c), Some(Override::Off), 12 * 60),
+            6500
+        );
+        // Equal night and day temperatures: one constant tint, fades included.
+        let flat = NightLightConfig {
+            day_temperature: 4500,
+            ..cfg("21:00", "07:00", 30)
+        };
+        for m in 0..1440u16 {
+            assert_eq!(target_kelvin(&flat, m), 4500, "{m}");
         }
     }
 

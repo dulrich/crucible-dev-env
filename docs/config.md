@@ -222,6 +222,7 @@ Blanking powers the monitors off on the TTY (DRM) backend; under the nested `win
 ```kdl
 night-light {
     temperature 4500   // K, 2500..=6500, default 4500
+    day-temperature 6500 // K, temperature..=6500, default 6500 (no tint)
     start "21:00"      // HH:MM local, required
     end "07:00"        // HH:MM local, required
     fade-minutes 30    // 0..=180, default 30
@@ -231,10 +232,11 @@ night-light {
 A built-in night light: a scheduled colour-temperature shift, applied as a gamma ramp on every active output. It is **off** without the block, and CDE then never writes a ramp. `start` and `end` are required and written `"HH:MM"` (exactly two digits each, 00-23 and 00-59); a window with `end` earlier than `start` wraps midnight, and `start == end` means all day (the full `temperature` around the clock, no fade). Each child may appear once. A value out of range, a malformed time or an unknown child is a located config error (never rounded or clamped).
 
 - `temperature` — the colour temperature in kelvin while the window is active. 6500 K is no tint; lower is warmer.
-- Schedule — the full `temperature` holds from `start` (inclusive) to `end` (exclusive) in local time. Over the `fade-minutes` before `start` the temperature falls linearly from 6500 K, and over the `fade-minutes` after `end` it rises linearly back to 6500 K. `fade-minutes 0` is a hard step.
-- Overlap rule — if the daytime gap between `end` and the next `start` is shorter than `2 * fade-minutes`, the two fades overlap, and inside the gap the **lower** (warmer) of the two ramp values applies; the result never exceeds 6500 K.
+- `day-temperature` — the colour temperature in kelvin outside the window, default 6500 K (no tint). Set it below 6500 for a mild tint during the day as well; it may equal `temperature` (one constant tint) but not be warmer than it, which is a located config error.
+- Schedule — the full `temperature` holds from `start` (inclusive) to `end` (exclusive) in local time. Over the `fade-minutes` before `start` the temperature falls linearly from `day-temperature`, and over the `fade-minutes` after `end` it rises linearly back to `day-temperature`; between them `day-temperature` holds. `fade-minutes 0` is a hard step.
+- Overlap rule — if the daytime gap between `end` and the next `start` is shorter than `2 * fade-minutes`, the two fades overlap, and inside the gap the **lower** (warmer) of the two ramp values applies; the result never exceeds `day-temperature`.
 
-The `night-light` verb (`night-light on|off|toggle|auto|<kelvin>`, no default chord, also `crucible msg exec night-light 4000`) overrides it: `on` forces the configured `temperature` (4500 K without a block), `off` forces 6500 K, `toggle` flips between them, `auto` returns to the schedule, and a number forces that temperature (2500-6500). A forced value holds until `auto` or a restart. A hot reload applies a changed block, but while a forced value holds the schedule is ignored, so after testing with the verb run `night-light auto`. Scripts driving it: [`scripting.md`](scripting.md#night-light).
+The `night-light` verb (`night-light on|off|toggle|auto|<kelvin>`, no default chord, also `crucible msg exec night-light 4000`) overrides it: `on` forces the configured `temperature` (4500 K without a block), `off` forces 6500 K (no tint, whatever `day-temperature` is), `toggle` flips between them (any tint in force, `day-temperature` included, toggles to `off`), `auto` returns to the schedule, and a number forces that temperature (2500-6500). A forced value holds until `auto` or a restart. A hot reload applies a changed block, but while a forced value holds the schedule is ignored, so after testing with the verb run `night-light auto`. Scripts driving it: [`scripting.md`](scripting.md#night-light).
 
 Night light works on the TTY (DRM) backend only; under the nested `winit` backend it has no effect. Screenshots are unaffected, because the ramp is applied at scanout.
 

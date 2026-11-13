@@ -1,10 +1,11 @@
-//! The `night-light { temperature 4500; start "21:00"; end "07:00"; fade-minutes 30 }` block.
+//! The `night-light { temperature 4500; day-temperature 6500; start "21:00"; end "07:00"; fade-minutes 30 }` block.
 
 use crate::error::ConfigError;
 use crate::model::NightLightConfig;
 use crate::reader::NodeReader;
 
 const DEFAULT_TEMPERATURE: u32 = 4500;
+const DEFAULT_DAY_TEMPERATURE: u32 = 6500;
 const DEFAULT_FADE_MINUTES: u32 = 30;
 
 /// `"HH:MM"` to minutes after midnight: exactly two digits each, hour 00-23, minute 00-59.
@@ -36,12 +37,14 @@ fn time_arg(child: &NodeReader<'_>) -> Result<u16, ConfigError> {
 
 pub(super) fn parse_night_light(node: NodeReader<'_>) -> Result<NightLightConfig, ConfigError> {
     let mut temperature = DEFAULT_TEMPERATURE;
+    let mut day = None;
     let mut fade = DEFAULT_FADE_MINUTES;
     let (mut start, mut end) = (None, None);
     for child in node.children_strict(&[], &[])? {
         let child = child?;
         match child.name() {
             "temperature" => temperature = child.u32_arg_in(2500..=6500)?,
+            "day-temperature" => day = Some((child.u32_arg_in(2500..=6500)?, child.at())),
             "fade-minutes" => fade = child.u32_arg_in(0..=180)?,
             "start" => start = Some((time_arg(&child)?, child.at())),
             "end" => end = Some((time_arg(&child)?, child.at())),
@@ -54,8 +57,20 @@ pub(super) fn parse_night_light(node: NodeReader<'_>) -> Result<NightLightConfig
     let Some((end, _)) = end else {
         return Err(node.missing("an `end` child"));
     };
+    let day_temperature = match day {
+        Some((k, at)) if k < temperature => {
+            return Err(node.invalid_at(
+                at,
+                "argument",
+                format!("day-temperature {k} is warmer than the night temperature {temperature}; it must be {temperature} or higher"),
+            ));
+        }
+        Some((k, _)) => k,
+        None => DEFAULT_DAY_TEMPERATURE,
+    };
     Ok(NightLightConfig {
         temperature,
+        day_temperature,
         start,
         end,
         fade_minutes: u16::try_from(fade).expect("range-checked to 0..=180"),
@@ -81,6 +96,7 @@ mod tests {
             c.night_light,
             Some(NightLightConfig {
                 temperature: 4500,
+                day_temperature: 6500,
                 start: 21 * 60,
                 end: 7 * 60 + 5,
                 fade_minutes: 30
@@ -107,6 +123,37 @@ mod tests {
     }
 
     #[test]
+    fn day_temperature_parses_and_may_equal_the_night_value() {
+        let n = parse(
+            "night-light { temperature 3500; day-temperature 5500; start \"21:00\"; end \"07:00\"; }\n",
+        )
+        .unwrap()
+        .night_light
+        .unwrap();
+        assert_eq!((n.temperature, n.day_temperature), (3500, 5500));
+        let n = parse("night-light { day-temperature 4500; start \"21:00\"; end \"07:00\"; }\n")
+            .unwrap()
+            .night_light
+            .unwrap();
+        assert_eq!((n.temperature, n.day_temperature), (4500, 4500));
+    }
+
+    #[test]
+    fn day_temperature_warmer_than_night_is_a_located_error() {
+        let (err, at) = err_at(
+            "\nnight-light {\n temperature 5000\n day-temperature 4000\n start \"21:00\"\n end \"07:00\"\n}\n",
+        );
+        assert!(matches!(err, ConfigError::InvalidValue { .. }), "{err:?}");
+        assert_eq!(at.line, 4);
+        // Order does not matter: the check runs after every child is read.
+        let (err, at) = err_at(
+            "\nnight-light {\n day-temperature 4000\n temperature 5000\n start \"21:00\"\n end \"07:00\"\n}\n",
+        );
+        assert!(matches!(err, ConfigError::InvalidValue { .. }), "{err:?}");
+        assert_eq!(at.line, 3);
+    }
+
+    #[test]
     fn out_of_range_numbers_are_located_errors() {
         for bad in [
             "temperature 2499",
@@ -114,6 +161,8 @@ mod tests {
             "temperature -1",
             "temperature 4500.5",
             "temperature \"4500\"",
+            "day-temperature 2499",
+            "day-temperature 6501",
             "fade-minutes 181",
             "fade-minutes -1",
         ] {
