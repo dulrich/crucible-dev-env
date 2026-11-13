@@ -258,10 +258,24 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// Prepends the substituted `tiling.terminal-args` (before the exec flag) to the arguments of a
-    /// CDE-spawned **terminal**. Overlays use `overlay.terminal-args` only; apps get none.
-    pub(super) fn with_tiling_args(&self, args: Vec<OsString>) -> Vec<OsString> {
-        with_terminal_args(&self.config.tiling.substituted_terminal_args(), args)
+    /// Prepends the resolved `tiling.terminal-args` for `program` (before the exec flag) to the
+    /// arguments of a CDE-spawned **terminal**: the matching `program=` node, else the program-less
+    /// node when `program` is the configured terminal (same basename), else the built-in default
+    /// ([`crucible_config::TilingConfig::effective_terminal_args`]). Overlays use
+    /// `overlay.terminal-args` only; apps get none.
+    pub(super) fn with_tiling_args(&self, program: &str, args: Vec<OsString>) -> Vec<OsString> {
+        let basename = Path::new(program)
+            .file_name()
+            .and_then(|b| b.to_str())
+            .unwrap_or(program);
+        let configured = same_program(program, &self.terminal_program());
+        with_terminal_args(
+            &self
+                .config
+                .tiling
+                .effective_terminal_args(basename, configured),
+            args,
+        )
     }
 
     /// The canonical executable `program` resolves to on the child's `PATH` (relative to `cwd`,
@@ -353,9 +367,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             command: Some(cmd.to_string()),
             mode,
         });
-        let args = self
-            .with_tiling_args(invocation.terminal_argv(&self.config.terminal.exec_flag, &crucible));
         let program = self.terminal_program();
+        let args = self.with_tiling_args(
+            &program,
+            invocation.terminal_argv(&self.config.terminal.exec_flag, &crucible),
+        );
         self.spawn(SpawnRequest::new(program, args, SpawnKind::Terminal).in_dir(dir.run_in))
             .ok_or_else(|| "spawn failed".to_string())
     }
@@ -364,7 +380,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     pub fn spawn_terminal_here(&mut self, program: &str) {
         let ws = self.layout.world.active_workspace_id();
         let dir = self.spawn_dir(DirPolicy::Inherit, ws);
-        let args = self.with_tiling_args(Vec::new());
+        let args = self.with_tiling_args(program, Vec::new());
         self.spawn(SpawnRequest::new(program, args, SpawnKind::Terminal).in_dir(dir.run_in));
     }
 
@@ -372,7 +388,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// active workspace's root. Invariants: `program` is a bare program with NO desktop arguments
     /// (single-instance forwarding would hand the window to another process and defeat the
     /// exact-pid classification in `persist/placement.rs`), and the `tiling.terminal-args` are
-    /// applied only when `program` is the configured terminal (same basename). The program is
+    /// resolved per program by [`Self::with_tiling_args`] (the program-less node only for the configured terminal, same basename). The program is
     /// resolved strictly ([`resolve_program`]) and the resolved path is what is spawned.
     ///
     /// # Errors
@@ -383,11 +399,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let dir = self.spawn_dir(DirPolicy::Inherit, ws);
         let resolved = resolve_program(program, &dir.preflight, Self::spawn_path().as_deref())
             .map_err(|word| format!("unknown command {word}"))?;
-        let args = if same_program(program, &self.terminal_program()) {
-            self.with_tiling_args(Vec::new())
-        } else {
-            Vec::new()
-        };
+        let args = self.with_tiling_args(program, Vec::new());
         self.spawn(
             SpawnRequest::new(resolved.to_string_lossy(), args, SpawnKind::Terminal)
                 .in_dir(dir.run_in),

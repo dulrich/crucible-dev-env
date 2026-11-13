@@ -19,8 +19,12 @@ tiling {
     terminal gap=(px)6 ring=(px)3 ring-inset=(px)0
     // Every other window: inset by gap, ring outside it, rest of gap painted fill.
     app gap=(px)0 ring=(px)0 fill="#737373"
-    // Arguments added to terminal spawns; {gap} is the terminal gap (foot shown).
+    // Arguments added to terminal spawns; {gap} is the terminal gap (foot shown). Without a
+    // node, known terminals get a built-in padding default (see docs/config.md); an empty node
+    // turns it off for the configured terminal.
     /-terminal-args "-o" "pad={gap}x{gap} center"
+    // The same for one program only (matched by basename), whichever terminal is configured.
+    /-terminal-args program="urxvt" "-b" "{gap}"
 }
 
 focus-follows-mouse #true

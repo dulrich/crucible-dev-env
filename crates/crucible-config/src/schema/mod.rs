@@ -217,7 +217,7 @@ binds {
         assert_eq!((c.tiling.app.gap, c.tiling.app.ring), (3, 1));
         assert_eq!(c.tiling.app.fill, Rgb(0x10, 0x20, 0x30));
         assert_eq!(
-            c.tiling.substituted_terminal_args(),
+            c.tiling.effective_terminal_args("anything", true),
             vec!["--window-padding-x=4".to_string(), "--b".to_string()]
         );
         assert!(!c.focus_follows_mouse);

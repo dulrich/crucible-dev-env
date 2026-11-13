@@ -113,9 +113,31 @@ pub struct TilingConfig {
     pub terminal: TerminalTiling,
     /// Every other managed window.
     pub app: AppTiling,
-    /// Extra terminal arguments for terminal spawns (`{gap}` = the terminal gap, see
-    /// [`substitute_gap`]), inserted before the exec flag.
-    pub terminal_args: Vec<String>,
+    /// The program-less `terminal-args` node (`{gap}` = the terminal gap, see [`substitute_gap`]),
+    /// inserted before the exec flag on spawns of the configured terminal. `None`: no node (the
+    /// built-in default applies); `Some(vec![])`: an explicit empty node (no arguments).
+    pub terminal_args: Option<Vec<String>>,
+    /// `terminal-args program="<basename>"` nodes: `(basename, args)`, one per program (a repeated
+    /// node keeps the last). An empty list disables that program's built-in default.
+    pub program_terminal_args: Vec<(String, Vec<String>)>,
+}
+
+/// The built-in `tiling.terminal-args` for the spawned program's `basename` (`{gap}` unsubstituted):
+/// foot-style padding for `cterm`/`foot`, urxvt's internal border, ghostty's window padding;
+/// nothing for any other basename (`footclient` and `urxvtc` included). Pure.
+#[must_use]
+pub fn builtin_tiling_args(basename: &str) -> &'static [&'static str] {
+    match basename {
+        "cterm" | "foot" => &["-o", "pad={gap}x{gap} center"],
+        "urxvt" | "rxvt-unicode" => &["-b", "{gap}"],
+        "ghostty" | "ghostty-cde" => &[
+            "--window-padding-x={gap}",
+            "--window-padding-y={gap}",
+            "--window-padding-color=extend-always",
+            "--window-padding-balance=true",
+        ],
+        _ => &[],
+    }
 }
 
 impl Default for TilingConfig {
@@ -134,16 +156,39 @@ impl Default for TilingConfig {
                 ring: 0,
                 fill: Rgb(0x73, 0x73, 0x73),
             },
-            terminal_args: Vec::new(),
+            terminal_args: None,
+            program_terminal_args: Vec::new(),
         }
     }
 }
 
 impl TilingConfig {
-    /// [`Self::terminal_args`] with `{gap}` replaced by the terminal gap.
+    /// The terminal args for a spawn of the program whose basename is `program_basename`, with
+    /// `{gap}` replaced by the terminal gap. Order: a `program=` node equal to the basename; else
+    /// the program-less node, only when `is_configured_terminal`; else the built-in default
+    /// ([`builtin_tiling_args`]). An explicit node, even an empty one, replaces the default for the
+    /// program(s) it applies to. Pure.
     #[must_use]
-    pub fn substituted_terminal_args(&self) -> Vec<String> {
-        substitute_gap(&self.terminal_args, self.terminal.gap)
+    pub fn effective_terminal_args(
+        &self,
+        program_basename: &str,
+        is_configured_terminal: bool,
+    ) -> Vec<String> {
+        let gap = self.terminal.gap;
+        if let Some((_, args)) = self
+            .program_terminal_args
+            .iter()
+            .find(|(p, _)| p == program_basename)
+        {
+            return substitute_gap(args, gap);
+        }
+        if is_configured_terminal && let Some(args) = &self.terminal_args {
+            return substitute_gap(args, gap);
+        }
+        builtin_tiling_args(program_basename)
+            .iter()
+            .map(|a| a.replace("{gap}", &gap.to_string()))
+            .collect()
     }
 }
 
@@ -599,7 +644,8 @@ mod tests {
         assert_eq!(c.tiling.terminal.ring, 3);
         assert_eq!((c.tiling.app.gap, c.tiling.app.ring), (0, 0));
         assert_eq!(c.tiling.app.fill, Rgb(0x73, 0x73, 0x73));
-        assert!(c.tiling.terminal_args.is_empty());
+        assert_eq!(c.tiling.terminal_args, None);
+        assert!(c.tiling.program_terminal_args.is_empty());
         assert!(c.focus_follows_mouse);
         assert!(c.confine_pointer_to_fullscreen);
         assert!(c.picker.roots.is_empty());

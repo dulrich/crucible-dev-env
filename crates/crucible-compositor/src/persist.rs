@@ -655,7 +655,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 focused: job.focused,
             };
             let (dir, args, origin) = (job.dir, job.args, job.origin);
-            let args = self.with_tiling_args(args);
+            let args = self.with_tiling_args(&program, args);
             let req = SpawnRequest::new(program.clone(), args, SpawnKind::Terminal)
                 .in_dir(Some(dir))
                 .with_origin(Some(origin));

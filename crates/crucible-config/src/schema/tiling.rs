@@ -58,14 +58,22 @@ fn clamp_ring_warn(class: &str, gap: u32, ring: &mut u32) {
 
 pub(super) fn parse_tiling(node: NodeReader<'_>) -> Result<TilingConfig, ConfigError> {
     let mut out = TilingConfig::default();
-    for child in node.children(&[])? {
+    for child in node.children(&["terminal-args"])? {
         let child = child?;
         match child.name() {
             "terminal" => parse_terminal_tiling(child, &mut out.terminal)?,
             "app" => parse_app_tiling(child, &mut out.app)?,
             "terminal-args" => {
-                child.no_properties()?;
-                out.terminal_args = child.string_list()?;
+                child.allow_properties(&["program"])?;
+                let args = child.string_list()?;
+                match child.string_prop("program", "a string")? {
+                    None => out.terminal_args = Some(args),
+                    Some((program, _)) => {
+                        child.nonempty("property `program`", program)?;
+                        out.program_terminal_args.retain(|(p, _)| p != program);
+                        out.program_terminal_args.push((program.to_string(), args));
+                    }
+                }
             }
             _ => return Err(child.unknown_node("tiling")),
         }
@@ -200,5 +208,126 @@ mod tests {
             parse("tiling {\n    terminal ring-inset=(px)1.5\n}\n").unwrap_err(),
             ConfigError::WrongType { .. }
         ));
+    }
+
+    fn args(text: &str) -> TilingConfig {
+        parse(&format!("tiling {{\n{text}\n}}\n")).unwrap().tiling
+    }
+
+    fn v(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn terminal_args_program_match_wins_over_program_less() {
+        let t =
+            args("terminal-args \"--a\"\nterminal-args program=\"urxvt\" \"-b\" \"{gap}\" \"-x\"");
+        assert_eq!(
+            t.effective_terminal_args("urxvt", true),
+            v(&["-b", "6", "-x"])
+        );
+        assert_eq!(
+            t.effective_terminal_args("urxvt", false),
+            v(&["-b", "6", "-x"])
+        );
+        assert_eq!(t.effective_terminal_args("foot", true), v(&["--a"]));
+    }
+
+    #[test]
+    fn terminal_args_program_less_applies_only_to_configured_terminal() {
+        let t = args("terminal-args \"--a\"");
+        assert_eq!(t.effective_terminal_args("kitty", true), v(&["--a"]));
+        assert!(t.effective_terminal_args("kitty", false).is_empty());
+        // Not the configured terminal: the built-in default still applies.
+        assert_eq!(
+            t.effective_terminal_args("foot", false),
+            v(&["-o", "pad=6x6 center"])
+        );
+    }
+
+    #[test]
+    fn terminal_args_built_in_defaults_per_basename() {
+        let t = TilingConfig::default();
+        let pad = v(&["-o", "pad=6x6 center"]);
+        for p in ["cterm", "foot"] {
+            assert_eq!(t.effective_terminal_args(p, true), pad, "{p}");
+            assert_eq!(t.effective_terminal_args(p, false), pad, "{p}");
+        }
+        for p in ["urxvt", "rxvt-unicode"] {
+            assert_eq!(t.effective_terminal_args(p, true), v(&["-b", "6"]), "{p}");
+        }
+        for p in ["ghostty", "ghostty-cde"] {
+            assert_eq!(
+                t.effective_terminal_args(p, true),
+                v(&[
+                    "--window-padding-x=6",
+                    "--window-padding-y=6",
+                    "--window-padding-color=extend-always",
+                    "--window-padding-balance=true",
+                ]),
+                "{p}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_args_unknown_basename_gets_none() {
+        let t = TilingConfig::default();
+        for p in ["footclient", "urxvtc", "kitty", ""] {
+            assert!(t.effective_terminal_args(p, true).is_empty(), "{p}");
+        }
+    }
+
+    #[test]
+    fn terminal_args_empty_program_less_node_restores_pre_0_6() {
+        let t = args("terminal-args");
+        assert_eq!(t.terminal_args, Some(vec![]));
+        assert!(t.effective_terminal_args("foot", true).is_empty());
+        // Still defaulted for a program that is not the configured terminal.
+        assert!(!t.effective_terminal_args("foot", false).is_empty());
+    }
+
+    #[test]
+    fn terminal_args_empty_program_node_disables_that_default() {
+        let t = args("terminal-args program=\"foot\"");
+        assert!(t.effective_terminal_args("foot", true).is_empty());
+        assert!(t.effective_terminal_args("foot", false).is_empty());
+        assert_eq!(t.effective_terminal_args("urxvt", true), v(&["-b", "6"]));
+    }
+
+    #[test]
+    fn terminal_args_repeated_nodes_keep_the_last() {
+        let t = args("terminal-args \"--a\"\nterminal-args \"--b\"");
+        assert_eq!(t.effective_terminal_args("kitty", true), v(&["--b"]));
+        let t =
+            args("terminal-args program=\"foot\" \"--a\"\nterminal-args program=\"foot\" \"--b\"");
+        assert_eq!(t.effective_terminal_args("foot", true), v(&["--b"]));
+        assert_eq!(t.program_terminal_args.len(), 1);
+    }
+
+    #[test]
+    fn terminal_args_gap_is_substituted() {
+        let t =
+            args("terminal gap=(px)9\nterminal-args program=\"kitty\" \"{gap}\" \"{gap}x{gap}\"");
+        assert_eq!(t.effective_terminal_args("kitty", true), v(&["9", "9x9"]));
+        assert_eq!(
+            t.effective_terminal_args("foot", true),
+            v(&["-o", "pad=9x9 center"])
+        );
+    }
+
+    #[test]
+    fn terminal_args_property_validation() {
+        let (err, _) = err_at("tiling {\n    terminal-args flag=\"x\"\n}\n");
+        assert!(
+            matches!(&err, ConfigError::UnknownProperty { name, node, .. }
+            if name == "flag" && node == "terminal-args"),
+            "{err}"
+        );
+        let (err, at) = err_at("tiling {\n    terminal-args program=\"\" \"--a\"\n}\n");
+        assert!(matches!(&err, ConfigError::InvalidValue { .. }), "{err}");
+        assert_eq!(at.line, 2);
+        let (err, _) = err_at("tiling {\n    terminal-args program=1\n}\n");
+        assert!(matches!(err, ConfigError::WrongType { .. }));
     }
 }

@@ -227,8 +227,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
             focused: slot.focused,
             saved_index: slot.saved_index,
         });
-        let args = self.with_tiling_args(job.args);
-        let req = SpawnRequest::new(self.terminal_program(), args, SpawnKind::Terminal)
+        let program = self.terminal_program();
+        let args = self.with_tiling_args(&program, job.args);
+        let req = SpawnRequest::new(program, args, SpawnKind::Terminal)
             .in_dir(Some(job.dir))
             .with_origin(Some(job.origin));
         match self.spawn(req) {
