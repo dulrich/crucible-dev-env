@@ -90,10 +90,18 @@ restore-session #false
 ### `lock-command`
 
 ```kdl
-lock-command "swaylock -f -c 000000"
+lock-command "swaylock --indicator-idle-visible -c 000000"
 ```
 
-The screen locker the `lock` action (default `Super+Escape`) spawns, detached (not into a pane). Default `"swaylock --indicator-idle-visible"`; must not be empty. With two or more `keyboard` layouts swaylock shows the active layout name in its indicator; `--indicator-idle-visible` shows the indicator (and so the layout) without a keypress. The string is split on whitespace into the program and its arguments (no shell quoting). A failed spawn only logs a warning.
+The screen locker the `lock` action (default `Super+Escape`) spawns, detached (not into a pane). Default `"swaylock --indicator-idle-visible"`; must not be empty. With two or more `keyboard` layouts swaylock shows the active layout name in its indicator; `--indicator-idle-visible` shows the indicator (and so the layout) without a keypress, so keep it when you add options. The string is split on whitespace into the program and its arguments (no shell quoting). A failed spawn only logs a warning.
+
+Styling the lock screen (swaylock options; see `swaylock(1)`):
+
+- `-c` / `--color <RRGGBB[AA]>` — the background colour; swaylock's own default is white. The example above locks to black.
+- `-i` / `--image [<output>:]<path>` — a background image, drawn over the colour; repeat it with an output name (for example `-i DP-1:/path/a.png -i HDMI-A-1:/path/b.png`) for one image per monitor.
+- `-s` / `--scaling <mode>` — how the image fits: `fill`, `fit`, `stretch`, `center`, `tile` or `solid_color`.
+
+Instead of flags, the same options can go in swaylock's own config file, `~/.config/swaylock/config`, which swaylock reads on every start: one option per line without the leading dashes (`color=000000`, `image=/path/to/lock.png`, `scaling=fill`, `indicator-idle-visible`). Use the file for an image path that contains spaces, since `lock-command` cannot quote one. A flag in `lock-command` overrides the same option in the file.
 
 #### Screen lock
 
