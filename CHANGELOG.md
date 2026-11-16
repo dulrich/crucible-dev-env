@@ -4,6 +4,17 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.0 — 2026-11-15
+
+### Added
+
+- **Config:** a `header { style }` child and an `overlay { alpha }` child (0.0–1.0, default opaque) for translucent "glass" overlays; the style names `terminal`, `n1-dark`, `n1-med` and `n1-light` are shared by the header, overlay, lock screen and greeter (docs/config.md § Surface styles).
+- **Config:** a `lock { style background }` block. With it, and a `lock-command` whose program is `swaylock`, CDE writes a generated swaylock config to `$XDG_CONFIG_HOME/cde/swaylock/config` and passes it with `-C`; `crucible lock-config` prints it. Without the block nothing changes.
+- **Config:** a `greeter { style background session }` block and `crucible greeter`, a kiosk compositor mode that runs as a greetd greeter: it reads a profile CDE publishes to `/var/lib/cde-greeter` and logs in through greetd's IPC (new `crucible-greetd` crate). Setup is in `docs/greeter.md`.
+- **IPC:** `crucible msg outputs` lists the enabled outputs with their logical geometry and scale; it is answered while locked.
+- `cde-wallpaper-rotate --outputs separate` puts a distinct random wallpaper on each output (default `mirror`, unchanged); the state file now holds one `<output>\t<path>` line per output.
+- A stock CDE background, installed by the deploy to `~/.local/share/cde/backgrounds/stock.png` (and `/opt/cde/share/backgrounds/` when that directory exists), usable as `background "stock"`.
+
 ## 0.6.0 — 2026-11-13
 
 ### Changed
