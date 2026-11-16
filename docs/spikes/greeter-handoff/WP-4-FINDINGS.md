@@ -43,7 +43,7 @@ Secondary: 267 ms from connector set-up to the main loop, and 100 ms from the fi
 3. **Defer the slow step:** if the scan is still slow with the connectors kept on, move connector probing out of the critical path before the main loop. This is a larger change.
 4. Not supported by this data: speeding up session open, or greetd itself.
 
-Next step: a follow-up plan that opens with candidate 1 as a measurement spike on host-b, then candidate 2 (backlog item in `INITIATIVE.md`).
+Next step: a follow-up plan that opens with candidate 1 as a measurement spike on host-b, then candidate 2, tracked in the project backlog.
 
 ## Addendum (2026-11-15, after close)
 
