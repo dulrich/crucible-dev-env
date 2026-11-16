@@ -222,6 +222,23 @@ if [ "$dry_run" = 1 ]; then
 	exit 0
 fi
 
+# greeter_background IMAGE: when the CDE session marked the greeter background as `user`
+# (/var/lib/cde-greeter/user-background) and the directory is writable, copy IMAGE to
+# background.<ext> there (tmp + mv). The profile's image path is left alone: if the extension
+# changed, the next compositor config apply republishes the profile. A failure prints one stderr
+# line and never changes the exit status.
+greeter_background() {
+	local gdir=/var/lib/cde-greeter src=$1 ext
+	[ -n "$src" ] && [ -e "$gdir/user-background" ] && [ -w "$gdir" ] || return 0
+	ext=${src##*.}
+	[ "$ext" != "$src" ] || ext=img
+	if ! { cp -- "$src" "$gdir/.background.tmp" && mv -f "$gdir/.background.tmp" "$gdir/background.$ext"; }; then
+		rm -f "$gdir/.background.tmp" 2>/dev/null
+		echo "wallpaper-rotate: cannot copy the greeter background to $gdir" >&2
+	fi
+	return 0
+}
+
 old_pids=$(pgrep -u "$(id -u)" -x swaybg || true)
 
 bg_args=()
@@ -246,5 +263,5 @@ if [ "$outputs_mode" = separate ]; then
 	for i in "${!names[@]}"; do printf '%s\t%s\n' "${names[$i]}" "${chosen[$i]}"; done >"$state_dir/current.tmp"
 else
 	printf '%s\n' "$img" >"$state_dir/current.tmp"
-fi && mv "$state_dir/current.tmp" "$state"
+fi && mv "$state_dir/current.tmp" "$state" && greeter_background "${img:-${chosen[0]:-}}"
 exit 0

@@ -331,6 +331,8 @@ Configures the optional greetd greeter (setup in [`greeter.md`](greeter.md)). Ev
 - `background` — `"stock"` (default), `"user"` or `"color" "#rrggbb"`, as in [`lock`](#lock).
 - `session` — the command started after a successful login, a non-empty string; default `"cde-session"`.
 
+With the block set, and `/var/lib/cde-greeter` existing and writable, CDE publishes the greeter profile (`profile.kdl`, built from this block plus `theme`, `overlay { alpha }`, the keyboard layouts and the `set-layout` binds) there on start and on every config reload (atomic, skipped when unchanged; a failure only logs a warning, and without the directory nothing is written). `stock` resolves to `/opt/cde/share/backgrounds/stock.png`, which the deploy installs; `user` copies the first image of the wallpaper state file to `/var/lib/cde-greeter/background.<ext>` and `cde-wallpaper-rotate` keeps that copy fresh; `color` needs no image. Details are in [`greeter.md`](greeter.md).
+
 ### Surface styles
 
 `header`, `overlay`, `lock` and `greeter` share the style names. `n1-dark`, `n1-med` and `n1-light` are fixed N1 palettes. `terminal` takes its colours from the [`theme`](#theme) block: background from `background`, text from `foreground`, rules from `palette 8` and the accent from `cursor`, each falling back to the `n1-med` value when the theme leaves it out; with no `theme` block, `terminal` looks exactly like `n1-med` on these surfaces (the overlay's own `terminal` style still keeps the terminal's look).

@@ -7,6 +7,7 @@
 
 pub mod panel;
 pub mod profile;
+pub mod publish;
 
 /// Re-exported for the `crucible greeter` entry point (the fake greetd and the codec).
 pub use crucible_greetd;

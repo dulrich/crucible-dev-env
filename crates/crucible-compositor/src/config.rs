@@ -221,6 +221,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.write_terminal_theme(theme);
         }
         crate::lock_config::write_swaylock_config(&config);
+        crate::greeter::publish::publish_for_env(&config);
         self.config = config;
         if delta.idle {
             self.idle.machine.reset();
