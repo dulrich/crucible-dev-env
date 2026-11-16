@@ -1,0 +1,151 @@
+diff --git a/crates/crucible-compositor/src/udev/device.rs b/crates/crucible-compositor/src/udev/device.rs
+index 51c5d1e..e15a5c0 100644
+--- a/crates/crucible-compositor/src/udev/device.rs
++++ b/crates/crucible-compositor/src/udev/device.rs
+@@ -176,8 +176,10 @@ impl CrucibleState<UdevData> {
+             .map_err(DeviceAddError::DeviceOpen)?;
+         let fd = DrmDeviceFd::new(DeviceFd::from(fd));
+ 
++        spike_dump(&fd, "before DrmDevice::new", false);
+         let (drm, notifier) =
+-            DrmDevice::new(fd.clone(), true).map_err(DeviceAddError::DrmDevice)?;
++            DrmDevice::new(fd.clone(), !(self.greeter.is_none() && spike_flag("KEEP_CONNECTORS"))).map_err(DeviceAddError::DrmDevice)?;
++        spike_dump(&fd, "after DrmDevice::new", false);
+         info!(
+             elapsed_ms = crate::startup::elapsed_ms(),
+             ?node,
+@@ -288,6 +290,9 @@ impl CrucibleState<UdevData> {
+             },
+         );
+ 
++        if let Some(dev) = self.backend_data.backends.get(&node) {
++            spike_dump(dev.drm_output_manager.device(), "before scan (forced probe)", true);
++        }
+         self.device_changed(node);
+         Ok(())
+     }
+@@ -363,3 +368,29 @@ impl CrucibleState<UdevData> {
+         }
+     }
+ }
++
++
++/// SPIKE: a variant toggle, `CDE_SPIKE_<name>=1` or the file `/opt/cde/spike/<name>` (the greeter
++/// runs under greetd, whose environment needs sudo to change).
++pub(crate) fn spike_flag(name: &str) -> bool {
++    let on = std::env::var(format!("CDE_SPIKE_{name}")).is_ok_and(|v| v == "1")
++        || std::path::Path::new("/opt/cde/spike").join(name).exists();
++    info!(elapsed_ms = crate::startup::elapsed_ms(), name, on, "spike: flag");
++    on
++}
++
++/// SPIKE (plan 44 premise, never committed): CRTC state and per-connector probe timing.
++pub(crate) fn spike_dump<D: smithay::reexports::drm::control::Device>(dev: &D, at: &str, force: bool) {
++    let Ok(res) = dev.resource_handles() else { return };
++    for &c in res.crtcs() {
++        if let Ok(i) = dev.get_crtc(c) {
++            info!(elapsed_ms = crate::startup::elapsed_ms(), at, ?c, mode = ?i.mode().map(|m| m.size()), fb = ?i.framebuffer(), "spike: crtc");
++        }
++    }
++    for &c in res.connectors() {
++        let t = std::time::Instant::now();
++        if let Ok(i) = dev.get_connector(c, force) {
++            info!(elapsed_ms = crate::startup::elapsed_ms(), at, force, conn = %format!("{:?}-{}", i.interface(), i.interface_id()), state = ?i.state(), enc = ?i.current_encoder(), took_us = t.elapsed().as_micros() as u64, "spike: connector");
++        }
++    }
++}
+diff --git a/crates/crucible-compositor/src/udev/mod.rs b/crates/crucible-compositor/src/udev/mod.rs
+index bf27274..9023929 100644
+--- a/crates/crucible-compositor/src/udev/mod.rs
++++ b/crates/crucible-compositor/src/udev/mod.rs
+@@ -654,5 +654,60 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
+             display_handle.flush_clients().unwrap();
+         }
+     }
+-    state.greeter_exit_code().unwrap_or(0)
++    let code = state.greeter_exit_code().unwrap_or(0);
++    if greeter_mode && code == 0 && device::spike_flag("GREETER_RETAIN") {
++        spike_retain(&state);
++        // Skip every Drop: no surface clear, no AtomicDrmDevice restore.
++        std::process::exit(code);
++    }
++    code
++}
++
++/// SPIKE (plan 44 WP-1, never committed): closes the scanout framebuffers' handles with
++/// DRM_IOCTL_MODE_CLOSEFB so the kernel does not disable the CRTC when this fd closes.
++#[allow(unsafe_code)]
++fn spike_retain(state: &CrucibleState<UdevData>) {
++    use smithay::reexports::drm::control::Device as _;
++    use std::os::fd::{AsFd, AsRawFd};
++    #[repr(C)]
++    struct CloseFb {
++        fb_id: u32,
++        pad: u32,
++    }
++    const DRM_IOCTL_MODE_CLOSEFB: libc::c_ulong = 0xC008_64D0;
++    let mut log = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/cde-greeter-spike.log").ok();
++    let mut note = |s: String| {
++        info!("{s}");
++        if let Some(f) = log.as_mut() {
++            use std::io::Write as _;
++            let _ = writeln!(f, "{} ms {s}", crate::startup::elapsed_ms());
++        }
++    };
++    // Variant C: blank the VT text so the console fbdev restores on exit shows black, not logs.
++    if device::spike_flag("GREETER_CLEAR_VT") {
++        let vt = std::env::var("XDG_VTNR").ok().map(|n| format!("/dev/tty{n}"));
++        for p in std::iter::once("/dev/tty".to_string()).chain(vt) {
++            match std::fs::OpenOptions::new().write(true).open(&p) {
++                Ok(mut f) => {
++                    use std::io::Write as _;
++                    let r = f.write_all(b"\x1b[0m\x1b[40m\x1b[H\x1b[2J\x1b[3J\x1b[?25l");
++                    note(format!("spike: clear-vt {p} -> {r:?}"));
++                    break;
++                }
++                Err(e) => note(format!("spike: clear-vt {p} open failed: {e}")),
++            }
++        }
++    }
++    for backend in state.backend_data.backends.values() {
++        let dev = backend.drm_output_manager.device();
++        device::spike_dump(dev, "greeter exit", false);
++        let Ok(res) = dev.resource_handles() else { continue };
++        for &c in res.crtcs() {
++            let Some(fb) = dev.get_crtc(c).ok().and_then(|i| i.framebuffer()) else { continue };
++            let mut arg = CloseFb { fb_id: fb.into(), pad: 0 };
++            let rc = unsafe { libc::ioctl(dev.as_fd().as_raw_fd(), DRM_IOCTL_MODE_CLOSEFB, &mut arg) };
++            let errno = std::io::Error::last_os_error();
++            note(format!("spike: closefb {c:?} {fb:?} rc={rc} errno={errno}"));
++        }
++    }
+ }
+diff --git a/crates/crucible-compositor/src/udev/output.rs b/crates/crucible-compositor/src/udev/output.rs
+index f91a69d..0c79663 100644
+--- a/crates/crucible-compositor/src/udev/output.rs
++++ b/crates/crucible-compositor/src/udev/output.rs
+@@ -418,6 +418,7 @@ impl CrucibleState<UdevData> {
+             }
+         };
+ 
++        super::device::spike_dump(device.drm_output_manager.device(), "before initialize_output", false);
+         let drm_output = match device
+             .drm_output_manager
+             .lock()
+diff --git a/crates/crucible-compositor/src/udev/render.rs b/crates/crucible-compositor/src/udev/render.rs
+index 8fb6d91..9de9e0e 100644
+--- a/crates/crucible-compositor/src/udev/render.rs
++++ b/crates/crucible-compositor/src/udev/render.rs
+@@ -256,6 +256,12 @@ impl CrucibleState<UdevData> {
+                 _ => unreachable!(),
+             });
+ 
++        {
++            static SPIKE_FIRST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
++            if result.as_ref().is_ok_and(|(r, _)| *r) && SPIKE_FIRST.swap(false, std::sync::atomic::Ordering::SeqCst) && let Some(dev) = self.backend_data.backends.get(&node) {
++                super::device::spike_dump(dev.drm_output_manager.device(), "before first queue_frame", false);
++            }
++        }
+         let result = result.and_then(|(rendered, states)| {
+             update_primary_scanout_output(&self.space, &output, self.dnd_icon.as_ref(), &states);
+             if rendered {
