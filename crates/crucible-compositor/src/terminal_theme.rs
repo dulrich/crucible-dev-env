@@ -30,7 +30,7 @@ pub fn write_fragments(theme: &ThemeConfig, dir: &Path) -> io::Result<Vec<ThemeT
 
 /// Replaces `path` with `content` atomically unless it already holds exactly `content`.
 /// Returns whether it wrote.
-fn write_if_changed(path: &Path, content: &str) -> io::Result<bool> {
+pub(crate) fn write_if_changed(path: &Path, content: &str) -> io::Result<bool> {
     if std::fs::read(path).is_ok_and(|old| old == content.as_bytes()) {
         return Ok(false);
     }

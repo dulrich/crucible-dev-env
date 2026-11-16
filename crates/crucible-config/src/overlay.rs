@@ -216,15 +216,21 @@ impl TerminalKind {
     /// not divide the overlay shows foot's own background, so that becomes the opaque N1
     /// surround (no gap between the surround and the border).
     #[must_use]
-    pub fn overlay_args(self, style: OverlayStyle) -> Vec<String> {
+    pub fn overlay_args(self, style: OverlayStyle, alpha: Milli) -> Vec<String> {
         let mut args = self.overlay_default_args();
+        let glass = alpha.0 < 1000;
+        let alpha_text = if glass {
+            alpha.to_string()
+        } else {
+            "1.0".to_string()
+        };
         if let Some(Rgb(r, g, b)) = style.palette().map(|p| p.bg) {
             match self {
                 Self::Foot => args.extend([
                     "-o".to_string(),
                     format!("colors-dark.background={r:02x}{g:02x}{b:02x}"),
                     "-o".to_string(),
-                    "colors-dark.alpha=1.0".to_string(),
+                    format!("colors-dark.alpha={alpha_text}"),
                 ]),
                 // cterm paints its whole buffer (padding and the cell-grid remainder) in
                 // `theme.bg` at `alpha`, so the same opaque surround closes the gap; zero
@@ -233,7 +239,7 @@ impl TerminalKind {
                     "-o".to_string(),
                     format!("colors.background={r:02x}{g:02x}{b:02x}"),
                     "-o".to_string(),
-                    "colors.alpha=1.0".to_string(),
+                    format!("colors.alpha={alpha_text}"),
                     "-o".to_string(),
                     "pad=0x0 center".to_string(),
                 ]),
@@ -247,6 +253,21 @@ impl TerminalKind {
                 ]),
                 Self::Ghostty | Self::Other => {}
             }
+        } else if glass {
+            // The `terminal` style leaves the colours alone; glass still applies. urxvt takes
+            // no alpha.
+            match self {
+                Self::Foot => {
+                    args.extend(["-o".to_string(), format!("colors-dark.alpha={alpha_text}")])
+                }
+                Self::Cterm => {
+                    args.extend(["-o".to_string(), format!("colors.alpha={alpha_text}")]);
+                }
+                Self::Ghostty | Self::Urxvt | Self::Other => {}
+            }
+        }
+        if glass && self == Self::Ghostty {
+            args.push(format!("--background-opacity={alpha_text}"));
         }
         args
     }
@@ -259,7 +280,7 @@ impl OverlayConfig {
     pub fn effective_terminal_args(&self, program: &str) -> Vec<String> {
         match &self.terminal_args {
             Some(list) => list.clone(),
-            None => TerminalKind::of(program).overlay_args(self.style),
+            None => TerminalKind::of(program).overlay_args(self.style, self.alpha),
         }
     }
 }
@@ -368,6 +389,41 @@ mod tests {
         assert_eq!(x.effective_terminal_args("ghostty"), vec!["--x"]);
         assert_eq!(x.effective_terminal_args("foot"), vec!["--x"]);
         assert_eq!(x.effective_terminal_args("cterm"), vec!["--x"]);
+    }
+
+    #[test]
+    fn glass_alpha_goes_to_each_terminals_args() {
+        let glass = |style, alpha| OverlayConfig {
+            style,
+            alpha: Milli(alpha),
+            ..OverlayConfig::default()
+        };
+        let n1 = glass(OverlayStyle::N1Med, 850);
+        let foot = n1.effective_terminal_args("foot");
+        assert!(foot.contains(&"colors-dark.alpha=0.85".to_string()));
+        assert!(!foot.contains(&"colors-dark.alpha=1.0".to_string()));
+        let cterm = n1.effective_terminal_args("cterm");
+        assert!(cterm.contains(&"colors.alpha=0.85".to_string()));
+        let ghostty = n1.effective_terminal_args("ghostty");
+        assert_eq!(ghostty.last().unwrap(), "--background-opacity=0.85");
+        assert_eq!(
+            n1.effective_terminal_args("urxvt"),
+            ["+sb", "-bg", "#3a3a3b", "-b", "0"].map(String::from)
+        );
+        // `terminal` style: alpha only, no colours.
+        let term = glass(OverlayStyle::Terminal, 500);
+        assert_eq!(
+            term.effective_terminal_args("cterm"),
+            ["-o", "colors.alpha=0.5"].map(String::from)
+        );
+        assert_eq!(
+            term.effective_terminal_args("foot").last().unwrap(),
+            "colors-dark.alpha=0.5"
+        );
+        assert_eq!(
+            term.effective_terminal_args("urxvt"),
+            ["+sb"].map(String::from)
+        );
     }
 
     #[test]

@@ -31,10 +31,13 @@ pub use render::build_header_elements;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crucible_config::{HeaderMode, HeaderStart, Rgb};
+use crucible_config::{
+    DEFAULT_DIVIDER_COLOR, HeaderConfig, HeaderMode, HeaderStart, Rgb, ThemeConfig, resolve_palette,
+};
 use crucible_layout::{OutputId, Rect, WorkspaceId};
 use crucible_persist::session::HeaderPref;
 
+use crate::palette::{BORDER_COLOR, STRIP_BG};
 use crate::{
     layout::model_output_id,
     state::{Backend, CrucibleState},
@@ -48,6 +51,51 @@ pub const PAD_X: i32 = 10;
 pub const LABEL_RGBA: [u8; 4] = [205, 208, 214, 255];
 /// Label colour on the highlighted (active) segment (straight RGBA).
 pub const LABEL_ACTIVE_RGBA: [u8; 4] = [10, 14, 16, 255];
+
+/// The colours the strip is drawn in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HeaderColors {
+    /// Strip background.
+    pub strip_bg: [f32; 4],
+    /// Highlight behind the active segment.
+    pub highlight: [f32; 4],
+    /// Inactive label colour.
+    pub label: [u8; 4],
+    /// Label colour on the active segment.
+    pub label_active: [u8; 4],
+    /// Divider colour.
+    pub divider: Rgb,
+}
+
+/// The strip colours: today's fixed look without `header.style`; with a style, the strip is the
+/// palette `bg`, labels `text`, the active highlight `accent` (its label `bg`, for contrast) and
+/// the divider `line` unless `divider color=` was set explicitly.
+#[must_use]
+pub fn header_colors(header: &HeaderConfig, theme: Option<&ThemeConfig>) -> HeaderColors {
+    let Some(style) = header.style else {
+        return HeaderColors {
+            strip_bg: STRIP_BG,
+            highlight: BORDER_COLOR,
+            label: LABEL_RGBA,
+            label_active: LABEL_ACTIVE_RGBA,
+            divider: header.divider_color,
+        };
+    };
+    let p = resolve_palette(style, theme);
+    let rgba = |c: Rgb| [c.0, c.1, c.2, 255];
+    HeaderColors {
+        strip_bg: p.bg.to_rgba_f32(),
+        highlight: p.accent.to_rgba_f32(),
+        label: rgba(p.text),
+        label_active: rgba(p.bg),
+        divider: if header.divider_color == DEFAULT_DIVIDER_COLOR {
+            p.line
+        } else {
+            header.divider_color
+        },
+    }
+}
+
 /// Width estimate per character when no font is loaded (so the strip still has segments).
 const FALLBACK_CHAR_FRACTION: f32 = 0.6;
 
@@ -219,8 +267,8 @@ pub struct HeaderLayout {
     pub segments: Vec<Segment>,
     /// Divider rects between adjacent segments (empty when the divider is 0).
     pub dividers: Vec<Rect>,
-    /// Colour the dividers are drawn in (`header.divider_color`).
-    pub divider_color: Rgb,
+    /// The strip, label, highlight and divider colours.
+    pub colors: HeaderColors,
 }
 
 /// Super-key glyph (place of interest sign) used in slot badges.
@@ -275,7 +323,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let height = strip_height(size);
         let divider = i32::try_from(self.config.header.divider).unwrap_or(0);
         let inset = i32::try_from(self.config.header.divider_inset).unwrap_or(0);
-        let divider_color = self.config.header.divider_color;
+        let colors = header_colors(&self.config.header, self.config.theme.as_ref());
         let badges = self.config.header.slots;
         let glyph = badges && self.header_text.has_glyph(SUPER_GLYPH);
         let output = self.layout.world.output(id)?;
@@ -320,7 +368,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             active,
             segments,
             dividers,
-            divider_color,
+            colors,
         })
     }
 
@@ -375,6 +423,26 @@ fn fallback_width(name: &str, size: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_colors_keep_today_without_a_style_and_follow_it_with_one() {
+        let mut h = HeaderConfig::default();
+        let c = header_colors(&h, None);
+        assert_eq!(c.strip_bg, STRIP_BG);
+        assert_eq!(c.highlight, BORDER_COLOR);
+        assert_eq!((c.label, c.label_active), (LABEL_RGBA, LABEL_ACTIVE_RGBA));
+        assert_eq!(c.divider, DEFAULT_DIVIDER_COLOR);
+        h.style = Some(crucible_config::OverlayStyle::N1Dark);
+        let p = crucible_config::N1_DARK;
+        let c = header_colors(&h, None);
+        assert_eq!(c.strip_bg, p.bg.to_rgba_f32());
+        assert_eq!(c.highlight, p.accent.to_rgba_f32());
+        assert_eq!(c.label, [p.text.0, p.text.1, p.text.2, 255]);
+        assert_eq!(c.divider, p.line);
+        // An explicit divider colour wins.
+        h.divider_color = Rgb(1, 2, 3);
+        assert_eq!(header_colors(&h, None).divider, Rgb(1, 2, 3));
+    }
 
     #[test]
     fn a_fullscreen_output_draws_and_hit_tests_no_strip_in_any_mode() {

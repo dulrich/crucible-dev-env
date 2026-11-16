@@ -220,6 +220,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some(theme) = &config.theme {
             self.write_terminal_theme(theme);
         }
+        crate::lock_config::write_swaylock_config(&config);
         self.config = config;
         if delta.idle {
             self.idle.machine.reset();

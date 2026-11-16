@@ -101,3 +101,7 @@ pub mod snip;
 
 /// Writing the `theme` block's per-terminal fragment files (plan 41).
 pub mod terminal_theme;
+
+/// The generated swaylock config for the `lock` block and the locker's `-C` argument rule
+/// (plan 42).
+pub mod lock_config;

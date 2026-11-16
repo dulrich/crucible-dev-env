@@ -6,9 +6,8 @@ use smithay::{
     utils::{Physical, Point, Scale},
 };
 
-use super::{HeaderLayout, LABEL_ACTIVE_RGBA, LABEL_RGBA, PAD_X};
+use super::{HeaderLayout, PAD_X};
 use crate::{
-    palette::{BORDER_COLOR, STRIP_BG},
     physical::{PhysicalMap, solid},
     render::CustomRenderElements,
     text::TextRenderer,
@@ -42,12 +41,12 @@ where
         let active = seg.index == l.active;
         let seg_rect = map.rect(to_origin(seg.rect));
         if active {
-            solids.push(solid(seg_rect, BORDER_COLOR));
+            solids.push(solid(seg_rect, l.colors.highlight));
         }
         let rgba = if active {
-            LABEL_ACTIVE_RGBA
+            l.colors.label_active
         } else {
-            LABEL_RGBA
+            l.colors.label
         };
         let loc =
             Point::<f64, Physical>::from((f64::from(seg_rect.loc.x + pad_x), f64::from(text_y)));
@@ -55,11 +54,11 @@ where
             labels.push(CustomRenderElements::Text(el));
         }
     }
-    let divider = l.divider_color.to_rgba_f32();
+    let divider = l.colors.divider.to_rgba_f32();
     for div in &l.dividers {
         solids.push(solid(map.rect(to_origin(*div)), divider));
     }
-    solids.push(solid(strip, STRIP_BG));
+    solids.push(solid(strip, l.colors.strip_bg));
     labels.extend(solids.into_iter().map(CustomRenderElements::SolidColor));
     labels
 }

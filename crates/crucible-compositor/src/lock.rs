@@ -320,7 +320,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             warn!("lock-command is empty; not spawning a locker");
             return;
         };
-        let args: Vec<std::ffi::OsString> = words.map(Into::into).collect();
+        let words: Vec<&str> = words.collect();
+        // With a `lock` block: refresh the generated swaylock config (a `user` background follows
+        // wallpaper rotations) and pass it to a plain `swaylock`.
+        let fragment = crate::lock_config::write_swaylock_config(&self.config);
+        let args = crate::lock_config::locker_args(program, &words, fragment.as_deref());
         info!(cmd, "lock: spawning the locker");
         if self
             .spawn(crate::persist::SpawnRequest::new(
