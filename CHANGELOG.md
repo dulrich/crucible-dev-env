@@ -4,6 +4,14 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.2 — 2026-11-15
+
+### Added
+
+- **Config:** a `greeter { position }` child places the greeter's login panel on a screen region (`center`, `upper`, `lower`, `upper-left`, `upper-right`, `lower-left`, `lower-right`); the default `lower` keeps the stock background's centre clear. The profile carries it as `position "<name>"`.
+- The greeter blanks the screens after `idle { blank-after }` seconds (published in the profile as `blank-after`), or 600 s when unset; it never locks. The key press that wakes the screens is consumed, so it never lands in the login field.
+- `startup:` info log lines with `elapsed_ms` on the TTY backend (GPU manager, DRM device steps, connector set-up, first frame and flip per output, first wallpaper buffer and the flip after it), for measuring where startup time goes.
+
 ## 0.7.1 — 2026-11-15
 
 ### Added
