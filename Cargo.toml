@@ -23,6 +23,9 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 xcursor = "0.3"
 serde = { version = "1", features = ["derive"] }
+# greetd IPC framing (length-prefixed JSON) for `crucible-greetd`. Already in `Cargo.lock` at
+# 1.0.150 via another dependency, so no new lock version.
+serde_json = "1"
 
 # Raw-mode terminal control (termios, window size, stdio handles) for `crucible pick` and
 # `crucible resume`. Already in `Cargo.lock` at 1.1.4 via calloop, so no new lock version.
