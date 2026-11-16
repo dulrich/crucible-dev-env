@@ -49,3 +49,20 @@ Next step: a follow-up plan that opens with candidate 1 as a measurement spike o
 
 - `sudo journalctl -u greetd -b` shows only the PAM lines, at one-second resolution: greeter session 23:23:22, user session 23:23:30. The greeter's `session started; greeter exiting` line is not in the unit journal, so the moment the greeter exits is still not measured.
 - A connector probe from a process that is not DRM master is a no-op. `get_connector(force = true)` returns in about 3 µs on both hosts, because the kernel only re-probes for the current master. So the 1 s cost can only be measured from inside CDE (master) at login. A host-side probe while the greeter holds master tells us nothing.
+
+## Spike login (2026-11-15 23:59, measurement-only build `450f37f-dirty`)
+
+The build logged CRTC state and timed each connector query at three points: before `DrmDevice::new`, after it, and before `scan_connectors`. Its patch is `runs/spike/handoff-probe/spike.patch`. The probes themselves add time, so this run reached the wallpaper at 2049 ms. 0.7.2 was restored afterwards (`--build` = 450f37f).
+
+| ms | Observation |
+|---|---|
+| 76 | Before `DrmDevice::new`: CRTC 47 is **active** at 1920x1080 with fb 113. The greeter's last image is still on screen and the panel is lit. CDE is not DRM master yet (`Unable to become drm master`). |
+| 76–208 | Connector queries, panel on: eDP 7 µs, **HDMI-A-1 116 ms** (DDC on an empty port), DP-1 6 ms, DP-2 8 ms. |
+| 208 → 373 | `DrmDevice::new(fd, true)`: 165 ms. Afterwards every CRTC has mode None, so **the panel is off**. |
+| 539 → 1188 | Forced probe, panel off: **eDP 649 ms**, then HDMI-A-1 224 ms, DP-1 15 ms, DP-2 16 ms. |
+| 1445 → 1701 | The real `scan_connectors`: 256 ms, compared with 1012 ms in the 0.7.2 runs. The spike's probes had already paid the eDP power-up. |
+
+Reading: the 1 s scan is about 650 ms of eDP panel power-up plus 115–225 ms of HDMI-A-1 DDC on an empty port. The power-up happens because CDE's own `DrmDevice::new(fd, true)` has just switched the lit panel off. Not measured yet:
+
+- whether the panel stays lit through CDE's first commit with `disable_connectors = false`. At 76 ms the greeter still held master. When it exits, the kernel removes its framebuffer, and smithay's `AtomicDrmDevice` `Drop` restores the state captured at its own start (`smithay …/backend/drm/device/atomic.rs:238-276`). Either may blank the screen.
+- the forced eDP probe cost while the panel is lit.
