@@ -30,3 +30,30 @@ At the first `queue_frame` (about 1060 ms) the CRTC shows CDE's own fb (115 or 1
 ## Decision for WP-2
 
 Ship **A+B**: `DrmDevice::new(fd, false)` with the unused-connector cleanup, and the greeter's retain-on-exit (CLOSEFB on the scanout fbs, then exit without Drop, in greeter mode only after a successful login), plus the wallpaper deferral. The expected result is greeter → console (about 0.9 s, panel lit) → wallpaper, with no power-off and no black or clear-colour frame from CDE.
+
+## WP-4 verification on the shipped 0.7.3 (2026-11-16)
+
+Build `f128b46` (tag v0.7.3). The user logged in through the greeter on host-b and reports the transition as expected: greeter, then the console with the panel lit, then the wallpaper, with no power-off and no black step. du-c300 (no greeter) confirms the tty1 text login path still works. host-a has not been restarted on 0.7.3 yet.
+
+host-b `/tmp/cde/cde-20261116-025939.log` (elapsed_ms from CDE start):
+
+| ms | line |
+|---:|---|
+| 77 | `startup: crtc state at="cde start" crtc=47 active=true fb=113` (CRTCs 63 and 79 inactive) |
+| 376 | `startup: scan_connectors done` (was 649 ms for the forced eDP probe alone with the panel off) |
+| 377 | `startup: adoption deferred until the wallpaper output=eDP-1` |
+| 379 | `startup: main loop starting` |
+| 679 | `startup: crtc state at="adoption commit" crtc=47 active=true fb=113` |
+| 679 | `startup: adopting output output=eDP-1 deferred=true` |
+| 744 | `startup: first flip completed output=eDP-1` |
+| 1024 | `startup: background layer mapped` |
+| 1137 | `startup: background buffer committed` |
+| 1144 | `startup: first flip after background buffer` |
+
+du-c300 `/tmp/cde/cde-20261116-025920.log`: `crtc state at="cde start" crtc=53 active=true fb=96`, `scan_connectors done` at 2457, main loop at 2476, `adopting output deferred=true` at 2777 (the 300 ms timeout, with no background buffer in the log), first flip at 2899.
+
+### Readings
+
+1. **No power-off.** The CRTC is active on the console fb at CDE start and still at the adoption commit, on both hosts. Variants A and B hold on the shipped build.
+2. **The adoption on host-b came from the timeout, not from the wallpaper.** The main loop started at 379 ms. Adoption ran at 679 ms, which is exactly the 300 ms timeout, and the wallpaper client's buffer arrived only at 1137 ms. So CDE's first frame (744 ms) was its scene without the wallpaper, and the wallpaper came about 400 ms later. The user did not see that frame as a black step. Waiting for the wallpaper would have meant a timeout of about 760 ms. That keeps the fbdev console up about 400 ms longer instead, and slows a start that has no wallpaper client by the same amount. The constant stays at 300 ms. The lever is a faster wallpaper client start, which goes to the backlog.
+3. **A start with no wallpaper client costs the 300 ms timeout, as the plan allowed** (du-c300).
