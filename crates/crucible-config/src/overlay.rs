@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use crate::model::{Named, Rgb};
+use crate::theme::Milli;
 
 /// The four colours of one N1 palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +91,9 @@ pub struct OverlayConfig {
     /// default for those terminals.
     /// `Some(list)` (even empty) replaces the default.
     pub terminal_args: Option<Vec<String>>,
+    /// Overlay background opacity, `0..=1000` thousandths (`alpha 0.85` is `Milli(850)`); default
+    /// 1000 (opaque). Below 1000 is the translucent "glass" look.
+    pub alpha: Milli,
 }
 
 impl Default for OverlayConfig {
@@ -98,6 +102,7 @@ impl Default for OverlayConfig {
             border: true,
             style: OverlayStyle::N1Med,
             terminal_args: None,
+            alpha: Milli(1000),
         }
     }
 }

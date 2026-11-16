@@ -248,6 +248,16 @@ impl<'a> NodeReader<'a> {
         Ok(self.string_args(&[label])?[0])
     }
 
+    /// The first positional argument as a string, ignoring any further arguments (the caller
+    /// re-reads them once the first one decides how many there are).
+    pub(crate) fn string_args_min(&self, label: &'static str) -> Result<&'a str, ConfigError> {
+        let all = self.args();
+        let (value, at) = all.first().ok_or_else(|| self.missing(label))?;
+        value
+            .as_string()
+            .ok_or_else(|| self.wrong_type_at(*at, "argument 1", "a string"))
+    }
+
     /// Exactly one string argument that is not blank; `what` names it in the error.
     pub(crate) fn nonempty_string_arg(
         &self,

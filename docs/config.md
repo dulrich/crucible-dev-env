@@ -172,6 +172,7 @@ Presentation of the picker, launcher and settings overlays. Every child is optio
 
 - `border` — `#true` (default) or `#false`. Draws a ring outside the overlay; while an overlay is open the pane focus ring and stack pips are not drawn over it.
 - `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` (default) or `"n1-light"`; any other value is a config error. `terminal` keeps the terminal's own look and the teal ring; the N1 styles paint opaque surrounds with an orange ring. The chosen style is passed to overlay programs as `CDE_OVERLAY_STYLE`.
+- `alpha` — the overlay background opacity, a number from 0.0 to 1.0 (default 1.0, opaque); outside that range is a config error, never clamped, and decimals are kept to three places. Below 1.0 gives the translucent "glass" look: the overlay terminal's surround lets the workspace show through. foot, cterm and ghostty honour it; urxvt does not (its overlay stays opaque).
 - `terminal-args` — extra terminal arguments, zero or more strings, inserted before the exec flag on overlay spawns only. Default: when the terminal program's basename is `ghostty` or `ghostty-cde`, CDE adds `--window-padding-color=extend-always --window-padding-balance=true --keybind=clear`; when the basename is exactly `foot`, CDE adds `-o key-bindings.<action>=none` for each of foot 1.28's default bindings and the other plain actions (foot has no `keybind=clear`), so no default binding, nor a `foot.ini` rebinding of those actions, takes a key before an overlay (`pipe-*`, `regex-*` and `color-theme-switch-*` binds in a `foot.ini` are not cleared); with an N1 style it also sets foot's background to that style's surround colour, opaque (`-o colors-dark.background=<rgb> -o colors-dark.alpha=1.0`), since foot cannot extend the edge colour into the strip the cell grid leaves, which otherwise shows as a gap inside the border; when the basename is exactly `cterm`, an N1 style sets cterm's background to that style's surround colour, opaque, with zero padding centred (`-o colors.background=<rgb> -o colors.alpha=1.0 -o 'pad=0x0 center'`), since cterm paints its padding and the strip the cell grid leaves in its own background, which otherwise shows as a gap inside the border; when the basename is exactly `urxvt` or `rxvt-unicode`, CDE adds `+sb` (no scrollbar, whatever the style), and an N1 style also sets urxvt's background to that style's surround colour and its internal border to zero (`-bg #<rgb> -b 0`), for the same reason; with any other terminal (`footclient` too), nothing. Any explicit `terminal-args` replaces the default, and an empty `terminal-args` node turns it off. These ghostty defaults fill ghostty's window padding (and the leftover strip where the cell grid does not divide the overlay evenly) with the N1 surround and spread it evenly, so the surround reaches the border on every side (verified with ghostty 1.3.1; `--background-opacity=1` is not needed), and `--keybind=clear` drops every ghostty keybind (the user config's included) so keys such as Escape reach the overlay; `--config-file=<path>` adds to the user config, while `--config-default-files=false` replaces it.
 
 Overlay terminals are pre-started: one hidden overlay terminal (running `crucible overlay-host`) is kept ready and is handed the overlay when one opens. It uses the same `terminal` program, exec flag and `overlay.terminal-args`; changing any of them on hot reload restarts it. There is nothing to configure.
@@ -197,6 +198,7 @@ A clickable workspace strip at the top of every output, listing that output's wo
 - `size` — label size, `(px)N` (an integer) or `(pt)N` (integer or decimal), from 6 to 96 px after conversion; default `(px)14`. The strip height is the size plus padding. `(pt)` converts as px = round(pt × 96 / 72), half away from zero, so `(pt)14` is 19 px, `(pt)10.5` is 14 px and `(pt)12` is 16 px; the range is checked on the converted value (`(pt)80` = 107 px is an error).
 - `divider` — width of a divider drawn between adjacent workspace labels, `(px)N` from 0 to 16; default `(px)0` (off). It takes its own space between labels (never before the first or after the last), is drawn in the inactive label colour by default, never sits under the active highlight, and a click on it switches nothing. Negative, above 16, non-integer or unannotated values are config errors. Optional properties: `inset=(px)<n>` (0 to 32, default 0) trims the line that many pixels from its top and bottom, and draws no line when nothing is left; `color="#rrggbb"` (default `#cdd0d6`, the label colour) sets its colour. Both are inert when the width is 0, and invalid values are config errors. Example: `divider (px)1 inset=(px)6 color="#5c6370"`.
 - `slots` — `#true` or `#false` (default `#false`). When on, the label of a workspace pinned to a slot shows the slot digit with a Super glyph (`⌘` + digit, e.g. `⌘3 name`); if the header font lacks the glyph the badge falls back to `S-3 name`. Unpinned labels are unchanged.
+- `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` or `"n1-light"`; any other value is a config error. Sets the strip, label and accent colours from that style's palette (`terminal` takes them from the [`theme`](#theme) block, below). Without `style` the header keeps its built-in colours, unchanged.
 
 Clicking a workspace name focuses that output and switches it to that workspace; the click acts on release (the press and its release are consumed by the strip, never sent to the window beneath). A drag starts once the pointer has moved 5 logical pixels from the press; while it is live every strip reflows to show where the workspace will land (also across outputs), and nothing changes until the release. Dragging a name and releasing on another name on the same output moves that workspace to the other's position and reorders the stack (`session.kdl` records the new order); releasing on the same output's empty strip area moves it to the end; releasing on another output's name moves the workspace there at that position, and on another output's empty strip area appends it there (the last workspace on an output cannot be dragged away: a no-op); releasing anywhere else, or after a lock or overlay opened, does nothing. A click never hides the strip; in `toggle` mode only `toggle-header` does. With an overlay open the strip is inert: a click on it closes the overlay like any other outside click. Changes take effect on hot reload.
 
@@ -294,6 +296,40 @@ One font and colour set for every supported terminal (foot, cterm, urxvt, ghostt
 
 - foot's `cursor=` takes the text colour and the cursor colour together; CDE uses the theme's `background` as the text colour, or foot's default background (`002b36`) when the theme sets none.
 - urxvt has no separate opacity key: `alpha` below 1.0 becomes a `[NN]` percentage prefix on `URxvt*background` (`alpha 0.9` → `[90]#111111`), so it needs `background` in the theme, and it shows only with a 32-bit visual (`URxvt.depth: 32`, which stays in your own `~/.Xresources`; the theme never emits it). Without `background`, `alpha` is not emitted for urxvt; with `alpha 1.0` the background is written plain.
+
+### `lock`
+
+```kdl
+lock {
+    style "n1-dark"
+    background "user"
+}
+```
+
+Styles the lock screen. The block only affects [`lock-command`](#lock-command) when its program is `swaylock`: CDE then styles swaylock through a generated swaylock config file; any other locker is spawned unchanged. Without the block nothing changes. Both children are optional and may appear once; an unknown child, a repeated child or a bad value is a located config error.
+
+- `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` (default) or `"n1-light"`: the indicator colours.
+- `background` — `"stock"` (the stock CDE background image), `"user"` (your current wallpaper on each output) or `"color" "#rrggbb"` (a solid colour). Default `"color" "#000000"`.
+
+### `greeter`
+
+```kdl
+greeter {
+    style "n1-med"
+    background "stock"
+    session "cde-session"
+}
+```
+
+Configures the optional greetd greeter (setup in [`greeter.md`](greeter.md)). Every child is optional and may appear once; an unknown child, a repeated child or a bad value is a located config error.
+
+- `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` (default) or `"n1-light"`.
+- `background` — `"stock"` (default), `"user"` or `"color" "#rrggbb"`, as in [`lock`](#lock).
+- `session` — the command started after a successful login, a non-empty string; default `"cde-session"`.
+
+### Surface styles
+
+`header`, `overlay`, `lock` and `greeter` share the style names. `n1-dark`, `n1-med` and `n1-light` are fixed N1 palettes. `terminal` takes its colours from the [`theme`](#theme) block: background from `background`, text from `foreground`, rules from `palette 8` and the accent from `cursor`, each falling back to the `n1-med` value when the theme leaves it out; with no `theme` block, `terminal` looks exactly like `n1-med` on these surfaces (the overlay's own `terminal` style still keeps the terminal's look).
 
 ### `cursor`
 
@@ -442,6 +478,11 @@ header {
     start "hidden"
     font "DejaVu Sans"
     size (px)14
+    style "n1-med"
+}
+lock {
+    style "n1-med"
+    background "color" "#000000"
 }
 idle {
     lock-after 300

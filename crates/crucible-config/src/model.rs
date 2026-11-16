@@ -299,6 +299,8 @@ pub struct HeaderConfig {
     pub divider_color: Rgb,
     /// Whether labels of slot-pinned workspaces carry a slot badge (`slots`).
     pub slots: bool,
+    /// Strip, label and accent colours (`style`); `None` keeps the legacy header colours.
+    pub style: Option<crate::surface::SurfaceStyle>,
 }
 
 impl Default for HeaderConfig {
@@ -312,6 +314,7 @@ impl Default for HeaderConfig {
             divider_inset: 0,
             divider_color: DEFAULT_DIVIDER_COLOR,
             slots: false,
+            style: None,
         }
     }
 }
@@ -504,6 +507,10 @@ pub struct Config {
     pub night_light: Option<NightLightConfig>,
     /// Terminal theme (`theme`); `None` writes no fragment files and adds no spawn arguments.
     pub theme: Option<crate::theme::ThemeConfig>,
+    /// Lock-screen style (`lock`); `None` leaves `lock-command` spawned exactly as written.
+    pub lock: Option<crate::surface::LockConfig>,
+    /// Optional greetd greeter settings (`greeter`); `None` when the block is absent.
+    pub greeter: Option<crate::surface::GreeterConfig>,
     /// Pointer cursor theme and size (both unset by default).
     pub cursor: CursorConfig,
     /// Screenshot destination and directory.
@@ -556,6 +563,8 @@ impl Default for Config {
             idle: IdleConfig::default(),
             night_light: None,
             theme: None,
+            lock: None,
+            greeter: None,
             cursor: CursorConfig::default(),
             screenshot: ScreenshotConfig::default(),
             launcher: LauncherConfig::default(),

@@ -10,6 +10,7 @@ mod night_light;
 mod output;
 mod overlay;
 mod screenshot;
+mod surface;
 mod theme;
 mod tiling;
 
@@ -72,6 +73,8 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "idle" => config.idle = idle::parse_idle(node)?,
             "night-light" => config.night_light = Some(night_light::parse_night_light(node)?),
             "theme" => config.theme = Some(theme::parse_theme(node)?),
+            "lock" => config.lock = Some(surface::parse_lock(node)?),
+            "greeter" => config.greeter = Some(surface::parse_greeter(node)?),
             "output" => {
                 let (name, out) = output::parse_output(node)?;
                 if config.outputs.insert(name.clone(), out).is_some() {

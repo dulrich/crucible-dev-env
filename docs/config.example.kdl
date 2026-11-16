@@ -51,6 +51,8 @@ launcher {
 overlay {
     border #true
     style "n1-med" // "terminal" | "n1-dark" | "n1-med" | "n1-light"
+    // Background opacity 0.0..=1.0; below 1.0 is the glass look (foot, cterm, ghostty; not urxvt).
+    /-alpha 0.85
     // Replaces the per-terminal defaults (see docs/config.md); an empty node turns them off.
     /-terminal-args
 }
@@ -62,6 +64,8 @@ header {
     size (px)14     // or (pt)N
     divider (px)0 inset=(px)0 color="#cdd0d6"
     slots #false
+    // Strip colours; absent keeps the legacy header colours. "terminal" uses the theme block.
+    /-style "n1-med"
 }
 
 keyboard {
@@ -96,6 +100,21 @@ idle {
     cursor "#dcdccc"
     alpha 0.9
     palette 1 "#f62b5a"
+}
+
+// Styles swaylock through a generated config (only when lock-command runs swaylock). Off without
+// the block; defaults style "n1-med", background "color" "#000000".
+/-lock {
+    style "n1-dark"
+    background "user" // "stock" | "user" | "color" "#rrggbb"
+}
+
+// The optional greetd greeter (see docs/greeter.md). Defaults style "n1-med", background "stock",
+// session "cde-session".
+/-greeter {
+    style "n1-med"
+    background "stock"
+    session "cde-session"
 }
 
 // Unset = $XCURSOR_THEME / $XCURSOR_SIZE, else "default" and 24.

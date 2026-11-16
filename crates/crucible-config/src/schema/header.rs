@@ -28,6 +28,7 @@ pub(super) fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigE
                 }
             }
             "slots" => out.slots = child.bool_arg()?,
+            "style" => out.style = Some(super::surface::parse_style(&child)?),
             _ => return Err(child.unknown_node("header")),
         }
     }
@@ -302,5 +303,36 @@ mod tests {
             msg("header {\n divider (px)1 inset=6\n}\n"),
             "2:16: `divider` property `inset`: `inset` needs a unit: (px)6"
         );
+    }
+
+    #[test]
+    fn header_style_is_optional_and_validated() {
+        use crate::overlay::OverlayStyle;
+        assert_eq!(Config::default().header.style, None);
+        assert_eq!(
+            parse("header {\n mode \"always\"\n}\n")
+                .unwrap()
+                .header
+                .style,
+            None
+        );
+        let c = parse("header {\n style \"n1-light\"\n}\n").unwrap();
+        assert_eq!(c.header.style, Some(OverlayStyle::N1Light));
+        for bad in [
+            "style \"bogus\"",
+            "style 1",
+            "style \"n1-med\"\n style \"n1-dark\"",
+        ] {
+            let err = parse(&format!("header {{\n {bad}\n}}\n")).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::InvalidValue { .. }
+                        | ConfigError::WrongType { .. }
+                        | ConfigError::Duplicate { .. }
+                ),
+                "{bad}: {err:?}"
+            );
+        }
     }
 }

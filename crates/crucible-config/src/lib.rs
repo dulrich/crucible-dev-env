@@ -20,6 +20,7 @@ mod model;
 mod overlay;
 mod reader;
 mod schema;
+mod surface;
 mod theme;
 
 use std::path::{Path, PathBuf};
@@ -37,6 +38,11 @@ pub use overlay::{
     OverlayStyle, Palette, TerminalKind,
 };
 pub use schema::parse;
+pub use surface::{
+    DEFAULT_GREETER_BACKGROUND, DEFAULT_GREETER_SESSION, DEFAULT_GREETER_STYLE,
+    DEFAULT_LOCK_BACKGROUND, DEFAULT_LOCK_STYLE, GreeterConfig, LockConfig, SurfaceBackground,
+    SurfaceStyle, resolve_palette,
+};
 pub use theme::{
     Milli, ThemeConfig, ThemeFont, ThemeTarget, render as render_theme, theme_dir, theme_dir_from,
     theme_spawn_args,
