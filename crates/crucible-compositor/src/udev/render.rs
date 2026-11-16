@@ -111,6 +111,14 @@ impl CrucibleState<UdevData> {
                     // A stale pre-blanking flip after the wake: the wake render owns the chain.
                     return;
                 }
+                if surface.first_flip.take() {
+                    tracing::info!(
+                        elapsed_ms = crate::startup::elapsed_ms(),
+                        output = %output.name(),
+                        "startup: first flip completed"
+                    );
+                }
+                crate::startup::note_flip_completed();
                 if let Some(mut feedback) = user_data.flatten() {
                     feedback.presented(clock, Refresh::fixed(frame_duration), seq as u64, flags);
                 }
@@ -265,6 +273,19 @@ impl CrucibleState<UdevData> {
                     .map_err(Into::<SwapBuffersError>::into)?;
                 // E2: `frame_finish` counts this output as presented iff this frame was locked.
                 self.session_lock.note_queued(&output, locked);
+                if let Some(surface) = self
+                    .backend_data
+                    .backends
+                    .get_mut(&node)
+                    .and_then(|device| device.surfaces.get_mut(&crtc))
+                    && surface.first_frame.take()
+                {
+                    tracing::info!(
+                        elapsed_ms = crate::startup::elapsed_ms(),
+                        output = %output.name(),
+                        "startup: first frame queued"
+                    );
+                }
             }
             // Send frame callbacks so clients draw their next frame.
             self.finish_frame(

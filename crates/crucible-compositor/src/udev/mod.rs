@@ -390,6 +390,7 @@ pub fn run_udev() {
 /// [`run_udev`], optionally in greeter mode (`crucible greeter`); returns the process exit status
 /// (greeter mode: 0 once the session started).
 pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
+    crate::startup::mark_process_start();
     let mut event_loop = match EventLoop::try_new() {
         Ok(ev) => ev,
         Err(err) => {
@@ -638,6 +639,10 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
         state.start_xwayland();
     }
 
+    info!(
+        elapsed_ms = crate::startup::elapsed_ms(),
+        "startup: main loop starting"
+    );
     info!("Initialization completed, starting the main loop.");
     while state.running.load(Ordering::SeqCst) {
         let result = event_loop.dispatch(Some(Duration::from_millis(16)), &mut state);

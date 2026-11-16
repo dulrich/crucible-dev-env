@@ -226,7 +226,7 @@ impl<B: Backend + 'static> WlrLayerShellHandler for CrucibleState<B> {
         &mut self,
         surface: LayerSurface,
         wl_output: Option<WlOutput>,
-        _layer: Layer,
+        layer: Layer,
         namespace: String,
     ) {
         let output = wl_output
@@ -240,6 +240,8 @@ impl<B: Backend + 'static> WlrLayerShellHandler for CrucibleState<B> {
         let mut map = layer_map_for_output(&output);
         if let Err(err) = map.map_layer(&smithay::desktop::LayerSurface::new(surface, namespace)) {
             warn!("Failed to map layer surface: {}", err);
+        } else if layer == Layer::Background {
+            crate::startup::note_background_layer_mapped();
         }
     }
 
@@ -330,6 +332,17 @@ pub fn ensure_initial_configure(
         let mut map = layer_map_for_output(output);
         // Arrange before configuring so the client's requested size is respected.
         map.arrange();
+        // Startup timing: the first background-layer commit that carries a buffer.
+        if map
+            .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
+            .is_some_and(|layer| layer.layer() == Layer::Background)
+            && smithay::backend::renderer::utils::with_renderer_surface_state(surface, |s| {
+                s.buffer().is_some()
+            })
+            .unwrap_or(false)
+        {
+            crate::startup::note_background_buffer_committed();
+        }
         if !initial_configure_sent {
             if let Some(layer) = map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL) {
                 layer.layer_surface().send_configure();

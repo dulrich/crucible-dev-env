@@ -18,6 +18,9 @@ pub mod winit;
 /// `udev`/DRM/KMS TTY backend (multi-output, libseat session, VT switching).
 pub mod udev;
 
+/// Startup timing lines for the udev path.
+pub mod startup;
+
 /// Wayland shell protocol handlers (xdg-shell + wlr-layer-shell).
 pub mod shell;
 

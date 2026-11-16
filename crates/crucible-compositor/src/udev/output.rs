@@ -153,6 +153,9 @@ pub(super) struct SurfaceData {
     pub dmabuf_feedback: Option<SurfaceDmabufFeedback>,
     /// Idle power state (DPMS off via `DrmCompositor::clear`).
     pub power: PowerMark,
+    /// Once-flags for the `startup:` timing lines (first frame queued, first flip completed).
+    pub first_frame: crate::startup::FirstOnly,
+    pub first_flip: crate::startup::FirstOnly,
 }
 
 /// What [`CrucibleState::frame_finish`] does with a page-flip completion, given the power mark.
@@ -339,6 +342,11 @@ impl CrucibleState<UdevData> {
             connector.interface_id()
         );
         info!(?crtc, "Setting up connector {}", output_name);
+        info!(
+            elapsed_ms = crate::startup::elapsed_ms(),
+            output = %output_name,
+            "startup: connector set up"
+        );
 
         let drm_device = device.drm_output_manager.device();
         let display_info = display_info::for_connector(drm_device, connector.handle());
@@ -446,6 +454,8 @@ impl CrucibleState<UdevData> {
             drm_output,
             dmabuf_feedback,
             power: PowerMark::default(),
+            first_frame: Default::default(),
+            first_flip: Default::default(),
         };
         device.surfaces.insert(crtc, surface);
         // A new CRTC has no night-light record: make sure it is tinted if the schedule says so.

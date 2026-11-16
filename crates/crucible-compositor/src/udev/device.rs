@@ -41,7 +41,7 @@ use smithay::{
     utils::DeviceFd,
 };
 use smithay_drm_extras::drm_scanner::{DrmScanEvent, DrmScanner};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::state::CrucibleState;
 
@@ -151,6 +151,12 @@ pub(super) fn init_gpu_manager() -> Result<GpuManager<GbmGles>, MultiError<GbmGl
         let renderer = unsafe { GlesRenderer::with_capabilities(context, capabilities)? };
         Ok(renderer)
     }))
+    .inspect(|_| {
+        info!(
+            elapsed_ms = crate::startup::elapsed_ms(),
+            "startup: GPU manager created"
+        );
+    })
 }
 
 impl CrucibleState<UdevData> {
@@ -172,6 +178,11 @@ impl CrucibleState<UdevData> {
 
         let (drm, notifier) =
             DrmDevice::new(fd.clone(), true).map_err(DeviceAddError::DrmDevice)?;
+        info!(
+            elapsed_ms = crate::startup::elapsed_ms(),
+            ?node,
+            "startup: DrmDevice::new done"
+        );
         let gbm = GbmDevice::new(fd).map_err(DeviceAddError::GbmDevice)?;
 
         // Drive page-flip completion (VBlank) for every CRTC on this device.
@@ -209,6 +220,11 @@ impl CrucibleState<UdevData> {
         })()
         .inspect_err(|err| warn!(?err, "failed to initialize gpu render node"))
         .ok();
+        info!(
+            elapsed_ms = crate::startup::elapsed_ms(),
+            ?node,
+            "startup: render node added"
+        );
 
         // Use this device's own allocator if it can render, else borrow the primary GPU's.
         let allocator = render_node
@@ -255,6 +271,12 @@ impl CrucibleState<UdevData> {
             render_formats,
         );
 
+        info!(
+            elapsed_ms = crate::startup::elapsed_ms(),
+            ?node,
+            "startup: DrmOutputManager::new done"
+        );
+
         self.backend_data.backends.insert(
             node,
             BackendData {
@@ -286,6 +308,12 @@ impl CrucibleState<UdevData> {
                 return;
             }
         };
+
+        info!(
+            elapsed_ms = crate::startup::elapsed_ms(),
+            ?node,
+            "startup: scan_connectors done"
+        );
 
         for event in scan_result {
             match event {
