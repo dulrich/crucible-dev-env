@@ -23,11 +23,12 @@ With more than one CDE instance (for example a nested `crucible --winit` test se
 - `run <command…>` / `run-in-terminal <command…>` — launch into the focused pane (the command line is encoded for you).
 - `run-on <workspace> <command…>` — launch in the background into a workspace; replies `ok <pid>`.
 - `capture <abs path>` — write a PNG of the focused output; replies `ok <w>x<h>`.
+- `outputs` — the enabled outputs. On the wire the reply is one line of space-separated `<name>=<x>,<y>,<w>x<h>@<scale>` records (logical geometry, ordered by x, then y, then name). `crucible msg outputs` prints one line per output instead: `<name>`, TAB, `<x>,<y>`, TAB, `<w>x<h>`, TAB, `<scale>`.
 - `candidates`, `bindings` — read-only queries (the picker's rows, the effective keybindings).
 
 Replies start with `ok` or `err <reason>`. Exit status: 0 on `ok`, 1 on `err`, 2 on a usage error or a missing `$CDE_SOCKET`. Except for `run`, `run-in-terminal`, `run-on`, `run-tui` and `run-term`, arguments are sent as typed, joined with single spaces, so percent-encode `%`, `:`, TAB, LF and CR yourself (`crucible msg open my%3Aname`).
 
-While the session is locked, every request except `candidates`, `bindings`, `save` and `exec set-layout <name>` answers `err session locked`. A script that runs on a timer should treat that as "try again next tick", not as a failure.
+While the session is locked, every request except `candidates`, `bindings`, `outputs`, `save` and `exec set-layout <name>` answers `err session locked`. A script that runs on a timer should treat that as "try again next tick", not as a failure.
 
 ## Night light
 

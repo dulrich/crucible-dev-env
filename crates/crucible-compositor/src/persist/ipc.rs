@@ -132,6 +132,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Request::Bindings => {
                 return Response::Ok(crate::ipc::format_bindings(&self.bindings.entries()));
             }
+            Request::Outputs => {
+                return Response::Ok(crate::ipc::format_outputs(&self.output_infos()));
+            }
             Request::Save => {
                 self.flush_workspaces();
                 Ok(())
@@ -182,6 +185,24 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Ok(()) => Response::Ok(String::new()),
             Err(reason) => Response::Err(reason),
         }
+    }
+
+    /// Every mapped output's name, logical geometry and scale (the `outputs` request).
+    fn output_infos(&self) -> Vec<crate::ipc::OutputInfo> {
+        self.space
+            .outputs()
+            .filter_map(|output| {
+                let geo = self.space.output_geometry(output)?;
+                Some(crate::ipc::OutputInfo {
+                    name: output.name(),
+                    x: geo.loc.x,
+                    y: geo.loc.y,
+                    w: geo.size.w,
+                    h: geo.size.h,
+                    scale: output.current_scale().fractional_scale(),
+                })
+            })
+            .collect()
     }
 
     /// `close-pid`: politely closes (`close_element`) every layout-bound window of process `pid`,
@@ -704,7 +725,12 @@ mod tests {
 
     #[test]
     fn locked_allows_read_only_requests() {
-        for r in [Request::Candidates, Request::Bindings, Request::Save] {
+        for r in [
+            Request::Candidates,
+            Request::Bindings,
+            Request::Save,
+            Request::Outputs,
+        ] {
             assert_eq!(admit_request(true, &r), Ok(()), "{r:?}");
         }
     }

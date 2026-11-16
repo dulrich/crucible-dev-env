@@ -1,12 +1,12 @@
 //! `crucible msg <request…>` — send one protocol line to the compositor and print the response.
 
-use crucible_compositor::ipc::{Request, SOCKET_ENV, encode_field};
+use crucible_compositor::ipc::{Request, Response, SOCKET_ENV, encode_field, parse_outputs};
 
 use crate::cli::Parsed;
 use crate::client::{Client, socket_from_env};
 
 /// Usage text for `crucible msg --help`.
-pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | save | open <name> | open-folder <path> | new <name> | rename <name> | root <path>|- | exec <action> | run <command...> | run-in-terminal <command...> | run-on <workspace> <command...> | run-tui <command...> | run-term <program> | close-pid <n> | capture <path> | relaunch\n\n`close-pid <n>` politely asks every window of process <n> to close (an X11 window without `WM_DELETE_WINDOW` is destroyed) and answers `ok <count>`, or `err no window for pid <n>`.\n`capture <path>` writes a PNG of the focused output (no cursor) to the absolute <path> and answers `ok <w>x<h>` once the file is written, or `err <reason>`.\n`root <path>` sets the active workspace's root (the folder its new terminals and apps start in; the path must be an absolute existing directory) and `root -` clears it.\n`exec` runs a keybinding action (the `binds` action grammar, for example `crucible msg exec focus left`); a failed action answers `err <reason>`.\n`run` and `run-in-terminal` are shorthands for `exec run <command>` and `exec run-in-terminal <command>`: they take the rest of the arguments as one command line (joined with single spaces) and encode it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. `run-tui` encodes its command the same way.\n`run-on <workspace> <command...>` (shorthand for `exec run-on …`) runs the command in the background into that workspace (created, not shown and ephemeral when missing) and answers `ok <pid>`. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`). While the session is locked, every request but `candidates`, `bindings`, `save` and `exec set-layout <name>` answers `err session locked`.\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
+pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | outputs | save | open <name> | open-folder <path> | new <name> | rename <name> | root <path>|- | exec <action> | run <command...> | run-in-terminal <command...> | run-on <workspace> <command...> | run-tui <command...> | run-term <program> | close-pid <n> | capture <path> | relaunch\n\n`outputs` prints one line per enabled output: `<name>TAB<x>,<y>TAB<w>x<h>TAB<scale>` (logical geometry), ordered by x, y, then name; the wire reply is a single line.\n`close-pid <n>` politely asks every window of process <n> to close (an X11 window without `WM_DELETE_WINDOW` is destroyed) and answers `ok <count>`, or `err no window for pid <n>`.\n`capture <path>` writes a PNG of the focused output (no cursor) to the absolute <path> and answers `ok <w>x<h>` once the file is written, or `err <reason>`.\n`root <path>` sets the active workspace's root (the folder its new terminals and apps start in; the path must be an absolute existing directory) and `root -` clears it.\n`exec` runs a keybinding action (the `binds` action grammar, for example `crucible msg exec focus left`); a failed action answers `err <reason>`.\n`run` and `run-in-terminal` are shorthands for `exec run <command>` and `exec run-in-terminal <command>`: they take the rest of the arguments as one command line (joined with single spaces) and encode it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. `run-tui` encodes its command the same way.\n`run-on <workspace> <command...>` (shorthand for `exec run-on …`) runs the command in the background into that workspace (created, not shown and ephemeral when missing) and answers `ok <pid>`. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`). While the session is locked, every request but `candidates`, `bindings`, `outputs`, `save` and `exec set-layout <name>` answers `err session locked`.\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
 
 /// Joins the arguments into one protocol line and validates it.
 ///
@@ -46,6 +46,21 @@ pub fn build_line(args: &[String]) -> Result<String, String> {
     };
     Request::parse(&line)?;
     Ok(line)
+}
+
+/// Presentation of an `outputs` reply: one `<name>\t<x>,<y>\t<w>x<h>\t<scale>` line per output.
+/// `None` when the reply is not an `ok` with a well-formed payload (print it raw then).
+#[must_use]
+pub fn format_outputs_reply(response: &str) -> Option<String> {
+    let payload = match Response::parse(response)? {
+        Response::Ok(p) => p,
+        Response::Err(_) => return None,
+    };
+    let lines: Vec<String> = parse_outputs(&payload)?
+        .iter()
+        .map(|o| format!("{}\t{},{}\t{}x{}\t{}", o.name, o.x, o.y, o.w, o.h, o.scale))
+        .collect();
+    Some(lines.join("\n"))
 }
 
 /// Maps a raw response line to the process exit code: 0 `ok`, 1 `err`, 1 anything else.
@@ -92,7 +107,16 @@ pub fn run(args: &[String]) -> i32 {
     };
     match client.request_raw(&line) {
         Ok(resp) => {
-            println!("{resp}");
+            let shown = if line == "outputs" {
+                format_outputs_reply(&resp)
+            } else {
+                None
+            };
+            match shown {
+                Some(text) if text.is_empty() => {}
+                Some(text) => println!("{text}"),
+                None => println!("{resp}"),
+            }
             exit_code(&resp)
         }
         Err(e) => {
@@ -247,6 +271,18 @@ mod tests {
             parse_args(&v(&["open", "--help"])),
             Ok(Parsed::Run("open --help".into()))
         );
+    }
+
+    #[test]
+    fn outputs_reply_presents_one_line_per_output() {
+        assert_eq!(build_line(&v(&["outputs"])).unwrap(), "outputs");
+        assert_eq!(
+            format_outputs_reply("ok DP-1=0,0,1920x1080@1 HDMI-A-1=1920,0,1280x720@1.5").as_deref(),
+            Some("DP-1\t0,0\t1920x1080\t1\nHDMI-A-1\t1920,0\t1280x720\t1.5")
+        );
+        assert_eq!(format_outputs_reply("ok").as_deref(), Some(""));
+        assert_eq!(format_outputs_reply("err nope"), None);
+        assert_eq!(format_outputs_reply("ok junk"), None);
     }
 
     #[test]

@@ -14,6 +14,7 @@ set -uo pipefail
 usage() {
 	cat <<'USAGE'
 Usage: wallpaper-rotate.sh [--help|-h] [--dry-run] [--wait SECONDS] [--dir DIR] [--mode MODE]
+                          [--outputs mirror|separate]
 
 Pick a random image from DIR and show it on every output with swaybg. The new
 swaybg starts first and the previous one is stopped only once the new one is
@@ -24,7 +25,16 @@ Options:
   --dir DIR    image directory (default: $WALLPAPER_DIR, else
                <photos-root>/bgs_4k/bgset); jpg/jpeg/png, not recursive
   --mode MODE  swaybg scaling mode: stretch|fit|fill|center|tile (default: fill)
-  --dry-run    print the socket and image that would be used, change nothing
+  --outputs MODE
+               mirror (default): one image on every output (swaybg -o '*').
+               separate: a distinct random image per output, the names read
+               from `crucible msg outputs` (the crucible next to this script,
+               else on PATH); no image repeats across outputs while DIR holds
+               at least as many images as outputs, and each output avoids its
+               previous image when possible. Without a CDE socket it warns and
+               falls back to mirror.
+  --dry-run    print the socket and image(s) that would be used, change nothing
+               (separate mode lists `output: image` per output)
   --wait SECONDS
                poll up to SECONDS for a live Wayland socket before giving up
                (for compositor startup; default 0 = check once)
@@ -36,7 +46,8 @@ Environment:
 
 Exit status: 0 on success or when no Wayland session is running; 1 when swaybg
 fails to start (the previous background is left in place); 2 on bad usage.
-State: ${XDG_STATE_HOME:-~/.local/state}/wallpaper-rotate/current (last image).
+State: ${XDG_STATE_HOME:-~/.local/state}/wallpaper-rotate/current: the last image
+(one path line) in mirror mode, `<output><TAB><path>` lines in separate mode.
 
 Cron example:
   */5 * * * * /path/to/crucible-dev-env/scripts/wallpaper-rotate.sh
@@ -54,6 +65,7 @@ build_flags "${BASH_SOURCE[0]}" "$@"
 
 dir="${WALLPAPER_DIR:-<photos-root>/bgs_4k/bgset}"
 mode=fill
+outputs_mode=mirror
 dry_run=0
 wait_s=0
 while [ $# -gt 0 ]; do
@@ -64,6 +76,10 @@ while [ $# -gt 0 ]; do
 		[ $# -ge 2 ] || { usage >&2; exit 2; }
 		case "$2" in '' | *[!0-9]*) echo "wallpaper-rotate: bad --wait '$2'" >&2; exit 2 ;; esac
 		wait_s=$2; shift ;;
+	--outputs)
+		[ $# -ge 2 ] || { usage >&2; exit 2; }
+		case "$2" in mirror | separate) outputs_mode=$2 ;; *) echo "wallpaper-rotate: bad --outputs '$2'" >&2; exit 2 ;; esac
+		shift ;;
 	--dir) [ $# -ge 2 ] || { usage >&2; exit 2; }; dir=$2; shift ;;
 	--mode)
 		[ $# -ge 2 ] || { usage >&2; exit 2; }
@@ -113,7 +129,26 @@ export WAYLAND_DISPLAY="${sock##*/}"
 
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/wallpaper-rotate"
 state="$state_dir/current"
-last=$(cat "$state" 2>/dev/null || true)
+state_raw=$(cat "$state" 2>/dev/null || true)
+# Previous image per output. Old form: one path line (all outputs); tab form: `<output>\t<path>`
+# (`*\t<path>` is the mirror form).
+last=
+declare -A prev=()
+while IFS= read -r line; do
+	[ -n "$line" ] || continue
+	case "$line" in
+	*$'\t'*) prev["${line%%$'\t'*}"]=${line#*$'\t'} ;;
+	*) prev['*']=$line ;;
+	esac
+done <<<"$state_raw"
+if [ "${#prev[@]}" -gt 0 ]; then
+	if [ -n "${prev['*']+x}" ]; then
+		last=${prev['*']}
+	else
+		first=${state_raw%%$'\n'*}
+		last=${first#*$'\t'}
+	fi
+fi
 
 images=()
 while IFS= read -r -d '' f; do images+=("$f"); done < <(
@@ -121,29 +156,95 @@ while IFS= read -r -d '' f; do images+=("$f"); done < <(
 )
 [ ${#images[@]} -gt 0 ] || { echo "wallpaper-rotate: no images in $dir" >&2; exit 1; }
 
-candidates=()
-for f in "${images[@]}"; do [ "$f" = "$last" ] || candidates+=("$f"); done
-[ ${#candidates[@]} -gt 0 ] || candidates=("${images[@]}")
-img=$(printf '%s\0' "${candidates[@]}" | shuf -z -n 1 | tr -d '\0')
+# Output names from the CDE IPC (separate mode); empty on any failure.
+output_names() {
+	local self crucible out
+	self=$(readlink -f "${BASH_SOURCE[0]}")
+	crucible=$(dirname "$self")/crucible
+	[ -x "$crucible" ] || crucible=$(command -v crucible 2>/dev/null || true)
+	[ -n "$crucible" ] || return 1
+	out=$(CDE_SOCKET="$XDG_RUNTIME_DIR/cde/$WAYLAND_DISPLAY.sock" "$crucible" msg outputs 2>/dev/null) || return 1
+	printf '%s\n' "$out" | cut -f1 | grep -v '^$'
+}
+
+names=()
+if [ "$outputs_mode" = separate ]; then
+	while IFS= read -r n; do [ -n "$n" ] && names+=("$n"); done < <(output_names)
+	if [ ${#names[@]} -eq 0 ]; then
+		echo "wallpaper-rotate: cannot read the output names (not CDE, or no IPC socket); using mirror" >&2
+		outputs_mode=separate_fallback
+	fi
+fi
+
+# pick PREV USED...: a random image avoiding the used ones and PREV; relaxes PREV first, then USED.
+pick() {
+	local avoid=$1 f u c=()
+	shift
+	for f in "${images[@]}"; do
+		for u in "$@"; do [ "$f" = "$u" ] && continue 2; done
+		[ "$f" = "$avoid" ] || c+=("$f")
+	done
+	if [ ${#c[@]} -eq 0 ]; then
+		for f in "${images[@]}"; do
+			for u in "$@"; do [ "$f" = "$u" ] && continue 2; done
+			c+=("$f")
+		done
+	fi
+	if [ ${#c[@]} -eq 0 ]; then
+		for f in "${images[@]}"; do [ "$f" = "$avoid" ] || c+=("$f"); done
+	fi
+	[ ${#c[@]} -gt 0 ] || c=("${images[@]}")
+	printf '%s\0' "${c[@]}" | shuf -z -n 1 | tr -d '\0'
+}
+
+img=
+chosen=()
+if [ "$outputs_mode" = separate ]; then
+	for n in "${names[@]}"; do
+		p=${prev[$n]:-${prev['*']:-}}
+		chosen+=("$(pick "$p" "${chosen[@]}")")
+	done
+else
+	candidates=()
+	for f in "${images[@]}"; do [ "$f" = "$last" ] || candidates+=("$f"); done
+	[ ${#candidates[@]} -gt 0 ] || candidates=("${images[@]}")
+	img=$(printf '%s\0' "${candidates[@]}" | shuf -z -n 1 | tr -d '\0')
+fi
 
 if [ "$dry_run" = 1 ]; then
 	echo "socket: $sock"
-	echo "image:  $img (mode $mode, ${#images[@]} images in $dir)"
+	if [ "$outputs_mode" = separate ]; then
+		echo "mode $mode, ${#images[@]} images in $dir"
+		for i in "${!names[@]}"; do echo "${names[$i]}: ${chosen[$i]}"; done
+	else
+		echo "image:  $img (mode $mode, ${#images[@]} images in $dir)"
+	fi
 	exit 0
 fi
 
 old_pids=$(pgrep -u "$(id -u)" -x swaybg || true)
 
+bg_args=()
+if [ "$outputs_mode" = separate ]; then
+	for i in "${!names[@]}"; do bg_args+=(-o "${names[$i]}" -i "${chosen[$i]}" -m "$mode"); done
+else
+	bg_args=(-o '*' -i "$img" -m "$mode")
+fi
+
 # setsid + /dev/null: detach fully so cron does not wait on the long-lived swaybg.
-setsid swaybg -o '*' -i "$img" -m "$mode" </dev/null >/dev/null 2>&1 &
+setsid swaybg "${bg_args[@]}" </dev/null >/dev/null 2>&1 &
 new_pid=$!
 sleep 1
 if ! kill -0 "$new_pid" 2>/dev/null; then
-	echo "wallpaper-rotate: swaybg exited at startup (image: $img); keeping the previous background" >&2
+	echo "wallpaper-rotate: swaybg exited at startup (image: ${img:-${chosen[*]}}); keeping the previous background" >&2
 	exit 1
 fi
 
 for p in $old_pids; do kill "$p" 2>/dev/null || true; done
 mkdir -p "$state_dir"
-printf '%s\n' "$img" >"$state_dir/current.tmp" && mv "$state_dir/current.tmp" "$state"
+if [ "$outputs_mode" = separate ]; then
+	for i in "${!names[@]}"; do printf '%s\t%s\n' "${names[$i]}" "${chosen[$i]}"; done >"$state_dir/current.tmp"
+else
+	printf '%s\n' "$img" >"$state_dir/current.tmp"
+fi && mv "$state_dir/current.tmp" "$state"
 exit 0

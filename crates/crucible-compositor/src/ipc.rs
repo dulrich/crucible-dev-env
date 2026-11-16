@@ -120,6 +120,9 @@ pub enum Request {
     /// `capture <path>` — write a PNG of the focused output (no cursor) to `path`; answers
     /// `ok <w>x<h>` once the file is written. Refused while locked. A debug request (plan 34).
     Capture(PathBuf),
+    /// `outputs` — list every enabled (mapped) output as one line of `<name>=<x>,<y>,<w>x<h>@<scale>`
+    /// records (logical geometry), ordered by x, y, then name (plan 42).
+    Outputs,
 }
 
 /// Parses the pid argument of `close-pid`: plain decimal digits, a non-zero `u32`.
@@ -154,7 +157,7 @@ impl Request {
     #[must_use]
     pub fn acts(&self) -> bool {
         match self {
-            Request::Candidates | Request::Bindings | Request::Save => false,
+            Request::Candidates | Request::Bindings | Request::Save | Request::Outputs => false,
             Request::Open(_)
             | Request::OpenFolder(_)
             | Request::New(_)
@@ -194,6 +197,7 @@ impl Request {
             "candidates" => none(arg, Request::Candidates),
             "bindings" => none(arg, Request::Bindings),
             "save" => none(arg, Request::Save),
+            "outputs" => none(arg, Request::Outputs),
             "relaunch" => none(arg, Request::Relaunch),
             "open" => need(arg).map(Request::Open),
             "open-folder" => need(arg).map(|p| Request::OpenFolder(PathBuf::from(p))),
@@ -218,6 +222,7 @@ impl Request {
             Request::Candidates => "candidates".into(),
             Request::Bindings => "bindings".into(),
             Request::Save => "save".into(),
+            Request::Outputs => "outputs".into(),
             Request::Relaunch => "relaunch".into(),
             Request::Open(n) => format!("open {}", encode_field(n)),
             Request::OpenFolder(p) => format!("open-folder {}", encode_field(&p.to_string_lossy())),
@@ -398,6 +403,62 @@ pub fn parse_bindings(payload: &str) -> Option<Vec<(String, String)>> {
         .map(|item| {
             let (chord, action) = item.split_once(':')?;
             Some((decode_field(chord)?, decode_field(action)?))
+        })
+        .collect()
+}
+
+/// One `outputs` record: an enabled output's connector name, logical position and size, and scale.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputInfo {
+    /// Connector name (never contains whitespace or `=`).
+    pub name: String,
+    /// Logical x.
+    pub x: i32,
+    /// Logical y.
+    pub y: i32,
+    /// Logical width.
+    pub w: i32,
+    /// Logical height.
+    pub h: i32,
+    /// Fractional scale.
+    pub scale: f64,
+}
+
+/// Formats outputs as the single-line `ok` payload: space-separated `name=x,y,wxh@scale` records,
+/// ordered by x, then y, then name.
+#[must_use]
+pub fn format_outputs(items: &[OutputInfo]) -> String {
+    let mut sorted: Vec<&OutputInfo> = items.iter().collect();
+    sorted.sort_by(|a, b| (a.x, a.y, &a.name).cmp(&(b.x, b.y, &b.name)));
+    sorted
+        .iter()
+        .map(|o| format!("{}={},{},{}x{}@{}", o.name, o.x, o.y, o.w, o.h, o.scale))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Parses an `outputs` payload back into records; `None` on any malformed record.
+#[must_use]
+pub fn parse_outputs(payload: &str) -> Option<Vec<OutputInfo>> {
+    payload
+        .split_ascii_whitespace()
+        .map(|rec| {
+            let (name, rest) = rec.split_once('=')?;
+            let (pos, rest) = rest.split_once(',')?;
+            let (y, rest) = rest.split_once(',')?;
+            let (w, rest) = rest.split_once('x')?;
+            let (h, scale) = rest.split_once('@')?;
+            if name.is_empty() {
+                return None;
+            }
+            Some(OutputInfo {
+                name: name.to_string(),
+                x: pos.parse().ok()?,
+                y: y.parse().ok()?,
+                w: w.parse().ok()?,
+                h: h.parse().ok()?,
+                scale: scale.parse().ok()?,
+            })
         })
         .collect()
 }
@@ -701,11 +762,37 @@ mod tests {
     }
 
     #[test]
+    fn outputs_reply_is_one_sorted_line_and_round_trips() {
+        let o = |name: &str, x, scale| OutputInfo {
+            name: name.into(),
+            x,
+            y: 0,
+            w: 1920,
+            h: 1080,
+            scale,
+        };
+        let payload = format_outputs(&[o("HDMI-A-1", 1920, 1.5), o("DP-1", 0, 1.0)]);
+        assert_eq!(
+            payload,
+            "DP-1=0,0,1920x1080@1 HDMI-A-1=1920,0,1920x1080@1.5"
+        );
+        assert!(!payload.contains('\n'));
+        assert_eq!(
+            parse_outputs(&payload),
+            Some(vec![o("DP-1", 0, 1.0), o("HDMI-A-1", 1920, 1.5)])
+        );
+        assert_eq!(format_outputs(&[]), "");
+        assert_eq!(Response::Ok(payload).to_line().lines().count(), 1);
+        assert_eq!(parse_outputs("DP-1=bad"), None);
+    }
+
+    #[test]
     fn requests_round_trip_through_the_wire() {
         let reqs = [
             Request::Candidates,
             Request::Bindings,
             Request::Save,
+            Request::Outputs,
             Request::Relaunch,
             Request::Open("a:b\tc".into()),
             Request::OpenFolder(PathBuf::from("/tmp/x:y/100%")),
