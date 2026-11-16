@@ -4,6 +4,16 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.1 — 2026-11-15
+
+### Added
+
+- The greeter's login panel shows the active keyboard layout name (right of the prompt) when the profile has two or more layouts, and updates it on each `set-layout`.
+
+### Changed
+
+- `docs/greeter.md`: greetd runs on VT 7 (Debian's `greetd.service` conflicts with `getty@tty7`, so `vt = 1` would fight the tty1 getty); try it with `systemctl start` before enabling.
+
 ## 0.7.0 — 2026-11-15
 
 ### Added
