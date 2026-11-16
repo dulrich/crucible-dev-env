@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="3840" height="2160" viewBox="0 0 3840 2160">
+  <!-- CDE stock background, 0.7 line. N1 Console palette; composition is centre-weighted
+       (everything that matters sits inside the central 3000x1400 so 16:10 and 21:9 fill crops keep it). -->
+  <defs>
+    <radialGradient id="bg" cx="50%" cy="50%" r="75%">
+      <stop offset="0" stop-color="#1a1a1e"/>
+      <stop offset="0.55" stop-color="#121214"/>
+      <stop offset="1" stop-color="#0b0b0d"/>
+    </radialGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#f07714" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#f07714" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="120" height="120" patternUnits="userSpaceOnUse">
+      <path d="M120 0H0V120" fill="none" stroke="#37383b" stroke-width="2" stroke-opacity="0.35"/>
+    </pattern>
+    <radialGradient id="fade" cx="50%" cy="50%" r="60%">
+      <stop offset="0.25" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="gridmask"><rect width="3840" height="2160" fill="url(#fade)"/></mask>
+  </defs>
+  <rect width="3840" height="2160" fill="url(#bg)"/>
+  <rect width="3840" height="2160" fill="url(#grid)" mask="url(#gridmask)"/>
+  <circle cx="1920" cy="1080" r="900" fill="url(#glow)"/>
+  <!-- concentric rings -->
+  <g fill="none" stroke="#37383b">
+    <circle cx="1920" cy="1080" r="420" stroke-width="3" stroke-opacity="0.9"/>
+    <circle cx="1920" cy="1080" r="640" stroke-width="2" stroke-opacity="0.7"/>
+    <circle cx="1920" cy="1080" r="860" stroke-width="2" stroke-opacity="0.45"/>
+    <circle cx="1920" cy="1080" r="1080" stroke-width="2" stroke-opacity="0.25" stroke-dasharray="6 18"/>
+  </g>
+  <!-- tiled panes: a split workspace, one focused pane in the accent -->
+  <g fill="#0e0e10" fill-opacity="0.85" stroke="#4a4b4f" stroke-width="3">
+    <rect x="1320" y="780" width="760" height="480" rx="6"/>
+    <rect x="2120" y="780" width="400" height="230" rx="6"/>
+    <rect x="2120" y="1030" width="400" height="230" rx="6"/>
+  </g>
+  <rect x="1320" y="780" width="760" height="480" rx="6" fill="#f07714" fill-opacity="0.07" stroke="#f07714" stroke-width="5"/>
+  <!-- stack marks on the focused pane, a pane-stack hint -->
+  <g fill="#f07714">
+    <rect x="1360" y="812" width="120" height="8" rx="4" fill-opacity="0.95"/>
+    <rect x="1496" y="812" width="80" height="8" rx="4" fill-opacity="0.35"/>
+    <rect x="1592" y="812" width="80" height="8" rx="4" fill-opacity="0.35"/>
+  </g>
+  <!-- crosshair ticks on the ring axes -->
+  <g stroke="#4a4b4f" stroke-width="3">
+    <path d="M1920 150V250M1920 1910V2010M560 1080H660M3180 1080H3280"/>
+  </g>
+</svg>
