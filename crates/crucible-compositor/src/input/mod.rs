@@ -78,7 +78,7 @@ impl CrucibleState<WinitData> {
     /// arrive with the udev/libinput path ([`CrucibleState::process_input_event_libinput`]).
     pub fn process_input_event(&mut self, event: InputEvent<smithay::backend::winit::WinitInput>) {
         type B = smithay::backend::winit::WinitInput;
-        let woke = self.idle_activity();
+        let woke = self.input_activity(&event);
         if self.drop_wake_key::<B>(woke, &event) {
             return;
         }
@@ -111,7 +111,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// motion through `process_pointer_motion_relative`. Device add/remove are surfaced to the
     /// caller (which configures libinput / tracks keyboards for LED sync) and otherwise ignored.
     pub fn process_input_event_libinput<I: InputBackend>(&mut self, event: InputEvent<I>) {
-        let woke = self.idle_activity();
+        let woke = self.input_activity(&event);
         if self.drop_wake_key::<I>(woke, &event) {
             return;
         }
@@ -133,6 +133,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 }
+impl<B: Backend + 'static> CrucibleState<B> {
+    /// Feeds `event` to the idle machine when it is user activity (see [`is_user_activity`]);
+    /// returns whether it woke blanked outputs.
+    fn input_activity<I: InputBackend>(&mut self, event: &InputEvent<I>) -> bool {
+        is_user_activity(input_kind(event)) && self.idle_activity()
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Greeter mode only: swallows the key press that woke blanked outputs (so it never reaches
     /// the login field) and records its keycode so the matching release is swallowed too.
@@ -217,5 +225,35 @@ fn input_kind<I: InputBackend>(event: &InputEvent<I>) -> &'static str {
         | InputEvent::TouchCancel { .. }
         | InputEvent::TouchFrame { .. } => "touch",
         _ => "other",
+    }
+}
+
+/// Whether an input event of `kind` (see [`input_kind`]) is user activity for the idle machine.
+/// Device add/remove are not: libinput queues its start-up device enumeration until the first real
+/// input is dispatched, so those events arrive just ahead of the key that wakes a blanked greeter.
+/// Counting them woke the outputs first, and the key was then delivered to the login field.
+fn is_user_activity(kind: &str) -> bool {
+    !matches!(kind, "device-added" | "device-removed")
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::is_user_activity;
+
+    #[test]
+    fn device_enumeration_is_not_user_activity() {
+        assert!(!is_user_activity("device-added"));
+        assert!(!is_user_activity("device-removed"));
+        for kind in [
+            "keyboard",
+            "pointer-motion",
+            "pointer-button",
+            "pointer-axis",
+            "switch",
+            "touch",
+            "other",
+        ] {
+            assert!(is_user_activity(kind), "{kind}");
+        }
     }
 }

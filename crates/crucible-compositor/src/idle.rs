@@ -177,7 +177,8 @@ impl<B: Backend + 'static> IdleInhibitHandler for CrucibleState<B> {
 
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Marks input activity: restarts the idle period, wakes blanked outputs and tells
-    /// `ext-idle-notify` clients. Called for every input event; never consumes the event itself
+    /// `ext-idle-notify` clients. Called for every user-activity input event (not device add/remove)
+    /// and on VT return; never consumes the event itself
     /// (the caller decides, see [`drops_wake_key`]). Returns whether this event woke blanked
     /// outputs.
     pub fn idle_activity(&mut self) -> bool {
