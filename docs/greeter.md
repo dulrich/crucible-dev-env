@@ -87,7 +87,7 @@ The greeter needs greetd, two directories and one config file. Nothing changes u
 
    ```toml
    [terminal]
-   vt = 1
+   vt = 7
 
    [default_session]
    command = "/opt/cde/bin/crucible greeter --profile /var/lib/cde-greeter"
@@ -95,11 +95,11 @@ The greeter needs greetd, two directories and one config file. Nothing changes u
    ```
 
 4. Populate `/opt/cde/bin/crucible` and `/opt/cde/share/backgrounds/stock.png`: re-run the deploy, or by hand `cargo build --release && install -D -m 755 target/release/crucible /opt/cde/bin/crucible`, then `scripts/render-backgrounds.sh && install -D -m 644 target/backgrounds/stock.png /opt/cde/share/backgrounds/stock.png`; and start CDE once (or reload its config) so the profile is published.
-5. Enable the service: `sudo systemctl enable greetd`, then reboot (or start it from a VT with `sudo systemctl start greetd`).
+5. Try it first without enabling: `sudo systemctl start greetd`, then `Ctrl+Alt+F7`; `sudo systemctl stop greetd` (or a reboot) backs out. When a login works, `sudo systemctl enable greetd`.
 
-greetd takes `vt = 1`, the VT a tty1 autologin getty would use, so enabling greetd replaces the tty1 login prompt: greetd starts the greeter there and, after a login, starts the `greeter` block's `session` command (default `cde-session`) as you. Other VTs keep their normal getty.
+Debian's `greetd.service` conflicts with `getty@tty7`, so `vt = 7` is the VT that works out of the box: greetd starts the greeter there and, after a login, starts the `greeter` block's `session` command (default `cde-session`) as you. tty1 keeps its normal getty and stays a text-login fallback (`cde-session` autostarts only from a tty1 login). To use `vt = 1` instead, also `sudo systemctl disable getty@tty1`, or the two fight over tty1.
 
-To switch back to tty1 login: `sudo systemctl disable greetd`, then reboot.
+To turn the greeter off: `sudo systemctl disable greetd`, then reboot (with `vt = 1`, also `sudo systemctl enable getty@tty1`).
 
 Security note: `/opt/cde/bin/crucible` is writable by you and runs as `_greetd`, which is less privileged than you. That is acceptable on a single-user host; do not do this on a shared host, where anyone who can write `/opt/cde` could run code as `_greetd`.
 
