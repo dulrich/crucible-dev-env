@@ -94,7 +94,7 @@ The greeter needs greetd, two directories and one config file. Nothing changes u
    user = "_greetd"
    ```
 
-4. Re-run the deploy (`scripts/deploy.sh <host>`) so `/opt/cde/bin/crucible` and `/opt/cde/share/backgrounds/stock.png` are populated, and start CDE once (or reload its config) so the profile is published.
+4. Populate `/opt/cde/bin/crucible` and `/opt/cde/share/backgrounds/stock.png`: re-run the deploy, or by hand `cargo build --release && install -D -m 755 target/release/crucible /opt/cde/bin/crucible`, then `scripts/render-backgrounds.sh && install -D -m 644 target/backgrounds/stock.png /opt/cde/share/backgrounds/stock.png`; and start CDE once (or reload its config) so the profile is published.
 5. Enable the service: `sudo systemctl enable greetd`, then reboot (or start it from a VT with `sudo systemctl start greetd`).
 
 greetd takes `vt = 1`, the VT a tty1 autologin getty would use, so enabling greetd replaces the tty1 login prompt: greetd starts the greeter there and, after a login, starts the `greeter` block's `session` command (default `cde-session`) as you. Other VTs keep their normal getty.
