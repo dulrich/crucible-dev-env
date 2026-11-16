@@ -1,4 +1,4 @@
-//! The `lock { style; background }` and `greeter { style; background; session }` blocks, and the
+//! The `lock { style; background }` and `greeter { style; background; position; session }` blocks, and the
 //! shared `style` / `background` child parsers.
 
 use crate::error::ConfigError;
@@ -58,6 +58,7 @@ pub(super) fn parse_greeter(node: NodeReader<'_>) -> Result<GreeterConfig, Confi
         match child.name() {
             "style" => out.style = parse_style(&child)?,
             "background" => out.background = parse_background(&child)?,
+            "position" => out.position = child.enum_arg("a position string")?,
             "session" => {
                 out.session = child.nonempty_string_arg("a command string", "session")?;
             }
@@ -133,6 +134,10 @@ mod tests {
             ("lock", "background"),
             ("greeter", "session \"  \""),
             ("greeter", "session 3"),
+            ("greeter", "position \"middle\""),
+            ("greeter", "position"),
+            ("greeter", "position 1"),
+            ("greeter", "position \"lower\" \"upper\""),
             ("greeter", "background \"user\" \"x\""),
         ] {
             let (err, at) = err_at(&format!("\n{block} {{\n {bad}\n}}\n"));
@@ -155,6 +160,7 @@ mod tests {
         for text in [
             "lock { style \"n1-med\"; style \"n1-dark\"; }\n",
             "greeter { session \"a\"; session \"b\"; }\n",
+            "greeter { position \"lower\"; position \"upper\"; }\n",
             "lock { }\nlock { }\n",
             "greeter { }\ngreeter { }\n",
         ] {

@@ -4,7 +4,7 @@
 //! [`resolve_palette`] turns a style plus the optional `theme` block into the [`Palette`] a
 //! surface paints. Rendering lives in the compositor and the greeter; this module is data only.
 
-use crate::model::Rgb;
+use crate::model::{Named, Rgb};
 use crate::overlay::{N1_MED, OverlayStyle, Palette};
 use crate::theme::ThemeConfig;
 
@@ -37,6 +37,58 @@ pub const DEFAULT_GREETER_BACKGROUND: SurfaceBackground = SurfaceBackground::Sto
 /// The default `greeter` session command.
 pub const DEFAULT_GREETER_SESSION: &str = "cde-session";
 
+/// Where the greeter's login panel sits: the centre of a screen region, as fractions of the output.
+///
+/// KDL: `position "<name>"` in the `greeter` block (default [`PanelPosition::Lower`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelPosition {
+    /// (50 %, 50 %).
+    Center,
+    /// (50 %, 25 %).
+    Upper,
+    /// (50 %, 75 %).
+    Lower,
+    /// (25 %, 25 %).
+    UpperLeft,
+    /// (75 %, 25 %).
+    UpperRight,
+    /// (25 %, 75 %).
+    LowerLeft,
+    /// (75 %, 75 %).
+    LowerRight,
+}
+
+impl Named for PanelPosition {
+    const NAMES: &'static [(Self, &'static str)] = &[
+        (Self::Center, "center"),
+        (Self::Upper, "upper"),
+        (Self::Lower, "lower"),
+        (Self::UpperLeft, "upper-left"),
+        (Self::UpperRight, "upper-right"),
+        (Self::LowerLeft, "lower-left"),
+        (Self::LowerRight, "lower-right"),
+    ];
+}
+
+impl PanelPosition {
+    /// The region centre as (x, y) fractions of the output size.
+    #[must_use]
+    pub const fn fractions(self) -> (f64, f64) {
+        match self {
+            Self::Center => (0.5, 0.5),
+            Self::Upper => (0.5, 0.25),
+            Self::Lower => (0.5, 0.75),
+            Self::UpperLeft => (0.25, 0.25),
+            Self::UpperRight => (0.75, 0.25),
+            Self::LowerLeft => (0.25, 0.75),
+            Self::LowerRight => (0.75, 0.75),
+        }
+    }
+}
+
+/// The default `greeter` panel position.
+pub const DEFAULT_GREETER_POSITION: PanelPosition = PanelPosition::Lower;
+
 /// The `lock { style …; background … }` block: how the generated swaylock config looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LockConfig {
@@ -55,7 +107,7 @@ impl Default for LockConfig {
     }
 }
 
-/// The `greeter { style …; background …; session "<command>" }` block for the optional greetd
+/// The `greeter { style …; background …; position …; session "<command>" }` block for the optional greetd
 /// greeter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GreeterConfig {
@@ -63,6 +115,8 @@ pub struct GreeterConfig {
     pub style: SurfaceStyle,
     /// Greeter background (default [`DEFAULT_GREETER_BACKGROUND`]).
     pub background: SurfaceBackground,
+    /// Where the login panel sits (default [`DEFAULT_GREETER_POSITION`]).
+    pub position: PanelPosition,
     /// The session command started after login, non-empty (default
     /// [`DEFAULT_GREETER_SESSION`]).
     pub session: String,
@@ -73,6 +127,7 @@ impl Default for GreeterConfig {
         Self {
             style: DEFAULT_GREETER_STYLE,
             background: DEFAULT_GREETER_BACKGROUND,
+            position: DEFAULT_GREETER_POSITION,
             session: DEFAULT_GREETER_SESSION.to_string(),
         }
     }

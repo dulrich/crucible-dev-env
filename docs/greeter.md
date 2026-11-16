@@ -25,6 +25,8 @@ style "terminal"                 // terminal | n1-dark | n1-med | n1-light
 background { image "/var/lib/cde-greeter/background.png"; }   // or: background { color "#000000"; }
 palette { bg "#1d1f21"; text "#c5c8c6"; line "#666666"; accent "#81a2be"; }
 alpha 0.85                       // panel fill, 0.0..=1.0 (below 1.0 is the glass look)
+position "lower"                 // center | upper | lower | upper-left | upper-right | lower-left | lower-right
+blank-after 600                  // idle seconds before the screens blank, 1 or more
 session "cde-session"            // the command greetd starts
 keyboard { layouts "us" "es"; }  // xkb layouts in group order
 bind "Super+E" "set-layout us"   // only set-layout binds are accepted
@@ -32,7 +34,8 @@ bind "Super+E" "set-layout us"   // only set-layout binds are accepted
 
 - `background` is a colour or an absolute image path; the profile never holds `stock` or `user`, which the publisher resolves to a copied image file.
 - `palette` holds the panel colours resolved from the style (for `terminal`, the user's `theme` colours). Without it the style's own palette is used (`terminal` falls back to `n1-med`).
-- The fallback look is style `n1-med` on colour `#000000`, alpha 1.0, layout `us`, session `cde-session` and the default binds.
+- `position` is the screen region whose centre the panel is centred on (clamped to stay on the output); `blank-after` is the idle timeout in whole seconds, published from the config's `idle { blank-after }` (600 when it sets none). The greeter never locks, and the key press that wakes blanked screens is consumed.
+- The fallback look is style `n1-med` on colour `#000000`, alpha 1.0, position `lower`, blank after 600 s, layout `us`, session `cde-session` and the default binds.
 
 ## Background
 
@@ -42,7 +45,7 @@ The stock CDE background image may change on a major release.
 
 ## Panel and keys
 
-The panel is centred on every output; keyboard focus is global. It shows the prompt ("Username", then the PAM prompts), the input field and a message line (errors, PAM info lines, and "Authenticating…" while greetd is answering).
+The panel sits at the profile's `position` (default `lower`) on every output; keyboard focus is global. It shows the prompt ("Username", then the PAM prompts), the input field and a message line (errors, PAM info lines, and "Authenticating…" while greetd is answering).
 
 - Printable characters type into the field; a secret prompt shows one bullet per character, never the text.
 - `Backspace` deletes the last character.

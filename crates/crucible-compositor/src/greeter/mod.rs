@@ -17,7 +17,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 
-use crucible_config::{Config, HeaderConfig, HeaderMode};
+use crucible_config::{Config, HeaderConfig, HeaderMode, IdleConfig};
 use crucible_greetd::{Event, Secret, Session, View};
 use smithay::input::keyboard::Keysym;
 use smithay::reexports::calloop::channel::{self, Event as ChannelEvent};
@@ -176,6 +176,7 @@ impl Greeter {
             layout: layout_label(&self.profile.layouts, self.layout),
             palette: self.profile.palette,
             alpha: self.profile.alpha,
+            position: self.profile.position,
             clear,
         }
     }
@@ -188,6 +189,11 @@ pub fn greeter_config(p: &GreeterProfile) -> Config {
     Config {
         keyboard: p.keyboard(),
         binds: p.binds.clone(),
+        // Blank on the profile's timeout; `lock_after` stays unset: the greeter never locks.
+        idle: IdleConfig {
+            lock_after: None,
+            blank_after: Some(p.blank_after),
+        },
         header: HeaderConfig {
             mode: HeaderMode::Off,
             ..HeaderConfig::default()
@@ -267,6 +273,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
             crate::text::TextRenderer::load(None, crucible_config::DEFAULT_HEADER_FONT);
         self.config = config;
         self.start_ipc();
+        // Greeter mode skips `start_persistence`, which is what arms the idle timer; arm only it
+        // (blank on the profile's `blank-after`; `greeter_config` leaves the lock off).
+        self.start_idle_timer();
         let swaybg = spawn_swaybg(&profile.background, self.socket_name.as_deref());
         let session = Session::new(stream, &profile.session);
         let view = session.view();
@@ -389,6 +398,29 @@ mod tests {
         i.done();
         i.key(GreeterKey::Char('x'));
         assert_eq!(i.text(), "x");
+    }
+
+    #[test]
+    fn greeter_config_blanks_on_the_profile_timeout_and_never_locks() {
+        let mut p = GreeterProfile::fallback();
+        p.blank_after = 90;
+        let cfg = greeter_config(&p);
+        assert_eq!(cfg.idle.blank_after, Some(90));
+        assert_eq!(cfg.idle.lock_after, None, "the greeter never locks");
+        assert_eq!(
+            greeter_config(&GreeterProfile::fallback()).idle.blank_after,
+            Some(600)
+        );
+        // The machine `start_idle_timer` drives, fed this config: blanks at the timeout, never
+        // asks for a lock (the timer arming itself needs a live compositor and is untested).
+        let mut m = crate::idle::IdleMachine::default();
+        let tick = |m: &mut crate::idle::IdleMachine, s| {
+            m.tick(std::time::Duration::from_secs(s), false, false, &cfg.idle)
+        };
+        assert_eq!(tick(&mut m, 89), crate::idle::IdleStep::default());
+        let step = tick(&mut m, 1);
+        assert!(step.blank && !step.lock);
+        assert!(!tick(&mut m, 100_000).lock);
     }
 
     #[test]

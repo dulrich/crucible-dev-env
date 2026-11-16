@@ -1,7 +1,7 @@
-//! The login panel: a pure layout (centred on the output, the secret field masked) and its render
+//! The login panel: a pure layout (centred on its region point, the secret field masked) and its render
 //! elements (labels, then the field and panel solids, front-to-back).
 
-use crucible_config::{Milli, Palette, Rgb};
+use crucible_config::{Milli, Palette, PanelPosition, Rgb};
 use crucible_layout::Rect;
 use smithay::{
     backend::renderer::{ImportAll, ImportMem, Renderer},
@@ -43,6 +43,8 @@ pub struct PanelFrame {
     pub palette: Palette,
     /// The panel fill alpha.
     pub alpha: Milli,
+    /// Where the panel sits on the output.
+    pub position: PanelPosition,
     /// The output clear colour (the profile colour, or black under an image).
     pub clear: [f32; 4],
 }
@@ -79,12 +81,21 @@ pub fn layout_label(layouts: &[String], active: usize) -> Option<String> {
         .cloned()
 }
 
-/// Lays the panel out centred in an output of logical size `w`x`h` (narrow outputs shrink it).
+/// Centres `size` on `frac` of `extent`, clamped so `0..=extent - size` holds.
+fn centre_on(extent: i32, size: i32, frac: f64) -> i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let at = (f64::from(extent) * frac).round() as i32;
+    (at - size / 2).clamp(0, (extent - size).max(0))
+}
+
+/// Lays the panel out centred on the `position` region point of an output of logical size
+/// `w`x`h`, clamped fully inside it (narrow outputs shrink it).
 #[must_use]
-pub fn layout(w: i32, h: i32) -> PanelLayout {
+pub fn layout(w: i32, h: i32, position: PanelPosition) -> PanelLayout {
     let pw = PANEL_W.min((w - 2 * PAD).max(PAD * 4));
     let ph = PAD + LINE_H + 8 + FIELD_H + 12 + LINE_H + PAD;
-    let (x, y) = ((w - pw) / 2, (h - ph) / 2);
+    let (fx, fy) = position.fractions();
+    let (x, y) = (centre_on(w, pw, fx), centre_on(h, ph, fy));
     let prompt = (x + PAD, y + PAD);
     let field = Rect::new(x + PAD, prompt.1 + LINE_H + 8, pw - 2 * PAD, FIELD_H);
     let message = (x + PAD, field.y + FIELD_H + 12);
@@ -120,7 +131,7 @@ where
     R: Renderer + ImportAll + ImportMem,
     R::TextureId: Send + Clone + 'static,
 {
-    let l = layout(size.0, size.1);
+    let l = layout(size.0, size.1, frame.position);
     let map = PhysicalMap::plain(scale);
     let pal = frame.palette;
     let mut out = Vec::new();
@@ -170,14 +181,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn panel_is_centred_and_secret_input_is_masked() {
-        let l = layout(1920, 1080);
-        assert_eq!(l.panel.x * 2 + l.panel.width, 1920);
-        assert!((l.panel.y * 2 + l.panel.height - 1080).abs() <= 1);
-        assert!(l.field.x >= l.panel.x && l.field.x + l.field.width <= l.panel.x + l.panel.width);
-        // A narrow output shrinks the panel but keeps it inside.
-        let n = layout(300, 400);
-        assert!(n.panel.x >= 0 && n.panel.x + n.panel.width <= 300);
+    fn every_position_centres_on_its_region_point() {
+        for (pos, fx, fy) in [
+            (PanelPosition::Center, 0.5, 0.5),
+            (PanelPosition::Upper, 0.5, 0.25),
+            (PanelPosition::Lower, 0.5, 0.75),
+            (PanelPosition::UpperLeft, 0.25, 0.25),
+            (PanelPosition::UpperRight, 0.75, 0.25),
+            (PanelPosition::LowerLeft, 0.25, 0.75),
+            (PanelPosition::LowerRight, 0.75, 0.75),
+        ] {
+            let l = layout(1920, 1080, pos);
+            let p = l.panel;
+            assert!(p.x >= 0 && p.x + p.width <= 1920 && p.y >= 0 && p.y + p.height <= 1080);
+            assert!(
+                (p.x * 2 + p.width - (1920.0 * fx * 2.0) as i32).abs() <= 1,
+                "{pos:?}"
+            );
+            assert!(
+                (p.y * 2 + p.height - (1080.0 * fy * 2.0) as i32).abs() <= 1,
+                "{pos:?}"
+            );
+            assert!(
+                l.field.x >= p.x && l.field.x + l.field.width <= p.x + p.width,
+                "{pos:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_small_output_clamps_the_panel_and_secret_input_is_masked() {
+        // A narrow output shrinks the panel and clamps it inside at every position.
+        for pos in [PanelPosition::UpperLeft, PanelPosition::LowerRight] {
+            let n = layout(300, 400, pos);
+            let p = n.panel;
+            assert!(p.x >= 0 && p.x + p.width <= 300, "{pos:?}");
+            assert!(p.y >= 0 && p.y + p.height <= 400, "{pos:?}");
+        }
+        let n = layout(300, 400, PanelPosition::LowerRight);
+        assert_eq!(n.panel.x, 300 - n.panel.width, "pinned to the right edge");
         assert_eq!(field_text("hunter2", true), "\u{2022}".repeat(7));
         assert_eq!(field_text("dulrich", false), "dulrich");
         assert_eq!(field_text("ñé", true).chars().count(), 2);

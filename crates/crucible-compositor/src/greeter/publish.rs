@@ -96,6 +96,7 @@ pub fn publish_to(
         greeter,
         config.theme.as_ref(),
         config.overlay.alpha,
+        config.idle.blank_after,
         &config.keyboard,
         &config.binds,
         image.as_deref(),

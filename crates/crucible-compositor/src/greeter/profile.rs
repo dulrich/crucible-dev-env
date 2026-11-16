@@ -10,6 +10,8 @@
 //! background { image "/var/lib/cde-greeter/background.png"; }   // or { color "#000000"; }
 //! palette { bg "#1d1f21"; text "#c5c8c6"; line "#666666"; accent "#81a2be"; }
 //! alpha 0.85
+//! position "lower"   // panel region: center|upper|lower|upper-left|upper-right|lower-left|lower-right
+//! blank-after 600    // seconds of idle before the outputs blank
 //! session "cde-session"
 //! keyboard { layouts "us" "es"; }
 //! bind "Super+E" "set-layout us"
@@ -18,10 +20,13 @@
 use std::path::{Path, PathBuf};
 
 use crucible_config::{
-    GreeterConfig, KeyboardConfig, Milli, N1_MED, Named, Palette, Rgb, SurfaceBackground,
-    SurfaceStyle, ThemeConfig, resolve_palette,
+    GreeterConfig, KeyboardConfig, Milli, N1_MED, Named, Palette, PanelPosition, Rgb,
+    SurfaceBackground, SurfaceStyle, ThemeConfig, resolve_palette,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
+
+/// Seconds of idle before the greeter blanks when the user's config sets no `idle { blank-after }`.
+pub const DEFAULT_BLANK_AFTER: u32 = 600;
 
 /// The profile file name inside the `--profile` directory.
 pub const PROFILE_FILE: &str = "profile.kdl";
@@ -47,6 +52,10 @@ pub struct GreeterProfile {
     pub palette: Palette,
     /// The panel fill alpha (`1` opaque, below it the glass look).
     pub alpha: Milli,
+    /// Where the login panel sits.
+    pub position: PanelPosition,
+    /// Seconds of idle before the outputs blank (the greeter never locks).
+    pub blank_after: u32,
     /// The session command greetd starts.
     pub session: String,
     /// The xkb layouts, in group order (never empty).
@@ -80,6 +89,8 @@ impl GreeterProfile {
             background: ProfileBackground::Color(Rgb(0, 0, 0)),
             palette: N1_MED,
             alpha: Milli(1000),
+            position: crucible_config::DEFAULT_GREETER_POSITION,
+            blank_after: DEFAULT_BLANK_AFTER,
             session: crucible_config::DEFAULT_GREETER_SESSION.to_string(),
             layouts: KeyboardConfig::default().layouts,
             binds: Vec::new(),
@@ -88,12 +99,14 @@ impl GreeterProfile {
 
     /// Builds the profile the user session publishes. `background_image` is the copied file
     /// that stands for `stock`/`user` (without one those fall back to black); only `set-layout`
-    /// entries of `binds` are kept.
+    /// entries of `binds` are kept. `blank_after` is the user's `idle { blank-after }`; `None` →
+    /// [`DEFAULT_BLANK_AFTER`].
     #[must_use]
     pub fn from_config(
         greeter: &GreeterConfig,
         theme: Option<&ThemeConfig>,
         alpha: Milli,
+        blank_after: Option<u32>,
         keyboard: &KeyboardConfig,
         binds: &[(String, String)],
         background_image: Option<&Path>,
@@ -108,6 +121,8 @@ impl GreeterProfile {
             background,
             palette: resolve_palette(greeter.style, theme),
             alpha,
+            position: greeter.position,
+            blank_after: blank_after.unwrap_or(DEFAULT_BLANK_AFTER),
             session: greeter.session.clone(),
             layouts: keyboard.layouts.clone(),
             binds: binds
@@ -171,6 +186,8 @@ pub fn write_profile(p: &GreeterProfile) -> String {
         ],
     ));
     nodes.push(node1("alpha", f64::from(p.alpha.0) / 1000.0));
+    nodes.push(node1("position", p.position.as_str()));
+    nodes.push(node1("blank-after", i128::from(p.blank_after)));
     nodes.push(node1("session", p.session.clone()));
     let mut layouts = KdlNode::new("layouts");
     for l in &p.layouts {
@@ -277,6 +294,21 @@ pub fn parse_profile(text: &str) -> Result<GreeterProfile, ProfileError> {
                     .and_then(Milli::from_f64)
                     .ok_or_else(|| invalid(name, "expects a number in 0.0..=1.0"))?;
             }
+            "position" => {
+                let s = str_arg(n, name)?;
+                p.position = PanelPosition::from_name(s)
+                    .ok_or_else(|| invalid(name, format!("unknown position `{s}`")))?;
+            }
+            "blank-after" => {
+                p.blank_after = match args(n).as_slice() {
+                    [v] => v
+                        .as_integer()
+                        .and_then(|i| u32::try_from(i).ok())
+                        .filter(|s| *s >= 1),
+                    _ => None,
+                }
+                .ok_or_else(|| invalid(name, "expects one whole number of seconds, 1 or more"))?;
+            }
             "session" => {
                 let s = str_arg(n, name)?;
                 if s.split_whitespace().next().is_none() {
@@ -358,6 +390,7 @@ mod tests {
         let greeter = GreeterConfig {
             style: SurfaceStyle::Terminal,
             background: SurfaceBackground::User,
+            position: PanelPosition::UpperRight,
             session: "cde-session --x".into(),
         };
         let kb = KeyboardConfig {
@@ -371,9 +404,26 @@ mod tests {
             &greeter,
             Some(&theme),
             Milli(850),
+            Some(90),
             &kb,
             &binds,
             Some(Path::new("/var/lib/cde-greeter/background.png")),
+        );
+        assert_eq!((p.position, p.blank_after), (PanelPosition::UpperRight, 90));
+        assert!(write_profile(&p).contains("blank-after 90"));
+        let none = GreeterProfile::from_config(&greeter, None, Milli(1000), None, &kb, &[], None);
+        assert_eq!(none.blank_after, 600);
+        assert_eq!(
+            (
+                GreeterProfile::fallback().position,
+                GreeterProfile::fallback().blank_after
+            ),
+            (PanelPosition::Lower, 600)
+        );
+        assert_eq!(
+            parse_profile("style \"n1-med\"\n").unwrap().position,
+            PanelPosition::Lower,
+            "old profiles keep the fallback"
         );
         assert_eq!(p.binds.len(), 1, "only set-layout binds are published");
         assert_eq!(p.palette.bg, Rgb(1, 2, 3));
@@ -403,6 +453,12 @@ mod tests {
         assert_eq!(load_profile(Some(&dir)), GreeterProfile::fallback());
         for bad in [
             "alpha 1.5",
+            "position \"middle\"",
+            "position",
+            "blank-after 0",
+            "blank-after -5",
+            "blank-after 1.5",
+            "blank-after \"9\"",
             "background { image \"relative.png\"; }",
             "bind \"Super+Return\" \"run-terminal\"",
             "keyboard { layouts; }",

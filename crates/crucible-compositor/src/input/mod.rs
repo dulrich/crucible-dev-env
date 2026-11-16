@@ -52,7 +52,9 @@ pub(crate) mod modal_test_support {
     }
 }
 
-use smithay::backend::input::{ButtonState, Event, InputBackend, InputEvent, PointerButtonEvent};
+use smithay::backend::input::{
+    ButtonState, Event, InputBackend, InputEvent, KeyboardKeyEvent, PointerButtonEvent,
+};
 use smithay::utils::SERIAL_COUNTER;
 
 use modal::InputMode;
@@ -76,7 +78,10 @@ impl CrucibleState<WinitData> {
     /// arrive with the udev/libinput path ([`CrucibleState::process_input_event_libinput`]).
     pub fn process_input_event(&mut self, event: InputEvent<smithay::backend::winit::WinitInput>) {
         type B = smithay::backend::winit::WinitInput;
-        self.idle_activity();
+        let woke = self.idle_activity();
+        if self.drop_wake_key::<B>(woke, &event) {
+            return;
+        }
         // The mode is resolved once for the event; snip mode branches here, once.
         let mode = self.input_mode();
         if mode.is_snipping() {
@@ -106,7 +111,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// motion through `process_pointer_motion_relative`. Device add/remove are surfaced to the
     /// caller (which configures libinput / tracks keyboards for LED sync) and otherwise ignored.
     pub fn process_input_event_libinput<I: InputBackend>(&mut self, event: InputEvent<I>) {
-        self.idle_activity();
+        let woke = self.idle_activity();
+        if self.drop_wake_key::<I>(woke, &event) {
+            return;
+        }
         // The mode is resolved once for the event; snip mode branches here, once. Absolute
         // motion is not handled on this path in any mode.
         let mode = self.input_mode();
@@ -126,6 +134,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 }
 impl<B: Backend + 'static> CrucibleState<B> {
+    /// Greeter mode only: swallows the key press that woke blanked outputs (so it never reaches
+    /// the login field) and records its keycode so the matching release is swallowed too.
+    /// Returns whether `event` was dropped. Ordinary sessions never drop it.
+    fn drop_wake_key<I: InputBackend>(&mut self, woke: bool, event: &InputEvent<I>) -> bool {
+        let InputEvent::Keyboard { event } = event else {
+            return false;
+        };
+        let press = event.state() == smithay::backend::input::KeyState::Pressed;
+        if !crate::idle::drops_wake_key(woke, self.greeter.is_some(), press) {
+            return false;
+        }
+        self.suppressed_keys.consume_press(event.key_code().raw());
+        true
+    }
+
     /// The snip-mode router: every event of a snipping session lands here, once, from either
     /// backend router, and no client receives pointer focus, motion, buttons or axis.
     ///

@@ -227,14 +227,14 @@ idle {
 }
 ```
 
-Built-in idle timers, both **off** unless configured. Each child is optional and may appear once; the value is a positive whole number of seconds. Zero, a negative number, a non-integer or an unknown child is a located config error (never rounded or clamped).
+Built-in idle timers, both **off** unless configured (the [greeter](#greeter) is the exception: it blanks after `blank-after`, or 600 s when unset, and never locks). Each child is optional and may appear once; the value is a positive whole number of seconds. Zero, a negative number, a non-integer or an unknown child is a located config error (never rounded or clamped).
 
 - `lock-after` — after this many seconds without input, CDE spawns the `lock-command` (the same path as the `lock` action). It fires at most once per idle period and never while the session is already locked or locking.
 - `blank-after` — after this many seconds without input, CDE powers the monitors off. It fires once per idle period and may fire while the session is locked. `blank-after` may be shorter than `lock-after` (blank first, lock later while still blanked).
 
 Idle time does not accumulate while idle is **inhibited**: when a client holds a `zwp_idle_inhibitor_v1` on a surface that is visible (mapped on an output's active workspace, or a non-workspace surface such as a layer surface, the overlay or a lock surface), or when a fullscreen window is on the active workspace of any output (this covers XWayland games that never send an inhibitor). A fullscreen window on a background workspace does not inhibit. When inhibition ends the idle period starts over.
 
-Any input event (key, pointer, touch, gesture) restarts the idle period and wakes blanked monitors; the waking event is still delivered to the focused window as usual. A hot reload applies the new timeouts and restarts the current idle period.
+Any input event (key, pointer, touch, gesture) restarts the idle period and wakes blanked monitors; the waking event is still delivered to the focused window as usual (in the greeter the waking key press and its release are consumed instead, so they never land in the login field). A hot reload applies the new timeouts and restarts the current idle period.
 
 Blanking powers the monitors off on the TTY (DRM) backend; under the nested `winit` backend it does nothing. CDE also advertises `ext-idle-notify-v1` and `zwp-idle-inhibit-manager-v1`, so third-party idle clients and idle-inhibiting apps work whether or not an `idle` block is present.
 
@@ -321,6 +321,7 @@ With the block set, CDE writes the generated swaylock config to `$XDG_CONFIG_HOM
 greeter {
     style "n1-med"
     background "stock"
+    position "lower"
     session "cde-session"
 }
 ```
@@ -329,7 +330,10 @@ Configures the optional greetd greeter (setup in [`greeter.md`](greeter.md)). Ev
 
 - `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` (default) or `"n1-light"`.
 - `background` — `"stock"` (default), `"user"` or `"color" "#rrggbb"`, as in [`lock`](#lock).
+- `position` — where the login panel sits on every output: `"center"`, `"upper"`, `"lower"` (default), `"upper-left"`, `"upper-right"`, `"lower-left"` or `"lower-right"`. The value names the centre of a screen region as a share of the output (`center` 50 % / 50 %, `upper` 50 % / 25 %, `lower` 50 % / 75 %, `upper-left` 25 % / 25 %, `upper-right` 75 % / 25 %, `lower-left` 25 % / 75 %, `lower-right` 75 % / 75 %); the panel is centred on that point and clamped to stay fully on the output. The default `lower` keeps the stock background's centre clear.
 - `session` — the command started after a successful login, a non-empty string; default `"cde-session"`.
+
+The greeter also blanks the screens after inactivity: after `idle { blank-after }` seconds (published in the profile), or 600 s when `idle` sets none. It never locks, whatever `idle { lock-after }` says.
 
 With the block set, and `/var/lib/cde-greeter` existing and writable, CDE publishes the greeter profile (`profile.kdl`, built from this block plus `theme`, `overlay { alpha }`, the keyboard layouts and the `set-layout` binds) there on start and on every config reload (atomic, skipped when unchanged; a failure only logs a warning, and without the directory nothing is written). `stock` resolves to `/opt/cde/share/backgrounds/stock.png`, which the deploy installs; `user` copies the first image of the wallpaper state file to `/var/lib/cde-greeter/background.<ext>` and `cde-wallpaper-rotate` keeps that copy fresh; `color` needs no image. Details are in [`greeter.md`](greeter.md).
 
