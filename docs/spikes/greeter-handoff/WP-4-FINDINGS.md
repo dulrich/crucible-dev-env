@@ -52,7 +52,7 @@ Next step: a follow-up plan that opens with candidate 1 as a measurement spike o
 
 ## Spike login (2026-11-15 23:59, measurement-only build `450f37f-dirty`)
 
-The build logged CRTC state and timed each connector query at three points: before `DrmDevice::new`, after it, and before `scan_connectors`. Its patch is `runs/spike/handoff-probe/spike.patch`. The probes themselves add time, so this run reached the wallpaper at 2049 ms. 0.7.2 was restored afterwards (`--build` = 450f37f).
+The build logged CRTC state and timed each connector query at three points: before `DrmDevice::new`, after it, and before `scan_connectors`. Its patch is [`spike-probe.patch`](spike-probe.patch). The probes themselves add time, so this run reached the wallpaper at 2049 ms. 0.7.2 was restored afterwards (`--build` = 450f37f).
 
 | ms | Observation |
 |---|---|

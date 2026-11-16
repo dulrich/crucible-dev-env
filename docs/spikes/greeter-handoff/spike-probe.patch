@@ -1,0 +1,46 @@
+diff --git a/crates/crucible-compositor/src/udev/device.rs b/crates/crucible-compositor/src/udev/device.rs
+index 51c5d1e..c82e74d 100644
+--- a/crates/crucible-compositor/src/udev/device.rs
++++ b/crates/crucible-compositor/src/udev/device.rs
+@@ -176,8 +176,10 @@ impl CrucibleState<UdevData> {
+             .map_err(DeviceAddError::DeviceOpen)?;
+         let fd = DrmDeviceFd::new(DeviceFd::from(fd));
+ 
++        spike_dump(&fd, "before DrmDevice::new", false);
+         let (drm, notifier) =
+             DrmDevice::new(fd.clone(), true).map_err(DeviceAddError::DrmDevice)?;
++        spike_dump(&fd, "after DrmDevice::new", false);
+         info!(
+             elapsed_ms = crate::startup::elapsed_ms(),
+             ?node,
+@@ -288,6 +290,9 @@ impl CrucibleState<UdevData> {
+             },
+         );
+ 
++        if let Some(dev) = self.backend_data.backends.get(&node) {
++            spike_dump(dev.drm_output_manager.device(), "before scan (forced probe)", true);
++        }
+         self.device_changed(node);
+         Ok(())
+     }
+@@ -363,3 +368,20 @@ impl CrucibleState<UdevData> {
+         }
+     }
+ }
++
++
++/// SPIKE (plan 44 premise, never committed): CRTC state and per-connector probe timing.
++fn spike_dump<D: smithay::reexports::drm::control::Device>(dev: &D, at: &str, force: bool) {
++    let Ok(res) = dev.resource_handles() else { return };
++    for &c in res.crtcs() {
++        if let Ok(i) = dev.get_crtc(c) {
++            info!(elapsed_ms = crate::startup::elapsed_ms(), at, ?c, mode = ?i.mode().map(|m| m.size()), fb = ?i.framebuffer(), "spike: crtc");
++        }
++    }
++    for &c in res.connectors() {
++        let t = std::time::Instant::now();
++        if let Ok(i) = dev.get_connector(c, force) {
++            info!(elapsed_ms = crate::startup::elapsed_ms(), at, force, conn = %format!("{:?}-{}", i.interface(), i.interface_id()), state = ?i.state(), enc = ?i.current_encoder(), took_us = t.elapsed().as_micros() as u64, "spike: connector");
++        }
++    }
++}
