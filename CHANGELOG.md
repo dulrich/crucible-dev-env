@@ -4,6 +4,17 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.3 — 2026-11-16
+
+### Changed
+
+- Greeter hand-off on the TTY backend: CDE keeps the panel lit when it takes over the outputs (connectors are no longer reset at start), and the greeter no longer tears down its last frame on exit, so a greeter login no longer flashes several black screens (the kernel's brief console restore between greeter and session remains). A normal CDE exit to a getty still restores the console.
+- At start-up each output is adopted once its wallpaper buffer arrives (or after 300 ms), so the first frame CDE shows is the wallpaper, never a black or clear frame. A tty start with no wallpaper client starts at most 300 ms later.
+
+### Added
+
+- `startup: crtc state` info log lines (CRTC active and framebuffer at CDE start and at each output's adoption commit), plus `startup: adopting output` lines, for verifying the hand-off.
+
 ## 0.7.2 — 2026-11-15
 
 ### Added
