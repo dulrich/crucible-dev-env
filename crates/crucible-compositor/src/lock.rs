@@ -508,9 +508,42 @@ fn all_presented_or_off<O>(
     outputs.all(|o| presented(&o) || powered_off(&o))
 }
 
+/// Whether a synchronous commit counts as its output's locked presentation (plan 44 invariant 5).
+///
+/// An output's start-up adoption commit is synchronous: it is on screen when the commit returns
+/// and no VBlank follows, so the `note_queued`/`take_queued` page-flip bookkeeping never sees it.
+/// It is the output's locked presentation iff it committed and was rendered while locked.
+pub(crate) fn sync_commit_presents_lock(rendered_locked: bool, committed: bool) -> bool {
+    rendered_locked && committed
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LockMachine, LockPhase, all_presented_or_off};
+    use super::{LockMachine, LockPhase, all_presented_or_off, sync_commit_presents_lock};
+
+    #[test]
+    fn lock_during_pending_adoption_confirms_on_the_adoption_commit() {
+        // Two outputs: 1 adopted and presenting via page flips, 2 still pending adoption. A lock
+        // is accepted; output 1's locked frame flips, output 2 then adopts (synchronous commit,
+        // no VBlank, no later damage).
+        let mut m: LockMachine<u8, Vec<u8>> = LockMachine::default();
+        assert!(m.request_lock(1, Vec::new(), false));
+        m.progress_mut().unwrap().push(1);
+        let confirm = |m: &mut LockMachine<u8, Vec<u8>>| {
+            let presented = m.progress_mut().cloned().unwrap_or_default();
+            all_presented_or_off([1u8, 2].iter(), |o| presented.contains(o), |_| false)
+        };
+        assert!(!confirm(&mut m), "output 2 has shown nothing locked yet");
+        if sync_commit_presents_lock(m.is_locked(), true) {
+            m.progress_mut().unwrap().push(2);
+        }
+        assert!(confirm(&mut m));
+        assert!(m.all_outputs_presented().is_some());
+        assert_eq!(m.phase(), &LockPhase::Locked { confirmed: 1 });
+        // A failed or unlocked adoption commit presents nothing locked.
+        assert!(!sync_commit_presents_lock(true, false));
+        assert!(!sync_commit_presents_lock(false, true));
+    }
 
     #[test]
     fn lock_confirms_when_every_output_presented_or_off() {

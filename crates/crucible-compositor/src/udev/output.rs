@@ -9,11 +9,13 @@
 //! methods on [`CrucibleState`] (`register_output`/`unregister_output`/`sync_output_rect`/
 //! `apply_layout`) — it never reaches into `layout.world` itself.
 
+use std::collections::HashMap;
+
 use smithay::{
     backend::{
         allocator::{format::FormatSet, gbm::GbmAllocator},
         drm::{
-            DrmDeviceFd, DrmNode, DrmSurface,
+            DrmDeviceFd, DrmNode, DrmSurface, Planes,
             exporter::gbm::GbmFramebufferExporter,
             output::{DrmOutput, DrmOutputRenderElements},
         },
@@ -26,7 +28,7 @@ use smithay::{
     desktop::{Space, utils::OutputPresentationFeedback},
     output::{Mode as WlMode, Output, PhysicalProperties},
     reexports::{
-        drm::control::{ModeTypeFlags, connector, crtc},
+        drm::control::{self as drm_control, Device as _, ModeTypeFlags, connector, crtc},
         wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags,
         wayland_server::{DisplayHandle, backend::GlobalId},
     },
@@ -35,7 +37,11 @@ use smithay::{
 use smithay_drm_extras::display_info;
 use tracing::{debug, info, warn};
 
-use crate::{element::WindowElement, state::CrucibleState};
+use crate::{
+    element::WindowElement,
+    render::{frame_elements, frame_view},
+    state::CrucibleState,
+};
 
 use super::plan::{self, MappedOutput, OutputPlan};
 use super::{OutputElements, UdevData};
@@ -136,12 +142,11 @@ fn get_surface_dmabuf_feedback(
 /// Holds the Smithay [`Output`], its `wl_output` global, and the [`DrmOutput`] that owns the
 /// per-output swapchain and page-flip scheduling.
 pub(super) struct SurfaceData {
-    /// Display handle, used to remove the `wl_output` global on drop.
-    dh: DisplayHandle,
+    /// The output's `wl_output` global and leave-all cleanup (handed over from the
+    /// [`PendingAdoption`]; declared first so it runs before the swapchain is dropped).
+    _global: OutputGlobal,
     /// The Smithay output mapped into the shared [`Space`].
     output: Output,
-    /// The `wl_output` global advertised to clients (removed on drop).
-    global: Option<GlobalId>,
     /// The DRM compositor for this CRTC: owns the GBM swapchain and frame submission.
     pub drm_output: DrmOutput<
         GbmAllocator<DrmDeviceFd>,
@@ -211,13 +216,58 @@ impl PowerMark {
     }
 }
 
-impl Drop for SurfaceData {
+/// The cleanup a mapped output owes on teardown: every surface leaves it and its `wl_output`
+/// global is removed (plan 44 invariant 6).
+///
+/// Owned first by the output's [`PendingAdoption`] and then, from its adoption on, by its
+/// [`SurfaceData`], so an output torn down before adoption still loses its global.
+pub(super) struct OutputGlobal {
+    /// Display handle, used to remove the global on drop.
+    dh: DisplayHandle,
+    /// The output every surface leaves on drop.
+    output: Output,
+    /// The `wl_output` global advertised to clients.
+    global: Option<GlobalId>,
+}
+
+impl Drop for OutputGlobal {
     fn drop(&mut self) {
         self.output.leave_all();
         if let Some(global) = self.global.take() {
             self.dh.remove_global::<CrucibleState<UdevData>>(global);
         }
     }
+}
+
+/// A start-up output whose DRM adoption (its first commit) waits for its wallpaper (plan 44).
+///
+/// The output is already mapped, registered and advertised; this record holds what the deferred
+/// `initialize_output` needs and owns the output's [`OutputGlobal`] until adoption.
+pub(super) struct PendingAdoption {
+    global: OutputGlobal,
+    output: Output,
+    connector: connector::Handle,
+    mode: drm_control::Mode,
+    planes: Planes,
+}
+
+/// One mapped output's backend record: adopted (it has a swapchain) or still pending adoption.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Mapped<S, P> {
+    Adopted(S),
+    Pending(P),
+}
+
+/// Takes `key`'s record out of whichever map holds it (an output is in at most one of them).
+pub(super) fn take_mapped<K: Eq + std::hash::Hash, S, P>(
+    surfaces: &mut HashMap<K, S>,
+    pending: &mut HashMap<K, P>,
+    key: &K,
+) -> Option<Mapped<S, P>> {
+    surfaces
+        .remove(key)
+        .map(Mapped::Adopted)
+        .or_else(|| pending.remove(key).map(Mapped::Pending))
 }
 
 /// The Space's outputs as the planner sees them, in Space order.
@@ -300,22 +350,30 @@ fn apply_positions(state: &mut CrucibleState<UdevData>, plan: &OutputPlan<UdevOu
 
 /// Tears down one mapped output: migrates its model workspaces onto a survivor, then unmaps it.
 ///
-/// A [`SurfaceData`] only ever exists for an output that is mapped in the [`Space`], so a plan's
-/// removal set and the device's surface map agree; an output whose surface never came up (its DRM
-/// output failed to initialize) is left alone here, exactly as before.
+/// Every mapped output has either a [`SurfaceData`] or a [`PendingAdoption`] (an output whose DRM
+/// output failed to initialize is unmapped at that point), so a plan's removal set and the
+/// device's two maps agree. Dropping the record runs the output's [`OutputGlobal`] cleanup.
 fn drop_mapped_output(state: &mut CrucibleState<UdevData>, key: UdevOutputId) {
     let Some(device) = state.backend_data.backends.get_mut(&key.device_id) else {
         return;
     };
-    let Some(surface) = device.surfaces.remove(&key.crtc) else {
+    let Some(record) = take_mapped(&mut device.surfaces, &mut device.pending, &key.crtc) else {
         return;
+    };
+    let output = match &record {
+        Mapped::Adopted(surface) => surface.output.clone(),
+        Mapped::Pending(pending) => {
+            info!(output = %pending.output.name(), "output removed before its adoption");
+            pending.output.clone()
+        }
     };
     state.night_light.cache.remove(&(key.device_id, key.crtc));
     // Migrate this output's model workspaces (and their windows) onto a survivor before
     // unmapping the Smithay output, so no window is destroyed on disconnect.
-    state.unregister_output(&surface.output);
-    state.space.unmap_output(&surface.output);
+    state.unregister_output(&output);
+    state.space.unmap_output(&output);
     state.space.refresh();
+    drop(record);
 }
 
 impl CrucibleState<UdevData> {
@@ -326,15 +384,9 @@ impl CrucibleState<UdevData> {
         connector: connector::Info,
         crtc: crtc::Handle,
     ) {
-        let Some(device) = self.backend_data.backends.get_mut(&node) else {
+        let Some(device) = self.backend_data.backends.get(&node) else {
             return;
         };
-        let render_node = device.render_node.unwrap_or(self.backend_data.primary_gpu);
-        let mut renderer = self
-            .backend_data
-            .gpus
-            .single_renderer(&render_node)
-            .unwrap();
 
         let output_name = format!(
             "{}-{}",
@@ -406,37 +458,188 @@ impl CrucibleState<UdevData> {
         self.space.map_output(&output, position);
         output.user_data().insert_if_missing(|| id);
 
-        // Snapshot the data needed to register this connector with the model once the `device`
-        // borrow is released (the registration must touch `self`, but `device` borrows `self`).
-        let register_output = output.clone();
+        // From here on the global's cleanup is owned (dropped on every early return).
+        let global = OutputGlobal {
+            dh: self.display_handle.clone(),
+            output: output.clone(),
+            global: Some(global),
+        };
 
         let planes = match drm_device.planes(&crtc) {
             Ok(planes) => planes,
             Err(err) => {
                 warn!("Failed to query crtc planes: {}", err);
+                self.space.unmap_output(&output);
                 return;
             }
         };
 
-        let drm_output = match device
-            .drm_output_manager
-            .lock()
-            .initialize_output::<_, OutputElements<'_>>(
+        let pending = PendingAdoption {
+            global,
+            output: output.clone(),
+            connector: connector.handle(),
+            mode: drm_mode,
+            planes,
+        };
+
+        // Register this connector with the model: the first compositor output adopts the existing
+        // `World::new()` output; subsequent connectors get their own independent workspace stack
+        // via `add_output`, seeded off the live and saved names. A start-up output is registered
+        // before its DRM adoption, so the wallpaper client binds and arranges on it meanwhile.
+        self.register_output(&output);
+
+        // Start-up (plan 44): the first commit waits for this output's wallpaper buffer, or for
+        // the adoption timeout. An output connected later adopts at once, as before.
+        if self.backend_data.adoption_window_open {
+            info!(
+                elapsed_ms = crate::startup::elapsed_ms(),
+                output = %output.name(),
+                ?crtc,
+                "startup: adoption deferred until the wallpaper"
+            );
+            if let Some(device) = self.backend_data.backends.get_mut(&node) {
+                device.pending.insert(crtc, pending);
+            }
+            return;
+        }
+        self.adopt_output(node, crtc, pending, false);
+    }
+
+    /// Adopts a pending start-up output if it is still pending (a wallpaper buffer landed on it).
+    pub(super) fn adopt_pending(&mut self, node: DrmNode, crtc: crtc::Handle) {
+        let Some(pending) = self
+            .backend_data
+            .backends
+            .get_mut(&node)
+            .and_then(|device| device.pending.remove(&crtc))
+        else {
+            return;
+        };
+        self.adopt_output(node, crtc, pending, true);
+    }
+
+    /// Closes the start-up adoption window (the timeout): adopts every still-pending output, then
+    /// disables the CRTCs CDE did not adopt (`DrmDevice::new(fd, false)` keeps them as found).
+    pub(super) fn finish_startup_adoption(&mut self) {
+        self.backend_data.adoption_window_open = false;
+        let nodes: Vec<DrmNode> = self.backend_data.backends.keys().copied().collect();
+        for node in &nodes {
+            let pending: Vec<crtc::Handle> = self.backend_data.backends[node]
+                .pending
+                .keys()
+                .copied()
+                .collect();
+            for crtc in crate::startup::ready_to_adopt(&pending, None, true) {
+                self.adopt_pending(*node, crtc);
+            }
+        }
+        for node in nodes {
+            self.disable_unadopted_crtcs(node);
+        }
+    }
+
+    /// The DRM adoption of one output: its `initialize_output` (the first commit), the surface
+    /// insert and the first render.
+    ///
+    /// A `deferred` (start-up) adoption commits the real frame (the wallpaper) and counts as the
+    /// output's locked presentation if a lock is pending (plan 44 invariant 5); a hot-plugged
+    /// output commits the default (black) frame, as before. Should the commit fail from the state
+    /// another DRM client left, that output's CRTCs are disabled and it retries once. If it cannot be
+    /// initialized it is unregistered and unmapped (the dropped record removes its global).
+    fn adopt_output(
+        &mut self,
+        node: DrmNode,
+        crtc: crtc::Handle,
+        pending: PendingAdoption,
+        deferred: bool,
+    ) {
+        let Some(device) = self.backend_data.backends.get(&node) else {
+            return;
+        };
+        let render_node = device.render_node.unwrap_or(self.backend_data.primary_gpu);
+        let output = pending.output.clone();
+        super::device::log_crtc_state(
+            device.drm_output_manager.device(),
+            "adoption commit",
+            &[crtc],
+        );
+        info!(
+            elapsed_ms = crate::startup::elapsed_ms(),
+            output = %output.name(),
+            deferred,
+            "startup: adopting output"
+        );
+
+        let locked = self.session_lock.is_locked();
+        let inputs = deferred.then(|| self.begin_frame(&output));
+        let mut renderer = self
+            .backend_data
+            .gpus
+            .single_renderer(&render_node)
+            .unwrap();
+        let mut render_elements = DrmOutputRenderElements::<_, OutputElements<'_>>::default();
+        if let Some(inputs) = &inputs {
+            let view = frame_view!(self, &output, inputs, self.dnd_icon.as_ref());
+            let (elements, clear_color) =
+                frame_elements(view, &mut self.header_text, &mut self.cursor, &mut renderer);
+            render_elements.add_output(&crtc, clear_color, elements);
+        }
+
+        let device = self
+            .backend_data
+            .backends
+            .get_mut(&node)
+            .expect("looked up above");
+        let mut attempt = |device: &mut super::device::BackendData| {
+            device.drm_output_manager.lock().initialize_output(
                 crtc,
-                drm_mode,
-                &[connector.handle()],
+                pending.mode,
+                &[pending.connector],
                 &output,
-                Some(planes),
+                Some(pending.planes.clone()),
                 &mut renderer,
-                &DrmOutputRenderElements::default(),
-            ) {
+                &render_elements,
+            )
+        };
+        let result = match attempt(device) {
+            Ok(drm_output) => Ok(drm_output),
+            Err(err) => {
+                warn!(%err, ?crtc, "first commit failed from the inherited state; resetting it and retrying once");
+                // Reset this output's inherited state: its target CRTC and the CRTC its connector
+                // is currently bound to (another client may have driven it from a different one).
+                let drm = device.drm_output_manager.device();
+                let bound = drm
+                    .get_connector(pending.connector, false)
+                    .ok()
+                    .and_then(|info| info.current_encoder())
+                    .and_then(|encoder| drm.get_encoder(encoder).ok())
+                    .and_then(|info| info.crtc());
+                for c in std::iter::once(crtc).chain(bound.filter(|&b| b != crtc)) {
+                    if let Err(err) = drm.set_crtc(c, None, (0, 0), &[], None) {
+                        warn!(%err, crtc = ?c, "failed to disable the inherited crtc state");
+                    }
+                }
+                attempt(device)
+            }
+        };
+        let drm_output = match result {
             Ok(drm_output) => drm_output,
             Err(err) => {
                 warn!("Failed to initialize drm output: {}", err);
+                drop(renderer);
+                self.unregister_output(&output);
+                self.space.unmap_output(&output);
+                self.space.refresh();
                 return;
             }
         };
+        drop(renderer);
 
+        let device = self
+            .backend_data
+            .backends
+            .get_mut(&node)
+            .expect("looked up above");
         let dmabuf_feedback = drm_output.with_compositor(|compositor| {
             get_surface_dmabuf_feedback(
                 self.backend_data.primary_gpu,
@@ -448,9 +651,8 @@ impl CrucibleState<UdevData> {
         });
 
         let surface = SurfaceData {
-            dh: self.display_handle.clone(),
-            output,
-            global: Some(global),
+            _global: pending.global,
+            output: output.clone(),
             drm_output,
             dmabuf_feedback,
             power: PowerMark::default(),
@@ -462,10 +664,11 @@ impl CrucibleState<UdevData> {
         self.night_light.cache.remove(&(node, crtc));
         self.evaluate_night_light();
 
-        // Register this connector with the model now that the `device` borrow is released: the first
-        // compositor output adopts the existing `World::new()` output; subsequent connectors get
-        // their own independent workspace stack via `add_output`, seeded off the live and saved names.
-        self.register_output(&register_output);
+        // The adoption commit is synchronous and raises no VBlank: if it showed a locked frame,
+        // it is this output's locked presentation (no later damage need follow).
+        if deferred && crate::lock::sync_commit_presents_lock(locked, true) {
+            self.lock_output_presented(&output);
+        }
 
         // An output hot-plugged while the idle machine has the outputs blanked comes up powered
         // off and lights up on the next wake; if its power-off fails it renders as usual.
@@ -504,6 +707,39 @@ impl CrucibleState<UdevData> {
 mod tests {
     use super::*;
     use smithay::backend::allocator::{Format, Fourcc, Modifier};
+
+    #[test]
+    fn disconnect_before_adoption_takes_the_pending_record() {
+        let mut surfaces: HashMap<u8, &str> = HashMap::from([(1, "adopted")]);
+        let mut pending: HashMap<u8, &str> = HashMap::from([(2, "pending")]);
+        assert_eq!(
+            take_mapped(&mut surfaces, &mut pending, &2),
+            Some(Mapped::Pending("pending"))
+        );
+        assert!(pending.is_empty());
+        assert_eq!(surfaces.len(), 1, "the adopted output is untouched");
+        // A second disconnect event for the same CRTC finds nothing (no double cleanup).
+        assert_eq!(take_mapped(&mut surfaces, &mut pending, &2), None);
+    }
+
+    #[test]
+    fn device_removal_before_adoption_takes_every_record() {
+        let mut surfaces: HashMap<u8, &str> = HashMap::from([(1, "adopted")]);
+        let mut pending: HashMap<u8, &str> = HashMap::from([(2, "p2"), (3, "p3")]);
+        let taken: Vec<_> = [1u8, 2, 3]
+            .iter()
+            .filter_map(|k| take_mapped(&mut surfaces, &mut pending, k))
+            .collect();
+        assert_eq!(
+            taken,
+            vec![
+                Mapped::Adopted("adopted"),
+                Mapped::Pending("p2"),
+                Mapped::Pending("p3")
+            ]
+        );
+        assert!(surfaces.is_empty() && pending.is_empty());
+    }
 
     #[test]
     fn power_mark_off_drops_flips_and_wakes_once() {

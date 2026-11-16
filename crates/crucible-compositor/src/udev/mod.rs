@@ -66,7 +66,10 @@ use smithay::{
     input::keyboard::LedState,
     output::Output,
     reexports::{
-        calloop::EventLoop,
+        calloop::{
+            EventLoop,
+            timer::{TimeoutAction, Timer},
+        },
         drm::control::{Device as ControlDevice, crtc},
         input::{DeviceCapability, Libinput},
         wayland_server::{Display, protocol::wl_surface::WlSurface},
@@ -126,6 +129,9 @@ pub struct UdevData {
     /// The `zwp_linux_dmabuf_v1` state and global; `None` until the primary renderer exists (or
     /// when it could not be created).
     dmabuf_state: Option<(DmabufState, DmabufGlobal)>,
+    /// Start-up adoption window (plan 44): while open, a connected output's DRM adoption waits
+    /// for its wallpaper; closed by the [`crate::startup::ADOPTION_TIMEOUT`] timer.
+    adoption_window_open: bool,
 }
 
 type UdevGles = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -286,6 +292,26 @@ impl Backend for UdevData {
             .is_some_and(|surface| surface.power.is_off())
     }
 
+    /// Adopts `output` on its wallpaper if its start-up adoption is pending (plan 44). Deferred to
+    /// an idle callback: the commit handler is no place for a DRM commit and a render.
+    fn background_buffer_committed(state: &mut CrucibleState<Self>, output: &Output) {
+        let Some(id) = output.user_data().get::<UdevOutputId>().copied() else {
+            return;
+        };
+        let pending: Vec<crtc::Handle> = state
+            .backend_data
+            .backends
+            .get(&id.device_id)
+            .map(|gpu| gpu.pending.keys().copied().collect())
+            .unwrap_or_default();
+        for crtc in crate::startup::ready_to_adopt(&pending, Some(id.crtc), false) {
+            let node = id.device_id;
+            state
+                .handle
+                .insert_idle(move |state| state.adopt_pending(node, crtc));
+        }
+    }
+
     /// Enqueues a real `render_surface` for a released reveal hold, as the wake path does; a
     /// powered-off output is not woken (`render_surface` re-checks the same guard).
     fn schedule_render(state: &mut CrucibleState<Self>, output: &Output) {
@@ -432,6 +458,7 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
         backends: HashMap::new(),
         keyboards: Vec::new(),
         dmabuf_state: None,
+        adoption_window_open: true,
     };
     let startup_config = match &greeter {
         Some(g) => crate::greeter::greeter_config(&g.profile),
@@ -644,6 +671,18 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
         "startup: main loop starting"
     );
     info!("Initialization completed, starting the main loop.");
+    // Plan 44: outputs still waiting for their wallpaper are adopted this long after main-loop
+    // start, and the CRTCs CDE did not adopt are then disabled.
+    event_loop
+        .handle()
+        .insert_source(
+            Timer::from_duration(crate::startup::ADOPTION_TIMEOUT),
+            |_, _, state| {
+                state.finish_startup_adoption();
+                TimeoutAction::Drop
+            },
+        )
+        .expect("failed to schedule the start-up adoption timeout");
     while state.running.load(Ordering::SeqCst) {
         let result = event_loop.dispatch(Some(Duration::from_millis(16)), &mut state);
         if result.is_err() {
@@ -654,5 +693,67 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
             display_handle.flush_clients().unwrap();
         }
     }
-    state.greeter_exit_code().unwrap_or(0)
+    let code = state.greeter_exit_code().unwrap_or(0);
+    if greeter_mode && code == 0 {
+        greeter_retain_and_exit(state);
+    }
+    code
+}
+
+/// `DRM_IOCTL_MODE_CLOSEFB`: `_IOWR('d', 0xD0, struct drm_mode_closefb)` (kernel 6.12; `drm`
+/// 0.14.1 has no wrapper).
+const DRM_IOCTL_MODE_CLOSEFB: libc::c_ulong = 0xC008_64D0;
+
+/// `struct drm_mode_closefb`.
+#[repr(C)]
+struct DrmModeCloseFb {
+    fb_id: u32,
+    pad: u32,
+}
+
+/// The greeter's exit after a successful login (plan 44 variant B): leave the last frame lit.
+///
+/// The greeter stops (its swaybg child is killed and reaped, as on a normal exit), then each
+/// scanout framebuffer of CDE's own CRTCs is closed with `DRM_IOCTL_MODE_CLOSEFB`, which drops
+/// the handle without disabling the CRTC when the fd closes (a non-zero return, e.g. ENOTTY or
+/// EINVAL before kernel 6.12, is logged and ignored). The process then exits without running
+/// any smithay Drop: the surface drop would clear the CRTC and the `AtomicDrmDevice` drop would
+/// restore the captured state, both of which power the panel off. Only greeter mode with exit
+/// code 0 comes here; greeter errors and a normal CDE exit keep the restore.
+fn greeter_retain_and_exit(mut state: CrucibleState<UdevData>) -> ! {
+    use std::io::Write as _;
+    use std::os::fd::{AsFd, AsRawFd};
+    // Drop the greeter itself: kills and waits for swaybg (no longer than today).
+    drop(state.greeter.take());
+    for backend in state.backend_data.backends.values() {
+        let dev = backend.drm_output_manager.device();
+        for &crtc in backend.surfaces.keys() {
+            let Some(fb) = dev.get_crtc(crtc).ok().and_then(|info| info.framebuffer()) else {
+                continue;
+            };
+            let mut arg = DrmModeCloseFb {
+                fb_id: fb.into(),
+                pad: 0,
+            };
+            // SAFETY: `dev`'s fd is a live DRM fd for this call, and `arg` is a valid, exclusively
+            // borrowed `struct drm_mode_closefb` that outlives the ioctl.
+            #[allow(unsafe_code)]
+            let rc = unsafe {
+                libc::ioctl(
+                    dev.as_fd().as_raw_fd(),
+                    DRM_IOCTL_MODE_CLOSEFB,
+                    &raw mut arg,
+                )
+            };
+            if rc == 0 {
+                info!(?crtc, ?fb, "greeter: scanout framebuffer kept lit on exit");
+            } else {
+                warn!(?crtc, ?fb, err = %std::io::Error::last_os_error(), "greeter: CLOSEFB failed; the kernel may disable the crtc");
+            }
+        }
+    }
+    info!("greeter: exiting without the DRM teardown (keep-lit hand-off)");
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(0)
 }

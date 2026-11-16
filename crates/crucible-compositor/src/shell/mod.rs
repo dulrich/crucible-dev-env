@@ -265,12 +265,15 @@ impl<B: Backend + 'static> WlrLayerShellHandler for CrucibleState<B> {
 /// defers the first configure to here (called from [`CrucibleState`]'s commit handler). Handles all
 /// three surface roles: xdg toplevel, xdg popup, and wlr layer surface (the latter is also arranged
 /// in its output's layer map first, to respect any size the client requested).
+///
+/// Returns the output a `background` layer surface's buffer commit landed on (`None` for every
+/// other commit), so the backend can adopt that output's DRM state on its wallpaper (plan 44).
 pub fn ensure_initial_configure(
     surface: &WlSurface,
     space: &Space<WindowElement>,
     unplaced: Option<WindowElement>,
     popups: &mut PopupManager,
-) {
+) -> Option<Output> {
     // Toplevel: send the first configure if relevant. `unplaced` is a toplevel for `surface` that
     // is not in the Space yet needs its configure: the hidden pre-warmed overlay host (audit E7),
     // or a managed window on a hidden workspace (`run-on`); the latter gets an unsized configure
@@ -295,7 +298,7 @@ pub fn ensure_initial_configure(
                 toplevel.send_configure();
             }
         }
-        return;
+        return None;
     }
 
     // Popup: send the first configure if relevant.
@@ -310,7 +313,7 @@ pub fn ensure_initial_configure(
             // Input-method popups don't require a configure.
             PopupKind::InputMethod(_) => {}
         }
-        return;
+        return None;
     }
 
     // Layer surface: arrange the output's layer map, then send the first configure if relevant.
@@ -332,15 +335,16 @@ pub fn ensure_initial_configure(
         let mut map = layer_map_for_output(output);
         // Arrange before configuring so the client's requested size is respected.
         map.arrange();
-        // Startup timing: the first background-layer commit that carries a buffer.
-        if map
+        // Startup timing: the first background-layer commit that carries a buffer. Every such
+        // commit also reports its output (per-output start-up adoption, plan 44).
+        let background_buffer = map
             .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
             .is_some_and(|layer| layer.layer() == Layer::Background)
             && smithay::backend::renderer::utils::with_renderer_surface_state(surface, |s| {
                 s.buffer().is_some()
             })
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if background_buffer {
             crate::startup::note_background_buffer_committed();
         }
         if !initial_configure_sent {
@@ -348,5 +352,7 @@ pub fn ensure_initial_configure(
                 layer.layer_surface().send_configure();
             }
         }
+        return background_buffer.then(|| output.clone());
     }
+    None
 }

@@ -128,7 +128,12 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
         let unplaced = self
             .warm_element_for(surface)
             .or_else(|| self.hidden_managed_for(surface));
-        ensure_initial_configure(surface, &self.space, unplaced, &mut self.popups);
+        // A background buffer reports the output it landed on (start-up adoption, plan 44).
+        if let Some(output) =
+            ensure_initial_configure(surface, &self.space, unplaced, &mut self.popups)
+        {
+            B::background_buffer_committed(self, &output);
+        }
     }
 }
 

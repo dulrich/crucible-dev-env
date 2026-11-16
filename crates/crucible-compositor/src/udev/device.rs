@@ -45,7 +45,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::state::CrucibleState;
 
-use super::output::{self, SurfaceData, UdevOutputId};
+use super::output::{self, PendingAdoption, SurfaceData, UdevOutputId};
 use super::{UdevData, plan};
 
 /// Color formats CDE asks the DRM compositor to use, in preference order.
@@ -63,6 +63,9 @@ const SUPPORTED_FORMATS: &[Fourcc] = &[
 pub(super) struct BackendData {
     /// The mapped outputs on this device, keyed by CRTC.
     pub surfaces: HashMap<crtc::Handle, SurfaceData>,
+    /// Start-up outputs that are mapped but wait for their wallpaper before their DRM adoption
+    /// (plan 44); an output is in `surfaces` or here, never both.
+    pub pending: HashMap<crtc::Handle, PendingAdoption>,
     /// Manages the GBM-backed [`DrmOutput`]s for this device's CRTCs.
     pub drm_output_manager: DrmOutputManager<
         GbmAllocator<DrmDeviceFd>,
@@ -176,8 +179,12 @@ impl CrucibleState<UdevData> {
             .map_err(DeviceAddError::DeviceOpen)?;
         let fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
+        // Keep-lit hand-off (plan 44): record what the previous DRM client left on screen, then keep
+        // it (`false`) so the panel stays on until CDE's first commit replaces it. The CRTCs CDE
+        // does not adopt are disabled once start-up adoption is done (`disable_unadopted_crtcs`).
+        log_crtc_state(&fd, "cde start", &[]);
         let (drm, notifier) =
-            DrmDevice::new(fd.clone(), true).map_err(DeviceAddError::DrmDevice)?;
+            DrmDevice::new(fd.clone(), false).map_err(DeviceAddError::DrmDevice)?;
         info!(
             elapsed_ms = crate::startup::elapsed_ms(),
             ?node,
@@ -285,11 +292,56 @@ impl CrucibleState<UdevData> {
                 drm_scanner: DrmScanner::new(),
                 render_node,
                 surfaces: HashMap::new(),
+                pending: HashMap::new(),
             },
         );
 
         self.device_changed(node);
+        // A device added after start-up adopts its outputs at once: clean it up now. At start-up
+        // the cleanup waits for every output's adoption (`finish_startup_adoption`).
+        if !self.backend_data.adoption_window_open {
+            self.disable_unadopted_crtcs(node);
+        }
         Ok(())
+    }
+
+    /// Disables the CRTCs left active on `node` that CDE did not adopt (plan 44 invariant 1).
+    ///
+    /// `DrmDevice::new(fd, false)` keeps whatever the previous DRM client left on screen, so a
+    /// connector CDE skipped (no free CRTC, a failed initialisation) or another client's CRTC
+    /// would keep showing stale content. Disabling the CRTC (a legacy `SETCRTC` with no fb) also
+    /// detaches its connectors; a connector without a CRTC is already off. Adopted and pending
+    /// outputs are left untouched.
+    pub(super) fn disable_unadopted_crtcs(&mut self, node: DrmNode) {
+        use smithay::reexports::drm::control::Device as _;
+        let Some(device) = self.backend_data.backends.get(&node) else {
+            return;
+        };
+        let drm = device.drm_output_manager.device();
+        let Ok(resources) = drm.resource_handles() else {
+            return;
+        };
+        let active: Vec<crtc::Handle> = resources
+            .crtcs()
+            .iter()
+            .copied()
+            .filter(|&c| {
+                drm.get_crtc(c)
+                    .is_ok_and(|info| info.mode().is_some() || info.framebuffer().is_some())
+            })
+            .collect();
+        let adopted: Vec<crtc::Handle> = device
+            .surfaces
+            .keys()
+            .chain(device.pending.keys())
+            .copied()
+            .collect();
+        for c in crtcs_to_disable(&active, &adopted) {
+            match drm.set_crtc(c, None, (0, 0), &[], None) {
+                Ok(()) => info!(?node, crtc = ?c, "startup: disabled an unadopted crtc"),
+                Err(err) => warn!(?node, crtc = ?c, %err, "failed to disable an unadopted crtc"),
+            }
+        }
     }
 
     /// Re-scans a device's connectors and creates/destroys outputs for connect/disconnect events.
@@ -361,5 +413,60 @@ impl CrucibleState<UdevData> {
             self.handle.remove(backend_data.registration_token);
             debug!("Dropped device {}", node);
         }
+    }
+}
+
+/// The cleanup set: the active CRTCs CDE neither adopted nor has pending. Pure, so it is
+/// unit-testable without a device.
+pub(super) fn crtcs_to_disable<K: PartialEq + Copy>(active: &[K], adopted: &[K]) -> Vec<K> {
+    active
+        .iter()
+        .copied()
+        .filter(|c| !adopted.contains(c))
+        .collect()
+}
+
+/// Logs one `startup:` line per CRTC (`only` empty: every CRTC) with whether it is active and the
+/// framebuffer it scans out (plan 44 invariant 4: the evidence that the panel stayed lit).
+pub(super) fn log_crtc_state<D: smithay::reexports::drm::control::Device>(
+    dev: &D,
+    at: &'static str,
+    only: &[crtc::Handle],
+) {
+    let Ok(resources) = dev.resource_handles() else {
+        return;
+    };
+    for &c in resources.crtcs() {
+        if !only.is_empty() && !only.contains(&c) {
+            continue;
+        }
+        if let Ok(info) = dev.get_crtc(c) {
+            info!(
+                elapsed_ms = crate::startup::elapsed_ms(),
+                at,
+                crtc = ?c,
+                active = info.mode().is_some(),
+                fb = ?info.framebuffer(),
+                "startup: crtc state"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crtcs_to_disable;
+
+    #[test]
+    fn cleanup_disables_only_unadopted_active_crtcs() {
+        // 47 adopted, 48 pending, 49 left active by the previous client (or a skipped connector),
+        // 50 inactive (not in `active`).
+        assert_eq!(crtcs_to_disable(&[47u32, 48, 49], &[47, 48]), vec![49]);
+    }
+
+    #[test]
+    fn cleanup_leaves_a_fully_adopted_device_alone() {
+        assert!(crtcs_to_disable(&[47u32], &[47, 48]).is_empty());
+        assert!(crtcs_to_disable::<u32>(&[], &[]).is_empty());
     }
 }

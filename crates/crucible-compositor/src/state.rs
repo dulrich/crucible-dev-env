@@ -172,6 +172,14 @@ pub trait Backend {
         Self: Sized + 'static,
     {
     }
+    /// A `background` layer surface on `output` committed a buffer (plan 44). The default (nested
+    /// `winit`, test backends) does nothing; the udev backend adopts `output` if its start-up DRM
+    /// adoption is still waiting for its wallpaper.
+    fn background_buffer_committed(_state: &mut CrucibleState<Self>, _output: &Output)
+    where
+        Self: Sized + 'static,
+    {
+    }
     /// Powers every output `on` (wake) or off (idle blanking). Called by the idle machine only on a
     /// change, never redundantly. The default (nested `winit`) logs and does nothing; the udev
     /// backend powers the DRM outputs (WP-3). An associated fn taking the whole state, like

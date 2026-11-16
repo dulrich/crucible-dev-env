@@ -1,7 +1,8 @@
 //! Startup timing for the udev path: where CDE's first second goes (plan 43 WP-1).
 //!
 //! One process-start [`Instant`] is captured at the backend entry; every `startup:` `info!` line
-//! carries `elapsed_ms` measured from it. Logging only — nothing here changes startup behaviour.
+//! carries `elapsed_ms` measured from it. Besides the logging, this holds the pure start-up
+//! adoption rule (plan 44): [`ADOPTION_TIMEOUT`] and [`ready_to_adopt`].
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -97,6 +98,31 @@ pub fn note_flip_completed() {
     }
 }
 
+/// How long, from main-loop start, an output's first DRM commit waits for its wallpaper (plan 44).
+///
+/// At udev start-up each output's adoption (its first commit) waits for a background-layer buffer
+/// on that output, so the first frame CDE scans out is the wallpaper; past this deadline every
+/// still-pending output is adopted anyway (a host with no wallpaper client starts at most this
+/// much later).
+pub const ADOPTION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The pending outputs to adopt now: all of them once the start-up deadline passed, else the one a
+/// background buffer just landed on (if it is pending at all). Pure, so the readiness rule is
+/// unit-testable without a compositor.
+pub fn ready_to_adopt<K: PartialEq + Copy>(
+    pending: &[K],
+    buffer_on: Option<K>,
+    timed_out: bool,
+) -> Vec<K> {
+    if timed_out {
+        return pending.to_vec();
+    }
+    buffer_on
+        .filter(|key| pending.contains(key))
+        .into_iter()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +152,24 @@ mod tests {
         assert!(!m.buffer_committed());
         assert!(m.flip_completed());
         assert!(!m.flip_completed());
+    }
+
+    #[test]
+    fn adoption_waits_for_a_buffer_on_that_output() {
+        let pending = [1u8, 2];
+        assert_eq!(ready_to_adopt(&pending, Some(2), false), vec![2]);
+        assert!(ready_to_adopt(&pending, None, false).is_empty());
+    }
+
+    #[test]
+    fn a_buffer_on_another_output_adopts_nothing() {
+        // Output 3 is already adopted (or not ours): pending 1 and 2 keep waiting.
+        assert!(ready_to_adopt(&[1u8, 2], Some(3), false).is_empty());
+    }
+
+    #[test]
+    fn the_timeout_adopts_every_pending_output() {
+        assert_eq!(ready_to_adopt(&[1u8, 2], None, true), vec![1, 2]);
+        assert!(ready_to_adopt::<u8>(&[], Some(1), true).is_empty());
     }
 }
