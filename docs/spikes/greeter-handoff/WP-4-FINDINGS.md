@@ -44,3 +44,8 @@ Secondary: 267 ms from connector set-up to the main loop, and 100 ms from the fi
 4. Not supported by this data: speeding up session open, or greetd itself.
 
 Next step: a follow-up plan that opens with candidate 1 as a measurement spike on host-b, then candidate 2 (backlog item in `INITIATIVE.md`).
+
+## Addendum (2026-11-15, after close)
+
+- `sudo journalctl -u greetd -b` shows only the PAM lines, at one-second resolution: greeter session 23:23:22, user session 23:23:30. The greeter's `session started; greeter exiting` line is not in the unit journal, so the moment the greeter exits is still not measured.
+- A connector probe from a process that is not DRM master is a no-op. `get_connector(force = true)` returns in about 3 µs on both hosts, because the kernel only re-probes for the current master. So the 1 s cost can only be measured from inside CDE (master) at login. A host-side probe while the greeter holds master tells us nothing.
