@@ -57,7 +57,7 @@ Only two kinds of chords work, the same ones as on the lock screen: VT switching
 
 ## Logging
 
-The greeter logs to stderr only, which greetd sends to its journal (`journalctl -u greetd`). `RUST_LOG` sets the level (default `info`). Passwords never appear in logs.
+The greeter logs to stderr and to a file `/tmp/cde-greeter/greeter-<unix-seconds>-<pid>.log`. greetd does not keep the greeter's stderr, so the file is the only record. The greeter keeps the five newest files. The directory is created mode 0755 and the files 0644, so any user can read them: usernames, passwords and keys never appear in the logs. If `/tmp/cde-greeter` is a symlink, not a directory, or owned by another user, the greeter logs to stderr only. `RUST_LOG` sets the level (default `info`). After the screens blank, the first key press is logged once, with whether it woke them, never its key.
 
 ## Nested test
 

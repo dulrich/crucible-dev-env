@@ -138,10 +138,25 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// the login field) and records its keycode so the matching release is swallowed too.
     /// Returns whether `event` was dropped. Ordinary sessions never drop it.
     fn drop_wake_key<I: InputBackend>(&mut self, woke: bool, event: &InputEvent<I>) -> bool {
+        if woke {
+            tracing::info!(event = input_kind(event), "idle: outputs woken by input");
+        }
         let InputEvent::Keyboard { event } = event else {
             return false;
         };
         let press = event.state() == smithay::backend::input::KeyState::Pressed;
+        if press && self.greeter.is_some() && std::mem::take(&mut self.idle.trace_next_key) {
+            let outputs: Vec<_> = self.space.outputs().cloned().collect();
+            let off = outputs
+                .iter()
+                .filter(|o| self.backend_data.output_powered_off(o))
+                .count();
+            tracing::info!(
+                woke,
+                outputs_off = off,
+                "greeter: first key press after blanking"
+            );
+        }
         if !crate::idle::drops_wake_key(woke, self.greeter.is_some(), press) {
             return false;
         }
@@ -181,5 +196,26 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.deliver_motion_to(None, pos, SERIAL_COUNTER.next_serial(), time, None);
             self.snip_motion(pos);
         }
+    }
+}
+
+/// A short name for an input event's kind, for logs (never its key, button or position).
+fn input_kind<I: InputBackend>(event: &InputEvent<I>) -> &'static str {
+    match event {
+        InputEvent::Keyboard { .. } => "keyboard",
+        InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. } => {
+            "pointer-motion"
+        }
+        InputEvent::PointerButton { .. } => "pointer-button",
+        InputEvent::PointerAxis { .. } => "pointer-axis",
+        InputEvent::DeviceAdded { .. } => "device-added",
+        InputEvent::DeviceRemoved { .. } => "device-removed",
+        InputEvent::SwitchToggle { .. } => "switch",
+        InputEvent::TouchDown { .. }
+        | InputEvent::TouchMotion { .. }
+        | InputEvent::TouchUp { .. }
+        | InputEvent::TouchCancel { .. }
+        | InputEvent::TouchFrame { .. } => "touch",
+        _ => "other",
     }
 }

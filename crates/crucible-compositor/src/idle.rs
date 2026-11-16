@@ -149,6 +149,9 @@ pub struct IdleRuntime {
     pub machine: IdleMachine,
     /// Surfaces holding an `zwp_idle_inhibitor_v1`.
     pub inhibitors: Vec<WlSurface>,
+    /// Greeter diagnostics: set when the outputs blank, cleared by the next key press, which is
+    /// then logged once (whether it woke the outputs and how many were off), never its key.
+    pub trace_next_key: bool,
     last_tick: Option<Instant>,
 }
 
@@ -251,6 +254,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if step.blank {
             info!("idle: blanking outputs");
             B::set_outputs_powered(self, false);
+            self.idle.trace_next_key = true;
             // Outputs that just went dark may complete a pending lock. Harmless on winit: no output
             // reports powered off there, so it only confirms what the render path would anyway.
             self.lock_confirm_if_presented();
