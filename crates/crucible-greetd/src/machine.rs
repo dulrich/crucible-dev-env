@@ -158,7 +158,7 @@ impl LoginMachine {
                         text: auth_message,
                         secret: auth_message_type == AuthMessageType::Secret,
                     };
-                    self.message = None;
+                    // An info/error line stays visible until the next Submit clears it.
                     self.out(None)
                 }
                 AuthMessageType::Info | AuthMessageType::Error => {

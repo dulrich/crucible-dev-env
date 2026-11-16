@@ -122,11 +122,17 @@ impl Backend for WinitData {
 ///
 /// Returns once the window is closed or a fatal error occurs.
 pub fn run_winit() {
+    run_winit_mode(None);
+}
+
+/// [`run_winit`], optionally in greeter mode (`crucible greeter --winit`); returns the process
+/// exit status (greeter mode: 0 once the session started).
+pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     let mut event_loop: EventLoop<CrucibleState<WinitData>> = match EventLoop::try_new() {
         Ok(loop_) => loop_,
         Err(err) => {
             error!("Failed to create the event loop: {}", err);
-            return;
+            return 1;
         }
     };
     let display: Display<CrucibleState<WinitData>> = Display::new().unwrap();
@@ -136,7 +142,7 @@ pub fn run_winit() {
         Ok(ret) => ret,
         Err(err) => {
             error!("Failed to initialize winit backend: {}", err);
-            return;
+            return 1;
         }
     };
     let size = backend.window_size();
@@ -162,7 +168,10 @@ pub fn run_winit() {
         None,
         Some((0, 0).into()),
     );
-    let startup_config = crate::config::load_startup_config();
+    let startup_config = match &greeter {
+        Some(g) => crate::greeter::greeter_config(&g.profile),
+        None => crate::config::load_startup_config(),
+    };
     // The configured scale is set before mapping so the Space geometry and model rect are logical.
     let scale = crate::config::configured_scale(&startup_config, OUTPUT_NAME);
     output.change_current_state(None, None, Some(scale), None);
@@ -216,10 +225,17 @@ pub fn run_winit() {
         data,
         true,
         &startup_config.keyboard,
+        greeter.is_some(),
     );
-    state.apply_config(startup_config);
-    // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
-    state.start_persistence();
+    let greeter_mode = greeter.is_some();
+    match greeter {
+        Some(setup) => state.start_greeter(setup),
+        None => {
+            state.apply_config(startup_config);
+            // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
+            state.start_persistence();
+        }
+    }
     state
         .shm_state
         .update_formats(state.backend_data.backend.renderer().shm_formats());
@@ -231,7 +247,9 @@ pub fn run_winit() {
     // `DISPLAY` and attaches the X11 window manager; see `crate::xwayland`.
     // The session (restore / cold-start picker / warm overlay host) starts at the first XWayland
     // outcome so its X11 spawns get a real `DISPLAY`; see `CrucibleState::on_xwayland_outcome`.
-    state.start_xwayland();
+    if !greeter_mode {
+        state.start_xwayland();
+    }
 
     let start_time = Instant::now();
 
@@ -347,4 +365,5 @@ pub fn run_winit() {
             display_handle.flush_clients().unwrap();
         }
     }
+    state.greeter_exit_code().unwrap_or(0)
 }

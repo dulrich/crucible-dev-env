@@ -105,3 +105,6 @@ pub mod terminal_theme;
 /// The generated swaylock config for the `lock` block and the locker's `-C` argument rule
 /// (plan 42).
 pub mod lock_config;
+
+/// `crucible greeter`: kiosk-mode login panel driving greetd (plan 42).
+pub mod greeter;

@@ -384,11 +384,17 @@ impl Backend for UdevData {
 /// event loop until [`CrucibleState::running`] is cleared. Rendering is driven per-output on VBlank;
 /// see [`CrucibleState::frame_finish`] / [`CrucibleState::render_surface`].
 pub fn run_udev() {
+    run_udev_mode(None);
+}
+
+/// [`run_udev`], optionally in greeter mode (`crucible greeter`); returns the process exit status
+/// (greeter mode: 0 once the session started).
+pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     let mut event_loop = match EventLoop::try_new() {
         Ok(ev) => ev,
         Err(err) => {
             error!("Failed to create the event loop: {}", err);
-            return;
+            return 1;
         }
     };
     let display = Display::new().unwrap();
@@ -399,13 +405,13 @@ pub fn run_udev() {
         Ok(ret) => ret,
         Err(err) => {
             error!("Could not initialize a session: {}", err);
-            return;
+            return 1;
         }
     };
 
     // Pick the GPU CDE renders on; an unusable `CDE_DRM_DEVICE` override is fatal.
     let Some(primary_gpu) = device::pick_primary_gpu(&session) else {
-        return;
+        return 1;
     };
     info!("Using {} as primary gpu.", primary_gpu);
 
@@ -414,7 +420,7 @@ pub fn run_udev() {
         Ok(gpus) => gpus,
         Err(err) => {
             error!("Failed to initialize the GPU manager: {}", err);
-            return;
+            return 1;
         }
     };
 
@@ -426,24 +432,34 @@ pub fn run_udev() {
         keyboards: Vec::new(),
         dmabuf_state: None,
     };
-    let startup_config = crate::config::load_startup_config();
+    let startup_config = match &greeter {
+        Some(g) => crate::greeter::greeter_config(&g.profile),
+        None => crate::config::load_startup_config(),
+    };
     let mut state = CrucibleState::init(
         display,
         event_loop.handle(),
         data,
         true,
         &startup_config.keyboard,
+        greeter.is_some(),
     );
-    state.apply_config(startup_config);
-    // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
-    state.start_persistence();
+    let greeter_mode = greeter.is_some();
+    match greeter {
+        Some(setup) => state.start_greeter(setup),
+        None => {
+            state.apply_config(startup_config);
+            // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
+            state.start_persistence();
+        }
+    }
 
     // Initialize the udev backend (GPU enumeration + hotplug).
     let udev_backend = match UdevBackend::new(&state.seat_name) {
         Ok(ret) => ret,
         Err(err) => {
             error!(error = ?err, "Failed to initialize udev backend");
-            return;
+            return 1;
         }
     };
 
@@ -453,7 +469,7 @@ pub fn run_udev() {
     );
     if libinput_context.udev_assign_seat(&state.seat_name).is_err() {
         error!("Failed to assign libinput seat");
-        return;
+        return 1;
     }
     let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
 
@@ -618,7 +634,9 @@ pub fn run_udev() {
     // Bring up XWayland so X11 apps run alongside Wayland clients.
     // The session (restore / cold-start picker / warm overlay host) starts at the first XWayland
     // outcome so its X11 spawns get a real `DISPLAY`; see `CrucibleState::on_xwayland_outcome`.
-    state.start_xwayland();
+    if !greeter_mode {
+        state.start_xwayland();
+    }
 
     info!("Initialization completed, starting the main loop.");
     while state.running.load(Ordering::SeqCst) {
@@ -631,4 +649,5 @@ pub fn run_udev() {
             display_handle.flush_clients().unwrap();
         }
     }
+    state.greeter_exit_code().unwrap_or(0)
 }

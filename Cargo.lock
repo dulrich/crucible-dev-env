@@ -317,10 +317,12 @@ name = "crucible-compositor"
 version = "0.6.0"
 dependencies = [
  "crucible-config",
+ "crucible-greetd",
  "crucible-keys",
  "crucible-layout",
  "crucible-persist",
  "fontdue",
+ "kdl",
  "libc",
  "png",
  "rustix 1.1.4",

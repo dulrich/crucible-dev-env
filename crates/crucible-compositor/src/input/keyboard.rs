@@ -65,6 +65,8 @@ enum KeyHit {
     Action(crucible_keys::Action),
     /// Snip mode: feed this event to the selection (`None`: the key is just swallowed).
     Snip(Option<SnipEvent>),
+    /// Greeter mode: feed this key to the login panel (`None`: swallowed).
+    Greeter(Option<crate::greeter::GreeterKey>),
 }
 
 /// The selection event a key press makes in snip mode: `Escape` cancels, `Return`/`KP_Enter`
@@ -116,7 +118,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             |state, modifiers, handle| {
                 let keysym = handle.modified_sym();
                 let raw_keycode = keycode.raw();
-                debug!(?key_state, mods = ?modifiers, keysym = keysym.raw(), "key");
+                // Never in greeter mode: the keys there are usernames and passwords.
+                if state.greeter.is_none() {
+                    debug!(?key_state, mods = ?modifiers, keysym = keysym.raw(), "key");
+                }
 
                 if let KeyState::Pressed = key_state {
                     // A press that matches a Super-chord is intercepted; record it (by physical
@@ -140,6 +145,18 @@ impl<B: Backend + 'static> CrucibleState<B> {
                             Some(action) => KeyHit::Action(action),
                             None => KeyHit::Snip(snip_key(keysym)),
                         }));
+                    }
+                    // Greeter mode: a non-admitted press goes to the login panel, never a client.
+                    if action.is_none() && state.greeter.is_some() {
+                        state.suppressed_keys.consume_press(raw_keycode);
+                        let ch = if modifiers.ctrl || modifiers.alt || modifiers.logo {
+                            None
+                        } else {
+                            keysym.key_char()
+                        };
+                        return FilterResult::Intercept(Some(KeyHit::Greeter(
+                            crate::greeter::greeter_key(keysym, ch),
+                        )));
                     }
                     if action.is_some() {
                         state.suppressed_keys.consume_press(raw_keycode);
@@ -166,6 +183,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 let _ = self.handle_key_action(action, super::Origin::Chord);
             }
             Some(Some(KeyHit::Snip(Some(event)))) => self.snip_event(event),
+            Some(Some(KeyHit::Greeter(Some(key)))) => self.greeter_key(key),
             _ => {}
         }
     }

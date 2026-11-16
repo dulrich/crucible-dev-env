@@ -119,6 +119,8 @@ pub struct FrameInputs {
     pub header: Option<HeaderLayout>,
     /// The header font size.
     pub header_size: u32,
+    /// The greeter login panel (greeter mode only).
+    pub greeter: Option<crate::greeter::panel::PanelFrame>,
 }
 
 /// The read-only state one output's frame is composed from: disjoint borrows of
@@ -207,10 +209,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
         FrameInputs {
             scale,
             cursor,
-            empty_focus_rect: self.focused_empty_pane_rect(),
+            // Greeter mode draws no pane chrome (no focus ring around the empty pane).
+            empty_focus_rect: self
+                .greeter
+                .is_none()
+                .then(|| self.focused_empty_pane_rect())
+                .flatten(),
             overlay: self.overlay_chrome(),
             header,
             header_size: self.config.header.size,
+            greeter: self.greeter.as_ref().map(|g| g.frame()),
         }
     }
 
@@ -325,6 +333,21 @@ where
             .map(CustomRenderElements::Surface),
         );
     }
+    let mut clear: Color32F = CLEAR_COLOR.into();
+    if let Some(panel) = &inputs.greeter {
+        let size = view
+            .space
+            .output_geometry(view.output)
+            .map_or((0, 0), |g| (g.size.w, g.size.h));
+        custom.extend(crate::greeter::panel::build_panel_elements(
+            panel,
+            size,
+            header_text,
+            renderer,
+            scale,
+        ));
+        clear = panel.clear.into();
+    }
     if let Some(header) = &inputs.header {
         custom.extend(crate::header::build_header_elements(
             header,
@@ -360,7 +383,7 @@ where
     .expect("output without mode?");
     elements.extend(space_elements.into_iter().map(OutputRenderElements::Space));
 
-    (elements, CLEAR_COLOR.into())
+    (elements, clear)
 }
 
 #[cfg(test)]

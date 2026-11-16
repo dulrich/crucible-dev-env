@@ -38,6 +38,20 @@ mod keyboard;
 mod modal;
 mod pointer;
 
+/// Test support: the real admission path greeter mode uses (mode resolution + `admit`).
+pub(crate) mod modal_test_support {
+    /// Whether a chord `action` runs in greeter mode (session not locked, no snip or overlay).
+    #[cfg(test)]
+    pub(crate) fn greeter_admits(action: &crucible_keys::Action) -> bool {
+        let mode = super::modal::resolve_mode::<()>(
+            super::modal::admits_as_locked(false, true),
+            false,
+            None,
+        );
+        super::execute::admit(&mode, action).is_ok()
+    }
+}
+
 use smithay::backend::input::{ButtonState, Event, InputBackend, InputEvent, PointerButtonEvent};
 use smithay::utils::SERIAL_COUNTER;
 

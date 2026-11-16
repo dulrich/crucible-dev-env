@@ -341,6 +341,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub reveal_holds: crate::reveal_hold::RevealHolds<Output, WlSurface>,
     /// IPC captures of a held output, answered once the hold releases.
     pub pending_captures: Vec<crate::capture::PendingCapture>,
+    /// Greeter mode (`crucible greeter`): the login panel and greetd worker; `None` normally.
+    pub greeter: Option<Box<crate::greeter::Greeter>>,
 }
 
 /// The icon surface a client attached to a pointer drag, with its accumulated hotspot offset.
@@ -364,6 +366,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         backend_data: B,
         listen_on_socket: bool,
         keyboard_config: &crucible_config::KeyboardConfig,
+        greeter: bool,
     ) -> CrucibleState<B> {
         let dh = display.handle();
         let clock = Clock::new();
@@ -447,12 +450,20 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let seat_name = backend_data.seat_name();
         // The startup seed is named off the saved workspaces once, before the model exists, so it
         // never shadows a saved name (no later rename).
-        let store_dir = crucible_persist::store::store_dir();
-        let saved: std::collections::HashSet<String> =
+        // Greeter mode reads nothing under the home: no store dir, no saved names.
+        let store_dir = if greeter {
+            std::path::PathBuf::new()
+        } else {
+            crucible_persist::store::store_dir()
+        };
+        let saved: std::collections::HashSet<String> = if greeter {
+            std::collections::HashSet::new()
+        } else {
             crucible_persist::store::list_saved(&store_dir)
                 .into_iter()
                 .map(|(n, _)| n)
-                .collect();
+                .collect()
+        };
         let seed = crate::persist::startup_seed_name(&saved);
         let mut seat = seat_state.new_wl_seat(&dh, seat_name.clone());
         let pointer = seat.add_pointer();
@@ -537,6 +548,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             night_light: crate::night_light::NightLight::default(),
             dnd_icon: None,
             pending_keyboard_focus: PendingFocus::default(),
+            greeter: None,
         }
     }
 }

@@ -1,0 +1,165 @@
+//! The login panel: a pure layout (centred on the output, the secret field masked) and its render
+//! elements (labels, then the field and panel solids, front-to-back).
+
+use crucible_config::{Milli, Palette, Rgb};
+use crucible_layout::Rect;
+use smithay::{
+    backend::renderer::{ImportAll, ImportMem, Renderer},
+    utils::{Physical, Point, Scale},
+};
+
+use crate::{
+    physical::{PhysicalMap, solid},
+    render::CustomRenderElements,
+    text::TextRenderer,
+};
+
+/// Panel width (logical px).
+pub const PANEL_W: i32 = 420;
+/// Inner padding (logical px).
+pub const PAD: i32 = 24;
+/// Label font size (logical px).
+pub const TEXT_PX: u32 = 16;
+/// Field height (logical px).
+pub const FIELD_H: i32 = 36;
+/// Line height of a label row (logical px).
+pub const LINE_H: i32 = 22;
+/// The mask glyph for secret input.
+pub const BULLET: char = '\u{2022}';
+
+/// What the panel shows this frame (owned, so it rides in the frame inputs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PanelFrame {
+    /// The field label.
+    pub prompt: String,
+    /// The field contents as drawn (already masked for secret prompts).
+    pub field: String,
+    /// The message line, if any.
+    pub message: Option<String>,
+    /// The panel colours.
+    pub palette: Palette,
+    /// The panel fill alpha.
+    pub alpha: Milli,
+    /// The output clear colour (the profile colour, or black under an image).
+    pub clear: [f32; 4],
+}
+
+/// The panel's output-local logical geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PanelLayout {
+    /// The whole panel.
+    pub panel: Rect,
+    /// Top-left of the prompt label.
+    pub prompt: (i32, i32),
+    /// The input field box.
+    pub field: Rect,
+    /// Top-left of the message line.
+    pub message: (i32, i32),
+}
+
+/// The field text as drawn: one bullet per character for a secret prompt, never the text.
+#[must_use]
+pub fn field_text(input: &str, secret: bool) -> String {
+    if secret {
+        std::iter::repeat_n(BULLET, input.chars().count()).collect()
+    } else {
+        input.to_string()
+    }
+}
+
+/// Lays the panel out centred in an output of logical size `w`x`h` (narrow outputs shrink it).
+#[must_use]
+pub fn layout(w: i32, h: i32) -> PanelLayout {
+    let pw = PANEL_W.min((w - 2 * PAD).max(PAD * 4));
+    let ph = PAD + LINE_H + 8 + FIELD_H + 12 + LINE_H + PAD;
+    let (x, y) = ((w - pw) / 2, (h - ph) / 2);
+    let prompt = (x + PAD, y + PAD);
+    let field = Rect::new(x + PAD, prompt.1 + LINE_H + 8, pw - 2 * PAD, FIELD_H);
+    let message = (x + PAD, field.y + FIELD_H + 12);
+    PanelLayout {
+        panel: Rect::new(x, y, pw, ph),
+        prompt,
+        field,
+        message,
+    }
+}
+
+fn rgba_u8(c: Rgb) -> [u8; 4] {
+    [c.0, c.1, c.2, 255]
+}
+
+/// `c` at `alpha`, premultiplied (the solid element's colour space).
+fn with_alpha(c: Rgb, alpha: Milli) -> [f32; 4] {
+    #[allow(clippy::cast_precision_loss)]
+    let a = (alpha.0.min(1000) as f32) / 1000.0;
+    let [r, g, b, _] = c.to_rgba_f32();
+    [r * a, g * a, b * a, a]
+}
+
+/// Builds the panel's elements for an output of logical size `size`.
+pub fn build_panel_elements<R>(
+    frame: &PanelFrame,
+    size: (i32, i32),
+    text: &mut TextRenderer,
+    renderer: &mut R,
+    scale: Scale<f64>,
+) -> Vec<CustomRenderElements<R>>
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Send + Clone + 'static,
+{
+    let l = layout(size.0, size.1);
+    let map = PhysicalMap::plain(scale);
+    let pal = frame.palette;
+    let mut out = Vec::new();
+    let mut label = |s: &str, at: (i32, i32), rgba: [u8; 4], out: &mut Vec<_>| {
+        if s.is_empty() {
+            return;
+        }
+        let p = map.rect(Rect::new(at.0, at.1, 1, 1)).loc;
+        let loc = Point::<f64, Physical>::from((f64::from(p.x), f64::from(p.y)));
+        if let Some(el) = text.element(renderer, loc, s, TEXT_PX, rgba, scale) {
+            out.push(CustomRenderElements::Text(el));
+        }
+    };
+    label(&frame.prompt, l.prompt, rgba_u8(pal.text), &mut out);
+    let field_at = (l.field.x + 8, l.field.y + (FIELD_H - LINE_H) / 2 + 2);
+    label(&frame.field, field_at, rgba_u8(pal.text), &mut out);
+    if let Some(msg) = &frame.message {
+        label(msg, l.message, rgba_u8(pal.accent), &mut out);
+    }
+    let f = l.field;
+    let inner = Rect::new(f.x + 1, f.y + 1, f.width - 2, f.height - 2);
+    out.push(CustomRenderElements::SolidColor(solid(
+        map.rect(inner),
+        pal.bg.to_rgba_f32(),
+    )));
+    out.push(CustomRenderElements::SolidColor(solid(
+        map.rect(f),
+        pal.accent.to_rgba_f32(),
+    )));
+    out.push(CustomRenderElements::SolidColor(solid(
+        map.rect(l.panel),
+        with_alpha(pal.bg, frame.alpha),
+    )));
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panel_is_centred_and_secret_input_is_masked() {
+        let l = layout(1920, 1080);
+        assert_eq!(l.panel.x * 2 + l.panel.width, 1920);
+        assert!((l.panel.y * 2 + l.panel.height - 1080).abs() <= 1);
+        assert!(l.field.x >= l.panel.x && l.field.x + l.field.width <= l.panel.x + l.panel.width);
+        // A narrow output shrinks the panel but keeps it inside.
+        let n = layout(300, 400);
+        assert!(n.panel.x >= 0 && n.panel.x + n.panel.width <= 300);
+        assert_eq!(field_text("hunter2", true), "\u{2022}".repeat(7));
+        assert_eq!(field_text("dulrich", false), "dulrich");
+        assert_eq!(field_text("ñé", true).chars().count(), 2);
+    }
+}

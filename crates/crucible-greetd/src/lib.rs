@@ -2,6 +2,7 @@
 //! ([`machine`]) and a thin synchronous driver ([`Session`]). No compositor dependency.
 
 pub mod codec;
+pub mod fake;
 pub mod machine;
 
 use std::io::{Read, Write};
@@ -57,19 +58,10 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use std::os::unix::net::UnixStream;
-    use std::thread::{self, JoinHandle};
+    use std::thread::JoinHandle;
 
-    /// Plays greetd: for each scripted reply, reads one request and sends the reply; returns the
-    /// requests it saw.
-    fn fake_greetd(mut sock: UnixStream, replies: Vec<Value>) -> JoinHandle<Vec<Value>> {
-        thread::spawn(move || {
-            let mut seen = Vec::new();
-            for reply in replies {
-                seen.push(codec::read_message::<_, Value>(&mut sock).unwrap());
-                codec::write_message(&mut sock, &reply).unwrap();
-            }
-            seen
-        })
+    fn fake_greetd(sock: UnixStream, replies: Vec<Value>) -> JoinHandle<Vec<Value>> {
+        crate::fake::serve(sock, replies)
     }
 
     fn submit(s: &mut Session<UnixStream>, text: &str) -> View {
@@ -148,6 +140,8 @@ mod tests {
         let mut s = Session::new(client, "cde-session");
         let v = submit(&mut s, "dulrich");
         assert_eq!(v.prompt, "Password:");
+        // The info line survives the next prompt and is only cleared by the next Submit.
+        assert_eq!(v.message.as_deref(), Some("Password expires soon"));
         let seen = srv.join().unwrap();
         assert_eq!(
             seen[1],

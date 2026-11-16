@@ -63,12 +63,19 @@ pub(crate) fn resolve_mode<O>(locked: bool, snipping: bool, overlay: Option<O>) 
     }
 }
 
+/// Whether input runs under the lock's rules: while the session is locked, and always in greeter
+/// mode (only VT switching and `set-layout` chords; every other key goes to the login panel).
+#[must_use]
+pub(crate) fn admits_as_locked(session_locked: bool, greeter: bool) -> bool {
+    session_locked || greeter
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Resolves the input mode for one event. Precedence is **Locked > Snip > Overlay >
     /// Normal** ([`resolve_mode`]), and this is the only place it is written.
     pub(crate) fn input_mode(&self) -> InputMode {
         resolve_mode(
-            self.is_session_locked(),
+            admits_as_locked(self.is_session_locked(), self.greeter.is_some()),
             self.snip.is_some(),
             self.mapped_overlay().cloned(),
         )
