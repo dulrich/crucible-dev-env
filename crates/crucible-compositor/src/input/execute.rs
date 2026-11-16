@@ -257,6 +257,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         keyboard.with_xkb_state(self, |mut ctx| {
             ctx.set_layout(smithay::input::keyboard::Layout(group));
         });
+        self.greeter_layout_changed(idx);
         info!(name, group, "set-layout");
     }
 }

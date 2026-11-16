@@ -24,7 +24,7 @@ use smithay::reexports::calloop::channel::{self, Event as ChannelEvent};
 use tracing::{error, info, warn};
 
 use crate::state::{Backend, CrucibleState};
-use panel::{PanelFrame, field_text};
+use panel::{PanelFrame, field_text, layout_label};
 use profile::{GreeterProfile, ProfileBackground};
 
 /// The swaybg binary (a system path: the greeter user has no `$PATH` worth trusting).
@@ -133,6 +133,8 @@ pub struct Greeter {
     input: LoginInput,
     events: mpsc::Sender<Event>,
     swaybg: Option<Child>,
+    /// The active layout's index in the profile's `layouts` (the xkb group; 0 at start).
+    layout: usize,
     /// The process exit status once the loop stops: 0 after `start_session` succeeded.
     pub exit_code: i32,
 }
@@ -171,6 +173,7 @@ impl Greeter {
             } else {
                 self.view.message.clone()
             },
+            layout: layout_label(&self.profile.layouts, self.layout),
             palette: self.profile.palette,
             alpha: self.profile.alpha,
             clear,
@@ -283,6 +286,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             input: LoginInput::default(),
             events,
             swaybg,
+            layout: 0,
             exit_code: 1,
         }));
     }
@@ -321,6 +325,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
             error!("the greetd worker is gone; greeter exiting");
             self.running.store(false, Ordering::SeqCst);
         }
+        self.redraw_greeter();
+    }
+
+    /// Records that `set-layout` switched to group `idx` and redraws the indicator (a no-op
+    /// outside greeter mode).
+    pub(crate) fn greeter_layout_changed(&mut self, idx: usize) {
+        let Some(g) = self.greeter.as_mut() else {
+            return;
+        };
+        g.layout = idx;
         self.redraw_greeter();
     }
 

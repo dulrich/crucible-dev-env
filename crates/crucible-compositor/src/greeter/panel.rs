@@ -36,6 +36,9 @@ pub struct PanelFrame {
     pub field: String,
     /// The message line, if any.
     pub message: Option<String>,
+    /// The active keyboard layout name, drawn right-aligned on the prompt row (`None` with a
+    /// single layout, as swaylock shows it only with two or more).
+    pub layout: Option<String>,
     /// The panel colours.
     pub palette: Palette,
     /// The panel fill alpha.
@@ -65,6 +68,15 @@ pub fn field_text(input: &str, secret: bool) -> String {
     } else {
         input.to_string()
     }
+}
+
+/// The layout indicator text: the name of the active layout when two or more are configured.
+#[must_use]
+pub fn layout_label(layouts: &[String], active: usize) -> Option<String> {
+    (layouts.len() >= 2)
+        .then(|| layouts.get(active))
+        .flatten()
+        .cloned()
 }
 
 /// Lays the panel out centred in an output of logical size `w`x`h` (narrow outputs shrink it).
@@ -112,6 +124,10 @@ where
     let map = PhysicalMap::plain(scale);
     let pal = frame.palette;
     let mut out = Vec::new();
+    let layout_w = frame
+        .layout
+        .as_deref()
+        .map_or(0, |name| text.measure(name, TEXT_PX).unwrap_or(0));
     let mut label = |s: &str, at: (i32, i32), rgba: [u8; 4], out: &mut Vec<_>| {
         if s.is_empty() {
             return;
@@ -127,6 +143,10 @@ where
     label(&frame.field, field_at, rgba_u8(pal.text), &mut out);
     if let Some(msg) = &frame.message {
         label(msg, l.message, rgba_u8(pal.accent), &mut out);
+    }
+    if let Some(name) = &frame.layout {
+        let at = (l.panel.x + l.panel.width - PAD - layout_w, l.prompt.1);
+        label(name, at, rgba_u8(pal.accent), &mut out);
     }
     let f = l.field;
     let inner = Rect::new(f.x + 1, f.y + 1, f.width - 2, f.height - 2);
@@ -161,5 +181,19 @@ mod tests {
         assert_eq!(field_text("hunter2", true), "\u{2022}".repeat(7));
         assert_eq!(field_text("dulrich", false), "dulrich");
         assert_eq!(field_text("ñé", true).chars().count(), 2);
+    }
+
+    #[test]
+    fn layout_label_names_the_active_layout_only_with_two_or_more() {
+        let two = vec!["us".to_string(), "es".to_string()];
+        assert_eq!(layout_label(&two, 0).as_deref(), Some("us"));
+        assert_eq!(layout_label(&two, 1).as_deref(), Some("es"));
+        assert_eq!(
+            layout_label(&two, 2),
+            None,
+            "an out-of-range group draws nothing"
+        );
+        assert_eq!(layout_label(&["us".to_string()], 0), None);
+        assert_eq!(layout_label(&[], 0), None);
     }
 }

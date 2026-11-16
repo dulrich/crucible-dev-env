@@ -50,7 +50,7 @@ The panel is centred on every output; keyboard focus is global. It shows the pro
 - `Escape` cancels back to the username prompt.
 - Keys are ignored while greetd is answering (a wrong password takes about two seconds).
 
-Only two kinds of chords work, the same ones as on the lock screen: VT switching (`Ctrl+Alt+F<n>`) and `set-layout` binds. Every other chord (for example `Super+Return`) does nothing. IPC `exec` requests follow the same rule.
+Only two kinds of chords work, the same ones as on the lock screen: VT switching (`Ctrl+Alt+F<n>`) and `set-layout` binds. Every other chord (for example `Super+Return`) does nothing. IPC `exec` requests follow the same rule. With two or more layouts in the profile, the panel shows the active layout name at the right of the prompt row, updated on each `set-layout`.
 
 ## Logging
 
