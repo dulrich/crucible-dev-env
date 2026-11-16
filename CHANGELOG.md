@@ -4,6 +4,17 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.4 — 2026-11-16
+
+### Fixed
+
+- The key press that wakes the blanked greeter no longer lands in the username field. libinput delivers its device-added events just ahead of the first key after the greeter starts, and those counted as activity and woke the screens first. Device add and remove no longer count as idle activity.
+- The greeter writes its log to `/tmp/cde-greeter/greeter-<unix-seconds>-<pid>.log` (the five newest are kept). greetd does not keep the greeter's stderr, so it had no log at all; docs/greeter.md wrongly pointed at the greetd journal.
+
+### Added
+
+- `idle: outputs woken by input event=<kind>` log lines, and in the greeter one `greeter: first key press after blanking` line after each blank (whether it woke the screens; never the key).
+
 ## 0.7.3 — 2026-11-16
 
 ### Changed
