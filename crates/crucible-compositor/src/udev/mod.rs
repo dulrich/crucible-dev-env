@@ -427,12 +427,9 @@ pub fn run_udev() {
 /// (greeter mode: 0 once the session started).
 pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     crate::startup::mark_process_start();
-    // Plan 45: the login readiness fd, taken before any thread or child exists (never the greeter).
-    let ready_fd = if greeter.is_none() {
-        crate::login_ready::take_from_env()
-    } else {
-        None
-    };
+    // Plan 45/46: the login readiness fd, taken before any thread or child exists (the greeter
+    // takes it too).
+    let ready_fd = crate::login_ready::take_from_env();
     let mut event_loop = match EventLoop::try_new() {
         Ok(ev) => ev,
         Err(err) => {
@@ -574,6 +571,8 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
                 for backend in data.backend_data.backends.values_mut() {
                     backend.drm_output_manager.pause();
                 }
+                // Plan 46: a pause after a delivered quit notice ends the session.
+                data.quit_on_pause();
             }
             SessionEvent::ActivateSession if data.backend_data.background_start => {
                 info!("resuming session");
@@ -734,10 +733,9 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
             )
             .expect("failed to schedule the start-up adoption timeout");
     }
-    // Plan 45: the login ready rule (and readiness fd) from main-loop start.
-    if !greeter_mode {
-        state.arm_login_ready(ready_fd);
-    }
+    // Plan 45: the login ready rule (and readiness fd) from main-loop start; plan 46: the greeter
+    // arms its own rule.
+    state.arm_login_ready(ready_fd, greeter_mode);
     while state.running.load(Ordering::SeqCst) {
         let result = event_loop.dispatch(Some(Duration::from_millis(16)), &mut state);
         if result.is_err() {

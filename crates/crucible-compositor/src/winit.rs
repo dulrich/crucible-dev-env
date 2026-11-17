@@ -259,7 +259,7 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
 
     let start_time = Instant::now();
     if !greeter_mode {
-        state.arm_login_ready(ready_fd);
+        state.arm_login_ready(ready_fd, false);
     }
 
     info!("Initialization completed, starting the main loop.");

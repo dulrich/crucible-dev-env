@@ -153,10 +153,73 @@ pub fn login_ready(inputs: ReadyInputs, timed_out: bool) -> bool {
             && inputs.windows_without_buffer == 0)
 }
 
+/// What the greeter's ready rule (plan 46 WP-1 invariant 3) looks at, sampled from the greeter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GreeterReadyInputs {
+    /// The login panel's state is built (`start_greeter` ran), so its elements are prepared for
+    /// the first adoption frame. A rendered panel frame is deliberately not awaited: a background
+    /// start renders nothing until adoption at activation.
+    pub panel_prepared: bool,
+    /// Whether a wallpaper client (swaybg) is running, so a background buffer is expected.
+    pub background_expected: bool,
+    /// Usable outputs enumerated (mapped in the Space).
+    pub outputs: usize,
+    /// Of those, the outputs whose background-layer buffer has committed.
+    pub outputs_with_background: usize,
+}
+
+/// The greeter's ready rule: every output's background buffer committed (when one is expected)
+/// and the panel prepared, or `timed_out` ([`READY_TIMEOUT`]). Holds before activation. Pure.
+pub fn greeter_ready(inputs: GreeterReadyInputs, timed_out: bool) -> bool {
+    timed_out
+        || (inputs.panel_prepared
+            && inputs.outputs > 0
+            && (!inputs.background_expected || inputs.outputs_with_background >= inputs.outputs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn greeter_ready_waits_for_backgrounds_and_panel() {
+        let full = GreeterReadyInputs {
+            panel_prepared: true,
+            background_expected: true,
+            outputs: 2,
+            outputs_with_background: 2,
+        };
+        assert!(greeter_ready(full, false));
+        let partial = GreeterReadyInputs {
+            outputs_with_background: 1,
+            ..full
+        };
+        assert!(!greeter_ready(partial, false));
+        assert!(greeter_ready(partial, true), "the timeout always holds");
+        let no_panel = GreeterReadyInputs {
+            panel_prepared: false,
+            ..full
+        };
+        assert!(!greeter_ready(no_panel, false));
+        let no_outputs = GreeterReadyInputs {
+            outputs: 0,
+            outputs_with_background: 0,
+            ..full
+        };
+        assert!(!greeter_ready(no_outputs, false));
+    }
+
+    #[test]
+    fn greeter_ready_without_swaybg_needs_no_background() {
+        let inputs = GreeterReadyInputs {
+            panel_prepared: true,
+            background_expected: false,
+            outputs: 1,
+            outputs_with_background: 0,
+        };
+        assert!(greeter_ready(inputs, false));
+    }
 
     #[test]
     fn elapsed_is_whole_milliseconds_and_saturates() {

@@ -354,6 +354,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
+    /// Whether the greeter's wallpaper client is running (`None` outside greeter mode).
+    #[must_use]
+    pub fn greeter_has_swaybg(&self) -> Option<bool> {
+        self.greeter.as_ref().map(|g| g.swaybg.is_some())
+    }
+
     /// The exit status greeter mode ends with (`None` outside greeter mode).
     #[must_use]
     pub fn greeter_exit_code(&self) -> Option<i32> {

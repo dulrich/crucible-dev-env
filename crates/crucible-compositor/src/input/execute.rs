@@ -8,8 +8,6 @@
 //! relayout-only-on-`Ok` contract ([`CrucibleState::with_model`]). [`apply_model_action`] and the gate's decisions only touch
 //! plain values, so they are unit-tested below without any compositor state.
 
-use std::sync::atomic::Ordering;
-
 use crucible_keys::Action;
 use crucible_layout::{LayoutError, World};
 use tracing::{debug, info, warn};
@@ -128,7 +126,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 info!("Super+Shift+Q: flushing workspaces and quitting");
                 self.flush_workspaces();
                 self.remove_ipc_socket();
-                self.running.store(false, Ordering::SeqCst);
+                // Plan 46: with a live session channel, wait for the pause (or a timeout).
+                self.begin_quit();
             }
             // Spawning causes the client to connect, map a toplevel, and flow through
             // `new_toplevel` -> `map_new_window`, which pushes the window onto the focused pane's
