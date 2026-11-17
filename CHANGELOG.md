@@ -4,6 +4,16 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.9 — 2026-11-17
+
+### Added
+
+- `header { active }`: `"fill"` (default, unchanged), `"text"` or `"text-bold"`. `text` drops the highlight block and draws the active workspace label in the highlight colour; `text-bold` also uses the bold face of the header font (fontconfig `<family>:bold`; a font path or a missing bold face falls back to the regular face with one warning).
+
+### Fixed
+
+- `overlay { alpha }` had no effect under the N1 styles: the overlay painted every cell with an explicit background, which terminals draw opaque. With foot, cterm or urxvt and no explicit `overlay.terminal-args`, CDE now sets `CDE_OVERLAY_SURROUND=default` and the overlay leaves its surround on the terminal's default background (already the style's colour), so foot and cterm overlays are translucent. Other terminals and explicit `terminal-args` keep the opaque surround.
+
 ## 0.7.8 — 2026-11-17
 
 ### Fixed
