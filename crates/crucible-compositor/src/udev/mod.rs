@@ -132,6 +132,12 @@ pub struct UdevData {
     /// Start-up adoption window (plan 44): while open, a connected output's DRM adoption waits
     /// for its wallpaper; closed by the [`crate::startup::ADOPTION_TIMEOUT`] timer.
     adoption_window_open: bool,
+    /// Background start (plan 45): the libseat session was inactive at start and has not been
+    /// activated yet. While set, devices stay paused, nothing is committed, tested or disabled on
+    /// DRM, and every output's adoption waits for the first `ActivateSession`.
+    background_start: bool,
+    /// Devices that could not be added during a background start, retried at activation.
+    deferred_devices: Vec<(libc::dev_t, std::path::PathBuf)>,
 }
 
 type UdevGles = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
@@ -295,6 +301,10 @@ impl Backend for UdevData {
     /// Adopts `output` on its wallpaper if its start-up adoption is pending (plan 44). Deferred to
     /// an idle callback: the commit handler is no place for a DRM commit and a render.
     fn background_buffer_committed(state: &mut CrucibleState<Self>, output: &Output) {
+        // A background start adopts every output at session activation instead (plan 45).
+        if state.backend_data.background_start {
+            return;
+        }
         let Some(id) = output.user_data().get::<UdevOutputId>().copied() else {
             return;
         };
@@ -417,6 +427,12 @@ pub fn run_udev() {
 /// (greeter mode: 0 once the session started).
 pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     crate::startup::mark_process_start();
+    // Plan 45: the login readiness fd, taken before any thread or child exists (never the greeter).
+    let ready_fd = if greeter.is_none() {
+        crate::login_ready::take_from_env()
+    } else {
+        None
+    };
     let mut event_loop = match EventLoop::try_new() {
         Ok(ev) => ev,
         Err(err) => {
@@ -435,6 +451,20 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
             return 1;
         }
     };
+    // Plan 45: a session that is inactive at start (a login daemon starting CDE on a background
+    // VT) defers every DRM adoption to its first activation.
+    let background_start = !session.is_active();
+    if background_start {
+        info!(
+            elapsed_ms = crate::startup::elapsed_ms(),
+            "startup: background start"
+        );
+    } else {
+        info!(
+            elapsed_ms = crate::startup::elapsed_ms(),
+            "startup: foreground start"
+        );
+    }
 
     // Pick the GPU CDE renders on; an unusable `CDE_DRM_DEVICE` override is fatal.
     let Some(primary_gpu) = device::pick_primary_gpu(&session) else {
@@ -459,6 +489,8 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
         keyboards: Vec::new(),
         dmabuf_state: None,
         adoption_window_open: true,
+        background_start,
+        deferred_devices: Vec::new(),
     };
     let startup_config = match &greeter {
         Some(g) => crate::greeter::greeter_config(&g.profile),
@@ -535,6 +567,15 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
                 for backend in data.backend_data.backends.values_mut() {
                     backend.drm_output_manager.pause();
                 }
+            }
+            SessionEvent::ActivateSession if data.backend_data.background_start => {
+                info!("resuming session");
+                data.backend_data.background_start = false;
+                data.night_light.cache.invalidate_all();
+                if let Err(err) = libinput_context.resume() {
+                    error!("Failed to resume libinput context: {:?}", err);
+                }
+                data.activate_background_start();
             }
             SessionEvent::ActivateSession => {
                 info!("resuming session");
@@ -672,17 +713,24 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     );
     info!("Initialization completed, starting the main loop.");
     // Plan 44: outputs still waiting for their wallpaper are adopted this long after main-loop
-    // start, and the CRTCs CDE did not adopt are then disabled.
-    event_loop
-        .handle()
-        .insert_source(
-            Timer::from_duration(crate::startup::ADOPTION_TIMEOUT),
-            |_, _, state| {
-                state.finish_startup_adoption();
-                TimeoutAction::Drop
-            },
-        )
-        .expect("failed to schedule the start-up adoption timeout");
+    // start, and the CRTCs CDE did not adopt are then disabled. A background start (plan 45) runs
+    // no such timer: its adoption happens at the first `ActivateSession`.
+    if !state.backend_data.background_start {
+        event_loop
+            .handle()
+            .insert_source(
+                Timer::from_duration(crate::startup::ADOPTION_TIMEOUT),
+                |_, _, state| {
+                    state.finish_startup_adoption();
+                    TimeoutAction::Drop
+                },
+            )
+            .expect("failed to schedule the start-up adoption timeout");
+    }
+    // Plan 45: the login ready rule (and readiness fd) from main-loop start.
+    if !greeter_mode {
+        state.arm_login_ready(ready_fd);
+    }
     while state.running.load(Ordering::SeqCst) {
         let result = event_loop.dispatch(Some(Duration::from_millis(16)), &mut state);
         if result.is_err() {

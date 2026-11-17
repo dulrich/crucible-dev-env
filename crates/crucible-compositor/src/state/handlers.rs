@@ -132,8 +132,11 @@ impl<B: Backend + 'static> CompositorHandler for CrucibleState<B> {
         if let Some(output) =
             ensure_initial_configure(surface, &self.space, unplaced, &mut self.popups)
         {
+            self.note_background_landed(&output);
             B::background_buffer_committed(self, &output);
         }
+        // Plan 45: a buffer commit may complete the session's first frame.
+        self.check_login_ready();
     }
 }
 

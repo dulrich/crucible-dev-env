@@ -128,6 +128,12 @@ pub fn run_winit() {
 /// [`run_winit`], optionally in greeter mode (`crucible greeter --winit`); returns the process
 /// exit status (greeter mode: 0 once the session started).
 pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
+    // Plan 45: the login readiness fd, taken before any thread or child exists (never the greeter).
+    let ready_fd = if greeter.is_none() {
+        crate::login_ready::take_from_env()
+    } else {
+        None
+    };
     let mut event_loop: EventLoop<CrucibleState<WinitData>> = match EventLoop::try_new() {
         Ok(loop_) => loop_,
         Err(err) => {
@@ -252,6 +258,9 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     }
 
     let start_time = Instant::now();
+    if !greeter_mode {
+        state.arm_login_ready(ready_fd);
+    }
 
     info!("Initialization completed, starting the main loop.");
 

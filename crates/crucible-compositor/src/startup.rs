@@ -123,6 +123,36 @@ pub fn ready_to_adopt<K: PartialEq + Copy>(
         .collect()
 }
 
+/// How long, from main-loop start, the login ready rule waits before it holds anyway (plan 45).
+pub const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// What the login ready rule (plan 45 WP-1 invariant 3) looks at, sampled from the compositor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ReadyInputs {
+    /// The startup session step (`start_session`) has run, so the expected surfaces are known.
+    pub session_started: bool,
+    /// Usable outputs enumerated (mapped in the Space).
+    pub outputs: usize,
+    /// Of those, the outputs whose background-layer buffer has landed.
+    pub outputs_with_background: usize,
+    /// Spawns the session step made for the active workspaces (restored windows, the cold-start
+    /// picker) that are still alive and have not created their window yet.
+    pub awaited_spawns: usize,
+    /// Windows shown on the active workspaces (in the Space) without a buffer yet.
+    pub windows_without_buffer: usize,
+}
+
+/// The login ready rule: the session's first frame is ready, or `timed_out` ([`READY_TIMEOUT`]
+/// passed). Pure, so it is unit-testable without a compositor.
+pub fn login_ready(inputs: ReadyInputs, timed_out: bool) -> bool {
+    timed_out
+        || (inputs.session_started
+            && inputs.outputs > 0
+            && inputs.outputs_with_background >= inputs.outputs
+            && inputs.awaited_spawns == 0
+            && inputs.windows_without_buffer == 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,5 +201,47 @@ mod tests {
     fn the_timeout_adopts_every_pending_output() {
         assert_eq!(ready_to_adopt(&[1u8, 2], None, true), vec![1, 2]);
         assert!(ready_to_adopt::<u8>(&[], Some(1), true).is_empty());
+    }
+
+    fn ready() -> ReadyInputs {
+        ReadyInputs {
+            session_started: true,
+            outputs: 2,
+            outputs_with_background: 2,
+            awaited_spawns: 0,
+            windows_without_buffer: 0,
+        }
+    }
+
+    #[test]
+    fn login_ready_needs_every_condition_short_of_the_timeout() {
+        assert!(login_ready(ready(), false));
+        let not = [
+            ReadyInputs {
+                session_started: false,
+                ..ready()
+            },
+            ReadyInputs {
+                outputs: 0,
+                outputs_with_background: 0,
+                ..ready()
+            },
+            ReadyInputs {
+                outputs_with_background: 1,
+                ..ready()
+            },
+            ReadyInputs {
+                awaited_spawns: 1,
+                ..ready()
+            },
+            ReadyInputs {
+                windows_without_buffer: 1,
+                ..ready()
+            },
+        ];
+        for inputs in not {
+            assert!(!login_ready(inputs, false), "{inputs:?}");
+            assert!(login_ready(inputs, true), "the timeout holds: {inputs:?}");
+        }
     }
 }

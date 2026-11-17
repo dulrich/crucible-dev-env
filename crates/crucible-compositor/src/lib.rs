@@ -21,6 +21,9 @@ pub mod udev;
 /// Startup timing lines for the udev path.
 pub mod startup;
 
+/// The login readiness signal (`CDE_LOGIN_READY_FD`, plan 45) and its ready-rule tracking.
+pub mod login_ready;
+
 /// Wayland shell protocol handlers (xdg-shell + wlr-layer-shell).
 pub mod shell;
 

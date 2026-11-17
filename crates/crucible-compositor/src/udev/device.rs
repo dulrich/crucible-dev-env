@@ -164,11 +164,61 @@ pub(super) fn init_gpu_manager() -> Result<GpuManager<GbmGles>, MultiError<GbmGl
 
 impl CrucibleState<UdevData> {
     /// Opens a DRM device, registers its VBlank source, and adds it to the GPU manager.
+    ///
+    /// During a background start (plan 45) a device that cannot be added yet (e.g. a seat backend
+    /// that refuses opens while the session is inactive) is retried at session activation.
     pub(super) fn device_added(
         &mut self,
         node: DrmNode,
         path: &Path,
     ) -> Result<(), DeviceAddError> {
+        let result = self.try_device_added(node, path);
+        if result.is_err() && self.backend_data.background_start {
+            info!(
+                ?node,
+                "startup: device deferred until the session activates"
+            );
+            self.backend_data
+                .deferred_devices
+                .push((node.dev_id(), path.to_path_buf()));
+        }
+        result
+    }
+
+    /// Activates a background start (plan 45) at its first `ActivateSession`: re-activates the
+    /// devices (the seat makes CDE DRM master now), adds the devices deferred at start (their
+    /// connectors are scanned and their outputs registered as they are added), then adopts every
+    /// pending output — its first commit is whatever frame is ready, the login ready rule having
+    /// held already when a login daemon activated the session — and disables the CRTCs CDE did not
+    /// adopt.
+    pub(super) fn activate_background_start(&mut self) {
+        let nodes: Vec<DrmNode> = self.backend_data.backends.keys().copied().collect();
+        for node in &nodes {
+            if let Some(backend) = self.backend_data.backends.get_mut(node) {
+                if let Err(err) = backend.drm_output_manager.lock().activate(false) {
+                    error!(%err, "Failed to activate drm device at background-start activation");
+                }
+            }
+        }
+        for (device_id, path) in std::mem::take(&mut self.backend_data.deferred_devices) {
+            if let Err(err) = DrmNode::from_dev_id(device_id)
+                .map_err(DeviceAddError::DrmNode)
+                .and_then(|node| self.device_added(node, &path))
+            {
+                error!("Skipping deferred device {device_id}: {err}");
+            }
+        }
+        info!(
+            elapsed_ms = crate::startup::elapsed_ms(),
+            ready = self.login_ready.done(),
+            "startup: adopting at session activation"
+        );
+        self.finish_startup_adoption();
+        self.idle_activity();
+        self.evaluate_night_light();
+    }
+
+    fn try_device_added(&mut self, node: DrmNode, path: &Path) -> Result<(), DeviceAddError> {
         let fd = self
             .backend_data
             .session
@@ -269,7 +319,7 @@ impl CrucibleState<UdevData> {
             .collect::<FormatSet>();
         drop(renderer);
 
-        let drm_output_manager = DrmOutputManager::new(
+        let mut drm_output_manager = DrmOutputManager::new(
             drm,
             allocator,
             framebuffer_exporter,
@@ -283,6 +333,11 @@ impl CrucibleState<UdevData> {
             ?node,
             "startup: DrmOutputManager::new done"
         );
+        // Background start (plan 45): smithay marks a new device active; it is not, so mark it
+        // paused until `ActivateSession` (no commit can reach the kernel meanwhile).
+        if self.backend_data.background_start {
+            drm_output_manager.pause();
+        }
 
         self.backend_data.backends.insert(
             node,

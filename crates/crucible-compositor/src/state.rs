@@ -347,6 +347,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub snip: Option<crate::snip::SnipSession>,
     /// Outputs held on their previous frame while a re-shown window repaints (plan 38).
     pub reveal_holds: crate::reveal_hold::RevealHolds<Output, WlSurface>,
+    /// The login ready rule and readiness fd (plan 45).
+    pub login_ready: crate::login_ready::LoginReady,
     /// IPC captures of a held output, answered once the hold releases.
     pub pending_captures: Vec<crate::capture::PendingCapture>,
     /// Greeter mode (`crucible greeter`): the login panel and greetd worker; `None` normally.
@@ -532,6 +534,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             suppressed_keys: SuppressedKeys::new(),
             snip: None,
             reveal_holds: crate::reveal_hold::RevealHolds::default(),
+            login_ready: crate::login_ready::LoginReady::default(),
             pending_captures: Vec::new(),
             xwm: None,
             xdisplay: None,

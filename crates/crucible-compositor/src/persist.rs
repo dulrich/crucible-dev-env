@@ -301,8 +301,50 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if !restored && !saved.is_empty() {
             self.open_picker(PickerMode::Pick);
         }
+        // Plan 45: the login ready rule waits on what this step opened for the active workspaces
+        // (before the hidden warm overlay host spawns, which is never awaited).
+        let awaited = self.session_awaited_pids();
+        self.note_session_spawns(awaited);
         self.start_warm_overlay();
         self.write_session();
+        self.check_login_ready();
+    }
+
+    /// The pending spawns that land on a workspace active on some output, plus a launching
+    /// overlay (the cold-start picker): what the session's first frame waits for (plan 45).
+    fn session_awaited_pids(&self) -> Vec<u32> {
+        let world = &self.layout.world;
+        let active: Vec<(WorkspaceId, Vec<crucible_layout::PaneId>)> = world
+            .outputs()
+            .map(|(_, o)| {
+                let ws = o.active_workspace();
+                (
+                    ws,
+                    world.workspace(ws).map(|w| w.panes()).unwrap_or_default(),
+                )
+            })
+            .collect();
+        let mut pids: Vec<u32> = self
+            .persist
+            .placement
+            .pending
+            .iter()
+            .filter(|(_, p)| {
+                matches!(p.target, placement::Target::Overlay)
+                    || active
+                        .iter()
+                        .any(|(ws, panes)| p.target.lands_in(*ws, panes))
+            })
+            .map(|(pid, _)| *pid)
+            .collect();
+        pids.sort_unstable();
+        pids
+    }
+
+    /// Whether spawn `pid` still awaits its window: its placement is pending and the child has
+    /// not exited (a dead or failed spawn never blocks the ready rule).
+    pub(crate) fn spawn_awaits_window(&self, pid: u32) -> bool {
+        self.persist.placement.pending.contains_key(&pid) && self.persist.spawn.get(pid).is_some()
     }
 
     /// Reopens the workspaces named by the session record. `false` (cold start) when there is no
@@ -461,6 +503,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             debug!(?reaped, "reaped exited children");
         }
         self.warm_reaped(&reaped);
+        // A reaped session spawn no longer holds back the login ready rule (plan 45).
+        self.check_login_ready();
         // One `/proc` capture per tick feeds both the recovery set and the auto-save.
         let captured = self.tick_capture();
         self.refresh_recovery(&captured);
