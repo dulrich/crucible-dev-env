@@ -15,20 +15,25 @@
 //!
 //! `--exit` (only valid with `--now`, as CDE's `run-tui` sends it): when the command finishes, `resume`
 //! exits with the command's exit code instead of starting a shell, so the terminal window closes.
+//!
+//! History: when `$SHELL` is bash, each run of the command is first appended to the bash history file
+//! (`$HISTFILE`, else `~/.bash_history`), so the interactive shell that starts afterwards can recall it.
 
 use crucible_persist::ResumeWrapper;
 use rustix::stdio::stdin;
 use rustix::termios::{OptionalActions, Termios, tcgetattr, tcsetattr};
-use std::ffi::OsString;
-use std::io::{IsTerminal, Read, Write};
+use std::ffi::{OsStr, OsString};
+use std::fs::OpenOptions;
+use std::io::{IsTerminal, Read, Seek, SeekFrom, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use crate::cli::{Parsed, help_requested};
 use crate::tty::{RawGuard, install_noop_handler};
 
 /// Usage text for `crucible resume --help`.
-pub const USAGE: &str = "usage: crucible resume [--now [--exit] | --lost] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). With --now, --exit exits with the command's exit code instead of starting a shell afterwards (--exit without --now is a usage error). If the command exits abnormally (a crash signal or a nonzero exit code other than a Ctrl+C), a crash banner offers Enter to run it again or Ctrl+C for a shell (or to close the terminal with --exit). --lost (CDE's placeholder for a terminal whose window was lost when its terminal process died) adds a line to the banner saying so; Enter re-runs the command as usual, and with no command the shell starts at once. --lost excludes --now. Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload.\n";
+pub const USAGE: &str = "usage: crucible resume [--now [--exit] | --lost] --cwd <dir> [-- <command>]\n\nRestored-terminal banner used by CDE: change into <dir>, show the command that was running and\nwait. Enter runs it (via $SHELL -c) and then starts an interactive $SHELL; Ctrl+C or EOF starts\n$SHELL directly. The command is never run without Enter (or --now, which runs it immediately, as `run-in-terminal` does). With --now, --exit exits with the command's exit code instead of starting a shell afterwards (--exit without --now is a usage error). If the command exits abnormally (a crash signal or a nonzero exit code other than a Ctrl+C), a crash banner offers Enter to run it again or Ctrl+C for a shell (or to close the terminal with --exit). --lost (CDE's placeholder for a terminal whose window was lost when its terminal process died) adds a line to the banner saying so; Enter re-runs the command as usual, and with no command the shell starts at once. --lost excludes --now. Without a command the shell starts\nimmediately. The command is one argument (a shell string); everything after `--` is payload. When $SHELL is bash, each run of the command is first appended to the bash history file ($HISTFILE, else ~/.bash_history), so the shell that starts afterwards can recall it.\n";
 
 /// The banner shown before waiting (or before the immediate shell).
 #[must_use]
@@ -119,6 +124,7 @@ pub fn run(args: &[String]) -> i32 {
     let mut last = None;
     let saved_termios = tcgetattr(stdin()).ok();
     while run_it {
+        record_history(&shell, &cmd);
         last = run_command(&shell, &cmd);
         match last.map_or(Outcome::Clean, exit_outcome) {
             Outcome::Abnormal(label) => {
@@ -133,6 +139,93 @@ pub fn run(args: &[String]) -> i32 {
         return return_code(last);
     }
     exec_shell(&shell)
+}
+
+/// True when the basename of `shell` is exactly `bash`.
+#[must_use]
+pub fn is_bash(shell: &OsStr) -> bool {
+    Path::new(shell).file_name() == Some(OsStr::new("bash"))
+}
+
+/// The bash history file: `HISTFILE` when set and non-empty, else `$HOME/.bash_history` when `HOME`
+/// is set and non-empty, else `None`.
+#[must_use]
+pub fn history_path(histfile: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    match (histfile, home) {
+        (Some(h), _) if !h.is_empty() => Some(PathBuf::from(h)),
+        (_, Some(home)) if !home.is_empty() => Some(PathBuf::from(home).join(".bash_history")),
+        _ => None,
+    }
+}
+
+/// The command as a history entry, or `None` when it must be skipped: empty or whitespace-only,
+/// containing a newline or carriage return, or starting with a space.
+#[must_use]
+pub fn history_entry(cmd: &str) -> Option<&str> {
+    if cmd.trim().is_empty() || cmd.contains(['\n', '\r']) || cmd.starts_with(' ') {
+        None
+    } else {
+        Some(cmd)
+    }
+}
+
+/// True for bash's timestamp comment line: `#` and one or more ASCII digits.
+fn is_timestamp_line(line: &[u8]) -> bool {
+    line.len() > 1 && line[0] == b'#' && line[1..].iter().all(u8::is_ascii_digit)
+}
+
+/// Appends `entry` to the history file at `path` (created when missing). A file whose first line is
+/// a bash timestamp comment gets `#<now_epoch>` before the entry; a last line without a newline is
+/// terminated first. Only the first line and the last byte are read.
+///
+/// # Errors
+/// Any open, read or write error.
+pub fn append_history(path: &Path, entry: &str, now_epoch: u64) -> std::io::Result<()> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .append(true)
+        .create(true)
+        .open(path)?;
+    let len = file.metadata()?.len();
+    let mut out = String::new();
+    if len > 0 {
+        file.seek(SeekFrom::End(-1))?;
+        let mut last = [0u8; 1];
+        file.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            out.push('\n');
+        }
+        file.seek(SeekFrom::Start(0))?;
+        let mut head = Vec::new();
+        (&mut file).take(32).read_to_end(&mut head)?;
+        let first = head.split(|b| *b == b'\n').next().unwrap_or(&[]);
+        if is_timestamp_line(first) {
+            out.push_str(&format!("#{now_epoch}\n"));
+        }
+    }
+    out.push_str(entry);
+    out.push('\n');
+    file.write_all(out.as_bytes())
+}
+
+/// Before a run: when `shell` is bash, records the command in the bash history so the shell that
+/// starts afterwards can recall it. A failure is one stderr line and never stops the command.
+fn record_history(shell: &OsStr, cmd: &str) {
+    if !is_bash(shell) {
+        return;
+    }
+    let Some(entry) = history_entry(cmd) else {
+        return;
+    };
+    let Some(path) = history_path(std::env::var_os("HISTFILE"), std::env::var_os("HOME")) else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if let Err(e) = append_history(&path, entry, now) {
+        eprintln!("crucible resume: cannot write shell history: {e}");
+    }
 }
 
 /// Undoes what a TUI that died without cleaning up (e.g. SIGABRT) left behind: SGR attributes,
@@ -289,7 +382,92 @@ fn wait_for_choice() -> Wait {
 mod tests {
     use super::*;
     use crucible_persist::ResumeMode;
-    use std::path::PathBuf;
+
+    #[test]
+    fn is_bash_matches_basename_only() {
+        for (s, want) in [
+            ("/bin/bash", true),
+            ("/usr/bin/bash", true),
+            ("bash", true),
+            ("/bin/sh", false),
+            ("/usr/bin/zsh", false),
+            ("/opt/bashful", false),
+        ] {
+            assert_eq!(is_bash(OsStr::new(s)), want, "{s}");
+        }
+    }
+
+    #[test]
+    fn history_path_prefers_histfile_then_home() {
+        let o = |s: &str| Some(OsString::from(s));
+        assert_eq!(
+            history_path(o("/h/f"), o("/home")),
+            Some(PathBuf::from("/h/f"))
+        );
+        assert_eq!(
+            history_path(o(""), o("/home")),
+            Some(PathBuf::from("/home/.bash_history"))
+        );
+        assert_eq!(
+            history_path(None, o("/home")),
+            Some(PathBuf::from("/home/.bash_history"))
+        );
+        assert_eq!(history_path(None, o("")), None);
+        assert_eq!(history_path(None, None), None);
+    }
+
+    #[test]
+    fn history_entry_skips_unrecordable_commands() {
+        assert_eq!(history_entry("ls -l"), Some("ls -l"));
+        assert_eq!(history_entry("ls  "), Some("ls  "));
+        for bad in ["", "   ", "a\nb", "a\rb", " ls"] {
+            assert_eq!(history_entry(bad), None, "{bad:?}");
+        }
+    }
+
+    fn temp_hist(name: &str, content: Option<&str>) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("crucible-hist-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        if let Some(c) = content {
+            std::fs::write(&p, c).unwrap();
+        }
+        p
+    }
+
+    #[test]
+    fn append_history_new_and_plain_files() {
+        let p = temp_hist("new", None);
+        append_history(&p, "ls", 5).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "ls\n");
+        std::fs::remove_file(&p).unwrap();
+        let p = temp_hist("plain", Some("a\nb\n"));
+        append_history(&p, "ls", 5).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nb\nls\n");
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn append_history_terminates_unfinished_last_line() {
+        let p = temp_hist("nonl", Some("a\nb"));
+        append_history(&p, "ls", 5).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "a\nb\nls\n");
+        std::fs::remove_file(&p).unwrap();
+    }
+
+    #[test]
+    fn append_history_timestamped_file_gets_timestamp() {
+        let p = temp_hist("ts", Some("#1700000000\nls\n"));
+        append_history(&p, "pwd", 1_700_000_100).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            "#1700000000\nls\n#1700000100\npwd\n"
+        );
+        std::fs::remove_file(&p).unwrap();
+        let p = temp_hist("notts", Some("#comment\nls\n"));
+        append_history(&p, "pwd", 9).unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "#comment\nls\npwd\n");
+        std::fs::remove_file(&p).unwrap();
+    }
 
     fn v(a: &[&str]) -> Vec<String> {
         a.iter().map(|s| (*s).to_string()).collect()
