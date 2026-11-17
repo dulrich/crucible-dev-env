@@ -1,6 +1,6 @@
 # The CDE greeter
 
-`crucible greeter` is an optional graphical login screen for CDE. It runs under [greetd](https://sr.ht/~kennylevinsen/greetd/) as greetd's greeter user: the CDE compositor in kiosk mode, drawing its own login panel in the CDE look. Logging in on tty1 with `cde-session` stays supported and is still the default.
+`crucible greeter` is an optional graphical login screen for CDE. It runs under the `cde-login` daemon (which speaks the [greetd](https://sr.ht/~kennylevinsen/greetd/) greeter protocol) as the `_greetd` user: the CDE compositor in kiosk mode, drawing its own login panel in the CDE look. Logging in on tty1 with `cde-session` stays supported and is still the default.
 
 In greeter mode the compositor loads no workspaces, runs no autostart, uses none of the user's binds and saves no session. It never reads `$HOME` or `$XDG_CONFIG_HOME` (the greeter user cannot read the user's home anyway): everything it shows comes from the profile directory given with `--profile`.
 
@@ -76,35 +76,28 @@ That script answers a username with a password prompt, accepts the password, the
 
 ## Setup
 
-The greeter needs greetd, two directories and one config file. Nothing changes until you enable the greetd service; until then tty1 login keeps working.
+The login daemon is `cde-login`, which replaces greetd. It runs as root from `cde-login.service`, starts the greeter as `_greetd` on VT 7, and starts the user's session on VT 8 in graphics mode. It switches to the session only once CDE reports its first frame ready (no console, no empty frame), and on logout it returns to the greeter on VT 7. tty1 keeps its getty and stays a text-login fallback (`cde-session` autostarts only from a tty1 login). Keep the `greetd` package installed but disabled: it provides the `_greetd` account and is the rollback. Nothing changes until you enable `cde-login`.
 
-1. Install greetd (Debian): `sudo apt install greetd`.
-2. Create the directories. `/opt/cde` holds the binary greetd runs and is owned by you, so a deploy can fill it without sudo. `/var/lib/cde-greeter` holds the published profile; you write it and the greeter user (`_greetd`) reads it:
+1. Make `/opt/cde` root-owned: `sudo install -d -o root -g root -m 0755 /opt/cde`, or for an existing user-owned one `sudo chown -R root:root /opt/cde`.
+2. Create the profile directory (you write it, the greeter user `_greetd` reads it): `sudo install -d -o <you> -g _greetd -m 0750 /var/lib/cde-greeter`
+3. Run `scripts/deploy.sh <host>`. It stages the files in `~/.local/share/cde/opt-staging` and prints one `sudo sh -c '...'` command that installs them into `/opt/cde`; run it. Start CDE once (or reload its config) so the profile is published.
+4. Install the unit and the PAM files:
 
    ```sh
-   sudo install -d -o <you> -g <you> -m 0755 /opt/cde
-   sudo install -d -o <you> -g _greetd -m 0750 /var/lib/cde-greeter
+   sudo install -m 0644 dist/systemd/cde-login.service /etc/systemd/system/
+   sudo install -m 0644 dist/pam.d/cde-login dist/pam.d/cde-login-greeter /etc/pam.d/
+   sudo systemctl daemon-reload
    ```
 
-3. Write `/etc/greetd/config.toml`:
+5. Switch over. Both services claim `display-manager.service`, so disable greetd first: `sudo systemctl disable greetd`, then `sudo systemctl enable cde-login`, then reboot.
 
-   ```toml
-   [terminal]
-   vt = 7
+Migration from a greetd setup: `/etc/greetd/config.toml` is no longer read. The greeter command and the VTs are `cde-login` flags (see `cde-login --help`), and the defaults match the old config.
 
-   [default_session]
-   command = "/opt/cde/bin/crucible greeter --profile /var/lib/cde-greeter"
-   user = "_greetd"
-   ```
+Rollback: `sudo systemctl disable cde-login && sudo systemctl enable greetd`, then reboot.
 
-4. Populate `/opt/cde/bin/crucible` and `/opt/cde/share/backgrounds/stock.png`: re-run the deploy, or by hand `cargo build --release && install -D -m 755 target/release/crucible /opt/cde/bin/crucible`, then `scripts/render-backgrounds.sh && install -D -m 644 target/backgrounds/stock.png /opt/cde/share/backgrounds/stock.png`; and start CDE once (or reload its config) so the profile is published.
-5. Try it first without enabling: `sudo systemctl start greetd`, then `Ctrl+Alt+F7`; `sudo systemctl stop greetd` (or a reboot) backs out. When a login works, `sudo systemctl enable greetd`.
+Every release on a greeter host leaves one sudo install step: the deploy prints it and reports `sudo install pending` until the installed `--build` matches.
 
-Debian's `greetd.service` conflicts with `getty@tty7`, so `vt = 7` is the VT that works out of the box: greetd starts the greeter there and, after a login, starts the `greeter` block's `session` command (default `cde-session`) as you. tty1 keeps its normal getty and stays a text-login fallback (`cde-session` autostarts only from a tty1 login). To use `vt = 1` instead, also `sudo systemctl disable getty@tty1`, or the two fight over tty1.
-
-To turn the greeter off: `sudo systemctl disable greetd`, then reboot (with `vt = 1`, also `sudo systemctl enable getty@tty1`).
-
-Security note: `/opt/cde/bin/crucible` is writable by you and runs as `_greetd`, which is less privileged than you. That is acceptable on a single-user host; do not do this on a shared host, where anyone who can write `/opt/cde` could run code as `_greetd`.
+Security note: `/opt/cde` is root-owned because `cde-login` runs as root and the greeter runs as `_greetd`; a user-writable `/opt/cde` would be a path to root.
 
 ### What gets published, and when
 
@@ -114,4 +107,4 @@ On start and on every config reload, when the config has a `greeter` block and `
 - `stock`: the profile points at `/opt/cde/share/backgrounds/stock.png`, installed by the deploy where the greeter user can read it.
 - `user`: the session copies the first image of your wallpaper state (`${XDG_STATE_HOME:-~/.local/state}/wallpaper-rotate/current`, the first output's image in `separate` mode) to `/var/lib/cde-greeter/background.<ext>` and points the profile at the copy. It also keeps an empty `user-background` marker in the directory while the background is `user` (removed otherwise). With the marker present, `cde-wallpaper-rotate` refreshes the copy on every rotation. If a rotation changes the image's extension, the profile keeps the old path until the next config apply republishes it. Without a wallpaper state the greeter shows black.
 
-The deploy also installs the stock image to `${XDG_DATA_HOME:-~/.local/share}/cde/backgrounds/stock.png` on every host (the lock screen's `stock` background), and installs `/opt/cde` only on hosts where that directory exists and is writable; elsewhere it prints `deploy: <host>: /opt/cde absent or not writable; greeter install skipped`.
+The deploy also installs the stock image to `${XDG_DATA_HOME:-~/.local/share}/cde/backgrounds/stock.png` on every host (the lock screen's `stock` background). Where `/opt/cde` exists it never writes there: it stages the files in `~/.local/share/cde/opt-staging` and prints one `sudo sh -c '...'` command (or `deploy: <host>: /opt/cde is current`); elsewhere it prints `deploy: <host>: /opt/cde absent; greeter install skipped`.

@@ -1,0 +1,15 @@
+#%PAM-1.0
+# CDE login daemon: user sessions (modelled on Debian's /etc/pam.d/login and greetd).
+auth       optional   pam_faildelay.so  delay=2000000
+auth       requisite  pam_nologin.so
+@include common-auth
+@include common-account
+session [success=ok ignore=ignore module_unknown=ignore default=bad] pam_selinux.so close
+session    required   pam_loginuid.so
+session    optional   pam_keyinit.so force revoke
+session [success=ok ignore=ignore module_unknown=ignore default=bad] pam_selinux.so open
+session    required   pam_env.so readenv=1
+session    required   pam_env.so readenv=1 envfile=/etc/default/locale
+session    required   pam_limits.so
+@include common-session
+@include common-password

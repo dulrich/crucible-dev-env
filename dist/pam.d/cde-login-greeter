@@ -1,0 +1,8 @@
+#%PAM-1.0
+# CDE login daemon: the greeter session (no authentication; pam_systemd via common-session).
+auth       required   pam_permit.so
+@include common-account
+session    required   pam_loginuid.so
+session    optional   pam_keyinit.so force revoke
+session    required   pam_limits.so
+@include common-session

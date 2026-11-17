@@ -1,0 +1,10 @@
+{
+  "units": [
+    {
+      "path": "dist/systemd/cde-login.service",
+      "scope": "system",
+      "ceiling": 9.6,
+      "reason": "a display-manager root service whose sandbox would be inherited by every user session, so no sandboxing directive applies"
+    }
+  ]
+}

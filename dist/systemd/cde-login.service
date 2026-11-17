@@ -1,0 +1,20 @@
+[Unit]
+Description=CDE login daemon
+After=systemd-user-sessions.service plymouth-quit-wait.service
+After=getty@tty7.service getty@tty8.service
+Conflicts=getty@tty7.service getty@tty8.service
+StartLimitBurst=5
+StartLimitIntervalSec=30
+
+[Service]
+Type=idle
+ExecStart=/opt/cde/bin/cde-login
+IgnoreSIGPIPE=no
+SendSIGHUP=yes
+TimeoutStopSec=30s
+KeyringMode=shared
+Restart=always
+RestartSec=1
+
+[Install]
+Alias=display-manager.service
