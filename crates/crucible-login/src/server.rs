@@ -149,10 +149,12 @@ pub fn serve<B: Backend, V: Vt>(
     let mut pending: Option<u64> = None;
     'main: loop {
         let ready_fd = daemon.ready_fd();
+        let greeter_fd = daemon.greeter_ready_fd();
         let mut fds: Vec<libc::pollfd> = vec![
             pfd(sig.as_raw_fd()),
             pfd(listener.as_raw_fd()),
             pfd(ready_fd.unwrap_or(-1)),
+            pfd(greeter_fd.unwrap_or(-1)),
         ];
         fds.extend(clients.iter().map(|c| pfd(c.stream.as_raw_fd())));
         let timeout = daemon.next_deadline().map_or(-1, |d| {
@@ -207,21 +209,19 @@ pub fn serve<B: Backend, V: Vt>(
         if let Some(rfd) = ready_fd
             && fds[2].revents != 0
         {
-            let mut buf = [0u8; 64];
-            #[allow(unsafe_code)]
-            // SAFETY: read into a local buffer from the daemon-owned pipe.
-            let n = unsafe { libc::read(rfd, buf.as_mut_ptr().cast(), buf.len()) };
-            let eof = n <= 0;
-            if eof || ready_seen(&buf[..n as usize]) {
-                tracing::info!(
-                    "session ready ({})",
-                    if eof { "pipe closed" } else { "ready" }
-                );
-                replies.extend(daemon.on_ready());
+            let (got, eof) = read_pipe(rfd);
+            replies.extend(daemon.on_session_input(&got, eof, now));
+        }
+        if let Some(gfd) = greeter_fd
+            && fds[3].revents != 0
+        {
+            let (got, eof) = read_pipe(gfd);
+            if eof || ready_seen(&got) {
+                daemon.on_greeter_ready();
             }
         }
         let mut gone = Vec::new();
-        for (i, pf) in fds[3..].iter().enumerate() {
+        for (i, pf) in fds[4..].iter().enumerate() {
             if pf.revents == 0 {
                 continue;
             }
@@ -253,6 +253,18 @@ pub fn serve<B: Backend, V: Vt>(
     daemon.shutdown(STOP_GRACE);
     let _ = fs::remove_file(sock_path);
     Ok(())
+}
+
+/// One read from a daemon-owned pipe: the bytes and whether it hit EOF (or failed).
+fn read_pipe(fd: RawFd) -> (Vec<u8>, bool) {
+    let mut buf = [0u8; 64];
+    #[allow(unsafe_code)]
+    // SAFETY: read into a local buffer from a daemon-owned pipe.
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    match usize::try_from(n) {
+        Ok(n) if n > 0 => (buf[..n].to_vec(), false),
+        _ => (Vec::new(), true),
+    }
 }
 
 fn pfd(fd: RawFd) -> libc::pollfd {

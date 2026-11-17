@@ -18,6 +18,10 @@ use crate::vt::Vt;
 pub const READY_FD: RawFd = 3;
 /// The env var naming [`READY_FD`] in the session process.
 pub const READY_ENV: &str = "CDE_LOGIN_READY_FD";
+/// How long a logout waits for the new greeter's `ready` before switching anyway, and how long
+/// a `start_session` waits for the previous (handed-off) session to close. Fixed rather than
+/// `--ready-timeout` so it always fires before CDE's own 10 s hard exit.
+pub const LOGOUT_WAIT: Duration = Duration::from_secs(4);
 /// How many prompt-less steps a greeter conversation may take before it is refused.
 const GREETER_MAX_STEPS: usize = 8;
 
@@ -86,6 +90,11 @@ pub fn ready_seen(buf: &[u8]) -> bool {
     buf.windows(5).any(|w| w == b"ready")
 }
 
+/// Whether bytes read from the session channel carry CDE's logout notice (`quit\n`).
+pub fn quit_seen(buf: &[u8]) -> bool {
+    buf.windows(4).any(|w| w == b"quit")
+}
+
 struct Running<H: SessionHandle> {
     handle: H,
     child: H::Child,
@@ -104,7 +113,28 @@ enum UserSession<H: SessionHandle> {
         ready: OwnedFd,
         deadline: Instant,
     },
-    Running(Running<H>),
+    Running {
+        run: Running<H>,
+        /// The session channel, kept open after `ready` for the `quit` notice; `None` after EOF.
+        chan: Option<OwnedFd>,
+        /// The session sent `quit`: the greeter was brought up for it and the session is closing.
+        handed_off: bool,
+    },
+}
+
+/// A logout hand-off waiting for the new greeter to draw.
+struct Logout {
+    ready: OwnedFd,
+    deadline: Instant,
+}
+
+/// A `start_session` waiting for the handed-off session to close.
+struct Queued<H> {
+    handle: H,
+    account: String,
+    cmd: Vec<String>,
+    env: Vec<String>,
+    deadline: Instant,
 }
 
 /// The daemon state machine.
@@ -117,6 +147,8 @@ pub struct Daemon<B: Backend, V: Vt> {
     backoff: Backoff,
     auth: Option<Auth<B::Handle>>,
     session: UserSession<B::Handle>,
+    logout: Option<Logout>,
+    queued: Option<Queued<B::Handle>>,
 }
 
 fn error(description: impl Into<String>) -> Response {
@@ -170,6 +202,8 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             backoff: Backoff::default(),
             auth: None,
             session: UserSession::None,
+            logout: None,
+            queued: None,
         }
     }
 
@@ -186,7 +220,12 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
         r
     }
 
-    fn try_start_greeter(&mut self) -> Result<Running<B::Handle>, SeamError> {
+    /// Starts a greeter; `ready` (a ready pipe's write end) goes to [`READY_FD`] with
+    /// [`READY_ENV`] set, for a logout hand-off. Greeters started otherwise get none.
+    fn try_start_greeter(
+        &mut self,
+        ready: Option<OwnedFd>,
+    ) -> Result<Running<B::Handle>, SeamError> {
         let mut handle = self.backend.begin(Class::Greeter, &self.cfg.greeter_user)?;
         let mut account = None;
         for _ in 0..GREETER_MAX_STEPS {
@@ -217,12 +256,16 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
                 env: vec![sock.clone()],
             })
             .and_then(|()| {
+                let mut env = vec![sock];
+                if ready.is_some() {
+                    env.push(format!("{READY_ENV}={READY_FD}"));
+                }
                 handle.spawn(SpawnSpec {
                     account,
                     cmd: self.cfg.greeter_cmd.clone(),
-                    env: vec![sock],
+                    env,
                     vt: self.cfg.greeter_vt,
-                    extra_fd: None,
+                    extra_fd: ready.map(|w| (w, READY_FD)),
                 })
             });
         match res {
@@ -240,7 +283,7 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
 
     fn start_greeter(&mut self, now: Instant) {
         self.greeter_due = None;
-        match self.try_start_greeter() {
+        match self.try_start_greeter(None) {
             Ok(run) => {
                 tracing::info!("greeter started (pid {})", run.child.pid());
                 self.greeter = Some(run);
@@ -269,12 +312,36 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
         self.greeter_due
     }
 
-    /// The ready pipe's read end while a session is starting.
+    /// Whether the session sent `quit` and is closing behind a new greeter.
+    pub fn handed_off(&self) -> bool {
+        matches!(
+            self.session,
+            UserSession::Running {
+                handed_off: true,
+                ..
+            }
+        )
+    }
+
+    /// Whether a session blocks a new login conversation: starting, or running without a
+    /// logout hand-off.
+    fn session_blocks(&self) -> bool {
+        self.session_active() && !self.handed_off()
+    }
+
+    /// The session channel's read end: the ready pipe while a session starts, then (until EOF)
+    /// the same pipe carrying the `quit` notice.
     pub fn ready_fd(&self) -> Option<RawFd> {
         match &self.session {
             UserSession::Starting { ready, .. } => Some(ready.as_raw_fd()),
-            _ => None,
+            UserSession::Running { chan, .. } => chan.as_ref().map(AsRawFd::as_raw_fd),
+            UserSession::None => None,
         }
+    }
+
+    /// The logout greeter's ready pipe while a hand-off waits for it.
+    pub fn greeter_ready_fd(&self) -> Option<RawFd> {
+        self.logout.as_ref().map(|l| l.ready.as_raw_fd())
     }
 
     /// The earliest timer the poll loop must wake for.
@@ -283,9 +350,106 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             UserSession::Starting { deadline, .. } => Some(*deadline),
             _ => None,
         };
-        match (ready, self.greeter_due) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        [
+            ready,
+            self.greeter_due,
+            self.logout.as_ref().map(|l| l.deadline),
+            self.queued.as_ref().map(|q| q.deadline),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Bytes (or EOF) from the session channel. Before ready, `ready` or EOF means ready (as
+    /// does a `quit` that arrives first); after ready, `quit` starts the logout hand-off and EOF
+    /// retires the channel. Returns the deferred `start_session` reply when it became ready.
+    pub fn on_session_input(&mut self, buf: &[u8], eof: bool, now: Instant) -> Option<Response> {
+        let quit = quit_seen(buf);
+        let mut reply = None;
+        if matches!(self.session, UserSession::Starting { .. }) && (eof || quit || ready_seen(buf))
+        {
+            tracing::info!(
+                "session ready ({})",
+                if eof && !ready_seen(buf) {
+                    "pipe closed"
+                } else {
+                    "ready"
+                }
+            );
+            reply = self.on_ready();
+        }
+        if quit {
+            self.on_quit(now);
+        }
+        if eof && let UserSession::Running { chan, .. } = &mut self.session {
+            *chan = None;
+        }
+        reply
+    }
+
+    /// The session's `quit` notice: bring the greeter up in the background with its own ready
+    /// pipe; [`Daemon::on_greeter_ready`], the [`LOGOUT_WAIT`] fallback or the greeter's exit
+    /// then switch to it.
+    pub fn on_quit(&mut self, now: Instant) {
+        let UserSession::Running { handed_off, .. } = &mut self.session else {
+            return;
+        };
+        if *handed_off {
+            return;
+        }
+        *handed_off = true;
+        tracing::info!("logout: quit notice");
+        if self.greeter.is_some() {
+            self.switch_to_greeter();
+            return;
+        }
+        self.greeter_due = None;
+        let started = make_pipe()
+            .map_err(|e| SeamError::Other(format!("pipe: {e}")))
+            .and_then(|(r, w)| self.try_start_greeter(Some(w)).map(|run| (run, r)));
+        match started {
+            Ok((run, ready)) => {
+                tracing::info!("logout: greeter started (pid {})", run.child.pid());
+                self.greeter = Some(run);
+                self.logout = Some(Logout {
+                    ready,
+                    deadline: now + LOGOUT_WAIT,
+                });
+            }
+            Err(e) => {
+                let delay = self.backoff.on_failure(Duration::ZERO);
+                tracing::error!("logout: greeter start failed: {e}; retrying in {delay:?}");
+                self.greeter_due = Some(now + delay);
+                self.switch_to_greeter();
+            }
+        }
+    }
+
+    /// The logout greeter signalled `ready` (or closed its pipe).
+    pub fn on_greeter_ready(&mut self) {
+        if self.logout.is_some() {
+            tracing::info!("logout: greeter ready");
+            self.finish_logout();
+        }
+    }
+
+    fn finish_logout(&mut self) {
+        if self.logout.take().is_some() {
+            self.switch_to_greeter();
+        }
+    }
+
+    fn switch_to_greeter(&mut self) {
+        let vt = self.cfg.greeter_vt;
+        if self.activate(vt).is_ok() {
+            tracing::info!("logout: switched to VT {vt}");
+        }
+    }
+
+    fn drop_queued(&mut self) {
+        if let Some(q) = self.queued.take() {
+            close_handle(q.handle, "queued session");
         }
     }
 
@@ -314,7 +478,7 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
     }
 
     fn create_session(&mut self, username: &str) -> Response {
-        if self.session_active() {
+        if self.session_blocks() || self.queued.is_some() {
             return error("a session is already active");
         }
         self.cancel_auth();
@@ -367,10 +531,10 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
         env: Vec<String>,
         now: Instant,
     ) -> Option<Response> {
-        if self.session_active() {
+        if self.session_blocks() || self.queued.is_some() {
             return Some(error("a session is already active"));
         }
-        let (mut handle, account) = match self.auth.take() {
+        let (handle, account) = match self.auth.take() {
             Some(Auth::Authenticated(h, a)) => (h, a),
             Some(pending @ Auth::Pending(_)) => {
                 self.auth = Some(pending);
@@ -378,6 +542,29 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             }
             None => return Some(error("no session under configuration")),
         };
+        if self.handed_off() {
+            // Only one user session at a time: wait (bounded) for the old one to close.
+            tracing::info!("start_session: waiting for the previous session to close");
+            self.queued = Some(Queued {
+                handle,
+                account,
+                cmd,
+                env,
+                deadline: now + LOGOUT_WAIT,
+            });
+            return None;
+        }
+        self.open_session(handle, account, cmd, env, now)
+    }
+
+    fn open_session(
+        &mut self,
+        mut handle: B::Handle,
+        account: String,
+        cmd: Vec<String>,
+        env: Vec<String>,
+        now: Instant,
+    ) -> Option<Response> {
         let vt = self.cfg.session_vt;
         let res = (|| {
             handle.open(&OpenSpec {
@@ -428,12 +615,16 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
     /// The session signalled `ready` (or closed the pipe, or timed out): switch to its VT and
     /// only then reply `success`.
     pub fn on_ready(&mut self) -> Option<Response> {
-        let UserSession::Starting { run, .. } =
+        let UserSession::Starting { run, ready, .. } =
             std::mem::replace(&mut self.session, UserSession::None)
         else {
             return None;
         };
-        self.session = UserSession::Running(run);
+        self.session = UserSession::Running {
+            run,
+            chan: Some(ready),
+            handed_off: false,
+        };
         match self.activate(self.cfg.session_vt) {
             Ok(()) => Some(Response::Success),
             Err(e) => Some(error(format!("could not switch to the session VT: {e}"))),
@@ -452,6 +643,15 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             );
             reply = self.on_ready();
         }
+        if self.logout.as_ref().is_some_and(|l| now >= l.deadline) {
+            tracing::warn!("logout: fallback (greeter not ready after {LOGOUT_WAIT:?})");
+            self.finish_logout();
+        }
+        if self.queued.as_ref().is_some_and(|q| now >= q.deadline) {
+            tracing::error!("start_session: the previous session did not close in time");
+            self.drop_queued();
+            reply = Some(error("the previous session did not close in time"));
+        }
         if self.greeter_due.is_some_and(|d| now >= d) && self.greeter.is_none() {
             self.start_greeter(now);
         }
@@ -463,7 +663,7 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
     pub fn poll_children(&mut self, now: Instant) -> Option<Response> {
         let mut reply = None;
         let session_exit = match &mut self.session {
-            UserSession::Starting { run, .. } | UserSession::Running(run) => {
+            UserSession::Starting { run, .. } | UserSession::Running { run, .. } => {
                 reap(&mut run.child, "session")
             }
             UserSession::None => None,
@@ -474,7 +674,20 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
                     close_handle(run.handle, "user session");
                     reply = Some(error("the session exited before it was ready"));
                 }
-                UserSession::Running(run) => {
+                UserSession::Running {
+                    run,
+                    handed_off: true,
+                    ..
+                } => {
+                    // The greeter was brought up at `quit`; it (or its fallback) owns the switch.
+                    close_handle(run.handle, "user session");
+                    tracing::info!("logout: session closed");
+                    self.backoff.reset();
+                    if let Some(q) = self.queued.take() {
+                        reply = self.open_session(q.handle, q.account, q.cmd, q.env, now);
+                    }
+                }
+                UserSession::Running { run, .. } => {
                     close_handle(run.handle, "user session");
                     tracing::info!("session ended; restarting the greeter");
                     self.backoff.reset();
@@ -497,7 +710,12 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             let lived = now.saturating_duration_since(g.started);
             close_handle(g.handle, "greeter session");
             self.cancel_auth();
-            if !self.session_active() {
+            self.drop_queued();
+            if self.logout.is_some() {
+                tracing::warn!("logout: greeter exited before ready");
+                self.finish_logout();
+            }
+            if !self.session_blocks() {
                 let delay = self.backoff.on_failure(lived);
                 tracing::warn!("greeter exited; restarting in {delay:?}");
                 self.greeter_due = Some(now + delay);
@@ -510,9 +728,11 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
     /// every open session.
     pub fn shutdown(&mut self, grace: Duration) {
         self.cancel_auth();
+        self.drop_queued();
+        self.logout = None;
         let mut runs: Vec<Running<B::Handle>> = Vec::new();
         match std::mem::replace(&mut self.session, UserSession::None) {
-            UserSession::Starting { run, .. } | UserSession::Running(run) => runs.push(run),
+            UserSession::Starting { run, .. } | UserSession::Running { run, .. } => runs.push(run),
             UserSession::None => {}
         }
         runs.extend(self.greeter.take());

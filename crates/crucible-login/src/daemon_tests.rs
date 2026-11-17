@@ -550,3 +550,187 @@ fn stub_backend_reports_wp3() {
     let err = b.begin(Class::User, "x").unwrap_err();
     assert!(err.to_string().contains("WP-3"));
 }
+
+/// Logs `alice` in, makes the session ready, lets the boot greeter exit (as a real greeter does
+/// after `start_session`) and marks the log.
+fn running_session(d: &mut Daemon<FakeBackend, FakeVt>, s: &S, now: Instant) {
+    login(d, "alice", now);
+    assert_eq!(
+        d.on_session_input(b"ready\n", false, now),
+        Some(Response::Success)
+    );
+    exit(s, "_greetd");
+    d.poll_children(now);
+    assert!(!d.greeter_running());
+    mark(s, "running");
+}
+
+fn count_after(l: &[String], m: &str, prefix: &str) -> usize {
+    l[pos(l, m)..]
+        .iter()
+        .filter(|e| e.starts_with(prefix))
+        .count()
+}
+
+#[test]
+fn quit_rule() {
+    assert!(quit_seen(b"quit\n"));
+    assert!(quit_seen(b"ready\nquit\n"));
+    assert!(!quit_seen(b"ready\n"));
+}
+
+#[test]
+fn logout_quit_greeter_ready_switch_then_leader_exit() {
+    let (mut d, s, now) = setup(&[]);
+    running_session(&mut d, &s, now);
+    assert!(d.ready_fd().is_some(), "channel stays open after ready");
+    assert_eq!(d.on_session_input(b"quit\n", false, now), None);
+    assert!(d.greeter_running() && d.handed_off());
+    assert!(d.greeter_ready_fd().is_some());
+    let l = log(&s);
+    assert!(
+        l.iter().any(|e| e.starts_with("spawn _greetd greeter")
+            && e.contains("CDE_LOGIN_READY_FD=3")
+            && e.ends_with("fd=Some(3)")),
+        "{l:#?}"
+    );
+    assert_eq!(count_after(&l, "running", "activate"), 0, "no switch yet");
+    d.on_greeter_ready();
+    assert!(d.greeter_ready_fd().is_none());
+    mark(&s, "switched");
+    exit(&s, "alice");
+    assert_eq!(d.poll_children(now), None);
+    assert!(!d.session_active() && d.greeter_running());
+    let l = log(&s);
+    assert_eq!(count_after(&l, "running", "activate vt7"), 1);
+    assert_eq!(
+        count_after(&l, "switched", "activate"),
+        0,
+        "no second switch"
+    );
+    assert_eq!(count_after(&l, "switched", "spawn"), 0, "no second greeter");
+    assert_eq!(count_after(&l, "running", "spawn _greetd"), 1);
+    let sh = s.borrow();
+    assert_eq!(
+        sh.opened - sh.closed_open,
+        1,
+        "only the new greeter is open"
+    );
+}
+
+#[test]
+fn ready_and_quit_in_one_read() {
+    let (mut d, s, now) = setup(&[]);
+    login(&mut d, "alice", now);
+    mark(&s, "running");
+    assert_eq!(
+        d.on_session_input(b"ready\nquit\n", false, now),
+        Some(Response::Success)
+    );
+    // The boot greeter is still up (already drawn), so the hand-off switches to it at once.
+    assert!(d.handed_off() && d.greeter_ready_fd().is_none());
+    let l = log(&s);
+    assert!(pos(&l, "running") < pos(&l, "activate vt8"));
+    assert!(pos(&l, "activate vt8") < pos(&l, "activate vt7"));
+    assert_eq!(count_after(&l, "running", "spawn _greetd"), 0);
+}
+
+#[test]
+fn logout_greeter_dies_before_ready() {
+    let (mut d, s, now) = setup(&[]);
+    running_session(&mut d, &s, now);
+    d.on_session_input(b"quit\n", false, now);
+    exit(&s, "_greetd");
+    d.poll_children(now);
+    assert!(!d.greeter_running() && d.greeter_ready_fd().is_none());
+    assert!(d.greeter_due().is_some(), "today's restart path");
+    assert_eq!(count_after(&log(&s), "running", "activate vt7"), 1);
+    exit(&s, "alice");
+    d.poll_children(now);
+    let due = d.greeter_due().unwrap();
+    d.on_tick(due);
+    assert!(d.greeter_running());
+}
+
+#[test]
+fn logout_greeter_start_failure_switches_anyway() {
+    let (mut d, s, now) = setup(&[]);
+    running_session(&mut d, &s, now);
+    s.borrow_mut().fail_greeter = 1;
+    d.on_session_input(b"quit\n", false, now);
+    assert!(!d.greeter_running() && d.greeter_due().is_some());
+    assert_eq!(count_after(&log(&s), "running", "activate vt7"), 1);
+}
+
+#[test]
+fn logout_fallback_after_fixed_wait() {
+    let (mut d, s, now) = setup(&[]);
+    running_session(&mut d, &s, now);
+    d.on_session_input(b"quit\n", false, now);
+    assert_eq!(d.next_deadline(), Some(now + LOGOUT_WAIT));
+    d.on_tick(now + LOGOUT_WAIT - Duration::from_millis(1));
+    assert_eq!(count_after(&log(&s), "running", "activate"), 0);
+    d.on_tick(now + LOGOUT_WAIT);
+    assert_eq!(count_after(&log(&s), "running", "activate vt7"), 1);
+    assert!(d.greeter_ready_fd().is_none() && d.greeter_running());
+}
+
+#[test]
+fn crash_without_quit_keeps_todays_path() {
+    let (mut d, s, now) = setup(&[]);
+    running_session(&mut d, &s, now);
+    exit(&s, "alice");
+    d.poll_children(now);
+    let l = log(&s);
+    assert!(d.greeter_running());
+    assert!(pos(&l, "running") < pos(&l, "spawn _greetd"));
+    assert!(pos(&l, "spawn _greetd") < pos(&l, "activate vt7"));
+}
+
+#[test]
+fn eof_after_ready_retires_the_channel() {
+    let (mut d, s, now) = setup(&[]);
+    running_session(&mut d, &s, now);
+    assert_eq!(d.on_session_input(b"", true, now), None);
+    assert!(d.ready_fd().is_none() && !d.handed_off() && !d.greeter_running());
+    assert_eq!(log(&s).last().map(String::as_str), Some("running"));
+}
+
+#[test]
+fn login_while_old_session_closes_waits_then_opens() {
+    let (mut d, s, now) = setup(&[]);
+    running_session(&mut d, &s, now);
+    d.on_session_input(b"quit\n", false, now);
+    d.on_greeter_ready();
+    login(&mut d, "bob", now);
+    assert!(
+        !log(&s).iter().any(|e| e.starts_with("open user bob")),
+        "session VT not opened while alice is open"
+    );
+    exit(&s, "alice");
+    assert_eq!(d.poll_children(now), None, "now starting");
+    let l = log(&s);
+    assert!(pos(&l, "close") < pos(&l, "open user bob vt8"));
+    assert_eq!(
+        d.on_session_input(b"ready\n", false, now),
+        Some(Response::Success)
+    );
+    assert!(!d.handed_off() && d.session_active());
+}
+
+#[test]
+fn queued_start_times_out() {
+    let (mut d, s, now) = setup(&[]);
+    running_session(&mut d, &s, now);
+    d.on_session_input(b"quit\n", false, now);
+    d.on_greeter_ready();
+    login(&mut d, "bob", now);
+    assert!(matches!(
+        d.on_tick(now + LOGOUT_WAIT),
+        Some(Response::Error { .. })
+    ));
+    exit(&s, "alice");
+    d.poll_children(now);
+    assert!(!d.session_active());
+    assert!(!log(&s).iter().any(|e| e.starts_with("open user bob")));
+}
