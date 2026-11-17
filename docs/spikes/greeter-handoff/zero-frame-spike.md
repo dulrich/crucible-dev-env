@@ -57,3 +57,14 @@ After the cutover (plan 45 WP-6; greetd disabled, `cde-login` enabled, `/opt/cde
 - **User-confirmed:** wrong password and retry, `Ctrl+Alt+F2` and back to F8, logout returns to the greeter.
 - **Remaining:** on logout, console text shows on VT 8 between CDE's exit and the daemon's switch to the restarted greeter (journal: session exit 12:29:09.539, greeter started 09.579). This is the reverse of the login problem and is out of scope for plan 45.
 - A logged-out session can stay `closing` on tty8 when user processes outlive it (the `cterm daemon`), which is ordinary logind behaviour, the same under greetd.
+
+## Result (2026-11-17): 0.7.8 — clean logout (plan 46)
+
+0.7.8 (`43ecf0b`, tag v0.7.8) was installed in `~/.local/bin` and `/opt/cde` on host-b, and `cde-login` was restarted at 13:08. The user confirmed every UI check: no console text on logout, kill fallback, immediate re-login, and a tty1 `cde-session` start. Read back from `journalctl -b -u cde-login`, `/tmp/cde/cde-*.log` and `/tmp/cde-greeter/greeter-*.log`:
+
+- **`Super+Shift+Q` (13:09:49):** CDE logs `logout: quit notice sent` at 49.828, and the daemon logs `logout: quit notice` 0.1 ms later. The greeter (pid 10795) is started at 49.863 and logs `startup: background start`. It logs `startup: login ready` with `greeter=true`, `signalled=true`, `timed_out=false` and `elapsed_ms=906` (panel prepared, background committed). The daemon logs `logout: greeter ready` and `logout: switched to VT 7` at 50.777, the greeter logs `resuming session` at 50.781, and CDE logs `pausing session` / `logout: paused, exiting` at 50.966. Then the daemon logs `session (pid 10679) exited: Code(0)` and `logout: session closed` at 51.000. VT 8 never comes to the front without a drawn compositor, and no second greeter starts.
+- **Second notice quit (13:10:24):** the same sequence. The greeter is ready after 789 ms, the switch to VT 7 comes at 25.069, CDE pauses and exits at 25.310, and the session closes at 25.349. No fallback fired on either logout.
+- **Re-login straight after logout:** 13:10:11 and 13:10:41. The old session had already closed both times, so `start_session` was not queued, and the session was ready about 1.1 s after start.
+- **Kill without a notice (13:11:07):** the session exits with `Code(143)`, the daemon logs `session ended; restarting the greeter` (today's path), and the greeter is started at 07.361.
+- **tty1:** `cde-session` on `/dev/tty1` at 13:11:53 logs `startup: foreground start`. `login ready` is `signalled=false` (no channel), as expected.
+- The queued-login and 4 s-fallback paths were exercised only by unit tests (`login_while_old_session_closes_waits_then_opens`, `queued_start_times_out`, `logout_fallback_after_fixed_wait`); neither happened on hardware.
