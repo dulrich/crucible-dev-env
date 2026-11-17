@@ -531,6 +531,13 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
         error!("Failed to assign libinput seat");
         return 1;
     }
+    // Plan 45: on a background start logind will not hand out live evdev fds for the inactive
+    // session, so the devices just opened are dead. Suspend now so the first `ActivateSession`'s
+    // `resume()` re-opens them (resume on a never-suspended context is a no-op).
+    if state.backend_data.background_start {
+        libinput_context.suspend();
+        info!("startup: libinput suspended until session activation");
+    }
     let libinput_backend = LibinputInputBackend::new(libinput_context.clone());
 
     event_loop
