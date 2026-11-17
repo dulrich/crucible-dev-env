@@ -35,3 +35,7 @@ Readings: greetd kills the greeter's process group, but not a `setsid` child, wh
 - The text on the restored console is `cde-session`'s three `== …` header lines, which it tees to the terminal after greetd's clear.
 
 Conclusion: with stock greetd a zero-frame hand-off is not reachable. Keeping logind's controller alive is possible without root (the rev-5 approach), but greetd's text switch comes after it. The next step is a bounded own-vs-depend review of greetd (user, 2026-11-17).
+
+## Follow-up (2026-11-17): CDE started on a background VT
+
+For the owned-login-daemon design (session started on a second VT while the greeter's VT stays in front), the user started `cde-session` on VT 2 and switched to the greeter's VT 7 before it began. CDE 0.7.4 is **not** ready for a background start. With the session inactive it logged `Unable to become drm master`, its 300 ms adoption timeout still fired, every format's mode-set test failed (`Error testing state`), the output was dropped, and disabling the unadopted CRTC failed (`Permission denied`). At the switch to VT 2 it logged `resuming session` with no output, never re-adopted, and the display and input were wedged until it was killed. Required before the daemon: no adoption while the session is paused, adoption on activation with an already-ready first frame, and a readiness signal to the daemon. Graphics-to-graphics VT switches between two *running* sessions were clean in both directions (greetd dependency review, 2026-11-17).
