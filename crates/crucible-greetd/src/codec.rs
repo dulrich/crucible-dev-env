@@ -24,7 +24,7 @@ pub enum CodecError {
 }
 
 /// A string that never appears in `Debug` output (passwords and other secret answers).
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Secret(String);
 
@@ -47,7 +47,7 @@ impl fmt::Debug for Secret {
 }
 
 /// A request to greetd.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
     /// Begin authenticating `username`.
@@ -72,7 +72,7 @@ pub enum Request {
 }
 
 /// Why greetd refused a request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorType {
     /// Authentication failed (wrong credentials).
@@ -82,7 +82,7 @@ pub enum ErrorType {
 }
 
 /// The kind of an auth message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMessageType {
     /// A prompt whose answer may be echoed.
@@ -96,7 +96,7 @@ pub enum AuthMessageType {
 }
 
 /// A reply from greetd.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
     /// The request succeeded.
@@ -162,6 +162,34 @@ mod tests {
             a.write_all(body).unwrap();
             let err = read_message::<_, Response>(&mut b).unwrap_err();
             assert!(matches!(err, CodecError::Malformed(_)));
+        }
+    }
+
+    #[test]
+    fn wire_bytes_round_trip_unchanged() {
+        let reqs = [
+            r#"{"type":"create_session","username":"alice"}"#,
+            r#"{"type":"post_auth_message_response","response":"pw"}"#,
+            r#"{"type":"post_auth_message_response","response":null}"#,
+            r#"{"type":"start_session","cmd":["cde-session"],"env":["A=1"]}"#,
+            r#"{"type":"cancel_session"}"#,
+        ];
+        for json in reqs {
+            let req: Request = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&req).unwrap(), json);
+        }
+        let resps = [
+            r#"{"type":"success"}"#,
+            r#"{"type":"error","error_type":"auth_error","description":"bad"}"#,
+            r#"{"type":"error","error_type":"error","description":"x"}"#,
+            r#"{"type":"auth_message","auth_message_type":"secret","auth_message":"Password: "}"#,
+            r#"{"type":"auth_message","auth_message_type":"visible","auth_message":"v"}"#,
+            r#"{"type":"auth_message","auth_message_type":"info","auth_message":"i"}"#,
+            r#"{"type":"auth_message","auth_message_type":"error","auth_message":"e"}"#,
+        ];
+        for json in resps {
+            let resp: Response = serde_json::from_str(json).unwrap();
+            assert_eq!(serde_json::to_string(&resp).unwrap(), json);
         }
     }
 

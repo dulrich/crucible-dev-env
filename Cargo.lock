@@ -374,6 +374,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "crucible-login"
+version = "0.7.4"
+dependencies = [
+ "crucible-greetd",
+ "libc",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "crucible-persist"
 version = "0.7.4"
 dependencies = [

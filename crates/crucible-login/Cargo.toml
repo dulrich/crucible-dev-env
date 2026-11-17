@@ -1,0 +1,22 @@
+[package]
+name = "crucible-login"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "cde-login: the CDE login daemon (greetd-protocol server, VT handling, session lifecycle)"
+
+[[bin]]
+name = "cde-login"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+crucible-greetd = { path = "../crucible-greetd" }
+libc.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
