@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crucible_login::daemon::{Config, Daemon};
-use crucible_login::seam::StubBackend;
 use crucible_login::server;
 use crucible_login::vt::RealVt;
+use crucible_login::worker::PamBackend;
 
 const USAGE: &str = "\
 cde-login - the CDE login daemon (runs as root; replaces greetd)
@@ -80,7 +80,7 @@ fn run(args: Args) -> Result<(), String> {
         .map_err(|e| format!("greeter socket in {}: {e}", args.runtime_dir.display()))?;
     cfg.sock_path = path.to_string_lossy().into_owned();
     tracing::info!("cde-login listening on {}", cfg.sock_path);
-    let daemon = Daemon::new(StubBackend, RealVt, cfg);
+    let daemon = Daemon::new(PamBackend, RealVt, cfg);
     server::serve(daemon, listener, &path, uid).map_err(|e| format!("serve: {e}"))
 }
 

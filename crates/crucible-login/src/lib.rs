@@ -3,6 +3,8 @@
 //! switches VTs only once the session reports its first frame ready.
 
 pub mod daemon;
+pub mod pam;
 pub mod seam;
 pub mod server;
 pub mod vt;
+pub mod worker;
