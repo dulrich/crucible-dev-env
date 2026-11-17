@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.6 — 2026-11-17
+
+### Fixed
+
+- `cde-login` failed to start the greeter: it ran every command through the account's login shell, and the greeter account `_greetd` has `/usr/sbin/nologin`, which rejected the command (`unrecognized option --profile`). A shell that `/etc/shells` does not list is replaced by `/bin/sh`, as greetd does.
+
 ## 0.7.5 — 2026-11-17
 
 ### Added
