@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.7 — 2026-11-17
+
+### Fixed
+
+- After a `cde-login` login, CDE took no keyboard or pointer input. On a start on a background VT, CDE opened the input devices while its session was inactive, which gave it no live devices, and never reopened them at activation. It now reopens them when the session first becomes active.
+
 ## 0.7.6 — 2026-11-17
 
 ### Fixed
