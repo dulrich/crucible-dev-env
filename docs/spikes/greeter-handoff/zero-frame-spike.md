@@ -49,3 +49,11 @@ After the cutover (plan 45 WP-6; greetd disabled, `cde-login` enabled, `/opt/cde
 - **Ready inputs:** `outputs: 1, outputs_with_background: 1, awaited_spawns: 0, windows_without_buffer: 0`. This login was a **cold start** (`no workspace of the last session is saved`), so readiness meant wallpaper plus picker; the restore path with spawned windows was not exercised.
 - **logind:** session 4: `Service=cde-login`, `Class=user`, `Type=wayland`, `TTY=tty8` (PAM_TTY in the `ttyN` form was accepted), `VTNr=8`, `Active=yes`, `State=active`; the foreground VT is tty8. The `VT_ACTIVATE` switch is enough; no logind `ActivateSession` fallback was needed.
 - While paused, CDE logged `Unable to become drm master, assuming unprivileged mode` (expected) and read CRTC 47 still active on the greeter's fb 120. The adoption commit put its own fb 114 on it.
+
+## Result (2026-11-17): 0.7.7 — input, restore and the remaining checks
+
+- **0.7.6 took no input** after a `cde-login` login. Its compositor held 0 `/dev/input` fds (host-a's foreground start holds 10): libinput bound the seat while the session was inactive, and resume on activation was a no-op on a never-suspended context. 0.7.7 (`d5a319c`) suspends libinput at a background start. With 0.7.7, libinput reports its devices after activation, and the user confirmed keyboard and pointer work.
+- **Restore readiness:** the 12:29 and 12:30 logins logged `last session restored`. The restored cterm (pid 4402) mapped 9 ms after spawn and had a buffer before the ready check, so `login ready` at 1102 ms had `awaited_spawns: 0, windows_without_buffer: 0`, and the restored window is in the first frame.
+- **User-confirmed:** wrong password and retry, `Ctrl+Alt+F2` and back to F8, logout returns to the greeter.
+- **Remaining:** on logout, console text shows on VT 8 between CDE's exit and the daemon's switch to the restarted greeter (journal: session exit 12:29:09.539, greeter started 09.579). This is the reverse of the login problem and is out of scope for plan 45.
+- A logged-out session can stay `closing` on tty8 when user processes outlive it (the `cterm daemon`), which is ordinary logind behaviour, the same under greetd.
