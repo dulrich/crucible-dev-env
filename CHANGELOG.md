@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.8 — 2026-11-17
+
+### Fixed
+
+- Logging out of a `cde-login` session showed console text between CDE and the greeter. CDE now tells `cde-login` when you quit and keeps its last frame on screen. The daemon brings the greeter up on VT 7 in the background and switches once the greeter has drawn (4 s fallback), and CDE then exits on its background VT. A login made while the old session is still closing waits for it to close before VT 8 opens. A CDE crash or kill still returns to the greeter as before.
+
 ## 0.7.7 — 2026-11-17
 
 ### Fixed
