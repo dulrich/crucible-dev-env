@@ -269,8 +269,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             warn!(%err, "invalid set-layout binds in the greeter profile; using the defaults");
         }
         self.bindings = bindings;
-        self.header_text =
-            crate::text::TextRenderer::load(None, crucible_config::DEFAULT_HEADER_FONT);
+        self.header_text = crate::text::HeaderFonts::new(crate::text::TextRenderer::load(
+            None,
+            crucible_config::DEFAULT_HEADER_FONT,
+        ));
         self.config = config;
         self.start_ipc();
         // Greeter mode skips `start_persistence`, which is what arms the idle timer; arm only it

@@ -200,12 +200,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         // Load lazily (also on the first apply, when the header equals the default): only when
         // the strip can ever show and the font spec differs from what is loaded.
-        if config.header.mode != crucible_config::HeaderMode::Off
-            && self.header.font_loaded.as_deref() != Some(config.header.font.as_str())
-        {
-            self.header_text =
-                crate::text::TextRenderer::load(config.header.font_path(), &config.header.font);
-            self.header.font_loaded = Some(config.header.font.clone());
+        if config.header.mode != crucible_config::HeaderMode::Off {
+            // The bold face is wanted only for `active "text-bold"`; it is (re)loaded with the
+            // regular one when the font or that wish changed, and dropped when no longer wanted.
+            let want_bold = config.header.active == crucible_config::HeaderActive::TextBold;
+            let key = (config.header.font.clone(), want_bold);
+            if self.header.font_loaded.as_ref() != Some(&key) {
+                self.header_text = crate::text::HeaderFonts::load(
+                    config.header.font_path(),
+                    &config.header.font,
+                    want_bold,
+                );
+                self.header.font_loaded = Some(key);
+            }
         }
         if delta.keyboard {
             self.reload_keyboard_layouts(&config);

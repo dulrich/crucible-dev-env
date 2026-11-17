@@ -172,6 +172,73 @@ pub struct TextBuffer {
     pub logical: Size<i32, Logical>,
 }
 
+/// The header's faces: the regular one plus, for `active "text-bold"`, a bold one. One value
+/// flows through the frame plumbing so live frames and captures use the same faces.
+#[derive(Debug)]
+pub struct HeaderFonts {
+    /// The regular face (also used for measuring, glyph lookup and every non-bold label).
+    pub regular: TextRenderer,
+    /// The bold face; `None` when not wanted or not resolvable (the regular face is used).
+    pub bold: Option<TextRenderer>,
+}
+
+/// The fontconfig pattern for the bold face of header font `font`: `"<family>:bold"` when `font`
+/// is a family name, `None` when it is a file path (no bold face can be derived from a path).
+#[must_use]
+pub fn bold_family(font: &str) -> Option<String> {
+    (!font.contains('/')).then(|| format!("{font}:bold"))
+}
+
+impl HeaderFonts {
+    /// Fonts with no bold face.
+    pub fn new(regular: TextRenderer) -> Self {
+        Self {
+            regular,
+            bold: None,
+        }
+    }
+
+    /// Loads the regular face for `override_path`/`family`, plus the bold face when `want_bold`.
+    /// A path font or an unresolvable bold face logs one `warn!` and uses the regular face.
+    pub fn load(override_path: Option<&Path>, family: &str, want_bold: bool) -> Self {
+        let regular = TextRenderer::load(override_path, family);
+        let bold = if want_bold {
+            match bold_family(family) {
+                None => {
+                    tracing::warn!(
+                        font = family,
+                        "header font is a path; `active \"text-bold\"` uses the regular face"
+                    );
+                    None
+                }
+                Some(pattern) => {
+                    let b = TextRenderer::load(None, &pattern);
+                    if b.has_font() {
+                        Some(b)
+                    } else {
+                        tracing::warn!(
+                            pattern,
+                            "no bold header face; `active \"text-bold\"` uses the regular face"
+                        );
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        };
+        Self { regular, bold }
+    }
+
+    /// The face the active label is drawn in under `active`.
+    pub fn active_face(&mut self, active: crucible_config::HeaderActive) -> &mut TextRenderer {
+        match (active, self.bold.as_mut()) {
+            (crucible_config::HeaderActive::TextBold, Some(b)) => b,
+            _ => &mut self.regular,
+        }
+    }
+}
+
 /// Loaded font plus a bounded buffer cache. `font == None` means text is disabled.
 pub struct TextRenderer {
     font: Option<fontdue::Font>,
@@ -222,6 +289,11 @@ impl TextRenderer {
             cache: HashMap::new(),
             rasterized: 0,
         }
+    }
+
+    /// Whether a font is loaded (text is enabled).
+    pub fn has_font(&self) -> bool {
+        self.font.is_some()
     }
 
     /// Whether the loaded font carries a glyph for `c` (`false` when text is disabled).
@@ -332,6 +404,15 @@ impl TextRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bold_family_is_a_fontconfig_pattern_for_families_only() {
+        assert_eq!(
+            bold_family("DejaVu Sans Mono").as_deref(),
+            Some("DejaVu Sans Mono:bold")
+        );
+        assert_eq!(bold_family("/usr/share/fonts/a.ttf"), None);
+    }
 
     fn dejavu() -> Option<fontdue::Font> {
         match std::fs::read(FALLBACK_FONT) {

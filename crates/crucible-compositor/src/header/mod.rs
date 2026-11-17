@@ -32,7 +32,8 @@ pub use render::build_header_elements;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crucible_config::{
-    DEFAULT_DIVIDER_COLOR, HeaderConfig, HeaderMode, HeaderStart, Rgb, ThemeConfig, resolve_palette,
+    DEFAULT_DIVIDER_COLOR, HeaderActive, HeaderConfig, HeaderMode, HeaderStart, Rgb, ThemeConfig,
+    resolve_palette,
 };
 use crucible_layout::{OutputId, Rect, WorkspaceId};
 use crucible_persist::session::HeaderPref;
@@ -93,6 +94,45 @@ pub fn header_colors(header: &HeaderConfig, theme: Option<&ThemeConfig>) -> Head
         } else {
             header.divider_color
         },
+    }
+}
+
+/// The width of one label: the active label of a `text-bold` strip is measured in the bold face
+/// (`bold`, falling back to `regular` when no bold face is loaded), every other label in the
+/// regular one. `None` (no font) when the chosen measurement is unavailable.
+#[must_use]
+pub fn label_width(
+    is_active: bool,
+    style: HeaderActive,
+    regular: Option<i32>,
+    bold: Option<i32>,
+) -> Option<i32> {
+    if is_active && style == HeaderActive::TextBold {
+        bold.or(regular)
+    } else {
+        regular
+    }
+}
+
+/// Whether the active segment gets a solid highlight block (`fill` only).
+#[must_use]
+pub fn draws_highlight_block(style: HeaderActive) -> bool {
+    style == HeaderActive::Fill
+}
+
+/// A premultiplied-free `[f32; 4]` colour as straight RGBA bytes, rounded.
+#[must_use]
+pub fn highlight_to_rgba(c: [f32; 4]) -> [u8; 4] {
+    c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+/// The colour of the active label: `label_active` on the `fill` block, else the highlight itself.
+#[must_use]
+pub fn active_label_rgba(style: HeaderActive, colors: &HeaderColors) -> [u8; 4] {
+    if draws_highlight_block(style) {
+        colors.label_active
+    } else {
+        highlight_to_rgba(colors.highlight)
     }
 }
 
@@ -216,8 +256,8 @@ pub struct HeaderState {
     pub consumed: ConsumedButtons,
     /// The label press being tracked as a possible drag.
     pub drag: Option<HeaderDrag>,
-    /// The font spec the text renderer was last loaded for.
-    pub font_loaded: Option<String>,
+    /// The `(font spec, bold face wanted)` the header fonts were last loaded for.
+    pub font_loaded: Option<(String, bool)>,
 }
 
 impl HeaderState {
@@ -263,6 +303,8 @@ pub struct HeaderLayout {
     pub workspaces: Vec<WorkspaceId>,
     /// Index of the active workspace.
     pub active: usize,
+    /// How the active label is drawn (`header { active }`).
+    pub active_style: HeaderActive,
     /// Segment rects for `names`.
     pub segments: Vec<Segment>,
     /// Divider rects between adjacent segments (empty when the divider is 0).
@@ -325,7 +367,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let inset = i32::try_from(self.config.header.divider_inset).unwrap_or(0);
         let colors = header_colors(&self.config.header, self.config.theme.as_ref());
         let badges = self.config.header.slots;
-        let glyph = badges && self.header_text.has_glyph(SUPER_GLYPH);
+        let glyph = badges && self.header_text.regular.has_glyph(SUPER_GLYPH);
         let output = self.layout.world.output(id)?;
         let strip = strip_rect(rect, height);
         let (mut names, mut workspaces) = (Vec::new(), Vec::new());
@@ -341,12 +383,29 @@ impl<B: Backend + 'static> CrucibleState<B> {
             names.push(badge_label(name, slot, glyph));
             workspaces.push(*ws);
         }
+        let active = drag::active_index(
+            output.active_workspace(),
+            output.active_index(),
+            &workspaces,
+            preview,
+        );
+        let style = self.config.header.active;
         let widths: Vec<i32> = names
             .iter()
-            .map(|n| {
-                self.header_text
-                    .measure(n, size)
-                    .unwrap_or_else(|| fallback_width(n, size))
+            .enumerate()
+            .map(|(i, n)| {
+                let bold = self
+                    .header_text
+                    .bold
+                    .as_ref()
+                    .and_then(|b| b.measure(n, size));
+                label_width(
+                    i == active,
+                    style,
+                    self.header_text.regular.measure(n, size),
+                    bold,
+                )
+                .unwrap_or_else(|| fallback_width(n, size))
             })
             .collect();
         let (segments, dividers) = segment_layout(&widths, strip, divider);
@@ -354,18 +413,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .into_iter()
             .filter_map(|d| inset_divider(d, inset))
             .collect();
-        let active = drag::active_index(
-            output.active_workspace(),
-            output.active_index(),
-            &workspaces,
-            preview,
-        );
         Some(HeaderLayout {
             output: id,
             strip,
             names,
             workspaces,
             active,
+            active_style: style,
             segments,
             dividers,
             colors,
@@ -423,6 +477,45 @@ fn fallback_width(name: &str, size: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn label_width_uses_the_bold_face_for_the_active_text_bold_label_only() {
+        let (r, b) = (Some(50), Some(58));
+        for style in [HeaderActive::Fill, HeaderActive::Text] {
+            assert_eq!(label_width(true, style, r, b), r, "{style:?}");
+        }
+        assert_eq!(label_width(true, HeaderActive::TextBold, r, b), b);
+        assert_eq!(label_width(false, HeaderActive::TextBold, r, b), r);
+        // No bold face loaded: the regular measurement; no font at all: None.
+        assert_eq!(label_width(true, HeaderActive::TextBold, r, None), r);
+        assert_eq!(label_width(true, HeaderActive::TextBold, None, None), None);
+    }
+
+    #[test]
+    fn fill_keeps_the_highlight_block_colours() {
+        // `fill` is the default and still pairs the highlight block with `label_active`.
+        let h = HeaderConfig::default();
+        assert_eq!(h.active, HeaderActive::Fill);
+        let c = header_colors(&h, None);
+        assert_eq!(
+            (c.highlight, c.label_active),
+            (BORDER_COLOR, LABEL_ACTIVE_RGBA)
+        );
+        assert_eq!(active_label_rgba(HeaderActive::Fill, &c), c.label_active);
+        assert!(draws_highlight_block(HeaderActive::Fill));
+    }
+
+    #[test]
+    fn text_modes_draw_the_label_in_the_highlight_colour_with_no_block() {
+        let c = header_colors(&HeaderConfig::default(), None);
+        // Straight RGBA, rounded (not truncated) from the f32 highlight.
+        let want = c.highlight.map(|v| (v * 255.0).round() as u8);
+        for style in [HeaderActive::Text, HeaderActive::TextBold] {
+            assert!(!draws_highlight_block(style));
+            assert_eq!(active_label_rgba(style, &c), want);
+        }
+        assert_eq!(highlight_to_rgba([0.5, 0.0, 1.0, 1.0]), [128, 0, 255, 255]);
+    }
 
     #[test]
     fn header_colors_keep_today_without_a_style_and_follow_it_with_one() {

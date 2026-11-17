@@ -1,4 +1,4 @@
-//! The `header { mode; start; font; size; divider …; slots }` block.
+//! The `header { mode; start; active; font; size; divider …; slots }` block.
 
 use crate::error::ConfigError;
 use crate::model::{
@@ -13,6 +13,7 @@ pub(super) fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigE
         match child.name() {
             "mode" => out.mode = child.enum_arg("a mode string")?,
             "start" => out.start = child.enum_arg("a start string")?,
+            "active" => out.active = child.enum_arg("an active string")?,
             "font" => {
                 out.font = child.nonempty_string_arg("a font path or family string", "font")?;
             }
@@ -66,6 +67,26 @@ mod tests {
             let err = parse(&format!("header {{\n mode \"{bad}\"\n}}\n")).unwrap_err();
             assert!(err.to_string().contains("off, always, toggle"), "{err}");
         }
+    }
+
+    #[test]
+    fn header_active_default_parse_and_error() {
+        use crate::model::HeaderActive;
+        assert_eq!(Config::default().header.active, HeaderActive::Fill);
+        assert_eq!(
+            parse("header {\n}\n").unwrap().header.active,
+            HeaderActive::Fill
+        );
+        for (name, active) in [
+            ("fill", HeaderActive::Fill),
+            ("text", HeaderActive::Text),
+            ("text-bold", HeaderActive::TextBold),
+        ] {
+            let c = parse(&format!("header {{\n active \"{name}\"\n}}\n")).unwrap();
+            assert_eq!(c.header.active, active);
+        }
+        let err = parse("header {\n active \"bold\"\n}\n").unwrap_err();
+        assert!(err.to_string().contains("fill, text, text-bold"), "{err}");
     }
 
     #[test]

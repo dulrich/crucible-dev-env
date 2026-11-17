@@ -242,6 +242,27 @@ impl Named for HeaderMode {
     ];
 }
 
+/// How the active workspace label is drawn in the header strip (`header { active }`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HeaderActive {
+    /// A solid highlight block behind the label (the default).
+    #[default]
+    Fill,
+    /// No block; the label is drawn in the highlight colour.
+    Text,
+    /// Like `Text`, in the bold face of the header font.
+    TextBold,
+}
+
+impl Named for HeaderActive {
+    /// Every value with its config spelling, in the order error messages list them.
+    const NAMES: &'static [(Self, &'static str)] = &[
+        (Self::Fill, "fill"),
+        (Self::Text, "text"),
+        (Self::TextBold, "text-bold"),
+    ];
+}
+
 /// Whether a never-toggled output's `toggle`-mode strip starts shown or hidden (`header { start }`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderStart {
@@ -285,6 +306,8 @@ pub struct HeaderConfig {
     pub mode: HeaderMode,
     /// Initial `toggle`-mode state of an output with no saved preference (`start`).
     pub start: HeaderStart,
+    /// How the active workspace label is drawn (`active`).
+    pub active: HeaderActive,
     /// A font file path (contains `/`) or a fontconfig family name.
     pub font: String,
     /// Font size in logical pixels, within [`HEADER_SIZE_MIN`]..=[`HEADER_SIZE_MAX`].
@@ -308,6 +331,7 @@ impl Default for HeaderConfig {
         Self {
             mode: HeaderMode::Toggle,
             start: HeaderStart::Hidden,
+            active: HeaderActive::Fill,
             font: DEFAULT_HEADER_FONT.to_string(),
             size: 14,
             divider: 0,
@@ -597,6 +621,18 @@ mod tests {
             HeaderMode::Off | HeaderMode::Always | HeaderMode::Toggle => (),
         };
         assert_names_round_trip(&[HeaderMode::Off, HeaderMode::Always, HeaderMode::Toggle]);
+    }
+
+    #[test]
+    fn header_active_names_round_trip() {
+        let _ = |m: HeaderActive| match m {
+            HeaderActive::Fill | HeaderActive::Text | HeaderActive::TextBold => (),
+        };
+        assert_names_round_trip(&[
+            HeaderActive::Fill,
+            HeaderActive::Text,
+            HeaderActive::TextBold,
+        ]);
     }
 
     #[test]

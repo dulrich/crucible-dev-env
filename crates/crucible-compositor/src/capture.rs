@@ -29,7 +29,7 @@ use crate::{
     ipc::Response,
     render::{FrameView, frame_elements},
     state::{Backend, CrucibleState},
-    text::TextRenderer,
+    text::HeaderFonts,
 };
 
 /// One captured output frame: top-down, tightly packed RGBA rows (`stride == width * 4`).
@@ -96,7 +96,7 @@ fn render_err(e: impl std::fmt::Display) -> CaptureError {
 pub fn render_capture<R, T>(
     renderer: &mut R,
     view: FrameView<'_>,
-    header_text: &mut TextRenderer,
+    header_text: &mut HeaderFonts,
     cursor: &mut Cursor,
 ) -> Result<Capture, CaptureError>
 where

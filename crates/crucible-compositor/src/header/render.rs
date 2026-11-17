@@ -6,21 +6,21 @@ use smithay::{
     utils::{Physical, Point, Scale},
 };
 
-use super::{HeaderLayout, PAD_X};
+use super::{HeaderLayout, PAD_X, active_label_rgba, draws_highlight_block};
 use crate::{
     physical::{PhysicalMap, solid},
     render::CustomRenderElements,
-    text::TextRenderer,
+    text::HeaderFonts,
 };
 
 /// Builds the strip's render elements (front-to-back: labels, then highlight and background
 /// solids) for one output's `layout`, positioned in the output's frame at
-/// `origin`. Without a loaded font only the backgrounds and highlight are produced.
+/// `origin`. The active label of a `text-bold` strip uses the bold face. Without a loaded font only the backgrounds and highlight are produced.
 pub fn build_header_elements<R>(
     layout: &HeaderLayout,
     origin: (i32, i32),
     size: u32,
-    text: &mut TextRenderer,
+    fonts: &mut HeaderFonts,
     renderer: &mut R,
     scale: Scale<f64>,
 ) -> Vec<CustomRenderElements<R>>
@@ -40,16 +40,21 @@ where
     for seg in &l.segments {
         let active = seg.index == l.active;
         let seg_rect = map.rect(to_origin(seg.rect));
-        if active {
+        if active && draws_highlight_block(l.active_style) {
             solids.push(solid(seg_rect, l.colors.highlight));
         }
         let rgba = if active {
-            l.colors.label_active
+            active_label_rgba(l.active_style, &l.colors)
         } else {
             l.colors.label
         };
         let loc =
             Point::<f64, Physical>::from((f64::from(seg_rect.loc.x + pad_x), f64::from(text_y)));
+        let text = if active {
+            fonts.active_face(l.active_style)
+        } else {
+            &mut fonts.regular
+        };
         if let Some(el) = text.element(renderer, loc, &l.names[seg.index], size, rgba, scale) {
             labels.push(CustomRenderElements::Text(el));
         }

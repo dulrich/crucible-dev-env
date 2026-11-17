@@ -325,7 +325,7 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// Workspace header strip toggle and consumed-button record.
     pub header: crate::header::HeaderState,
     /// Font + glyph cache for the header labels; disabled until the config selects a font.
-    pub header_text: crate::text::TextRenderer,
+    pub header_text: crate::text::HeaderFonts,
     /// Screen-lock state (`ext-session-lock-v1`); see [`crate::lock`].
     pub session_lock: crate::lock::SessionLock,
     /// `ext-idle-notify-v1` global state; see [`crate::idle`].
@@ -551,7 +551,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             hover_workspace: None,
             persist: crate::persist::PersistState::new(store_dir),
             header: crate::header::HeaderState::default(),
-            header_text: crate::text::TextRenderer::from_font(None),
+            header_text: crate::text::HeaderFonts::new(crate::text::TextRenderer::from_font(None)),
             session_lock,
             idle_notifier_state,
             idle_inhibit_state,

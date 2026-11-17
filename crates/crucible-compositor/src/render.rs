@@ -36,7 +36,7 @@ use crate::{
     layout::LayoutState,
     lock::SessionLock,
     state::{Backend, CrucibleState, DndIcon},
-    text::TextRenderer,
+    text::HeaderFonts,
 };
 
 /// Solid color the output is cleared to each frame (a dark slate), as `[r, g, b, a]`.
@@ -271,7 +271,7 @@ pub fn icon_location(
 /// [`CrucibleState::apply_layout`]: crate::state::CrucibleState
 pub fn frame_elements<R>(
     view: FrameView<'_>,
-    header_text: &mut TextRenderer,
+    header_text: &mut HeaderFonts,
     cursor: &mut Cursor,
     renderer: &mut R,
 ) -> (FrameElements<R>, Color32F)
@@ -294,7 +294,7 @@ where
             snip,
             view.output,
             inputs.cursor,
-            header_text,
+            &mut header_text.regular,
             cursor,
             renderer,
             scale,
@@ -342,7 +342,7 @@ where
         custom.extend(crate::greeter::panel::build_panel_elements(
             panel,
             size,
-            header_text,
+            &mut header_text.regular,
             renderer,
             scale,
         ));
