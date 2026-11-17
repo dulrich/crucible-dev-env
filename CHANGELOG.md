@@ -4,6 +4,17 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.10 — 2026-11-17
+
+### Added
+
+- `theme { accent "#rrggbb" }`: a CDE-only accent (never emitted to terminals). It is the accent of every `terminal`-styled surface, ahead of `cursor`.
+- `accent` on `overlay`, `header`, `lock` and `greeter`: `"style"` (default, unchanged), `"theme"` (the `terminal` style's accent: `theme.accent`, then `cursor`, then the `n1-med` accent) or `"#rrggbb"`. It colours the overlay ring and the N1 overlay's selected-row text (`CDE_OVERLAY_ACCENT`), the header highlight, the swaylock indicator and the greeter field frame and message. `overlay { style "n1-dark"; accent "#33cccc"; }` gives an N1 overlay the teal ring.
+
+### Fixed
+
+- A command run through `crucible resume` (a restored terminal, a launcher program row, `run-in-terminal`) never reached the shell history, because `$SHELL -c` records none. When `$SHELL` is bash, `resume` now appends the command line to the bash history file (`$HISTFILE`, else `~/.bash_history`) before each run. Multi-line and space-led commands are skipped.
+
 ## 0.7.9 — 2026-11-17
 
 ### Added
