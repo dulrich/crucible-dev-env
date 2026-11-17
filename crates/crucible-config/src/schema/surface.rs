@@ -4,11 +4,25 @@
 use crate::error::ConfigError;
 use crate::model::Rgb;
 use crate::reader::NodeReader;
-use crate::surface::{GreeterConfig, LockConfig, SurfaceBackground, SurfaceStyle};
+use crate::surface::{GreeterConfig, LockConfig, SurfaceAccent, SurfaceBackground, SurfaceStyle};
 
 /// `style "<terminal|n1-dark|n1-med|n1-light>"`.
 pub(super) fn parse_style(child: &NodeReader<'_>) -> Result<SurfaceStyle, ConfigError> {
     child.enum_arg("a style string")
+}
+
+/// `accent "style" | "theme" | "#rrggbb"`.
+pub(super) fn parse_accent(child: &NodeReader<'_>) -> Result<SurfaceAccent, ConfigError> {
+    match child.string_arg("an accent string")? {
+        "style" => Ok(SurfaceAccent::Style),
+        "theme" => Ok(SurfaceAccent::Theme),
+        s => Rgb::from_hex(s).map(SurfaceAccent::Color).ok_or_else(|| {
+            child.invalid(
+                "argument",
+                format!("`{s}` is not one of style, theme or a #rrggbb colour"),
+            )
+        }),
+    }
 }
 
 /// `background "stock"`, `background "user"` or `background "color" "#rrggbb"`.
@@ -44,6 +58,7 @@ pub(super) fn parse_lock(node: NodeReader<'_>) -> Result<LockConfig, ConfigError
         let child = child?;
         match child.name() {
             "style" => out.style = parse_style(&child)?,
+            "accent" => out.accent = parse_accent(&child)?,
             "background" => out.background = parse_background(&child)?,
             _ => return Err(child.unknown_node("lock")),
         }
@@ -58,6 +73,7 @@ pub(super) fn parse_greeter(node: NodeReader<'_>) -> Result<GreeterConfig, Confi
         match child.name() {
             "style" => out.style = parse_style(&child)?,
             "background" => out.background = parse_background(&child)?,
+            "accent" => out.accent = parse_accent(&child)?,
             "position" => out.position = child.enum_arg("a position string")?,
             "session" => {
                 out.session = child.nonempty_string_arg("a command string", "session")?;
@@ -152,6 +168,54 @@ mod tests {
                 "{bad}: {err:?}"
             );
             assert_eq!(at.line, 3, "{bad}");
+        }
+    }
+
+    #[test]
+    fn accent_parses_in_every_surface_block_and_rejects_bad_values() {
+        use crate::surface::SurfaceAccent;
+        let c = parse(
+            "lock { accent \"#33CCcc\"; }\ngreeter { accent \"theme\"; }\n\
+             overlay { accent \"style\"; }\nheader { accent \"#010203\"; }\ntheme { accent \"#0a0b0c\"; }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            c.lock.unwrap().accent,
+            SurfaceAccent::Color(Rgb(0x33, 0xcc, 0xcc))
+        );
+        assert_eq!(c.greeter.unwrap().accent, SurfaceAccent::Theme);
+        assert_eq!(c.overlay.accent, SurfaceAccent::Style);
+        assert_eq!(c.header.accent, SurfaceAccent::Color(Rgb(1, 2, 3)));
+        assert_eq!(c.theme.unwrap().accent, Some(Rgb(0x0a, 0x0b, 0x0c)));
+        let d = parse("lock { }\n").unwrap();
+        assert_eq!(d.lock.unwrap().accent, SurfaceAccent::Style);
+        assert_eq!(Config::default().overlay.accent, SurfaceAccent::Style);
+        assert_eq!(Config::default().header.accent, SurfaceAccent::Style);
+        for block in ["lock", "greeter", "overlay", "header"] {
+            for bad in ["accent \"teal\"", "accent 1", "accent \"#12345\"", "accent"] {
+                let (err, at) = err_at(&format!("\n{block} {{\n {bad}\n}}\n"));
+                assert!(
+                    matches!(
+                        err,
+                        ConfigError::InvalidValue { .. }
+                            | ConfigError::WrongType { .. }
+                            | ConfigError::MissingArgument { .. }
+                    ),
+                    "{block} {bad}: {err:?}"
+                );
+                assert_eq!(at.line, 3, "{block} {bad}");
+            }
+            let (err, _) = err_at(&format!(
+                "{block} {{ accent \"style\"; accent \"theme\"; }}\n"
+            ));
+            assert!(matches!(err, ConfigError::Duplicate { .. }), "{block}");
+        }
+        for bad in [
+            "accent \"theme\"",
+            "accent 1",
+            "accent \"#33cccc\"\n accent \"#33cccc\"",
+        ] {
+            assert!(parse(&format!("theme {{\n {bad}\n}}\n")).is_err(), "{bad}");
         }
     }
 

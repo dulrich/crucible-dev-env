@@ -1,5 +1,5 @@
 //! The `theme { font "<family>" size=(pt)N; foreground "#rrggbb"; background "#rrggbb";
-//! cursor "#rrggbb"; alpha 0.9; palette <0-15> "#rrggbb" }` block.
+//! cursor "#rrggbb"; accent "#rrggbb"; alpha 0.9; palette <0-15> "#rrggbb" }` block.
 
 use crate::error::ConfigError;
 use crate::model::Rgb;
@@ -38,6 +38,7 @@ pub(super) fn parse_theme(node: NodeReader<'_>) -> Result<ThemeConfig, ConfigErr
             "foreground" => theme.foreground = Some(child.hex_arg()?),
             "background" => theme.background = Some(child.hex_arg()?),
             "cursor" => theme.cursor = Some(child.hex_arg()?),
+            "accent" => theme.accent = Some(child.hex_arg()?),
             "alpha" => {
                 let a = child.float_arg()?;
                 theme.alpha =

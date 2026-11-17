@@ -65,6 +65,7 @@ pub(super) fn parse_overlay(node: NodeReader<'_>) -> Result<OverlayConfig, Confi
         match child.name() {
             "border" => out.border = child.bool_arg()?,
             "style" => out.style = child.enum_arg("a style string")?,
+            "accent" => out.accent = super::surface::parse_accent(&child)?,
             "alpha" => {
                 let a = child.float_arg()?;
                 out.alpha = Milli::from_f64(a).filter(|m| m.0 <= 1000).ok_or_else(|| {

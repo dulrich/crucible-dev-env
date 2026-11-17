@@ -9,7 +9,7 @@
 //! default background already is the palette `bg`, so `overlay.alpha` can apply), the N1 base
 //! background is SGR 49 instead of the explicit truecolor `bg`.
 
-use crucible_compositor::ipc::{OVERLAY_STYLE_ENV, OVERLAY_SURROUND_ENV};
+use crucible_compositor::ipc::{OVERLAY_ACCENT_ENV, OVERLAY_STYLE_ENV, OVERLAY_SURROUND_ENV};
 use crucible_config::{Named, OverlayStyle, Palette, Rgb};
 
 /// The overlay style.
@@ -59,13 +59,29 @@ impl Style {
         }
     }
 
-    /// The style from `OVERLAY_STYLE_ENV` and `OVERLAY_SURROUND_ENV`.
+    /// `accent` (an `OVERLAY_ACCENT_ENV` value, `#rrggbb`) replaces an N1 palette's accent, which
+    /// only the selected-row foreground uses. Unset or malformed values and `Terminal` are
+    /// unchanged.
+    #[must_use]
+    pub fn with_accent(self, accent: Option<&str>) -> Style {
+        let Some(c) = accent.and_then(Rgb::from_hex) else {
+            return self;
+        };
+        match self {
+            Style::Terminal => Style::Terminal,
+            Style::N1(p) => Style::N1(Palette { accent: c, ..p }),
+            Style::N1Default(p) => Style::N1Default(Palette { accent: c, ..p }),
+        }
+    }
+
+    /// The style from `OVERLAY_STYLE_ENV`, `OVERLAY_SURROUND_ENV` and `OVERLAY_ACCENT_ENV`.
     #[must_use]
     pub fn from_env() -> Style {
         Style::parse_with_surround(
             std::env::var(OVERLAY_STYLE_ENV).ok().as_deref(),
             std::env::var(OVERLAY_SURROUND_ENV).ok().as_deref(),
         )
+        .with_accent(std::env::var(OVERLAY_ACCENT_ENV).ok().as_deref())
     }
 
     /// Base attributes: truecolor foreground and background, or SGR 49 for the background when
@@ -193,6 +209,29 @@ mod tests {
         assert_eq!(
             Style::parse_with_surround(None, Some("default")),
             Style::Terminal
+        );
+    }
+
+    #[test]
+    fn accent_env_changes_only_the_n1_highlight_foreground() {
+        let n1 = Style::parse(Some("n1-dark"));
+        let teal = n1.with_accent(Some("#33cccc"));
+        assert_eq!(
+            teal.highlight_start(),
+            "\x1b[48;2;55;56;59m\x1b[38;2;51;204;204m"
+        );
+        assert_eq!((teal.base(), teal.dim("x")), (n1.base(), n1.dim("x")));
+        for bad in [None, Some(""), Some("33cccc"), Some("#33ccc"), Some("teal")] {
+            assert_eq!(n1.with_accent(bad), n1, "{bad:?}");
+        }
+        assert_eq!(
+            Style::Terminal.with_accent(Some("#33cccc")),
+            Style::Terminal
+        );
+        let d = Style::parse_with_surround(Some("n1-dark"), Some("default"));
+        assert_eq!(
+            d.with_accent(Some("#33cccc")).highlight_start(),
+            teal.highlight_start()
         );
     }
 

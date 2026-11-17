@@ -30,6 +30,7 @@ pub(super) fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigE
             }
             "slots" => out.slots = child.bool_arg()?,
             "style" => out.style = Some(super::surface::parse_style(&child)?),
+            "accent" => out.accent = super::surface::parse_accent(&child)?,
             _ => return Err(child.unknown_node("header")),
         }
     }

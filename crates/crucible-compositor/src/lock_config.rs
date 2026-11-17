@@ -13,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crucible_config::{
-    Config, LockConfig, Rgb, SurfaceBackground, ThemeConfig, config_path_from, resolve_palette,
+    Config, LockConfig, Rgb, SurfaceBackground, ThemeConfig, config_path_from, surface_palette,
 };
 use tracing::{info, warn};
 
@@ -57,7 +57,7 @@ pub fn swaylock_config(
     stock_path: &Path,
     state_text: Option<&str>,
 ) -> String {
-    let p = resolve_palette(lock.style, theme);
+    let p = surface_palette(lock.style, lock.accent, theme);
     let mut out = String::from("indicator-idle-visible\n");
     match lock.background {
         SurfaceBackground::Color(c) => {
@@ -223,7 +223,11 @@ mod tests {
     use crucible_config::OverlayStyle;
 
     fn lock(style: OverlayStyle, background: SurfaceBackground) -> LockConfig {
-        LockConfig { style, background }
+        LockConfig {
+            style,
+            background,
+            ..LockConfig::default()
+        }
     }
 
     #[test]
@@ -291,6 +295,23 @@ mod tests {
         );
         let text = swaylock_config(&l, Some(&theme), Path::new("/s.png"), None);
         assert!(text.contains("text-color=010203ff\n"), "{text}");
+    }
+
+    #[test]
+    fn lock_accent_colours_the_ring() {
+        let base = lock(OverlayStyle::N1Med, SurfaceBackground::Color(Rgb(0, 0, 0)));
+        let l = LockConfig {
+            accent: crucible_config::SurfaceAccent::Color(Rgb(0x33, 0xcc, 0xcc)),
+            ..base
+        };
+        let text = swaylock_config(&l, None, Path::new("/s.png"), None);
+        assert!(text.contains("33ccccff"), "{text}");
+        let plain = swaylock_config(&base, None, Path::new("/s.png"), None);
+        assert!(!plain.contains("33cccc"), "{plain}");
+        assert_eq!(
+            text.replace("33cccc", &rgb(crucible_config::N1_MED.accent)),
+            plain
+        );
     }
 
     #[test]

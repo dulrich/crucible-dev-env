@@ -94,6 +94,8 @@ pub struct OverlayConfig {
     /// Overlay background opacity, `0..=1000` thousandths (`alpha 0.85` is `Milli(850)`); default
     /// 1000 (opaque). Below 1000 is the translucent "glass" look.
     pub alpha: Milli,
+    /// The overlay accent (ring and TUI highlight; default [`SurfaceAccent::Style`]).
+    pub accent: crate::surface::SurfaceAccent,
 }
 
 impl Default for OverlayConfig {
@@ -103,6 +105,7 @@ impl Default for OverlayConfig {
             style: OverlayStyle::N1Med,
             terminal_args: None,
             alpha: Milli(1000),
+            accent: crate::surface::SurfaceAccent::Style,
         }
     }
 }

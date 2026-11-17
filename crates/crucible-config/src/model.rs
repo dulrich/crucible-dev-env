@@ -324,6 +324,9 @@ pub struct HeaderConfig {
     pub slots: bool,
     /// Strip, label and accent colours (`style`); `None` keeps the legacy header colours.
     pub style: Option<crate::surface::SurfaceStyle>,
+    /// Highlight accent (`accent`); with no `style`, a non-default value replaces only the
+    /// highlight colour.
+    pub accent: crate::surface::SurfaceAccent,
 }
 
 impl Default for HeaderConfig {
@@ -339,6 +342,7 @@ impl Default for HeaderConfig {
             divider_color: DEFAULT_DIVIDER_COLOR,
             slots: false,
             style: None,
+            accent: crate::surface::SurfaceAccent::Style,
         }
     }
 }

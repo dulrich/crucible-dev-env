@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use crucible_config::{
     GreeterConfig, KeyboardConfig, Milli, N1_MED, Named, Palette, PanelPosition, Rgb,
-    SurfaceBackground, SurfaceStyle, ThemeConfig, resolve_palette,
+    SurfaceBackground, SurfaceStyle, ThemeConfig, resolve_palette, surface_palette,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
 
@@ -119,7 +119,7 @@ impl GreeterProfile {
         Self {
             style: greeter.style,
             background,
-            palette: resolve_palette(greeter.style, theme),
+            palette: surface_palette(greeter.style, greeter.accent, theme),
             alpha,
             position: greeter.position,
             blank_after: blank_after.unwrap_or(DEFAULT_BLANK_AFTER),
@@ -392,6 +392,7 @@ mod tests {
             background: SurfaceBackground::User,
             position: PanelPosition::UpperRight,
             session: "cde-session --x".into(),
+            ..GreeterConfig::default()
         };
         let kb = KeyboardConfig {
             layouts: vec!["us".into(), "es".into()],
@@ -433,6 +434,34 @@ mod tests {
         let mut q = GreeterProfile::fallback();
         q.background = ProfileBackground::Color(Rgb(0x12, 0x34, 0x56));
         assert_eq!(parse_profile(&write_profile(&q)).unwrap(), q);
+    }
+
+    #[test]
+    fn profile_palette_carries_the_resolved_accent() {
+        let kb = KeyboardConfig {
+            layouts: vec!["us".into()],
+        };
+        let theme = ThemeConfig {
+            accent: Some(Rgb(0x33, 0xcc, 0xcc)),
+            ..ThemeConfig::default()
+        };
+        let plain = GreeterConfig::default();
+        let p =
+            GreeterProfile::from_config(&plain, Some(&theme), Milli(1000), None, &kb, &[], None);
+        assert_eq!(
+            p.palette,
+            crucible_config::N1_MED,
+            "default accent: today's palette"
+        );
+        let g = GreeterConfig {
+            accent: crucible_config::SurfaceAccent::Theme,
+            ..GreeterConfig::default()
+        };
+        let p = GreeterProfile::from_config(&g, Some(&theme), Milli(1000), None, &kb, &[], None);
+        assert_eq!(p.palette.accent, Rgb(0x33, 0xcc, 0xcc));
+        assert_eq!(p.palette.bg, crucible_config::N1_MED.bg);
+        let text = write_profile(&p);
+        assert_eq!(parse_profile(&text).unwrap(), p, "{text}");
     }
 
     #[test]

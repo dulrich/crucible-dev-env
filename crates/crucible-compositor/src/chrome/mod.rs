@@ -177,6 +177,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             rect: self.mapped_overlay_rect()?,
             border: self.config.overlay.border,
             style: self.config.overlay.style,
+            accent: plan::overlay_ring_accent(
+                self.config.overlay.style,
+                self.config.overlay.accent,
+                self.config.theme.as_ref(),
+            ),
         })
     }
 }

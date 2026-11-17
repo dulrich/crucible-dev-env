@@ -63,6 +63,8 @@ pub struct WarmKey {
     /// Whether the overlay terminal's default background is the N1 palette `bg`
     /// (`OverlayConfig::surround_is_default_bg`), exported as `CDE_OVERLAY_SURROUND`.
     pub overlay_surround_default: bool,
+    /// The overlay TUI accent ([`overlay_tui_accent`]), exported as `CDE_OVERLAY_ACCENT`.
+    pub overlay_accent: Option<String>,
     /// The launcher's TUI entries.
     pub launcher_tui: Vec<String>,
     /// The configured `(output name, scale_120)` pairs.
@@ -87,6 +89,16 @@ pub fn overlay_terminal_args(
     args
 }
 
+/// The `CDE_OVERLAY_ACCENT` value (lowercase `#rrggbb`) for `config`'s overlay: `Some` only when
+/// the overlay style is N1 and the resolved overlay accent differs from the style's own. **Pure.**
+#[must_use]
+pub fn overlay_tui_accent(config: &Config) -> Option<String> {
+    let style = config.overlay.style;
+    let own = style.palette()?.accent;
+    let c = crucible_config::resolve_accent(style, config.overlay.accent, config.theme.as_ref());
+    (c != own).then(|| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2))
+}
+
 /// The [`WarmKey`] of `config` given the resolved `terminal` program and the theme fragment
 /// directory (the theme's ghostty `--config-file=` is part of the overlay args).
 #[must_use]
@@ -98,6 +110,7 @@ pub fn warm_key(config: &Config, terminal: String, theme_dir: Option<&std::path:
         exec_flag: config.terminal.exec_flag.clone(),
         overlay_args,
         overlay_surround_default,
+        overlay_accent: overlay_tui_accent(config),
         launcher_tui: config.launcher.tui.clone(),
         output_scales: config
             .outputs
@@ -508,6 +521,30 @@ mod tests {
             warm_key(&c, "ghostty".into(), None),
             warm_key(&opt_out, "ghostty".into(), None)
         );
+    }
+
+    #[test]
+    fn overlay_tui_accent_is_set_only_for_an_n1_override_and_keys_the_warm_host() {
+        let unset = Config::default();
+        assert_eq!(overlay_tui_accent(&unset), None);
+        let teal = crucible_config::parse("overlay { accent \"#33CCCC\"; }\n").unwrap();
+        assert_eq!(overlay_tui_accent(&teal).as_deref(), Some("#33cccc"));
+        assert_ne!(
+            warm_key(&unset, "foot".into(), None),
+            warm_key(&teal, "foot".into(), None)
+        );
+        // The style's own accent, or a `terminal` overlay: unset.
+        let own =
+            crucible_config::parse("overlay { accent \"#ff8a3d\"; style \"n1-dark\"; }\n").unwrap();
+        assert_eq!(overlay_tui_accent(&own), None);
+        let term = crucible_config::parse("overlay { accent \"#33cccc\"; style \"terminal\"; }\n")
+            .unwrap();
+        assert_eq!(overlay_tui_accent(&term), None);
+        let themed = crucible_config::parse(
+            "theme { accent \"#010203\"; }\noverlay { accent \"theme\"; }\n",
+        )
+        .unwrap();
+        assert_eq!(overlay_tui_accent(&themed).as_deref(), Some("#010203"));
     }
 
     #[test]

@@ -32,8 +32,8 @@ pub use render::build_header_elements;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crucible_config::{
-    DEFAULT_DIVIDER_COLOR, HeaderActive, HeaderConfig, HeaderMode, HeaderStart, Rgb, ThemeConfig,
-    resolve_palette,
+    DEFAULT_DIVIDER_COLOR, HeaderActive, HeaderConfig, HeaderMode, HeaderStart, OverlayStyle, Rgb,
+    SurfaceAccent, ThemeConfig, resolve_accent, surface_palette,
 };
 use crucible_layout::{OutputId, Rect, WorkspaceId};
 use crucible_persist::session::HeaderPref;
@@ -74,15 +74,20 @@ pub struct HeaderColors {
 #[must_use]
 pub fn header_colors(header: &HeaderConfig, theme: Option<&ThemeConfig>) -> HeaderColors {
     let Some(style) = header.style else {
+        // Without a style only a non-default `accent` changes anything: the highlight.
+        let highlight = match header.accent {
+            SurfaceAccent::Style => BORDER_COLOR,
+            accent => resolve_accent(OverlayStyle::Terminal, accent, theme).to_rgba_f32(),
+        };
         return HeaderColors {
             strip_bg: STRIP_BG,
-            highlight: BORDER_COLOR,
+            highlight,
             label: LABEL_RGBA,
             label_active: LABEL_ACTIVE_RGBA,
             divider: header.divider_color,
         };
     };
-    let p = resolve_palette(style, theme);
+    let p = surface_palette(style, header.accent, theme);
     let rgba = |c: Rgb| [c.0, c.1, c.2, 255];
     HeaderColors {
         strip_bg: p.bg.to_rgba_f32(),
@@ -535,6 +540,34 @@ mod tests {
         // An explicit divider colour wins.
         h.divider_color = Rgb(1, 2, 3);
         assert_eq!(header_colors(&h, None).divider, Rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn header_accent_with_and_without_a_style() {
+        let teal = Rgb(0x33, 0xcc, 0xcc);
+        let t = ThemeConfig {
+            accent: Some(Rgb(7, 7, 7)),
+            ..ThemeConfig::default()
+        };
+        // No style: theme.accent alone leaves the teal; an explicit accent swaps only the highlight.
+        let mut h = HeaderConfig::default();
+        assert_eq!(header_colors(&h, Some(&t)), header_colors(&h, None));
+        h.accent = SurfaceAccent::Theme;
+        let c = header_colors(&h, Some(&t));
+        assert_eq!(c.highlight, Rgb(7, 7, 7).to_rgba_f32());
+        assert_eq!(
+            HeaderColors {
+                highlight: BORDER_COLOR,
+                ..c
+            },
+            header_colors(&HeaderConfig::default(), None)
+        );
+        // With a style: the accent replaces the palette accent only.
+        h.style = Some(OverlayStyle::N1Dark);
+        h.accent = SurfaceAccent::Color(teal);
+        let c = header_colors(&h, None);
+        assert_eq!(c.highlight, teal.to_rgba_f32());
+        assert_eq!(c.strip_bg, crucible_config::N1_DARK.bg.to_rgba_f32());
     }
 
     #[test]

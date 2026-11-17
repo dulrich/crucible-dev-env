@@ -26,6 +26,18 @@ pub enum SurfaceBackground {
     User,
 }
 
+/// Which accent a surface paints. KDL: `accent "style" | "theme" | "#rrggbb"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SurfaceAccent {
+    /// The surface style's own accent (today's behaviour).
+    #[default]
+    Style,
+    /// The `terminal` style's resolved accent: `theme.accent`, then `theme.cursor`, then n1-med.
+    Theme,
+    /// A fixed colour.
+    Color(Rgb),
+}
+
 /// The default `lock` style.
 pub const DEFAULT_LOCK_STYLE: SurfaceStyle = OverlayStyle::N1Med;
 /// The default `lock` background: solid black.
@@ -96,6 +108,8 @@ pub struct LockConfig {
     pub style: SurfaceStyle,
     /// Lock-screen background (default [`DEFAULT_LOCK_BACKGROUND`]).
     pub background: SurfaceBackground,
+    /// Indicator accent (default [`SurfaceAccent::Style`]).
+    pub accent: SurfaceAccent,
 }
 
 impl Default for LockConfig {
@@ -103,6 +117,7 @@ impl Default for LockConfig {
         Self {
             style: DEFAULT_LOCK_STYLE,
             background: DEFAULT_LOCK_BACKGROUND,
+            accent: SurfaceAccent::Style,
         }
     }
 }
@@ -120,6 +135,8 @@ pub struct GreeterConfig {
     /// The session command started after login, non-empty (default
     /// [`DEFAULT_GREETER_SESSION`]).
     pub session: String,
+    /// Panel accent (default [`SurfaceAccent::Style`]).
+    pub accent: SurfaceAccent,
 }
 
 impl Default for GreeterConfig {
@@ -129,13 +146,14 @@ impl Default for GreeterConfig {
             background: DEFAULT_GREETER_BACKGROUND,
             position: DEFAULT_GREETER_POSITION,
             session: DEFAULT_GREETER_SESSION.to_string(),
+            accent: SurfaceAccent::Style,
         }
     }
 }
 
 /// The effective palette of `style`. The N1 styles return their fixed palette. `terminal` takes
 /// its colours from `theme`: `bg` = `theme.background`, `text` = `theme.foreground`, `line` =
-/// `theme.palette 8` (bright black), `accent` = `theme.cursor`, each falling back to the
+/// `theme.palette 8` (bright black), `accent` = `theme.accent`, then `theme.cursor`, each falling back to the
 /// [`N1_MED`] value when unset; with no `theme` block, `terminal` is exactly [`N1_MED`].
 #[must_use]
 pub fn resolve_palette(style: SurfaceStyle, theme: Option<&ThemeConfig>) -> Palette {
@@ -149,7 +167,36 @@ pub fn resolve_palette(style: SurfaceStyle, theme: Option<&ThemeConfig>) -> Pale
         bg: t.background.unwrap_or(N1_MED.bg),
         text: t.foreground.unwrap_or(N1_MED.text),
         line: t.palette[8].unwrap_or(N1_MED.line),
-        accent: t.cursor.unwrap_or(N1_MED.accent),
+        accent: t.accent.or(t.cursor).unwrap_or(N1_MED.accent),
+    }
+}
+
+/// The accent colour `accent` selects for `style`: [`resolve_palette`]'s accent under
+/// [`SurfaceAccent::Style`], the `terminal` accent under [`SurfaceAccent::Theme`], else the colour.
+#[must_use]
+pub fn resolve_accent(
+    style: SurfaceStyle,
+    accent: SurfaceAccent,
+    theme: Option<&ThemeConfig>,
+) -> Rgb {
+    match accent {
+        SurfaceAccent::Style => resolve_palette(style, theme).accent,
+        SurfaceAccent::Theme => resolve_palette(OverlayStyle::Terminal, theme).accent,
+        SurfaceAccent::Color(c) => c,
+    }
+}
+
+/// A surface's palette: [`resolve_palette`] with its accent chosen by `accent`
+/// ([`resolve_accent`]). The one place a surface's accent is resolved.
+#[must_use]
+pub fn surface_palette(
+    style: SurfaceStyle,
+    accent: SurfaceAccent,
+    theme: Option<&ThemeConfig>,
+) -> Palette {
+    Palette {
+        accent: resolve_accent(style, accent, theme),
+        ..resolve_palette(style, theme)
     }
 }
 
@@ -171,6 +218,55 @@ mod tests {
         ] {
             assert_eq!(resolve_palette(s, Some(&t)), p);
             assert_eq!(resolve_palette(s, None), p);
+        }
+    }
+
+    #[test]
+    fn surface_palette_over_style_accent_and_theme() {
+        let teal = Rgb(0x33, 0xcc, 0xcc);
+        let cursor_only = ThemeConfig {
+            cursor: Some(Rgb(4, 4, 4)),
+            ..ThemeConfig::default()
+        };
+        let both = ThemeConfig {
+            accent: Some(Rgb(5, 5, 5)),
+            ..cursor_only.clone()
+        };
+        // `terminal` prefers theme.accent, then cursor, then n1-med.
+        assert_eq!(
+            resolve_palette(OverlayStyle::Terminal, Some(&both)).accent,
+            Rgb(5, 5, 5)
+        );
+        for style in [
+            OverlayStyle::Terminal,
+            OverlayStyle::N1Dark,
+            OverlayStyle::N1Light,
+        ] {
+            for theme in [None, Some(&cursor_only), Some(&both)] {
+                let base = resolve_palette(style, theme);
+                assert_eq!(surface_palette(style, SurfaceAccent::Style, theme), base);
+                let want = match theme {
+                    None => N1_MED.accent,
+                    Some(t) => t.accent.or(t.cursor).unwrap(),
+                };
+                let p = surface_palette(style, SurfaceAccent::Theme, theme);
+                assert_eq!(
+                    p,
+                    Palette {
+                        accent: want,
+                        ..base
+                    },
+                    "{style:?}"
+                );
+                let p = surface_palette(style, SurfaceAccent::Color(teal), theme);
+                assert_eq!(
+                    p,
+                    Palette {
+                        accent: teal,
+                        ..base
+                    }
+                );
+            }
         }
     }
 

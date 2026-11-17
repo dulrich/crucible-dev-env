@@ -60,6 +60,8 @@ pub struct ThemeConfig {
     pub background: Option<Rgb>,
     /// Cursor colour.
     pub cursor: Option<Rgb>,
+    /// CDE-only accent of `terminal`-styled surfaces; never emitted to a terminal fragment.
+    pub accent: Option<Rgb>,
     /// Background opacity, `0..=1000` thousandths (`alpha 0.9` is `Milli(900)`).
     pub alpha: Option<Milli>,
     /// ANSI palette entries 0-15.
@@ -342,8 +344,22 @@ mod tests {
             foreground: Some(Rgb(0xdc, 0xdc, 0xcc)),
             background: Some(Rgb(0x11, 0x11, 0x11)),
             cursor: Some(Rgb(0xff, 0x00, 0x80)),
+            accent: None,
             alpha: Some(Milli(900)),
             palette,
+        }
+    }
+
+    #[test]
+    fn accent_is_never_emitted_to_a_terminal() {
+        let with = ThemeConfig {
+            accent: Some(Rgb(0x33, 0xcc, 0xcc)),
+            ..full()
+        };
+        for target in ThemeTarget::ALL {
+            let out = render(&with, target);
+            assert_eq!(out, render(&full(), target), "{target:?}");
+            assert!(!out.to_lowercase().contains("33cccc"), "{target:?}");
         }
     }
 

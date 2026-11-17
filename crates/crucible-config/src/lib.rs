@@ -41,7 +41,8 @@ pub use schema::parse;
 pub use surface::{
     DEFAULT_GREETER_BACKGROUND, DEFAULT_GREETER_POSITION, DEFAULT_GREETER_SESSION,
     DEFAULT_GREETER_STYLE, DEFAULT_LOCK_BACKGROUND, DEFAULT_LOCK_STYLE, GreeterConfig, LockConfig,
-    PanelPosition, SurfaceBackground, SurfaceStyle, resolve_palette,
+    PanelPosition, SurfaceAccent, SurfaceBackground, SurfaceStyle, resolve_accent, resolve_palette,
+    surface_palette,
 };
 pub use theme::{
     Milli, ThemeConfig, ThemeFont, ThemeTarget, render as render_theme, theme_dir, theme_dir_from,
