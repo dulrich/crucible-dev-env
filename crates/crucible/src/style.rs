@@ -5,16 +5,21 @@
 //! helper return the empty string (or today's unstyled sequence), so output stays byte-identical
 //! to the unstyled TUIs. The N1 styles paint truecolor base attributes before every clear and
 //! re-apply them after every in-frame reset, so no cell falls back to the terminal's default
-//! background.
+//! background. When the compositor also sets `OVERLAY_SURROUND_ENV` to `default` (the terminal's
+//! default background already is the palette `bg`, so `overlay.alpha` can apply), the N1 base
+//! background is SGR 49 instead of the explicit truecolor `bg`.
 
-use crucible_compositor::ipc::OVERLAY_STYLE_ENV;
+use crucible_compositor::ipc::{OVERLAY_STYLE_ENV, OVERLAY_SURROUND_ENV};
 use crucible_config::{Named, OverlayStyle, Palette, Rgb};
 
 /// The overlay style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Style {
     Terminal,
+    /// An N1 palette whose surround is painted with an explicit truecolor background.
     N1(Palette),
+    /// An N1 palette whose surround is the terminal's default background (SGR 49).
+    N1Default(Palette),
 }
 
 impl From<OverlayStyle> for Style {
@@ -22,6 +27,9 @@ impl From<OverlayStyle> for Style {
         style.palette().map_or(Style::Terminal, Style::N1)
     }
 }
+
+/// The `OVERLAY_SURROUND_ENV` value meaning the terminal's default background is the palette bg.
+const SURROUND_DEFAULT: &str = "default";
 
 fn fg(Rgb(r, g, b): Rgb) -> String {
     format!("\x1b[38;2;{r};{g};{b}m")
@@ -41,18 +49,33 @@ impl Style {
             .map_or(Style::Terminal, Style::from)
     }
 
-    /// The style from `OVERLAY_STYLE_ENV`.
+    /// [`Style::parse`] plus the surround: `surround == Some("default")` turns an N1 style's
+    /// base background into SGR 49. Any other value, and the `Terminal` style, are unchanged.
     #[must_use]
-    pub fn from_env() -> Style {
-        Style::parse(std::env::var(OVERLAY_STYLE_ENV).ok().as_deref())
+    pub fn parse_with_surround(value: Option<&str>, surround: Option<&str>) -> Style {
+        match (Style::parse(value), surround) {
+            (Style::N1(p), Some(SURROUND_DEFAULT)) => Style::N1Default(p),
+            (style, _) => style,
+        }
     }
 
-    /// Base attributes: truecolor foreground and background (empty for `Terminal`).
+    /// The style from `OVERLAY_STYLE_ENV` and `OVERLAY_SURROUND_ENV`.
+    #[must_use]
+    pub fn from_env() -> Style {
+        Style::parse_with_surround(
+            std::env::var(OVERLAY_STYLE_ENV).ok().as_deref(),
+            std::env::var(OVERLAY_SURROUND_ENV).ok().as_deref(),
+        )
+    }
+
+    /// Base attributes: truecolor foreground and background, or SGR 49 for the background when
+    /// the surround is the terminal's default (empty for `Terminal`).
     #[must_use]
     pub fn base(&self) -> String {
         match self {
             Style::Terminal => String::new(),
             Style::N1(p) => format!("{}{}", fg(p.text), bg(p.bg)),
+            Style::N1Default(p) => format!("{}\x1b[49m", fg(p.text)),
         }
     }
 
@@ -61,7 +84,7 @@ impl Style {
     pub fn reset(&self) -> String {
         match self {
             Style::Terminal => String::new(),
-            Style::N1(_) => "\x1b[0m".to_string(),
+            Style::N1(_) | Style::N1Default(_) => "\x1b[0m".to_string(),
         }
     }
 
@@ -78,7 +101,7 @@ impl Style {
     pub fn highlight_start(&self) -> String {
         match self {
             Style::Terminal => "\x1b[7m".to_string(),
-            Style::N1(p) => format!("{}{}", bg(p.line), fg(p.accent)),
+            Style::N1(p) | Style::N1Default(p) => format!("{}{}", bg(p.line), fg(p.accent)),
         }
     }
 
@@ -96,7 +119,7 @@ impl Style {
     pub fn dim(&self, text: &str) -> String {
         match self {
             Style::Terminal => format!("\x1b[2m{text}\x1b[22m"),
-            Style::N1(p) => {
+            Style::N1(p) | Style::N1Default(p) => {
                 let mid =
                     |a: u8, b: u8| u8::try_from((u16::from(a) + u16::from(b)) / 2).unwrap_or(a);
                 let (Rgb(tr, tg, tb), Rgb(br, bgc, bb)) = (p.text, p.bg);
@@ -138,6 +161,39 @@ mod tests {
         ] {
             assert_eq!(Style::parse(Some(s.as_str())), Style::from(s));
         }
+    }
+
+    #[test]
+    fn surround_default_makes_the_n1_base_background_sgr_49() {
+        let n1 = |surround| Style::parse_with_surround(Some("n1-dark"), surround);
+        // Unset or any other value: unchanged from today.
+        assert_eq!(n1(None), Style::N1(N1_DARK));
+        assert_eq!(n1(Some("")), Style::N1(N1_DARK));
+        assert_eq!(n1(Some("opaque")), Style::N1(N1_DARK));
+        let d = n1(Some("default"));
+        assert_eq!(d, Style::N1Default(N1_DARK));
+        assert_eq!(d.base(), "\x1b[38;2;233;233;234m\x1b[49m");
+        assert_eq!(
+            d.frame_start(),
+            "\x1b[H\x1b[38;2;233;233;234m\x1b[49m\x1b[2J"
+        );
+        // Selected rows keep the explicit line background; the base is re-applied after.
+        assert_eq!(
+            d.highlight("x"),
+            "\x1b[48;2;55;56;59m\x1b[38;2;255;138;61mx\x1b[0m\x1b[38;2;233;233;234m\x1b[49m"
+        );
+        assert_eq!(d.highlight_start(), n1(None).highlight_start());
+        assert_eq!(d.reset(), "\x1b[0m");
+        assert_eq!(d.dim("x"), n1(None).dim("x"));
+        // The Terminal style ignores the surround.
+        assert_eq!(
+            Style::parse_with_surround(Some("terminal"), Some("default")),
+            Style::Terminal
+        );
+        assert_eq!(
+            Style::parse_with_surround(None, Some("default")),
+            Style::Terminal
+        );
     }
 
     #[test]

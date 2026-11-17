@@ -26,8 +26,8 @@ use tracing::{error, info, warn};
 
 use crate::config::pick_terminal;
 use crate::ipc::{
-    LAUNCHER_TUI_ENV, OVERLAY_STYLE_ENV, SOCKET_ENV, SPAWN_EPOCH_ENV, TERMINAL_ENV,
-    TERMINAL_EXEC_FLAG_ENV,
+    LAUNCHER_TUI_ENV, OVERLAY_STYLE_ENV, OVERLAY_SURROUND_ENV, SOCKET_ENV, SPAWN_EPOCH_ENV,
+    TERMINAL_ENV, TERMINAL_EXEC_FLAG_ENV,
 };
 use crate::state::{Backend, CrucibleState};
 
@@ -231,6 +231,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if kind == SpawnKind::Overlay {
             cmd.env(OVERLAY_STYLE_ENV, self.config.overlay.style.as_str());
             cmd.env(LAUNCHER_TUI_ENV, self.config.launcher.tui.join(":"));
+            // `program` is the overlay terminal itself (the overlay and warm-host spawns pass
+            // `terminal_program()`); the locker spawn is `SpawnKind::Overlay` too and resolves
+            // to `Other`, so it gets no flag.
+            if self.config.overlay.surround_is_default_bg(program) {
+                cmd.env(OVERLAY_SURROUND_ENV, "default");
+            } else {
+                cmd.env_remove(OVERLAY_SURROUND_ENV);
+            }
+        } else {
+            cmd.env_remove(OVERLAY_SURROUND_ENV);
         }
         let mut record = SpawnRecord {
             origin,

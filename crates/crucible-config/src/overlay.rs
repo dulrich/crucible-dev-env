@@ -211,6 +211,15 @@ impl TerminalKind {
         }
     }
 
+    /// Whether [`Self::overlay_args`] sets this terminal's *default* background to the N1
+    /// palette `bg` under `style` (foot, cterm and urxvt with an N1 style). The single source of
+    /// truth for that decision: the overlay TUI may then paint its surround with SGR 49 so the
+    /// terminal's alpha applies.
+    #[must_use]
+    pub fn sets_default_bg(self, style: OverlayStyle) -> bool {
+        style.palette().is_some() && matches!(self, Self::Foot | Self::Cterm | Self::Urxvt)
+    }
+
     /// [`Self::overlay_default_args`] plus what depends on the overlay `style`. foot has no
     /// ghostty `--window-padding-color=extend-always`: the strip left where the cell grid does
     /// not divide the overlay shows foot's own background, so that becomes the opaque N1
@@ -224,7 +233,11 @@ impl TerminalKind {
         } else {
             "1.0".to_string()
         };
-        if let Some(Rgb(r, g, b)) = style.palette().map(|p| p.bg) {
+        if let Some(Rgb(r, g, b)) = style
+            .palette()
+            .filter(|_| self.sets_default_bg(style))
+            .map(|p| p.bg)
+        {
             match self {
                 Self::Foot => args.extend([
                     "-o".to_string(),
@@ -251,7 +264,7 @@ impl TerminalKind {
                     "-b".to_string(),
                     "0".to_string(),
                 ]),
-                Self::Ghostty | Self::Other => {}
+                Self::Ghostty | Self::Other => unreachable!("sets_default_bg excludes these"),
             }
         } else if glass {
             // The `terminal` style leaves the colours alone; glass still applies. urxvt takes
@@ -282,6 +295,14 @@ impl OverlayConfig {
             Some(list) => list.clone(),
             None => TerminalKind::of(program).overlay_args(self.style, self.alpha),
         }
+    }
+
+    /// Whether the overlay terminal `program`'s default background is the N1 palette `bg`: false
+    /// with explicit `terminal_args` (CDE then adds no background), else
+    /// [`TerminalKind::sets_default_bg`].
+    #[must_use]
+    pub fn surround_is_default_bg(&self, program: &str) -> bool {
+        self.terminal_args.is_none() && TerminalKind::of(program).sets_default_bg(self.style)
     }
 }
 
@@ -389,6 +410,47 @@ mod tests {
         assert_eq!(x.effective_terminal_args("ghostty"), vec!["--x"]);
         assert_eq!(x.effective_terminal_args("foot"), vec!["--x"]);
         assert_eq!(x.effective_terminal_args("cterm"), vec!["--x"]);
+    }
+
+    #[test]
+    fn surround_is_default_bg_matrix() {
+        let styles = [
+            OverlayStyle::Terminal,
+            OverlayStyle::N1Dark,
+            OverlayStyle::N1Med,
+            OverlayStyle::N1Light,
+        ];
+        let programs = [
+            ("foot", true),
+            ("/x/foot", true),
+            ("cterm", true),
+            ("urxvt", true),
+            ("rxvt-unicode", true),
+            ("ghostty", false),
+            ("ghostty-cde", false),
+            ("footclient", false),
+            ("alacritty", false),
+            ("", false),
+        ];
+        for style in styles {
+            for (p, kind_ok) in programs {
+                let unset = OverlayConfig {
+                    style,
+                    ..OverlayConfig::default()
+                };
+                let want = kind_ok && style != OverlayStyle::Terminal;
+                assert_eq!(unset.surround_is_default_bg(p), want, "{p} {style:?}");
+                assert_eq!(TerminalKind::of(p).sets_default_bg(style), want, "{p}");
+                for args in [vec![], vec!["--x".to_string()]] {
+                    let explicit = OverlayConfig {
+                        style,
+                        terminal_args: Some(args),
+                        ..OverlayConfig::default()
+                    };
+                    assert!(!explicit.surround_is_default_bg(p), "{p} {style:?}");
+                }
+            }
+        }
     }
 
     #[test]

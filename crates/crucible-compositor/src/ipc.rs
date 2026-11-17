@@ -63,6 +63,11 @@ pub const TERMINAL_EXEC_FLAG_ENV: &str = "CDE_TERMINAL_EXEC_FLAG";
 /// Environment variable carrying the configured overlay style, set on overlay spawns only.
 pub const OVERLAY_STYLE_ENV: &str = "CDE_OVERLAY_STYLE";
 
+/// Environment variable set to `default` on overlay spawns whose terminal's default background is
+/// the N1 palette `bg` (see `OverlayConfig::surround_is_default_bg`), so the overlay TUI paints its
+/// surround with SGR 49 and `overlay.alpha` applies. Unset (removed) otherwise.
+pub const OVERLAY_SURROUND_ENV: &str = "CDE_OVERLAY_SURROUND";
+
 /// Environment variable carrying the `launcher { tui … }` entries (program names / `*` globs)
 /// joined by `:`, set on overlay spawns only. Unset or empty means no configured entries (the
 /// launcher's built-in list still applies). Entries never contain `/` or `:`.

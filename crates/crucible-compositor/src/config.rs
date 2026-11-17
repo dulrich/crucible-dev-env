@@ -60,6 +60,9 @@ pub struct WarmKey {
     pub exec_flag: String,
     /// The effective overlay terminal args for `terminal`.
     pub overlay_args: Vec<String>,
+    /// Whether the overlay terminal's default background is the N1 palette `bg`
+    /// (`OverlayConfig::surround_is_default_bg`), exported as `CDE_OVERLAY_SURROUND`.
+    pub overlay_surround_default: bool,
     /// The launcher's TUI entries.
     pub launcher_tui: Vec<String>,
     /// The configured `(output name, scale_120)` pairs.
@@ -89,10 +92,12 @@ pub fn overlay_terminal_args(
 #[must_use]
 pub fn warm_key(config: &Config, terminal: String, theme_dir: Option<&std::path::Path>) -> WarmKey {
     let overlay_args = overlay_terminal_args(config, &terminal, theme_dir);
+    let overlay_surround_default = config.overlay.surround_is_default_bg(&terminal);
     WarmKey {
         terminal,
         exec_flag: config.terminal.exec_flag.clone(),
         overlay_args,
+        overlay_surround_default,
         launcher_tui: config.launcher.tui.clone(),
         output_scales: config
             .outputs
@@ -503,6 +508,24 @@ mod tests {
             warm_key(&c, "ghostty".into(), None),
             warm_key(&opt_out, "ghostty".into(), None)
         );
+    }
+
+    #[test]
+    fn warm_key_carries_the_surround_flag() {
+        let unset = Config::default();
+        let mut explicit = unset.clone();
+        // Explicit args equal to the foot N1 defaults: same overlay args, but CDE no longer
+        // owns the default background.
+        explicit.overlay.terminal_args = Some(unset.overlay.effective_terminal_args("foot"));
+        let (a, b) = (
+            warm_key(&unset, "foot".into(), None),
+            warm_key(&explicit, "foot".into(), None),
+        );
+        assert_eq!(a.overlay_args, b.overlay_args);
+        assert!(a.overlay_surround_default);
+        assert!(!b.overlay_surround_default);
+        assert_ne!(a, b);
+        assert!(!warm_key(&unset, "ghostty".into(), None).overlay_surround_default);
     }
 
     #[test]
