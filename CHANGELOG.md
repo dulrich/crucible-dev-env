@@ -4,6 +4,17 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.5 — 2026-11-17
+
+### Added
+
+- **`cde-login`, a CDE login daemon that replaces greetd.** It runs as root from `cde-login.service`, runs the greeter as `_greetd` on VT 7 and serves the greetd protocol on `GREETD_SOCK` (the greeter is unchanged), authenticates through PAM (`dist/pam.d/cde-login`, `cde-login-greeter`), and starts the user session on VT 8 in graphics mode while the greeter stays in front. It switches to VT 8 only once CDE reports its first frame ready (or after `--ready-timeout`, default 10 s), so a greeter login no longer shows the console or an empty frame. On logout it returns to the greeter. greetd stays installed but disabled as the rollback; see docs/greeter.md "Setup".
+- CDE can start on an inactive (background) VT: outputs and clients come up while the session is paused, and DRM is adopted on activation with a ready first frame (the restored or picker windows drawn, or after ~3 s). When `CDE_LOGIN_READY_FD` is set, CDE writes `ready` to that fd once the frame is ready. `startup: background start` / `startup: foreground start` log lines record which path ran and the ready time. A tty1 `cde-session` start behaves as before.
+
+### Changed
+
+- `/opt/cde` (the greeter's `crucible`, `cde-login` and the stock background) is root-owned. On a greeter host the deploy stages these files under `~/.local/share/cde/opt-staging`, prints one `sudo` install command, and reports `sudo install pending` until the installed `--build` matches; it never runs sudo itself.
+
 ## 0.7.4 — 2026-11-16
 
 ### Fixed
