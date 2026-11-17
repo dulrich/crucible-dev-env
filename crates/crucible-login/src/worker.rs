@@ -340,6 +340,17 @@ pub fn session_pam_env(vt: u32, class: Class, extra: &[String]) -> Vec<String> {
     v
 }
 
+/// The shell the command runs through: the account's shell when `/etc/shells` lists it, else
+/// `/bin/sh`. A system account such as the greeter's has `/usr/sbin/nologin`, which would
+/// refuse the command (greetd always runs `/bin/sh`).
+pub fn exec_shell<'a>(shell: &'a str, etc_shells: &str) -> &'a str {
+    let listed = etc_shells
+        .lines()
+        .map(str::trim)
+        .any(|l| !l.starts_with('#') && l == shell);
+    if listed { shell } else { "/bin/sh" }
+}
+
 /// The exec argv: the login shell as a login shell running the command words as `"$@"`, so
 /// no word is ever re-split or re-quoted.
 pub fn login_argv(shell: &str, cmd: &[String]) -> Vec<String> {
@@ -965,10 +976,12 @@ fn spawn_user(
     }
     let acct = lookup_account(account)?;
     let env = cstrs(&build_env(pam_env, &acct, vt, class, extra_env))?;
-    let argv = cstrs(&login_argv(&acct.shell, cmd))?;
+    let etc_shells = std::fs::read_to_string("/etc/shells").unwrap_or_default();
+    let run_shell = exec_shell(&acct.shell, &etc_shells);
+    let argv = cstrs(&login_argv(run_shell, cmd))?;
     let envp = ptrs(&env);
     let argvp = ptrs(&argv);
-    let shell = CString::new(acct.shell.as_str())?;
+    let shell = CString::new(run_shell)?;
     let tty = CString::new(format!("/dev/tty{vt}"))?;
     let home = CString::new(acct.home.as_str())?;
     let name = CString::new(acct.name.as_str())?;
@@ -1175,6 +1188,19 @@ mod tests {
                 "GREETD_SOCK=/s"
             ])
         );
+    }
+
+    #[test]
+    fn exec_shell_falls_back_for_unlisted_shells() {
+        let shells = "# /etc/shells: valid login shells\n/bin/sh\n/bin/bash\n/usr/bin/dash\n";
+        assert_eq!(exec_shell("/bin/bash", shells), "/bin/bash");
+        assert_eq!(exec_shell("/usr/sbin/nologin", shells), "/bin/sh");
+        assert_eq!(exec_shell("/bin/false", shells), "/bin/sh");
+        assert_eq!(
+            exec_shell("# /etc/shells: valid login shells", shells),
+            "/bin/sh"
+        );
+        assert_eq!(exec_shell("/bin/bash", ""), "/bin/sh");
     }
 
     #[test]

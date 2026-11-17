@@ -83,8 +83,8 @@ pub struct OpenSpec {
 pub struct SpawnSpec {
     /// The resolved account the command runs as (never root unless the account is root).
     pub account: String,
-    /// The command words; the backend runs them through the account's login shell as greetd
-    /// does (`exec <words joined by spaces>`).
+    /// The command words; the backend runs them as `<shell> -l -c 'exec "$@"'` (the account's
+    /// shell when `/etc/shells` lists it, else `/bin/sh`), so no word is re-split.
     pub cmd: Vec<String>,
     /// Extra `KEY=VALUE` entries added to the from-scratch environment.
     pub env: Vec<String>,
