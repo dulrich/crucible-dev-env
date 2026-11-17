@@ -80,7 +80,7 @@ The login daemon is `cde-login`, which replaces greetd. It runs as root from `cd
 
 1. Make `/opt/cde` root-owned: `sudo install -d -o root -g root -m 0755 /opt/cde`, or for an existing user-owned one `sudo chown -R root:root /opt/cde`.
 2. Create the profile directory (you write it, the greeter user `_greetd` reads it): `sudo install -d -o <you> -g _greetd -m 0750 /var/lib/cde-greeter`
-3. Run `scripts/deploy.sh <host>`. It stages the files in `~/.local/share/cde/opt-staging` and prints one `sudo sh -c '...'` command that installs them into `/opt/cde`; run it. Start CDE once (or reload its config) so the profile is published.
+3. Run the deploy for the host. It stages the files in `~/.local/share/cde/opt-staging` and prints one `sudo sh -c '...'` command that installs them into `/opt/cde`; run it. Start CDE once (or reload its config) so the profile is published.
 4. Install the unit and the PAM files:
 
    ```sh
