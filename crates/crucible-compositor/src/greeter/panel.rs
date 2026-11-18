@@ -90,7 +90,8 @@ pub(crate) fn ellipsis(elapsed: std::time::Duration) -> &'static str {
 pub const LOGOUT_TEXT: &str = "Logging out";
 
 /// The modal's palette: the `greeter` block's style and accent (alpha from `overlay { alpha }`),
-/// or [`GreeterConfig::default`] without one (the tty1 default), as the published profile.
+/// or [`GreeterConfig::default`] without one (the tty1 default), as the published profile. It is
+/// always centred on the output; the greeter's `position` places only the login panel.
 #[must_use]
 pub fn logout_frame(config: &Config, elapsed: std::time::Duration) -> PanelFrame {
     let default = GreeterConfig::default();
@@ -102,7 +103,7 @@ pub fn logout_frame(config: &Config, elapsed: std::time::Duration) -> PanelFrame
         layout: None,
         palette: surface_palette(g.style, g.accent, config.theme.as_ref()),
         alpha: config.overlay.alpha,
-        position: g.position,
+        position: PanelPosition::Center,
         clear: [0.0, 0.0, 0.0, 1.0],
     }
 }
@@ -337,10 +338,11 @@ mod tests {
         let d = GreeterConfig::default();
         let want = surface_palette(d.style, d.accent, None);
         let f = logout_frame(&none, std::time::Duration::ZERO);
-        assert_eq!((f.palette, f.position), (want, d.position));
+        assert_eq!((f.palette, f.position), (want, PanelPosition::Center));
         let block = GreeterConfig {
             style: SurfaceStyle::N1Light,
             accent: SurfaceAccent::Style,
+            position: PanelPosition::UpperLeft,
             ..GreeterConfig::default()
         };
         let cfg = Config {
@@ -350,5 +352,10 @@ mod tests {
         let f = logout_frame(&cfg, std::time::Duration::ZERO);
         assert_eq!(f.palette, surface_palette(block.style, block.accent, None));
         assert_ne!(f.palette, want, "the block, not the default");
+        assert_eq!(
+            f.position,
+            PanelPosition::Center,
+            "centred whatever the greeter position"
+        );
     }
 }

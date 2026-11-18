@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.12 — 2026-11-17
+
+### Fixed
+
+- The "Logging out" panel took the `greeter` block's `position` (default `lower`); it is now always centred on each output.
+
 ## 0.7.11 — 2026-11-17
 
 ### Changed
