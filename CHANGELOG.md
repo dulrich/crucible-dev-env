@@ -4,6 +4,14 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.11 — 2026-11-17
+
+### Changed
+
+- The greeter's default style is now `n1-dark` (was `n1-med`), and the login panel has a 2 px `#4a4b4f` border, the stroke of the stock background's boxes.
+- After a successful login the greeter swaps the prompt and field for "Loading CDE" with an animated ellipsis, held on screen through the hand-off: `start_session` is written only once that frame has been presented on every lit output (or after a 250 ms cap).
+- Logging out (`Super+Shift+Q`, `crucible msg exec quit`) shows a centred "Logging out" panel with the same animated ellipsis, in the greeter's look, on every output, held until it is presented before `cde-login` is told. Input no longer reaches clients once it shows.
+
 ## 0.7.10 — 2026-11-17
 
 ### Added
