@@ -7,11 +7,16 @@ use std::rc::Rc;
 use crucible_greetd::AuthMessageType;
 
 use super::*;
+use crate::seam::{SignalTarget, signal_target};
 
 #[derive(Default)]
 struct Proc {
     exit: Option<ExitStatus>,
     ignores_term: bool,
+    /// `try_wait` fails this many more times before it reports again.
+    wait_errs: usize,
+    /// Every signal sent, with where the real backend would aim it.
+    signals: Vec<(i32, SignalTarget)>,
 }
 
 struct FakeChild {
@@ -24,10 +29,16 @@ impl Child for FakeChild {
         self.pid
     }
     fn try_wait(&mut self) -> Result<Option<ExitStatus>, SeamError> {
-        Ok(self.proc_.borrow().exit)
+        let mut p = self.proc_.borrow_mut();
+        if p.wait_errs > 0 {
+            p.wait_errs -= 1;
+            return Err(SeamError::Other("ECHILD".into()));
+        }
+        Ok(p.exit)
     }
     fn signal(&mut self, sig: i32) -> Result<(), SeamError> {
         let mut p = self.proc_.borrow_mut();
+        p.signals.push((sig, signal_target(sig)));
         if sig == libc::SIGKILL || !p.ignores_term {
             p.exit.get_or_insert(ExitStatus::Signal(sig));
         }
@@ -542,6 +553,54 @@ fn e2_stop_during_session_kills_stubborn_child() {
         Some(ExitStatus::Signal(libc::SIGKILL))
     );
     assert_all_closed_once(&s);
+}
+
+#[test]
+fn a13_sigkill_escalation_aims_at_the_user_pidfd() {
+    let (mut d, s, now) = setup(&[]);
+    login(&mut d, "alice", now);
+    d.on_ready();
+    proc_of(&s, "alice").borrow_mut().ignores_term = true;
+    d.shutdown(Duration::from_millis(50));
+    assert_eq!(
+        proc_of(&s, "alice").borrow().signals,
+        vec![
+            (libc::SIGTERM, SignalTarget::Session),
+            (libc::SIGKILL, SignalTarget::UserPidfd)
+        ]
+    );
+}
+
+#[test]
+fn a13_shutdown_wait_error_is_not_an_exit() {
+    let (mut d, s, now) = setup(&[]);
+    login(&mut d, "alice", now);
+    d.on_ready();
+    // SIGTERM "works", but every wait fails: the child is not counted dead, so it is still
+    // escalated, and its handle is still closed.
+    proc_of(&s, "alice").borrow_mut().wait_errs = usize::MAX;
+    d.shutdown(Duration::from_millis(50));
+    let p = proc_of(&s, "alice");
+    assert!(
+        p.borrow()
+            .signals
+            .contains(&(libc::SIGKILL, SignalTarget::UserPidfd))
+    );
+    p.borrow_mut().wait_errs = 0;
+    assert_all_closed_once(&s);
+}
+
+#[test]
+fn a13_reap_error_keeps_the_session_running() {
+    let (mut d, s, now) = setup(&[]);
+    running_session(&mut d, &s, now);
+    proc_of(&s, "alice").borrow_mut().wait_errs = 1;
+    d.poll_children(now);
+    assert!(d.session_active());
+    assert_eq!(count_after(&log(&s), "running", "close"), 0);
+    exit(&s, "alice");
+    d.poll_children(now);
+    assert!(!d.session_active());
 }
 
 #[test]

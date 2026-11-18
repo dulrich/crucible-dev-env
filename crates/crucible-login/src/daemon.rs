@@ -744,7 +744,7 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
         let mut alive: Vec<bool> = vec![true; runs.len()];
         loop {
             for (r, a) in runs.iter_mut().zip(alive.iter_mut()) {
-                if *a && !matches!(r.child.try_wait(), Ok(None)) {
+                if *a && exited(&mut r.child, "session") {
                     *a = false;
                 }
             }
@@ -757,7 +757,7 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             if *a {
                 let _ = r.child.signal(libc::SIGKILL);
                 for _ in 0..50 {
-                    if !matches!(r.child.try_wait(), Ok(None)) {
+                    if exited(&mut r.child, "session") {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(20));
@@ -777,11 +777,17 @@ fn reap<C: Child>(child: &mut C, what: &str) -> Option<ExitStatus> {
             Some(st)
         }
         Ok(None) => None,
+        // A wait error says nothing about the process: keep the state and look again later.
         Err(e) => {
             tracing::error!("waiting for {what}: {e}");
-            Some(ExitStatus::Code(-1))
+            None
         }
     }
+}
+
+/// Shutdown's wait: only `Ok(Some(_))` means exited; a wait error keeps the child alive.
+fn exited<C: Child>(child: &mut C, what: &str) -> bool {
+    reap(child, what).is_some()
 }
 
 #[cfg(test)]

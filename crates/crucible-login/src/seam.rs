@@ -104,6 +104,24 @@ pub enum ExitStatus {
     Signal(i32),
 }
 
+/// Where [`Child::signal`] aims a signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalTarget {
+    /// The session's own process (the PAM worker, which forwards it to the user process).
+    Session,
+    /// The user process through its pidfd, never a bare pid (SIGKILL cannot be forwarded).
+    UserPidfd,
+}
+
+/// The target every [`Child`] implementation uses for `sig`.
+pub fn signal_target(sig: i32) -> SignalTarget {
+    if sig == libc::SIGKILL {
+        SignalTarget::UserPidfd
+    } else {
+        SignalTarget::Session
+    }
+}
+
 /// A spawned session process.
 pub trait Child {
     /// Its pid (for logs).

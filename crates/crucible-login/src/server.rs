@@ -41,7 +41,9 @@ fn signal_pipe() -> io::Result<OwnedFd> {
         return Err(io::Error::last_os_error());
     }
     SIG_WRITE.store(fds[1], Ordering::Relaxed);
-    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGCHLD] {
+    // SIGHUP stops the daemon like SIGTERM: the unit's `SendSIGHUP=yes` sends it alongside the
+    // stop signal, and its default action would end the daemon before `shutdown` runs (A7).
+    for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGCHLD] {
         // SAFETY: a zeroed sigaction with a plain handler and an empty mask is valid.
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
@@ -134,7 +136,7 @@ fn send(clients: &mut Vec<Client>, id: u64, resp: &Response) {
     }
 }
 
-/// Runs the daemon until SIGTERM/SIGINT; then stops it in order, removes the socket and
+/// Runs the daemon until SIGTERM/SIGINT/SIGHUP; then stops it in order, removes the socket and
 /// returns.
 pub fn serve<B: Backend, V: Vt>(
     mut daemon: Daemon<B, V>,
@@ -179,10 +181,7 @@ pub fn serve<B: Backend, V: Vt>(
             // SAFETY: non-blocking read into a local buffer.
             let n = unsafe { libc::read(sig.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
             let got = &buf[..usize::try_from(n).unwrap_or(0)];
-            if got
-                .iter()
-                .any(|&s| i32::from(s) == libc::SIGTERM || i32::from(s) == libc::SIGINT)
-            {
+            if stop_requested(got) {
                 tracing::info!("stopping");
                 break 'main;
             }
@@ -255,6 +254,13 @@ pub fn serve<B: Backend, V: Vt>(
     Ok(())
 }
 
+/// Whether the signal-pipe bytes carry a stop signal (SIGTERM, SIGINT or SIGHUP).
+fn stop_requested(sig_bytes: &[u8]) -> bool {
+    sig_bytes
+        .iter()
+        .any(|&s| [libc::SIGTERM, libc::SIGINT, libc::SIGHUP].contains(&i32::from(s)))
+}
+
 /// One read from a daemon-owned pipe: the bytes and whether it hit EOF (or failed).
 fn read_pipe(fd: RawFd) -> (Vec<u8>, bool) {
     let mut buf = [0u8; 64];
@@ -272,5 +278,19 @@ fn pfd(fd: RawFd) -> libc::pollfd {
         fd,
         events: libc::POLLIN,
         revents: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sighup_stops_like_sigterm_and_sigchld_does_not() {
+        for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            assert!(stop_requested(&[libc::SIGCHLD as u8, sig as u8]), "{sig}");
+        }
+        assert!(!stop_requested(&[libc::SIGCHLD as u8]));
+        assert!(!stop_requested(&[]));
     }
 }

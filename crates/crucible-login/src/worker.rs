@@ -7,12 +7,13 @@
 //!
 //! - `Step(answer)` → `Prompt` | `Authenticated` | `AuthError` | `Error` (the first `Step` starts
 //!   PAM; PAM's push-driven conversation blocks on the next `Step` for each message);
-//! - `Open` → `Ok` | `Error`; `Spawn` (+ the extra fd over `SCM_RIGHTS`) → `Spawned(pid)` |
-//!   `Error`; `Close` → the worker closes PAM and exits.
+//! - `Open` → `Ok` | `Error`; `Spawn` (+ the extra fd over `SCM_RIGHTS`) → `Spawned(pid)` (+ a
+//!   pidfd for the user process over `SCM_RIGHTS`, absent if `pidfd_open` failed) | `Error`; `Close` → the worker closes PAM and exits.
 //!
 //! After `Spawned`, the worker forwards `SIGTERM`/`SIGINT`/`SIGHUP` to the user process, reaps
 //! it, runs `pam_close_session` + `pam_setcred(DELETE_CRED)` + `pam_end`, and exits with the
-//! user process's status, so the daemon-side [`Child`] is the worker itself.
+//! user process's status, so the daemon-side [`Child`] is the worker itself. SIGKILL cannot be
+//! forwarded, so the daemon sends it through the user process's pidfd (never a bare pid).
 #![allow(unsafe_code)]
 
 use std::ffi::CString;
@@ -24,7 +25,8 @@ use crucible_greetd::{AuthMessageType, Secret};
 
 use crate::pam::{PAM_DELETE_CRED, PAM_ESTABLISH_CRED, Pam};
 use crate::seam::{
-    AuthStep, Backend, Child, Class, ExitStatus, OpenSpec, SeamError, SessionHandle, SpawnSpec,
+    AuthStep, Backend, Child, Class, ExitStatus, OpenSpec, SeamError, SessionHandle, SignalTarget,
+    SpawnSpec, signal_target,
 };
 
 /// The `PATH` every session starts with.
@@ -479,6 +481,8 @@ pub struct PamHandle {
 pub struct WorkerChild {
     worker: i32,
     user: i32,
+    /// The user process's pidfd from the `Spawned` reply; `None` if the worker sent none.
+    user_pidfd: Option<OwnedFd>,
     status: Option<ExitStatus>,
 }
 
@@ -531,10 +535,21 @@ impl Backend for PamBackend {
 
 impl PamHandle {
     fn call(&mut self, req: &Req, fd: Option<RawFd>) -> Result<Rep, SeamError> {
+        self.call_fd(req, fd).map(|(r, _)| r)
+    }
+
+    /// [`Self::call`], also returning an fd passed with the reply.
+    fn call_fd(
+        &mut self,
+        req: &Req,
+        fd: Option<RawFd>,
+    ) -> Result<(Rep, Option<OwnedFd>), SeamError> {
         send(self.sock.as_raw_fd(), &req.encode(), fd)
             .map_err(|e| other(format!("worker: {e}")))?;
         match recv(self.sock.as_raw_fd()).map_err(|e| other(format!("worker: {e}")))? {
-            Some((b, _)) => Rep::decode(&b).map_err(|e| other(format!("worker reply: {e}"))),
+            Some((b, rfd)) => Rep::decode(&b)
+                .map(|r| (r, rfd))
+                .map_err(|e| other(format!("worker reply: {e}"))),
             None => Err(other("session worker exited")),
         }
     }
@@ -584,19 +599,23 @@ impl SessionHandle for PamHandle {
             vt: spec.vt,
             target_fd: target,
         };
-        let rep = self.call(&req, fd);
+        let rep = self.call_fd(&req, fd);
         // Our copy of the extra fd is dropped here; the worker dropped its own after the fork.
         drop(spec);
         match rep? {
-            Rep::Spawned(user) => {
+            (Rep::Spawned(user), user_pidfd) => {
                 self.spawned = true;
+                if user_pidfd.is_none() {
+                    tracing::warn!("no pidfd for user process {user}; SIGKILL will not reach it");
+                }
                 Ok(WorkerChild {
                     worker: self.pid,
                     user,
+                    user_pidfd,
                     status: None,
                 })
             }
-            r => Err(unexpected(r)),
+            (r, _) => Err(unexpected(r)),
         }
     }
 
@@ -657,15 +676,33 @@ impl Child for WorkerChild {
         if self.status.is_some() {
             return Ok(());
         }
-        // SIGKILL cannot be forwarded: kill the user process directly so the worker still
-        // reaps it and closes PAM. Every other signal goes through the worker.
-        let pid = if sig == libc::SIGKILL {
-            self.user
-        } else {
-            self.worker
+        // SIGKILL cannot be forwarded: it goes to the user process through its pidfd, so it
+        // can only hit that process (ESRCH once reaped), and the worker still reaps it and closes
+        // PAM. Without a pidfd there is no safe target: the daemon never signals a bare user pid
+        // and never SIGKILLs the worker (PAM would stay open), so the SIGKILL is dropped with an
+        // error log and the worker's own SIGTERM forwarding is all that stops the session.
+        // Every other signal goes to the worker, which forwards it.
+        let rc = match signal_target(sig) {
+            SignalTarget::UserPidfd => {
+                let Some(fd) = &self.user_pidfd else {
+                    tracing::error!("no pidfd for user process {}; SIGKILL not sent", self.user);
+                    return Ok(());
+                };
+                // SAFETY: pidfd_send_signal(2) on our own pidfd with a NULL siginfo.
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        fd.as_raw_fd(),
+                        sig,
+                        std::ptr::null::<libc::siginfo_t>(),
+                        0u32,
+                    )
+                }
+            }
+            // SAFETY: plain kill(2) on the worker, our own child.
+            SignalTarget::Session => i64::from(unsafe { libc::kill(self.worker, sig) }),
         };
-        // SAFETY: plain kill(2).
-        if unsafe { libc::kill(pid, sig) } < 0 {
+        if rc < 0 {
             let e = io::Error::last_os_error();
             if e.raw_os_error() != Some(libc::ESRCH) {
                 return Err(other(e));
@@ -882,11 +919,22 @@ fn worker_main(sock: RawFd, class: Class, user: &str) -> i32 {
                 let pam_env = pam.envlist();
                 match spawn_user(&account, &cmd, &env, vt, class, &pam_env, extra) {
                     Ok(pid) => {
+                        // Opened in this (parent) process after the fork, so the user process
+                        // never holds it (pidfds are always close-on-exec). This process is
+                        // the only one that reaps `pid`, and only in `wait_user` below, so the
+                        // pid cannot be recycled before this open.
+                        let pidfd = open_pidfd(pid);
                         USER_PID.store(pid, Ordering::Relaxed);
                         for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
                             set_handler(sig, forward as *const () as libc::sighandler_t);
                         }
-                        reply(sock, &Rep::Spawned(pid));
+                        let _ = send(
+                            sock,
+                            &Rep::Spawned(pid).encode(),
+                            pidfd.as_ref().map(AsRawFd::as_raw_fd),
+                        );
+                        // The daemon holds its own copy now.
+                        drop(pidfd);
                         break wait_user(pid);
                     }
                     Err(e) => {
@@ -921,6 +969,18 @@ fn wait_close(sock: RawFd) -> i32 {
             _ => return 0,
         }
     }
+}
+
+/// `pidfd_open(pid, 0)`; `None` (logged) on failure.
+fn open_pidfd(pid: i32) -> Option<OwnedFd> {
+    // SAFETY: pidfd_open(2) only creates an fd.
+    let r = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0u32) };
+    if r < 0 {
+        tracing::warn!("pidfd_open({pid}): {}", io::Error::last_os_error());
+        return None;
+    }
+    // SAFETY: a fresh fd we own.
+    Some(unsafe { OwnedFd::from_raw_fd(r as RawFd) })
 }
 
 /// Reaps the user process; returns the worker's exit code mirroring its status (a signal is
