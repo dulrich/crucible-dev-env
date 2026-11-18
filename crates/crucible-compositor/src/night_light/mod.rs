@@ -22,7 +22,7 @@ use crate::state::{Backend, CrucibleState};
 /// How often the schedule is re-evaluated.
 const TICK: Duration = Duration::from_secs(30);
 
-use model::{IDENTITY_KELVIN, Override, Verb, apply_verb, effective_kelvin};
+use model::{IDENTITY_KELVIN, Override, apply_verb, effective_kelvin};
 
 /// What the cache knows about one output's gamma ramp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,18 +137,6 @@ pub struct NightLight {
     pub cache: ApplyCache<OutputKey>,
 }
 
-/// Maps the keys-crate verb argument onto the model's.
-#[must_use]
-pub fn verb_of(arg: NightLightArg) -> Verb {
-    match arg {
-        NightLightArg::On => Verb::On,
-        NightLightArg::Off => Verb::Off,
-        NightLightArg::Toggle => Verb::Toggle,
-        NightLightArg::Auto => Verb::Auto,
-        NightLightArg::Kelvin(k) => Verb::Kelvin(k),
-    }
-}
-
 /// The local minute of the day (0..1440), or `None` if the C library refuses the time.
 fn local_minute_of_day() -> Option<u16> {
     let now = crate::screenshot::Stamp::now_local()?;
@@ -202,7 +190,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// then applies it immediately.
     pub fn night_light_verb(&mut self, arg: NightLightArg) {
         let now = self.night_light_kelvin_now().unwrap_or(IDENTITY_KELVIN);
-        self.night_light.over = apply_verb(verb_of(arg), now);
+        self.night_light.over = apply_verb(arg, now);
         self.evaluate_night_light();
     }
 }
@@ -301,14 +289,5 @@ mod tests {
         c.record_success(2, NIGHT);
         c.remove_where(|k| *k == 2);
         assert_eq!(c.decide(&2, IDENTITY_KELVIN, true, false), Decision::Skip);
-    }
-
-    #[test]
-    fn verb_arguments_map_one_to_one() {
-        assert_eq!(verb_of(NightLightArg::On), Verb::On);
-        assert_eq!(verb_of(NightLightArg::Off), Verb::Off);
-        assert_eq!(verb_of(NightLightArg::Toggle), Verb::Toggle);
-        assert_eq!(verb_of(NightLightArg::Auto), Verb::Auto);
-        assert_eq!(verb_of(NightLightArg::Kelvin(3000)), Verb::Kelvin(3000));
     }
 }

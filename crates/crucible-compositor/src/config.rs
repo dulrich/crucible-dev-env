@@ -155,6 +155,9 @@ pub fn warm_key(config: &Config, terminal: String, theme_dir: Option<&std::path:
 pub struct LiveEnv<'a> {
     /// The cursor theme and size currently loaded (`None` before the first apply).
     pub cursor_loaded: Option<(&'a str, u32)>,
+    /// The `(font spec, bold face wanted)` the header fonts were loaded for (`None` before the
+    /// first apply and for fonts not loaded from a header config).
+    pub font_loaded: Option<&'a (String, bool)>,
     /// Environment lookup for the cursor theme resolution (`XCURSOR_THEME` / `XCURSOR_SIZE`).
     pub env: &'a dyn Fn(&str) -> Option<String>,
     /// The terminal the keys crate resolves when the config names none.
@@ -180,6 +183,13 @@ pub struct ConfigDelta {
     /// The resolved `(theme, size)` to load, when it differs from what is loaded (startup:
     /// nothing loaded yet); `None` keeps the loaded theme.
     pub cursor: Option<(String, u32)>,
+    /// The `(font spec, bold face wanted)` to load the header fonts for: set only when the strip
+    /// can ever show (`mode` is not `off`) and the key differs from the loaded one (the first
+    /// apply included); `None` keeps the loaded fonts. The bold face is wanted only for
+    /// `active "text-bold"`.
+    pub header_font: Option<(String, bool)>,
+    /// The `night-light` block changed: the schedule is re-evaluated.
+    pub night_light: bool,
     /// The overlay host's warm key changed (terminal, exec flag, overlay args, launcher entries or
     /// output scales): the hidden warm overlay host restarts.
     pub warm: bool,
@@ -192,6 +202,13 @@ impl ConfigDelta {
         let header_changed = old.header != new.header;
         let (theme, size) = crate::cursor::theme::resolve(&new.cursor, live.env);
         let cursor = (live.cursor_loaded != Some((theme.as_str(), size))).then_some((theme, size));
+        let font_key = (
+            new.header.font.clone(),
+            new.header.active == crucible_config::HeaderActive::TextBold,
+        );
+        let header_font = (new.header.mode != crucible_config::HeaderMode::Off
+            && live.font_loaded != Some(&font_key))
+        .then_some(font_key);
         let terminal = |c: &Config| {
             pick_terminal(
                 c.terminal.command.as_deref(),
@@ -204,6 +221,8 @@ impl ConfigDelta {
             max_scale: (old.max_output_scale(), new.max_output_scale()),
             idle: old.idle != new.idle,
             cursor,
+            header_font,
+            night_light: old.night_light != new.night_light,
             warm: warm_key(old, terminal(old), live.theme_dir)
                 != warm_key(new, terminal(new), live.theme_dir),
         }
@@ -232,6 +251,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             &config,
             &LiveEnv {
                 cursor_loaded: self.cursor.loaded(),
+                font_loaded: self.header_text.loaded.as_ref(),
                 env: &|k| std::env::var(k).ok(),
                 fallback_terminal: &fallback_terminal,
                 theme_dir: self.theme_dir.as_deref(),
@@ -248,21 +268,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if delta.relayout {
             self.invalidate_projection();
         }
-        // Load lazily (also on the first apply, when the header equals the default): only when
-        // the strip can ever show and the font spec differs from what is loaded.
-        if config.header.mode != crucible_config::HeaderMode::Off {
-            // The bold face is wanted only for `active "text-bold"`; it is (re)loaded with the
-            // regular one when the font or that wish changed, and dropped when no longer wanted.
-            let want_bold = config.header.active == crucible_config::HeaderActive::TextBold;
-            let key = (config.header.font.clone(), want_bold);
-            if self.header.font_loaded.as_ref() != Some(&key) {
-                self.header_text = crate::text::HeaderFonts::load(
-                    config.header.font_path(),
-                    &config.header.font,
-                    want_bold,
-                );
-                self.header.font_loaded = Some(key);
-            }
+        // Lazy: only when the strip can ever show and the key differs from the loaded one
+        // (also on the first apply, when the header equals the default).
+        if let Some((font, want_bold)) = &delta.header_font {
+            self.header_text =
+                crate::text::HeaderFonts::load(config.header.font_path(), font, *want_bold);
         }
         if delta.keyboard {
             self.reload_keyboard_layouts(&config);
@@ -273,7 +283,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if let Some((theme, size)) = &delta.cursor {
             self.cursor.set_theme(theme, *size);
         }
-        let night_light_changed = self.config.night_light != config.night_light;
+        // The three writers run on every apply because each skips an unchanged file
+        // (`terminal_theme::write_if_changed`, shared by the swaylock and greeter writers).
         if let Some(theme) = &config.theme {
             self.write_terminal_theme(theme);
         }
@@ -287,7 +298,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if delta.warm {
             self.warm_config_changed();
         }
-        if night_light_changed {
+        if delta.night_light {
             self.evaluate_night_light();
         }
         self.apply_layout();
@@ -400,6 +411,7 @@ mod tests {
     fn live() -> LiveEnv<'static> {
         LiveEnv {
             cursor_loaded: Some(("default", 24)),
+            font_loaded: None,
             env: &|_| None,
             fallback_terminal: "foot",
             theme_dir: Some(std::path::Path::new("/c/cde/terminal-theme")),
@@ -492,6 +504,64 @@ mod tests {
             ConfigDelta::between(&old, &old, &with_env).cursor,
             Some(("Env".to_string(), 24))
         );
+    }
+
+    #[test]
+    fn delta_header_font_loads_on_first_apply_and_keeps_an_equal_key() {
+        let c = Config::default();
+        let key = (c.header.font.clone(), false);
+        assert_eq!(delta(&c, &c).header_font, Some(key.clone()));
+        let loaded = LiveEnv {
+            font_loaded: Some(&key),
+            ..live()
+        };
+        assert_eq!(ConfigDelta::between(&c, &c, &loaded).header_font, None);
+    }
+
+    #[test]
+    fn delta_header_font_reloads_on_a_font_or_bold_wish_change() {
+        use crucible_config::HeaderActive;
+        let old = Config::default();
+        let key = (old.header.font.clone(), false);
+        let loaded = LiveEnv {
+            font_loaded: Some(&key),
+            ..live()
+        };
+        let mut font = old.clone();
+        font.header.font = "Other Sans".into();
+        assert_eq!(
+            ConfigDelta::between(&old, &font, &loaded).header_font,
+            Some(("Other Sans".to_string(), false))
+        );
+        let mut bold = old.clone();
+        bold.header.active = HeaderActive::TextBold;
+        assert_eq!(
+            ConfigDelta::between(&old, &bold, &loaded).header_font,
+            Some((old.header.font.clone(), true))
+        );
+    }
+
+    #[test]
+    fn delta_header_font_never_loads_when_the_mode_is_off() {
+        let off = header_mode(crucible_config::HeaderMode::Off);
+        assert_eq!(delta(&off, &off).header_font, None);
+        assert_eq!(delta(&Config::default(), &off).header_font, None);
+    }
+
+    #[test]
+    fn delta_night_light_follows_the_block_only() {
+        let old = Config::default();
+        assert!(!delta(&old, &old.clone()).night_light);
+        let mut new = old.clone();
+        new.night_light = Some(crucible_config::NightLightConfig {
+            temperature: 4000,
+            day_temperature: 6500,
+            start: 1260,
+            end: 420,
+            fade_minutes: 30,
+        });
+        assert!(delta(&old, &new).night_light);
+        assert!(!delta(&new, &new.clone()).night_light);
     }
 
     #[test]

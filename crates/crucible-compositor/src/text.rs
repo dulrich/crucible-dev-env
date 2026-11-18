@@ -180,6 +180,9 @@ pub struct HeaderFonts {
     pub regular: TextRenderer,
     /// The bold face; `None` when not wanted or not resolvable (the regular face is used).
     pub bold: Option<TextRenderer>,
+    /// The `(font spec, bold face wanted)` these faces were loaded for; `None` for fonts not
+    /// loaded from a header config (the default and the greeter's), which a config apply replaces.
+    pub loaded: Option<(String, bool)>,
 }
 
 /// The fontconfig pattern for the bold face of header font `font`: `"<family>:bold"` when `font`
@@ -195,6 +198,7 @@ impl HeaderFonts {
         Self {
             regular,
             bold: None,
+            loaded: None,
         }
     }
 
@@ -227,7 +231,11 @@ impl HeaderFonts {
         } else {
             None
         };
-        Self { regular, bold }
+        Self {
+            regular,
+            bold,
+            loaded: Some((family.to_string(), want_bold)),
+        }
     }
 
     /// The face a label is measured and drawn in: the bold face for the active label under

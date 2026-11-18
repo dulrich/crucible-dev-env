@@ -480,6 +480,14 @@ pub struct IdleConfig {
     pub blank_after: Option<u32>,
 }
 
+/// The lowest night-light temperature in kelvin, for the config and the `night-light` verb.
+pub const NIGHT_LIGHT_MIN_KELVIN: u32 = 2500;
+/// The identity night-light temperature in kelvin: no tint, and the highest accepted value.
+pub const NIGHT_LIGHT_IDENTITY_KELVIN: u32 = 6500;
+/// The default night temperature in kelvin (a `night-light` block without `temperature`, and what
+/// the `on` verb forces without a block).
+pub const NIGHT_LIGHT_DEFAULT_KELVIN: u32 = 4500;
+
 /// Built-in night light (`night-light { temperature 4500; start "21:00"; end "07:00"; fade-minutes 30 }`).
 /// `start`/`end` are local minutes of the day (`0..1440`), `start != end`; the window may wrap midnight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

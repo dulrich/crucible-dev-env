@@ -1,13 +1,12 @@
 //! Pure night-light model: no Smithay, no I/O, so it is unit-testable without a compositor.
 
 use crucible_config::NightLightConfig;
-
-/// The temperature at which the ramp is exactly the identity (no tint).
-pub const IDENTITY_KELVIN: u32 = 6500;
-/// The lowest temperature the schedule or a verb may request.
-pub const MIN_KELVIN: u32 = 2500;
-/// The night temperature `on` forces when there is no `night-light` block.
-pub const DEFAULT_KELVIN: u32 = 4500;
+/// The config crate owns the bounds and the default; they keep their model names here.
+pub use crucible_config::{
+    NIGHT_LIGHT_DEFAULT_KELVIN as DEFAULT_KELVIN, NIGHT_LIGHT_IDENTITY_KELVIN as IDENTITY_KELVIN,
+    NIGHT_LIGHT_MIN_KELVIN as MIN_KELVIN,
+};
+use crucible_keys::NightLightArg;
 
 const MINUTES_PER_DAY: i64 = 1440;
 
@@ -18,22 +17,7 @@ pub enum Override {
     On,
     /// Force [`IDENTITY_KELVIN`].
     Off,
-    /// Force this temperature.
-    Kelvin(u32),
-}
-
-/// The argument of the `night-light` verb.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Verb {
-    /// `on`.
-    On,
-    /// `off`.
-    Off,
-    /// `toggle`.
-    Toggle,
-    /// `auto`: clear the override.
-    Auto,
-    /// `<kelvin>`.
+    /// Force this temperature (clamped once, when [`apply_verb`] creates the override).
     Kelvin(u32),
 }
 
@@ -88,7 +72,7 @@ pub fn effective_kelvin(
     match over {
         Some(Override::On) => schedule.map_or(DEFAULT_KELVIN, |c| c.temperature),
         Some(Override::Off) => IDENTITY_KELVIN,
-        Some(Override::Kelvin(k)) => k.clamp(MIN_KELVIN, IDENTITY_KELVIN),
+        Some(Override::Kelvin(k)) => k,
         None => schedule.map_or(IDENTITY_KELVIN, |c| target_kelvin(c, minute_of_day)),
     }
 }
@@ -96,14 +80,14 @@ pub fn effective_kelvin(
 /// The override after a verb, given the temperature in force right now (only `toggle` reads it).
 /// `None` means "follow the schedule".
 #[must_use]
-pub fn apply_verb(verb: Verb, effective_now: u32) -> Option<Override> {
+pub fn apply_verb(verb: NightLightArg, effective_now: u32) -> Option<Override> {
     match verb {
-        Verb::On => Some(Override::On),
-        Verb::Off => Some(Override::Off),
-        Verb::Toggle if effective_now < IDENTITY_KELVIN => Some(Override::Off),
-        Verb::Toggle => Some(Override::On),
-        Verb::Auto => None,
-        Verb::Kelvin(k) => Some(Override::Kelvin(k.clamp(MIN_KELVIN, IDENTITY_KELVIN))),
+        NightLightArg::On => Some(Override::On),
+        NightLightArg::Off => Some(Override::Off),
+        NightLightArg::Toggle if effective_now < IDENTITY_KELVIN => Some(Override::Off),
+        NightLightArg::Toggle => Some(Override::On),
+        NightLightArg::Auto => None,
+        NightLightArg::Kelvin(k) => Some(Override::Kelvin(k.clamp(MIN_KELVIN, IDENTITY_KELVIN))),
     }
 }
 
@@ -334,19 +318,25 @@ mod tests {
     }
 
     #[test]
+    fn keys_kelvin_bounds_match_the_config_constants() {
+        assert_eq!(NightLightArg::MIN_KELVIN, MIN_KELVIN);
+        assert_eq!(NightLightArg::MAX_KELVIN, IDENTITY_KELVIN);
+    }
+
+    #[test]
     fn verbs_resolve_against_the_effective_temperature() {
         let c = cfg("21:00", "07:00", 0);
-        assert_eq!(apply_verb(Verb::Auto, 4500), None);
-        assert_eq!(apply_verb(Verb::On, 6500), Some(Override::On));
-        assert_eq!(apply_verb(Verb::Off, 4500), Some(Override::Off));
-        assert_eq!(apply_verb(Verb::Toggle, 4500), Some(Override::Off));
-        assert_eq!(apply_verb(Verb::Toggle, 6500), Some(Override::On));
+        assert_eq!(apply_verb(NightLightArg::Auto, 4500), None);
+        assert_eq!(apply_verb(NightLightArg::On, 6500), Some(Override::On));
+        assert_eq!(apply_verb(NightLightArg::Off, 4500), Some(Override::Off));
+        assert_eq!(apply_verb(NightLightArg::Toggle, 4500), Some(Override::Off));
+        assert_eq!(apply_verb(NightLightArg::Toggle, 6500), Some(Override::On));
         assert_eq!(
-            apply_verb(Verb::Kelvin(4000), 6500),
+            apply_verb(NightLightArg::Kelvin(4000), 6500),
             Some(Override::Kelvin(4000))
         );
         assert_eq!(
-            apply_verb(Verb::Kelvin(100), 6500),
+            apply_verb(NightLightArg::Kelvin(100), 6500),
             Some(Override::Kelvin(2500))
         );
         // Resolution of overrides.

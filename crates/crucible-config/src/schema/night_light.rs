@@ -1,11 +1,14 @@
 //! The `night-light { temperature 4500; day-temperature 6500; start "21:00"; end "07:00"; fade-minutes 30 }` block.
 
 use crate::error::ConfigError;
-use crate::model::NightLightConfig;
+use crate::model::{
+    NIGHT_LIGHT_DEFAULT_KELVIN, NIGHT_LIGHT_IDENTITY_KELVIN, NIGHT_LIGHT_MIN_KELVIN,
+    NightLightConfig,
+};
 use crate::reader::NodeReader;
 
-const DEFAULT_TEMPERATURE: u32 = 4500;
-const DEFAULT_DAY_TEMPERATURE: u32 = 6500;
+const KELVIN_RANGE: std::ops::RangeInclusive<u32> =
+    NIGHT_LIGHT_MIN_KELVIN..=NIGHT_LIGHT_IDENTITY_KELVIN;
 const DEFAULT_FADE_MINUTES: u32 = 30;
 
 /// `"HH:MM"` to minutes after midnight: exactly two digits each, hour 00-23, minute 00-59.
@@ -36,15 +39,15 @@ fn time_arg(child: &NodeReader<'_>) -> Result<u16, ConfigError> {
 }
 
 pub(super) fn parse_night_light(node: NodeReader<'_>) -> Result<NightLightConfig, ConfigError> {
-    let mut temperature = DEFAULT_TEMPERATURE;
+    let mut temperature = NIGHT_LIGHT_DEFAULT_KELVIN;
     let mut day = None;
     let mut fade = DEFAULT_FADE_MINUTES;
     let (mut start, mut end) = (None, None);
     for child in node.children_strict(&[], &[])? {
         let child = child?;
         match child.name() {
-            "temperature" => temperature = child.u32_arg_in(2500..=6500)?,
-            "day-temperature" => day = Some((child.u32_arg_in(2500..=6500)?, child.at())),
+            "temperature" => temperature = child.u32_arg_in(KELVIN_RANGE)?,
+            "day-temperature" => day = Some((child.u32_arg_in(KELVIN_RANGE)?, child.at())),
             "fade-minutes" => fade = child.u32_arg_in(0..=180)?,
             "start" => start = Some((time_arg(&child)?, child.at())),
             "end" => end = Some((time_arg(&child)?, child.at())),
@@ -66,7 +69,7 @@ pub(super) fn parse_night_light(node: NodeReader<'_>) -> Result<NightLightConfig
             ));
         }
         Some((k, _)) => k,
-        None => DEFAULT_DAY_TEMPERATURE,
+        None => NIGHT_LIGHT_IDENTITY_KELVIN,
     };
     Ok(NightLightConfig {
         temperature,

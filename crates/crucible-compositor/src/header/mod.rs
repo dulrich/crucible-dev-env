@@ -251,8 +251,6 @@ pub struct HeaderState {
     pub consumed: ConsumedButtons,
     /// The label press being tracked as a possible drag.
     pub drag: Option<HeaderDrag>,
-    /// The `(font spec, bold face wanted)` the header fonts were last loaded for.
-    pub font_loaded: Option<(String, bool)>,
 }
 
 impl HeaderState {

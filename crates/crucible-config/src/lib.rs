@@ -29,7 +29,8 @@ pub use error::{ConfigError, Location};
 pub use model::{
     AppTiling, Config, CursorConfig, DEFAULT_DIVIDER_COLOR, DEFAULT_HEADER_FONT,
     HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderActive,
-    HeaderConfig, HeaderMode, HeaderStart, IdleConfig, KeyboardConfig, LauncherConfig, Named,
+    HeaderConfig, HeaderMode, HeaderStart, IdleConfig, KeyboardConfig, LauncherConfig,
+    NIGHT_LIGHT_DEFAULT_KELVIN, NIGHT_LIGHT_IDENTITY_KELVIN, NIGHT_LIGHT_MIN_KELVIN, Named,
     NightLightConfig, PickerConfig, Rgb, ScreenshotConfig, ScreenshotDestination, TerminalConfig,
     TerminalTiling, TilingConfig, clamp_ring, substitute_gap,
 };
