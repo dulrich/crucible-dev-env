@@ -6,7 +6,7 @@
 //! calls on a config reload. The decision logic is in the pure [`plan_bindings`]/[`pick_terminal`] so it is
 //! unit-tested without a compositor.
 
-use crucible_config::{Config, ConfigError};
+use crucible_config::{Config, ConfigError, Named};
 use crucible_keys::{BindError, Bindings};
 use tracing::{error, info, warn};
 
@@ -48,10 +48,59 @@ pub fn plan_bindings(current: &Bindings, config: &Config) -> (Bindings, Option<B
     }
 }
 
+/// The stable environment an overlay spawn exports, built once from `(config, program)` by
+/// [`OverlayEnv::of`]: the overlay style (`CDE_OVERLAY_STYLE`), the TUI accent
+/// (`CDE_OVERLAY_ACCENT`), the surround flag (`CDE_OVERLAY_SURROUND`) and the launcher's TUI
+/// entries (`CDE_LAUNCHER_TUI`). [`WarmKey`] embeds it and `spawn()` applies [`Self::vars`], so
+/// the warm host is keyed on exactly what it was spawned with. **Pure.**
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverlayEnv {
+    /// The overlay style.
+    pub style: crucible_config::SurfaceStyle,
+    /// The overlay TUI accent ([`overlay_tui_accent`]).
+    pub accent: Option<String>,
+    /// Whether `program`'s default background is the N1 palette `bg`
+    /// (`OverlayConfig::surround_is_default_bg`); false for the locker, which resolves to `Other`.
+    pub surround_default: bool,
+    /// The launcher's TUI entries.
+    pub launcher_tui: Vec<String>,
+}
+
+impl OverlayEnv {
+    /// The overlay environment of `config` for the overlay spawn of `program`.
+    #[must_use]
+    pub fn of(config: &Config, program: &str) -> OverlayEnv {
+        OverlayEnv {
+            style: config.overlay.style,
+            accent: overlay_tui_accent(config),
+            surround_default: config.overlay.surround_is_default_bg(program),
+            launcher_tui: config.launcher.tui.clone(),
+        }
+    }
+
+    /// The `(variable, value)` pairs an overlay spawn applies; `None` means the variable is
+    /// removed from the child's environment.
+    #[must_use]
+    pub fn vars(&self) -> [(&'static str, Option<String>); 4] {
+        use crate::ipc::{
+            LAUNCHER_TUI_ENV, OVERLAY_ACCENT_ENV, OVERLAY_STYLE_ENV, OVERLAY_SURROUND_ENV,
+        };
+        [
+            (OVERLAY_STYLE_ENV, Some(self.style.as_str().to_string())),
+            (LAUNCHER_TUI_ENV, Some(self.launcher_tui.join(":"))),
+            (OVERLAY_ACCENT_ENV, self.accent.clone()),
+            (
+                OVERLAY_SURROUND_ENV,
+                self.surround_default.then(|| "default".to_string()),
+            ),
+        ]
+    }
+}
+
 /// What a pre-warmed overlay host bakes in at spawn time: resolved terminal program, exec flag,
-/// overlay terminal args, the launcher's TUI entries, and the configured output scales (the
-/// hidden host is on no output, so it never sees a rescale and would open sized for the old
-/// scale). A change in any of them invalidates the warm host.
+/// overlay terminal args, its [`OverlayEnv`], and the configured output scales (the hidden host
+/// is on no output, so it never sees a rescale and would open sized for the old scale). A change
+/// in any of them -- the overlay style included -- invalidates the warm host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WarmKey {
     /// The resolved terminal program.
@@ -60,13 +109,8 @@ pub struct WarmKey {
     pub exec_flag: String,
     /// The effective overlay terminal args for `terminal`.
     pub overlay_args: Vec<String>,
-    /// Whether the overlay terminal's default background is the N1 palette `bg`
-    /// (`OverlayConfig::surround_is_default_bg`), exported as `CDE_OVERLAY_SURROUND`.
-    pub overlay_surround_default: bool,
-    /// The overlay TUI accent ([`overlay_tui_accent`]), exported as `CDE_OVERLAY_ACCENT`.
-    pub overlay_accent: Option<String>,
-    /// The launcher's TUI entries.
-    pub launcher_tui: Vec<String>,
+    /// The environment the warm host is spawned with.
+    pub env: OverlayEnv,
     /// The configured `(output name, scale_120)` pairs.
     pub output_scales: Vec<(String, u32)>,
 }
@@ -92,14 +136,12 @@ pub fn warm_key(config: &Config, terminal: String, theme_dir: Option<&std::path:
     let overlay_args = config
         .overlay
         .spawn_args(&terminal, config.theme.as_ref(), theme_dir);
-    let overlay_surround_default = config.overlay.surround_is_default_bg(&terminal);
+    let env = OverlayEnv::of(config, &terminal);
     WarmKey {
         terminal,
         exec_flag: config.terminal.exec_flag.clone(),
         overlay_args,
-        overlay_surround_default,
-        overlay_accent: overlay_tui_accent(config),
-        launcher_tui: config.launcher.tui.clone(),
+        env,
         output_scales: config
             .outputs
             .iter()
@@ -548,10 +590,14 @@ mod tests {
             warm_key(&explicit, "foot".into(), None),
         );
         assert_eq!(a.overlay_args, b.overlay_args);
-        assert!(a.overlay_surround_default);
-        assert!(!b.overlay_surround_default);
+        assert!(a.env.surround_default);
+        assert!(!b.env.surround_default);
         assert_ne!(a, b);
-        assert!(!warm_key(&unset, "ghostty".into(), None).overlay_surround_default);
+        assert!(
+            !warm_key(&unset, "ghostty".into(), None)
+                .env
+                .surround_default
+        );
     }
 
     #[test]
@@ -594,6 +640,59 @@ mod tests {
         let mut edited = themed_ghostty.clone();
         edited.theme.as_mut().unwrap().alpha = None;
         assert!(!delta(&themed_ghostty, &edited).warm);
+    }
+
+    #[test]
+    fn warm_key_tracks_a_style_only_change() {
+        // Explicit args: same overlay args, no surround, no accent override -- only the style
+        // differs, which alone must restart the warm host (C5).
+        let dark = crucible_config::parse("overlay { style \"n1-dark\"; terminal-args \"-x\"; }\n")
+            .unwrap();
+        let light =
+            crucible_config::parse("overlay { style \"n1-light\"; terminal-args \"-x\"; }\n")
+                .unwrap();
+        let (a, b) = (
+            warm_key(&dark, "foot".into(), None),
+            warm_key(&light, "foot".into(), None),
+        );
+        assert_eq!(a.overlay_args, b.overlay_args);
+        assert_eq!(
+            (&a.env.accent, a.env.surround_default),
+            (&b.env.accent, b.env.surround_default)
+        );
+        assert_ne!(a, b);
+        assert!(delta(&dark, &light).warm);
+    }
+
+    #[test]
+    fn overlay_env_vars_for_the_overlay_terminal() {
+        let c = crucible_config::parse(
+            "overlay { style \"n1-dark\"; accent \"#33CCCC\"; }\nlauncher { tui \"k9s\" \"htop\"; }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            OverlayEnv::of(&c, "foot").vars(),
+            [
+                ("CDE_OVERLAY_STYLE", Some("n1-dark".to_string())),
+                ("CDE_LAUNCHER_TUI", Some("k9s:htop".to_string())),
+                ("CDE_OVERLAY_ACCENT", Some("#33cccc".to_string())),
+                ("CDE_OVERLAY_SURROUND", Some("default".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn overlay_env_vars_for_the_locker_remove_surround_and_accent() {
+        let c = Config::default();
+        assert_eq!(
+            OverlayEnv::of(&c, "/usr/bin/swaylock").vars(),
+            [
+                ("CDE_OVERLAY_STYLE", Some("n1-med".to_string())),
+                ("CDE_LAUNCHER_TUI", Some(String::new())),
+                ("CDE_OVERLAY_ACCENT", None),
+                ("CDE_OVERLAY_SURROUND", None),
+            ]
+        );
     }
 
     #[test]

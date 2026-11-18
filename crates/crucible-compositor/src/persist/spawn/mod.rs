@@ -16,7 +16,6 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crucible_config::Named;
 use crucible_layout::WorkspaceId;
 use crucible_persist::{
     Invocation, ResumeMode, ResumeWrapper, WindowRecord, child_path, preflight_command,
@@ -26,8 +25,8 @@ use tracing::{error, info, warn};
 
 use crate::config::pick_terminal;
 use crate::ipc::{
-    LAUNCHER_TUI_ENV, OVERLAY_ACCENT_ENV, OVERLAY_STYLE_ENV, OVERLAY_SURROUND_ENV, SOCKET_ENV,
-    SPAWN_EPOCH_ENV, TERMINAL_ENV, TERMINAL_EXEC_FLAG_ENV,
+    OVERLAY_ACCENT_ENV, OVERLAY_SURROUND_ENV, SOCKET_ENV, SPAWN_EPOCH_ENV, TERMINAL_ENV,
+    TERMINAL_EXEC_FLAG_ENV,
 };
 use crate::state::{Backend, CrucibleState};
 
@@ -208,19 +207,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         // Only what the config sets; otherwise the child inherits the session env unchanged.
         cmd.envs(crate::cursor::child_env(&self.config.cursor));
         if kind == SpawnKind::Overlay {
-            cmd.env(OVERLAY_STYLE_ENV, self.config.overlay.style.as_str());
-            cmd.env(LAUNCHER_TUI_ENV, self.config.launcher.tui.join(":"));
-            match crate::config::overlay_tui_accent(&self.config) {
-                Some(accent) => cmd.env(OVERLAY_ACCENT_ENV, accent),
-                None => cmd.env_remove(OVERLAY_ACCENT_ENV),
-            };
             // `program` is the overlay terminal itself (the overlay and warm-host spawns pass
             // `terminal_program()`); the locker spawn is `SpawnKind::Overlay` too and resolves
-            // to `Other`, so it gets no flag.
-            if self.config.overlay.surround_is_default_bg(program) {
-                cmd.env(OVERLAY_SURROUND_ENV, "default");
-            } else {
-                cmd.env_remove(OVERLAY_SURROUND_ENV);
+            // to `Other`, so it gets no surround flag.
+            for (name, value) in crate::config::OverlayEnv::of(&self.config, program).vars() {
+                match value {
+                    Some(value) => cmd.env(name, value),
+                    None => cmd.env_remove(name),
+                };
             }
         } else {
             cmd.env_remove(OVERLAY_SURROUND_ENV);

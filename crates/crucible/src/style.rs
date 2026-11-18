@@ -16,15 +16,22 @@ use crucible_config::{Named, Palette, Rgb, SurfaceStyle};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Style {
     Terminal,
-    /// An N1 palette whose surround is painted with an explicit truecolor background.
-    N1(Palette),
-    /// An N1 palette whose surround is the terminal's default background (SGR 49).
-    N1Default(Palette),
+    /// An N1 palette; `default_bg` means the surround is the terminal's default background
+    /// (SGR 49) instead of an explicit truecolor background.
+    N1 {
+        palette: Palette,
+        default_bg: bool,
+    },
 }
 
 impl From<SurfaceStyle> for Style {
     fn from(style: SurfaceStyle) -> Style {
-        style.palette().map_or(Style::Terminal, Style::N1)
+        style
+            .palette()
+            .map_or(Style::Terminal, |palette| Style::N1 {
+                palette,
+                default_bg: false,
+            })
     }
 }
 
@@ -53,9 +60,12 @@ impl Style {
     /// base background into SGR 49. Any other value, and the `Terminal` style, are unchanged.
     #[must_use]
     pub fn parse_with_surround(value: Option<&str>, surround: Option<&str>) -> Style {
-        match (Style::parse(value), surround) {
-            (Style::N1(p), Some(SURROUND_DEFAULT)) => Style::N1Default(p),
-            (style, _) => style,
+        match Style::parse(value) {
+            Style::N1 { palette, .. } => Style::N1 {
+                palette,
+                default_bg: surround == Some(SURROUND_DEFAULT),
+            },
+            Style::Terminal => Style::Terminal,
         }
     }
 
@@ -69,8 +79,16 @@ impl Style {
         };
         match self {
             Style::Terminal => Style::Terminal,
-            Style::N1(p) => Style::N1(Palette { accent: c, ..p }),
-            Style::N1Default(p) => Style::N1Default(Palette { accent: c, ..p }),
+            Style::N1 {
+                palette,
+                default_bg,
+            } => Style::N1 {
+                palette: Palette {
+                    accent: c,
+                    ..palette
+                },
+                default_bg,
+            },
         }
     }
 
@@ -90,8 +108,14 @@ impl Style {
     pub fn base(&self) -> String {
         match self {
             Style::Terminal => String::new(),
-            Style::N1(p) => format!("{}{}", fg(p.text), bg(p.bg)),
-            Style::N1Default(p) => format!("{}\x1b[49m", fg(p.text)),
+            Style::N1 {
+                palette: p,
+                default_bg: false,
+            } => format!("{}{}", fg(p.text), bg(p.bg)),
+            Style::N1 {
+                palette: p,
+                default_bg: true,
+            } => format!("{}\x1b[49m", fg(p.text)),
         }
     }
 
@@ -100,7 +124,7 @@ impl Style {
     pub fn reset(&self) -> String {
         match self {
             Style::Terminal => String::new(),
-            Style::N1(_) | Style::N1Default(_) => "\x1b[0m".to_string(),
+            Style::N1 { .. } => "\x1b[0m".to_string(),
         }
     }
 
@@ -117,7 +141,7 @@ impl Style {
     pub fn highlight_start(&self) -> String {
         match self {
             Style::Terminal => "\x1b[7m".to_string(),
-            Style::N1(p) | Style::N1Default(p) => format!("{}{}", bg(p.line), fg(p.accent)),
+            Style::N1 { palette: p, .. } => format!("{}{}", bg(p.line), fg(p.accent)),
         }
     }
 
@@ -135,7 +159,7 @@ impl Style {
     pub fn dim(&self, text: &str) -> String {
         match self {
             Style::Terminal => format!("\x1b[2m{text}\x1b[22m"),
-            Style::N1(p) | Style::N1Default(p) => {
+            Style::N1 { palette: p, .. } => {
                 let mid =
                     |a: u8, b: u8| u8::try_from((u16::from(a) + u16::from(b)) / 2).unwrap_or(a);
                 let (Rgb(tr, tg, tb), Rgb(br, bgc, bb)) = (p.text, p.bg);
@@ -151,12 +175,26 @@ mod tests {
     use super::*;
     use crucible_config::{N1_DARK, N1_LIGHT, N1_MED};
 
+    fn styled(palette: Palette) -> Style {
+        Style::N1 {
+            palette,
+            default_bg: false,
+        }
+    }
+
+    fn styled_default(palette: Palette) -> Style {
+        Style::N1 {
+            palette,
+            default_bg: true,
+        }
+    }
+
     #[test]
     fn parses_each_value_and_falls_back() {
         assert_eq!(Style::parse(Some("terminal")), Style::Terminal);
-        assert_eq!(Style::parse(Some("n1-dark")), Style::N1(N1_DARK));
-        assert_eq!(Style::parse(Some("n1-med")), Style::N1(N1_MED));
-        assert_eq!(Style::parse(Some("n1-light")), Style::N1(N1_LIGHT));
+        assert_eq!(Style::parse(Some("n1-dark")), styled(N1_DARK));
+        assert_eq!(Style::parse(Some("n1-med")), styled(N1_MED));
+        assert_eq!(Style::parse(Some("n1-light")), styled(N1_LIGHT));
         assert_eq!(Style::parse(Some("bogus")), Style::Terminal);
         assert_eq!(Style::parse(Some("")), Style::Terminal);
         assert_eq!(Style::parse(None), Style::Terminal);
@@ -165,9 +203,9 @@ mod tests {
     #[test]
     fn from_overlay_style_covers_every_variant() {
         assert_eq!(Style::from(SurfaceStyle::Terminal), Style::Terminal);
-        assert_eq!(Style::from(SurfaceStyle::N1Dark), Style::N1(N1_DARK));
-        assert_eq!(Style::from(SurfaceStyle::N1Med), Style::N1(N1_MED));
-        assert_eq!(Style::from(SurfaceStyle::N1Light), Style::N1(N1_LIGHT));
+        assert_eq!(Style::from(SurfaceStyle::N1Dark), styled(N1_DARK));
+        assert_eq!(Style::from(SurfaceStyle::N1Med), styled(N1_MED));
+        assert_eq!(Style::from(SurfaceStyle::N1Light), styled(N1_LIGHT));
         // The names the compositor exports round-trip through the config's spelling.
         for s in [
             SurfaceStyle::Terminal,
@@ -183,11 +221,11 @@ mod tests {
     fn surround_default_makes_the_n1_base_background_sgr_49() {
         let n1 = |surround| Style::parse_with_surround(Some("n1-dark"), surround);
         // Unset or any other value: unchanged from today.
-        assert_eq!(n1(None), Style::N1(N1_DARK));
-        assert_eq!(n1(Some("")), Style::N1(N1_DARK));
-        assert_eq!(n1(Some("opaque")), Style::N1(N1_DARK));
+        assert_eq!(n1(None), styled(N1_DARK));
+        assert_eq!(n1(Some("")), styled(N1_DARK));
+        assert_eq!(n1(Some("opaque")), styled(N1_DARK));
         let d = n1(Some("default"));
-        assert_eq!(d, Style::N1Default(N1_DARK));
+        assert_eq!(d, styled_default(N1_DARK));
         assert_eq!(d.base(), "\x1b[38;2;233;233;234m\x1b[49m");
         assert_eq!(
             d.frame_start(),
