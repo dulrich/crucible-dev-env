@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 crucible-compositor = { path = "../crucible-compositor" }
 crucible-config = { path = "../crucible-config" }
+crucible-greetd = { path = "../crucible-greetd" }
 crucible-persist = { path = "../crucible-persist" }
 crucible-keys = { path = "../crucible-keys" }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

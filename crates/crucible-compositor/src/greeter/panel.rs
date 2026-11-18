@@ -135,18 +135,6 @@ pub fn notice_frame(
     }
 }
 
-/// The border ring just inside `r`, `w` wide: top, bottom, left, right.
-#[must_use]
-pub fn border_rects(r: Rect, w: i32) -> [Rect; 4] {
-    let side_h = (r.height - 2 * w).max(0);
-    [
-        Rect::new(r.x, r.y, r.width, w),
-        Rect::new(r.x, r.y + r.height - w, r.width, w),
-        Rect::new(r.x, r.y + w, w, side_h),
-        Rect::new(r.x + r.width - w, r.y + w, w, side_h),
-    ]
-}
-
 /// The layout indicator text: the name of the active layout when two or more are configured.
 #[must_use]
 pub fn layout_label(layouts: &[String], active: usize) -> Option<String> {
@@ -249,7 +237,7 @@ where
         )));
     }
     // The border ring sits on the panel edge, in front of the panel fill (front-to-back order).
-    for r in border_rects(l.panel, BORDER_W) {
+    for r in l.panel.border_strips(BORDER_W) {
         out.push(CustomRenderElements::SolidColor(solid(
             map.rect(r),
             crate::palette::PANEL_BORDER.to_rgba_f32(),
@@ -336,7 +324,7 @@ mod tests {
     #[test]
     fn the_border_rings_the_panel_edge() {
         let p = Rect::new(10, 20, 100, 50);
-        let [t, b, l, r] = border_rects(p, BORDER_W);
+        let [t, b, l, r] = p.border_strips(BORDER_W);
         assert_eq!(t, Rect::new(10, 20, 100, 2));
         assert_eq!(b, Rect::new(10, 68, 100, 2));
         assert_eq!(l, Rect::new(10, 22, 2, 46));

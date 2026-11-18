@@ -9,9 +9,6 @@ pub mod panel;
 pub mod profile;
 pub mod publish;
 
-/// Re-exported for the `crucible greeter` entry point (the fake greetd and the codec).
-pub use crucible_greetd;
-
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
@@ -25,8 +22,8 @@ use smithay::reexports::calloop::channel::{self, Event as ChannelEvent};
 use tracing::{error, info, warn};
 
 use crate::state::{Backend, CrucibleState};
+use crucible_config::{GreeterProfile, ProfileBackground};
 use panel::{HandoffNotice, PanelFrame, field_text, layout_label};
-use profile::{GreeterProfile, ProfileBackground};
 
 /// The swaybg binary (a system path: the greeter user has no `$PATH` worth trusting).
 pub const SWAYBG: &str = "/usr/bin/swaybg";

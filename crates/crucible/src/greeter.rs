@@ -10,7 +10,8 @@ use std::sync::Mutex;
 
 use tracing_subscriber::fmt::writer::{BoxMakeWriter, MakeWriterExt};
 
-use crucible_compositor::greeter::{GreeterSetup, crucible_greetd::fake, profile};
+use crucible_compositor::greeter::{GreeterSetup, profile};
+use crucible_greetd::fake;
 
 use crate::cli::{Parsed, help_requested};
 

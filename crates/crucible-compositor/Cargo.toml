@@ -17,8 +17,6 @@ crucible-config = { path = "../crucible-config" }
 crucible-persist = { path = "../crucible-persist" }
 # The greetd IPC client and login state machine for greeter mode (plan 42).
 crucible-greetd = { path = "../crucible-greetd" }
-# Reading and writing the greeter profile (`greeter/profile.rs`); already a workspace dependency.
-kdl.workspace = true
 tracing.workspace = true
 # XCursor theme lookup and image parsing for the themed pointer cursor (plan 30); already in the
 # lock through smithay.

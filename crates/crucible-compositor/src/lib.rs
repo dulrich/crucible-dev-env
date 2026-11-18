@@ -105,7 +105,7 @@ pub mod capture;
 /// Screenshot delivery: clipboard image selection, file save (plan 34).
 pub mod screenshot;
 
-/// Snip mode: the pure selection state machine (plan 34 WP-3); the compositor side arrives in WP-4.
+/// Snip mode: the pure selection state machine (`model`) and the compositor side (`mode`, driving `CrucibleState::snip`) (plan 34).
 pub mod snip;
 
 /// Writing the `theme` block's per-terminal fragment files (plan 41).

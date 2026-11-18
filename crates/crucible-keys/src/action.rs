@@ -20,12 +20,11 @@ use std::str::FromStr;
 
 use crucible_layout::Direction;
 
-/// Default terminal command used when `$TERMINAL` is unset, tried in order.
+/// The default terminal command, used when `$TERMINAL` is unset or blank.
 ///
-/// CDE targets Wayland-native terminals; the compositor tries these against `$PATH` in order at
-/// spawn time and launches the child with `WAYLAND_DISPLAY` pointed at CDE's own socket so it
-/// connects back to the compositor.
-pub const DEFAULT_TERMINALS: &[&str] = &["foot", "alacritty", "kitty", "weston-terminal"];
+/// CDE targets Wayland-native terminals; the compositor looks it up on `$PATH` at spawn time and
+/// launches the child with `WAYLAND_DISPLAY` pointed at CDE's own socket so it connects back.
+pub const DEFAULT_TERMINAL: &str = "foot";
 
 /// The argument of [`Action::NightLight`]. The compositor maps it onto its own night-light model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,7 +83,7 @@ pub enum Action {
     /// Defaults: `Super+E` -> `us`, `Super+S` -> `es`.
     SetLayout(String),
     /// Spawn the configured terminal into the focused pane (the window joins the pane's stack). The
-    /// compositor picks the terminal (config `terminal`, then `$TERMINAL`, then a default list).
+    /// compositor picks the terminal (config `terminal`, then `$TERMINAL`, then `foot`).
     /// Because `World::open_window` is only called from the surface-map path, a keybind never
     /// fabricates a window: the spawned client's toplevel is placed by the shell map path.
     RunTerminal,
@@ -498,7 +497,7 @@ impl FromStr for Action {
     }
 }
 
-/// Resolves the terminal command: `$TERMINAL` if set and non-empty, else the first default.
+/// Resolves the terminal command: `$TERMINAL` if set and non-empty, else [`DEFAULT_TERMINAL`].
 ///
 /// Pure aside from reading the environment; the actual lookup against `$PATH` happens when the
 /// compositor spawns the child.
@@ -506,7 +505,7 @@ impl FromStr for Action {
 pub fn terminal_command() -> String {
     match std::env::var("TERMINAL") {
         Ok(term) if !term.trim().is_empty() => term,
-        _ => DEFAULT_TERMINALS[0].to_string(),
+        _ => DEFAULT_TERMINAL.to_string(),
     }
 }
 
@@ -731,7 +730,7 @@ mod tests {
         unsafe {
             std::env::remove_var("TERMINAL");
         }
-        assert_eq!(terminal_command(), DEFAULT_TERMINALS[0]);
+        assert_eq!(terminal_command(), DEFAULT_TERMINAL);
         #[allow(unsafe_code)]
         unsafe {
             match prev {

@@ -8,11 +8,10 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crucible_config::{Config, SurfaceBackground};
+use crucible_config::{Config, GreeterProfile, PROFILE_FILE, SurfaceBackground, write_profile};
 use tracing::{debug, info, warn};
 
-use super::profile::{GreeterProfile, PROFILE_FILE, write_profile};
-use crate::lock_config::wallpaper_state_path_from;
+use crate::lock_config::{wallpaper_entries, wallpaper_state_path_from};
 use crate::terminal_theme::write_if_changed;
 
 /// The system directory the greeter reads its profile from.
@@ -22,13 +21,13 @@ pub const STOCK_IMAGE: &str = "/opt/cde/share/backgrounds/stock.png";
 /// Present in the directory iff the background is `user`; `wallpaper-rotate.sh` checks it.
 pub const MARKER_FILE: &str = "user-background";
 
-/// The first image of a wallpaper state file: the path field of a tab line, or a bare line.
-/// **Pure.**
+/// The first image of a wallpaper state file: the path of its first entry (the state file's one
+/// parser, [`wallpaper_entries`]). **Pure.**
 #[must_use]
 pub fn first_state_image(state_text: &str) -> Option<PathBuf> {
-    let line = state_text.lines().find(|l| !l.is_empty())?;
-    let path = line.split_once('\t').map_or(line, |(_, p)| p);
-    (!path.is_empty()).then(|| PathBuf::from(path))
+    wallpaper_entries(state_text)
+        .first()
+        .map(|(_, path)| PathBuf::from(path))
 }
 
 /// Copies `src` to `<dir>/background.<ext of src>` atomically, skipping equal bytes. Returns the
@@ -157,6 +156,22 @@ mod tests {
         );
         assert_eq!(first_state_image("*\t/a/e.png"), Some("/a/e.png".into()));
         assert_eq!(first_state_image(""), None);
+    }
+
+    #[test]
+    fn first_image_follows_the_state_file_parser_on_malformed_input() {
+        // Blank means trims to nothing; tab fields are verbatim; a bare line is trimmed.
+        for (text, want) in [
+            ("  \n/a.png\n", Some("/a.png")),
+            (" /a.png \n", Some("/a.png")),
+            ("\t/a.png\n/b.png\n", Some("/b.png")),
+            ("*\t\n/b.png\n", Some("/b.png")),
+            ("DP-1\t\n/b.png\n", Some("/b.png")),
+            ("DP-1\t /a b.png\n", Some(" /a b.png")),
+            ("\t\n", None),
+        ] {
+            assert_eq!(first_state_image(text), want.map(PathBuf::from), "{text:?}");
+        }
     }
 
     #[test]

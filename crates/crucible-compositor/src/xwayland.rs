@@ -114,21 +114,16 @@ fn xresources_files(
         .collect()
 }
 
-/// The command merging `files` in order: `xrdb -merge <file>` for one, else one `/bin/sh` loop
-/// running `xrdb -merge` per file (so a single child is waited on). **Pure.**
+/// The command merging `files` in order: one `/bin/sh` loop running `xrdb -merge` per file (so a
+/// single child is waited on; non-zero exit if any merge failed). **Pure.**
 fn merge_command(files: &[PathBuf]) -> (String, Vec<std::ffi::OsString>) {
-    match files {
-        [one] => ("xrdb".into(), vec!["-merge".into(), one.into()]),
-        _ => {
-            let mut args: Vec<std::ffi::OsString> = vec![
-                "-c".into(),
-                "s=0; for f do xrdb -merge \"$f\" || s=1; done; exit \"$s\"".into(),
-                "sh".into(),
-            ];
-            args.extend(files.iter().map(Into::into));
-            ("/bin/sh".into(), args)
-        }
-    }
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "-c".into(),
+        "s=0; for f do xrdb -merge \"$f\" || s=1; done; exit \"$s\"".into(),
+        "sh".into(),
+    ];
+    args.extend(files.iter().map(Into::into));
+    ("/bin/sh".into(), args)
 }
 
 /// Starts `xrdb -merge` of `files` (in order) against display `display_number`.
@@ -574,11 +569,12 @@ mod tests {
     }
 
     #[test]
-    fn one_file_runs_xrdb_directly_and_several_run_in_order() {
+    fn one_file_and_several_both_run_the_loop_in_order() {
         let a = PathBuf::from("/a");
         let (program, args) = merge_command(std::slice::from_ref(&a));
-        assert_eq!(program, "xrdb");
-        assert_eq!(args, ["-merge", "/a"]);
+        assert_eq!(program, "/bin/sh");
+        assert_eq!(args[0], "-c");
+        assert_eq!(args[2..], ["sh", "/a"]);
         let (program, args) = merge_command(&[a, PathBuf::from("/b")]);
         assert_eq!(program, "/bin/sh");
         assert_eq!(args[0], "-c");

@@ -11,11 +11,12 @@
 //! `crucible-keys` (`Bindings::with_overrides`). Hot reload is the compositor's concern.
 //! The full schema is documented in `docs/config.md`.
 //!
-//! Layout: `error` (typed errors), `model` (the parsed data), `overlay` (overlay style, palette
-//! and terminal defaults), `reader` (a located view of one KDL node) and `schema` (the grammar
-//! built on the reader).
+//! Layout: `error` (typed errors), `greeter_profile` (the greeter profile file), `model` (the
+//! parsed data), `overlay` (overlay style, palette and terminal defaults), `reader` (a located
+//! view of one KDL node) and `schema` (the grammar built on the reader).
 
 mod error;
+mod greeter_profile;
 mod model;
 mod overlay;
 mod reader;
@@ -26,6 +27,10 @@ mod theme;
 use std::path::{Path, PathBuf};
 
 pub use error::{ConfigError, Location};
+pub use greeter_profile::{
+    DEFAULT_BLANK_AFTER, GreeterProfile, PROFILE_FILE, ProfileBackground, ProfileError,
+    parse_profile, write_profile,
+};
 pub use model::{
     AppTiling, Config, CursorConfig, DEFAULT_DIVIDER_COLOR, DEFAULT_HEADER_FONT,
     HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderActive,

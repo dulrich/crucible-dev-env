@@ -305,6 +305,7 @@ version = "0.7.12"
 dependencies = [
  "crucible-compositor",
  "crucible-config",
+ "crucible-greetd",
  "crucible-keys",
  "crucible-persist",
  "libc",
@@ -322,7 +323,6 @@ dependencies = [
  "crucible-layout",
  "crucible-persist",
  "fontdue",
- "kdl",
  "libc",
  "png",
  "rustix 1.1.4",

@@ -30,20 +30,32 @@ fn rgb(c: Rgb) -> String {
     format!("{c:x}")
 }
 
-/// The `image=` values for the wallpaper state text: one `<output>:<path>` per `<output>\t<path>`
-/// line; a bare path line or a `*\t<path>` line gives a plain path. **Pure.**
-fn wallpaper_images(state: &str) -> Vec<String> {
+/// The entries of the wallpaper state text as `(output, path)`: `output` is `None` for a bare path
+/// line or a `*\t<path>` line. A line that trims to nothing is blank; tab-separated fields are
+/// taken verbatim (never trimmed); only a bare (no tab) line is trimmed; a tab line with an empty
+/// path, or an empty output that is not `*`, is skipped. The one parser of the state file
+/// (`wallpaper-rotate.sh` writes it). **Pure.**
+pub(crate) fn wallpaper_entries(state: &str) -> Vec<(Option<&str>, &str)> {
     state
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|line| match line.split_once('\t') {
-            Some(("*", path)) if !path.is_empty() => Some(path.to_string()),
+            Some(("*", path)) if !path.is_empty() => Some((None, path)),
             Some((output, path)) if !output.is_empty() && !path.is_empty() => {
-                Some(format!("{output}:{path}"))
+                Some((Some(output), path))
             }
             Some(_) => None,
-            None => Some(line.trim().to_string()),
+            None => Some((None, line.trim())),
         })
+        .collect()
+}
+
+/// The `image=` values for the wallpaper state text: one `<output>:<path>` per `<output>\t<path>`
+/// line; a bare path line or a `*\t<path>` line gives a plain path. **Pure.**
+fn wallpaper_images(state: &str) -> Vec<String> {
+    wallpaper_entries(state)
+        .into_iter()
+        .map(|(output, path)| output.map_or_else(|| path.to_string(), |o| format!("{o}:{path}")))
         .collect()
 }
 
