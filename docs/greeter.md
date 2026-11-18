@@ -95,7 +95,7 @@ Logout: when you quit CDE (`Super+Shift+Q` or `crucible msg exec quit`), CDE sho
 
 Migration from a greetd setup: `/etc/greetd/config.toml` is no longer read. The greeter command and the VTs are `cde-login` flags (see `cde-login --help`), and the defaults match the old config.
 
-Rollback: `sudo systemctl disable cde-login && sudo systemctl enable greetd`, then reboot.
+Rollback: `sudo systemctl disable cde-login && sudo systemctl enable greetd`, then reboot. Binary rollback: the printed sudo install keeps the previous pair as `.prev`; restore it with `sudo sh -c 'mv /opt/cde/bin/crucible.prev /opt/cde/bin/crucible && mv /opt/cde/bin/cde-login.prev /opt/cde/bin/cde-login'`.
 
 Every release on a greeter host leaves one sudo install step: the deploy prints it and reports `sudo install pending` until the installed `--build` matches.
 
