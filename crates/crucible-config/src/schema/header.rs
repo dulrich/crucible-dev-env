@@ -25,7 +25,7 @@ pub(super) fn parse_header(node: NodeReader<'_>) -> Result<HeaderConfig, ConfigE
                     out.divider_inset = inset;
                 }
                 if let Some(c) = child.hex_prop("color")? {
-                    out.divider_color = c;
+                    out.divider_color = Some(c);
                 }
             }
             "slots" => out.slots = child.bool_arg()?,
@@ -151,12 +151,12 @@ mod tests {
     fn header_divider_inset_color_defaults_and_parse() {
         let h = parse("").unwrap().header;
         assert_eq!(h.divider_inset, 0);
-        assert_eq!(h.divider_color, Rgb(0xcd, 0xd0, 0xd6));
+        assert_eq!(h.divider_color, None);
         let h = parse("header {\n divider (px)1 inset=(px)6 color=\"#5c6370\"\n}\n")
             .unwrap()
             .header;
         assert_eq!((h.divider, h.divider_inset), (1, 6));
-        assert_eq!(h.divider_color, Rgb(0x5c, 0x63, 0x70));
+        assert_eq!(h.divider_color, Some(Rgb(0x5c, 0x63, 0x70)));
         // Properties are accepted (and inert) with a zero width.
         assert_eq!(
             parse("header {\n divider (px)0 inset=(px)32\n}\n")
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn header_style_is_optional_and_validated() {
-        use crate::overlay::OverlayStyle;
+        use crate::surface::SurfaceStyle;
         assert_eq!(Config::default().header.style, None);
         assert_eq!(
             parse("header {\n mode \"always\"\n}\n")
@@ -339,7 +339,7 @@ mod tests {
             None
         );
         let c = parse("header {\n style \"n1-light\"\n}\n").unwrap();
-        assert_eq!(c.header.style, Some(OverlayStyle::N1Light));
+        assert_eq!(c.header.style, Some(SurfaceStyle::N1Light));
         for bad in [
             "style \"bogus\"",
             "style 1",

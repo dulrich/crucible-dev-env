@@ -71,14 +71,18 @@ pub struct WarmKey {
     pub output_scales: Vec<(String, u32)>,
 }
 
-/// The `CDE_OVERLAY_ACCENT` value (lowercase `#rrggbb`) for `config`'s overlay: `Some` only when
-/// the overlay style is N1 and the resolved overlay accent differs from the style's own. **Pure.**
+/// The `CDE_OVERLAY_ACCENT` value (lowercase `#rrggbb`) for `config`'s overlay: the
+/// [`crucible_config::Surface::OverlayTui`] accent (set only for an N1 style whose resolved accent
+/// differs from its own). **Pure.**
 #[must_use]
 pub fn overlay_tui_accent(config: &Config) -> Option<String> {
-    let style = config.overlay.style;
-    let own = style.palette()?.accent;
-    let c = crucible_config::resolve_accent(style, config.overlay.accent, config.theme.as_ref());
-    (c != own).then(|| c.to_string())
+    crucible_config::surface_accent(
+        crucible_config::Surface::OverlayTui,
+        Some(config.overlay.style),
+        config.overlay.accent,
+        config.theme.as_ref(),
+    )
+    .map(|c| c.to_string())
 }
 
 /// The [`WarmKey`] of `config` given the resolved `terminal` program and the theme fragment

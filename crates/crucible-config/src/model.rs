@@ -356,8 +356,9 @@ pub struct HeaderConfig {
     /// Logical pixels trimmed from the top and bottom of each divider, within
     /// `0..=`[`HEADER_DIVIDER_INSET_MAX`]; no effect when `divider` is 0.
     pub divider_inset: u32,
-    /// Divider colour (`divider ... color=`); defaults to [`DEFAULT_DIVIDER_COLOR`].
-    pub divider_color: Rgb,
+    /// Explicit divider colour (`divider ... color=`), which always wins; `None` takes the label
+    /// colour ([`DEFAULT_DIVIDER_COLOR`]) without a `style` and the palette `line` with one.
+    pub divider_color: Option<Rgb>,
     /// Whether labels of slot-pinned workspaces carry a slot badge (`slots`).
     pub slots: bool,
     /// Strip, label and accent colours (`style`); `None` keeps the legacy header colours.
@@ -377,7 +378,7 @@ impl Default for HeaderConfig {
             size: 14,
             divider: 0,
             divider_inset: 0,
-            divider_color: DEFAULT_DIVIDER_COLOR,
+            divider_color: None,
             slots: false,
             style: None,
             accent: crate::surface::SurfaceAccent::Style,
@@ -645,7 +646,7 @@ impl Default for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::overlay::OverlayStyle;
+    use crate::surface::SurfaceStyle;
 
     /// Every `all` variant is in `NAMES` (same count, each round-trips through its spelling).
     fn assert_names_round_trip<T: Named + std::fmt::Debug>(all: &[T]) {
@@ -687,17 +688,17 @@ mod tests {
 
     #[test]
     fn overlay_style_names_round_trip() {
-        let _ = |m: OverlayStyle| match m {
-            OverlayStyle::Terminal
-            | OverlayStyle::N1Dark
-            | OverlayStyle::N1Med
-            | OverlayStyle::N1Light => (),
+        let _ = |m: SurfaceStyle| match m {
+            SurfaceStyle::Terminal
+            | SurfaceStyle::N1Dark
+            | SurfaceStyle::N1Med
+            | SurfaceStyle::N1Light => (),
         };
         assert_names_round_trip(&[
-            OverlayStyle::Terminal,
-            OverlayStyle::N1Dark,
-            OverlayStyle::N1Med,
-            OverlayStyle::N1Light,
+            SurfaceStyle::Terminal,
+            SurfaceStyle::N1Dark,
+            SurfaceStyle::N1Med,
+            SurfaceStyle::N1Light,
         ]);
     }
 

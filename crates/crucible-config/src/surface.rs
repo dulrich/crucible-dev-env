@@ -5,13 +5,46 @@
 //! surface paints. Rendering lives in the compositor and the greeter; this module is data only.
 
 use crate::model::{Named, Rgb};
-use crate::overlay::{N1_MED, OverlayStyle, Palette};
+use crate::overlay::{N1_DARK, N1_LIGHT, N1_MED, Palette};
 use crate::theme::ThemeConfig;
 
-/// The look of a CDE surface (header, overlay, lock screen, greeter): `terminal | n1-dark |
-/// n1-med | n1-light`. The same type as [`OverlayStyle`], so the names, parser and
-/// [`OverlayStyle::palette`] table are shared.
-pub type SurfaceStyle = OverlayStyle;
+/// The look of a CDE surface (header, overlay, lock screen, greeter): the terminal's own colours or one of the
+/// N1 Console surrounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceStyle {
+    /// The terminal's inherited look.
+    Terminal,
+    /// Opaque dark N1 surround.
+    N1Dark,
+    /// Opaque medium N1 surround (the default).
+    N1Med,
+    /// Opaque light N1 surround.
+    N1Light,
+}
+
+impl Named for SurfaceStyle {
+    /// Every style with its config / environment spelling, in the order error messages list them.
+    const NAMES: &'static [(Self, &'static str)] = &[
+        (Self::Terminal, "terminal"),
+        (Self::N1Dark, "n1-dark"),
+        (Self::N1Med, "n1-med"),
+        (Self::N1Light, "n1-light"),
+    ];
+}
+
+impl SurfaceStyle {
+    /// The N1 palette the overlay TUIs paint and the compositor derives its border from, or
+    /// `None` for [`SurfaceStyle::Terminal`]. Its `bg` is the opaque surround foot gets.
+    #[must_use]
+    pub fn palette(self) -> Option<Palette> {
+        match self {
+            Self::Terminal => None,
+            Self::N1Dark => Some(N1_DARK),
+            Self::N1Med => Some(N1_MED),
+            Self::N1Light => Some(N1_LIGHT),
+        }
+    }
+}
 
 /// What a full-screen surface (lock screen, greeter) shows behind its content.
 ///
@@ -39,11 +72,11 @@ pub enum SurfaceAccent {
 }
 
 /// The default `lock` style.
-pub const DEFAULT_LOCK_STYLE: SurfaceStyle = OverlayStyle::N1Med;
+pub const DEFAULT_LOCK_STYLE: SurfaceStyle = SurfaceStyle::N1Med;
 /// The default `lock` background: solid black.
 pub const DEFAULT_LOCK_BACKGROUND: SurfaceBackground = SurfaceBackground::Color(Rgb(0, 0, 0));
 /// The default `greeter` style.
-pub const DEFAULT_GREETER_STYLE: SurfaceStyle = OverlayStyle::N1Dark;
+pub const DEFAULT_GREETER_STYLE: SurfaceStyle = SurfaceStyle::N1Dark;
 /// The default `greeter` background.
 pub const DEFAULT_GREETER_BACKGROUND: SurfaceBackground = SurfaceBackground::Stock;
 /// The default `greeter` session command.
@@ -181,13 +214,68 @@ pub fn resolve_accent(
 ) -> Rgb {
     match accent {
         SurfaceAccent::Style => resolve_palette(style, theme).accent,
-        SurfaceAccent::Theme => resolve_palette(OverlayStyle::Terminal, theme).accent,
+        SurfaceAccent::Theme => resolve_palette(SurfaceStyle::Terminal, theme).accent,
         SurfaceAccent::Color(c) => c,
     }
 }
 
-/// A surface's palette: [`resolve_palette`] with its accent chosen by `accent`
-/// ([`resolve_accent`]). The one place a surface's accent is resolved.
+/// CDE's built-in chrome teal: the unstyled header highlight and the `terminal` overlay ring.
+pub const CHROME_ACCENT: Rgb = Rgb(0x33, 0xcc, 0xcc);
+
+/// Which CDE surface an accent is resolved for: the one input that carries plan 48's
+/// per-surface accent rules into [`surface_accent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Surface {
+    /// The workspace header strip (`style` optional).
+    Header,
+    /// The compositor's ring around a mapped overlay.
+    OverlayRing,
+    /// The overlay TUI (picker, launcher, keys).
+    OverlayTui,
+    /// The lock screen indicator.
+    Lock,
+    /// The greeter panel.
+    Greeter,
+}
+
+/// The accent `surface` paints for `style` (`None` = an unstyled header) under `accent` — the one
+/// place the per-surface accent rules are written. `None` means the surface keeps its own look
+/// (only [`Surface::OverlayTui`]: a `terminal` TUI stays reverse video, an N1 TUI whose accent is
+/// its palette's own needs no override).
+///
+/// - An explicit colour always wins (except a `terminal` TUI, which has no accent).
+/// - Unstyled header: [`CHROME_ACCENT`] for `accent "style"`, else the `terminal` accent.
+/// - Overlay ring under `terminal` with `accent "style"`: `theme.accent` when set, else
+///   [`CHROME_ACCENT`] (never `theme.cursor`).
+/// - Everything else (styled header, N1 overlay, lock, greeter): [`resolve_accent`].
+#[must_use]
+pub fn surface_accent(
+    surface: Surface,
+    style: Option<SurfaceStyle>,
+    accent: SurfaceAccent,
+    theme: Option<&ThemeConfig>,
+) -> Option<Rgb> {
+    let Some(style) = style else {
+        return Some(match accent {
+            SurfaceAccent::Style => CHROME_ACCENT,
+            a => resolve_accent(SurfaceStyle::Terminal, a, theme),
+        });
+    };
+    match (surface, style, accent) {
+        (Surface::OverlayTui, s, a) => {
+            let own = s.palette()?.accent;
+            let c = resolve_accent(s, a, theme);
+            (c != own).then_some(c)
+        }
+        (Surface::OverlayRing, SurfaceStyle::Terminal, SurfaceAccent::Style) => {
+            Some(theme.and_then(|t| t.accent).unwrap_or(CHROME_ACCENT))
+        }
+        (_, s, a) => Some(resolve_accent(s, a, theme)),
+    }
+}
+
+/// The palette of a styled header, lock screen or greeter: [`resolve_palette`] with its accent
+/// from [`surface_accent`] (for these surfaces, [`resolve_accent`]).
 #[must_use]
 pub fn surface_palette(
     style: SurfaceStyle,
@@ -203,7 +291,6 @@ pub fn surface_palette(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::overlay::{N1_DARK, N1_LIGHT};
 
     #[test]
     fn n1_styles_ignore_the_theme() {
@@ -212,9 +299,9 @@ mod tests {
             ..ThemeConfig::default()
         };
         for (s, p) in [
-            (OverlayStyle::N1Dark, N1_DARK),
-            (OverlayStyle::N1Med, N1_MED),
-            (OverlayStyle::N1Light, N1_LIGHT),
+            (SurfaceStyle::N1Dark, N1_DARK),
+            (SurfaceStyle::N1Med, N1_MED),
+            (SurfaceStyle::N1Light, N1_LIGHT),
         ] {
             assert_eq!(resolve_palette(s, Some(&t)), p);
             assert_eq!(resolve_palette(s, None), p);
@@ -234,13 +321,13 @@ mod tests {
         };
         // `terminal` prefers theme.accent, then cursor, then n1-med.
         assert_eq!(
-            resolve_palette(OverlayStyle::Terminal, Some(&both)).accent,
+            resolve_palette(SurfaceStyle::Terminal, Some(&both)).accent,
             Rgb(5, 5, 5)
         );
         for style in [
-            OverlayStyle::Terminal,
-            OverlayStyle::N1Dark,
-            OverlayStyle::N1Light,
+            SurfaceStyle::Terminal,
+            SurfaceStyle::N1Dark,
+            SurfaceStyle::N1Light,
         ] {
             for theme in [None, Some(&cursor_only), Some(&both)] {
                 let base = resolve_palette(style, theme);
@@ -270,11 +357,139 @@ mod tests {
         }
     }
 
+    /// Plan 48's per-surface accent rules, one table: (surface, style, accent, theme) -> accent.
+    #[test]
+    fn surface_accent_per_surface_table() {
+        use Surface::{Greeter, Header, Lock, OverlayRing, OverlayTui};
+        use SurfaceStyle::{N1Dark, N1Light, N1Med, Terminal};
+        let teal = CHROME_ACCENT;
+        let red = Rgb(0xff, 0, 0);
+        let both = ThemeConfig {
+            accent: Some(Rgb(9, 9, 9)),
+            cursor: Some(Rgb(4, 4, 4)),
+            ..ThemeConfig::default()
+        };
+        let cursor_only = ThemeConfig {
+            accent: None,
+            ..both.clone()
+        };
+        let (b, c) = (Some(&both), Some(&cursor_only));
+        let all = [Terminal, N1Dark, N1Med, N1Light];
+        // Overlay ring (was the compositor's `overlay_ring_accent`): N1 keeps its palette accent,
+        // `terminal` takes theme.accent (never the cursor), else teal.
+        for s in all {
+            let own = s.palette().map_or(teal, |p| p.accent);
+            for theme in [None, c] {
+                assert_eq!(
+                    surface_accent(OverlayRing, Some(s), SurfaceAccent::Style, theme),
+                    Some(own)
+                );
+            }
+            assert_eq!(
+                surface_accent(OverlayRing, Some(s), SurfaceAccent::Color(red), b),
+                Some(red)
+            );
+            assert_eq!(
+                surface_accent(OverlayRing, Some(s), SurfaceAccent::Theme, b),
+                Some(Rgb(9, 9, 9))
+            );
+            assert_eq!(
+                surface_accent(OverlayRing, Some(s), SurfaceAccent::Theme, c),
+                Some(Rgb(4, 4, 4))
+            );
+        }
+        assert_eq!(
+            surface_accent(OverlayRing, Some(Terminal), SurfaceAccent::Style, b),
+            Some(Rgb(9, 9, 9))
+        );
+        assert_eq!(
+            surface_accent(OverlayRing, Some(N1Dark), SurfaceAccent::Style, b),
+            Some(N1_DARK.accent)
+        );
+        // Overlay TUI (was `overlay_tui_accent`'s policy): only an N1 override that differs from
+        // the style's own; a `terminal` TUI stays reverse video.
+        assert_eq!(
+            surface_accent(OverlayTui, Some(N1Med), SurfaceAccent::Style, b),
+            None
+        );
+        assert_eq!(
+            surface_accent(OverlayTui, Some(N1Med), SurfaceAccent::Color(teal), None),
+            Some(teal)
+        );
+        assert_eq!(
+            surface_accent(
+                OverlayTui,
+                Some(N1Med),
+                SurfaceAccent::Color(N1_MED.accent),
+                None
+            ),
+            None
+        );
+        assert_eq!(
+            surface_accent(OverlayTui, Some(Terminal), SurfaceAccent::Color(teal), b),
+            None
+        );
+        assert_eq!(
+            surface_accent(OverlayTui, Some(N1Dark), SurfaceAccent::Theme, b),
+            Some(Rgb(9, 9, 9))
+        );
+        // Unstyled header (was `header_colors`' unstyled branch): teal for `accent "style"`
+        // whatever the theme; an explicit theme or colour changes only the highlight.
+        for theme in [None, b, c] {
+            assert_eq!(
+                surface_accent(Header, None, SurfaceAccent::Style, theme),
+                Some(teal)
+            );
+            assert_eq!(
+                surface_accent(Header, None, SurfaceAccent::Color(red), theme),
+                Some(red)
+            );
+        }
+        assert_eq!(
+            surface_accent(Header, None, SurfaceAccent::Theme, b),
+            Some(Rgb(9, 9, 9))
+        );
+        assert_eq!(
+            surface_accent(Header, None, SurfaceAccent::Theme, c),
+            Some(Rgb(4, 4, 4))
+        );
+        assert_eq!(
+            surface_accent(Header, None, SurfaceAccent::Theme, None),
+            Some(N1_MED.accent)
+        );
+        // Styled header, lock and greeter: the normal palette fallback, equal to the palette's.
+        for surface in [Header, Lock, Greeter] {
+            for s in all {
+                for theme in [None, b, c] {
+                    for a in [
+                        SurfaceAccent::Style,
+                        SurfaceAccent::Theme,
+                        SurfaceAccent::Color(red),
+                    ] {
+                        assert_eq!(
+                            surface_accent(surface, Some(s), a, theme),
+                            Some(surface_palette(s, a, theme).accent),
+                            "{surface:?} {s:?} {a:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            surface_accent(Lock, Some(Terminal), SurfaceAccent::Style, c),
+            Some(Rgb(4, 4, 4))
+        );
+        assert_eq!(
+            surface_accent(Greeter, Some(Terminal), SurfaceAccent::Style, None),
+            Some(N1_MED.accent)
+        );
+    }
+
     #[test]
     fn terminal_takes_theme_colours_and_falls_back_to_n1_med() {
-        assert_eq!(resolve_palette(OverlayStyle::Terminal, None), N1_MED);
+        assert_eq!(resolve_palette(SurfaceStyle::Terminal, None), N1_MED);
         assert_eq!(
-            resolve_palette(OverlayStyle::Terminal, Some(&ThemeConfig::default())),
+            resolve_palette(SurfaceStyle::Terminal, Some(&ThemeConfig::default())),
             N1_MED
         );
         let mut t = ThemeConfig {
@@ -285,7 +500,7 @@ mod tests {
         };
         t.palette[8] = Some(Rgb(3, 3, 3));
         assert_eq!(
-            resolve_palette(OverlayStyle::Terminal, Some(&t)),
+            resolve_palette(SurfaceStyle::Terminal, Some(&t)),
             Palette {
                 bg: Rgb(1, 1, 1),
                 text: Rgb(2, 2, 2),

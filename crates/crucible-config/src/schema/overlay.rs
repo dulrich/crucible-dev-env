@@ -78,14 +78,14 @@ mod tests {
     use super::super::{err_at, parse};
     use crate::error::ConfigError;
     use crate::model::{Config, Named};
-    use crate::overlay::OverlayStyle;
+    use crate::surface::SurfaceStyle;
     use std::path::PathBuf;
 
     #[test]
     fn overlay_defaults_when_absent() {
         let c = parse("").unwrap();
         assert!(c.overlay.border);
-        assert_eq!(c.overlay.style, OverlayStyle::N1Med);
+        assert_eq!(c.overlay.style, SurfaceStyle::N1Med);
         assert_eq!(c.overlay.terminal_args, None);
     }
 
@@ -96,7 +96,7 @@ mod tests {
         )
         .unwrap();
         assert!(!c.overlay.border);
-        assert_eq!(c.overlay.style, OverlayStyle::N1Light);
+        assert_eq!(c.overlay.style, SurfaceStyle::N1Light);
         assert_eq!(
             c.overlay.terminal_args,
             Some(vec!["--a=1".to_string(), "--b".to_string()])
@@ -113,7 +113,7 @@ mod tests {
     fn overlay_partial_keeps_other_defaults() {
         let c = parse("overlay {\n style \"terminal\"\n}\n").unwrap();
         assert!(c.overlay.border);
-        assert_eq!(c.overlay.style, OverlayStyle::Terminal);
+        assert_eq!(c.overlay.style, SurfaceStyle::Terminal);
     }
 
     #[test]

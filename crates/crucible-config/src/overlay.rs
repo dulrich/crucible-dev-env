@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use crate::model::{Named, Rgb};
+use crate::surface::SurfaceStyle;
 use crate::theme::{Alpha, ThemeConfig, ThemeTarget, theme_spawn_args};
 
 /// The four colours of one N1 palette.
@@ -41,51 +42,13 @@ pub const N1_LIGHT: Palette = Palette {
     accent: Rgb(0xf0, 0x77, 0x14),
 };
 
-/// The look of a CDE overlay (picker, launcher, keys): the terminal's own colours or one of the
-/// N1 Console surrounds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OverlayStyle {
-    /// The terminal's inherited look.
-    Terminal,
-    /// Opaque dark N1 surround.
-    N1Dark,
-    /// Opaque medium N1 surround (the default).
-    N1Med,
-    /// Opaque light N1 surround.
-    N1Light,
-}
-
-impl Named for OverlayStyle {
-    /// Every style with its config / environment spelling, in the order error messages list them.
-    const NAMES: &'static [(Self, &'static str)] = &[
-        (Self::Terminal, "terminal"),
-        (Self::N1Dark, "n1-dark"),
-        (Self::N1Med, "n1-med"),
-        (Self::N1Light, "n1-light"),
-    ];
-}
-
-impl OverlayStyle {
-    /// The N1 palette the overlay TUIs paint and the compositor derives its border from, or
-    /// `None` for [`OverlayStyle::Terminal`]. Its `bg` is the opaque surround foot gets.
-    #[must_use]
-    pub fn palette(self) -> Option<Palette> {
-        match self {
-            Self::Terminal => None,
-            Self::N1Dark => Some(N1_DARK),
-            Self::N1Med => Some(N1_MED),
-            Self::N1Light => Some(N1_LIGHT),
-        }
-    }
-}
-
 /// Overlay presentation settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverlayConfig {
     /// Whether a border is drawn around the overlay.
     pub border: bool,
     /// The overlay style.
-    pub style: OverlayStyle,
+    pub style: SurfaceStyle,
     /// Extra terminal arguments inserted before the exec flag on overlay spawns. `None` means not
     /// set: [`OverlayConfig::effective_terminal_args`] then applies the built-in ghostty or foot
     /// default for those terminals.
@@ -102,7 +65,7 @@ impl Default for OverlayConfig {
     fn default() -> Self {
         Self {
             border: true,
-            style: OverlayStyle::N1Med,
+            style: SurfaceStyle::N1Med,
             terminal_args: None,
             alpha: Alpha::OPAQUE,
             accent: crate::surface::SurfaceAccent::Style,
@@ -133,7 +96,7 @@ pub const GHOSTTY_OVERLAY_DEFAULT_ARGS: [&str; 3] = [
 /// through `search-start` / `show-urls-*` (disabled here), and `[mouse-bindings]` take no keyboard
 /// key (modifiers only), so none of those are touched.
 /// [`OverlayConfig::effective_terminal_args`] appends the N1 style's opaque surround as foot's
-/// background (see [`OverlayStyle::palette`]).
+/// background (see [`SurfaceStyle::palette`]).
 pub const FOOT_UNBOUND_ACTIONS: [&str; 28] = [
     "scrollback-up-page",
     "scrollback-up-half-page",
@@ -221,7 +184,7 @@ impl TerminalKind {
     /// truth for that decision: the overlay TUI may then paint its surround with SGR 49 so the
     /// terminal's alpha applies.
     #[must_use]
-    pub fn sets_default_bg(self, style: OverlayStyle) -> bool {
+    pub fn sets_default_bg(self, style: SurfaceStyle) -> bool {
         style.palette().is_some() && matches!(self, Self::Foot | Self::Cterm | Self::Urxvt)
     }
 
@@ -232,7 +195,7 @@ impl TerminalKind {
     /// divide the overlay shows foot's own background, which becomes the opaque N1 surround (no
     /// gap between the surround and the border).
     #[must_use]
-    pub fn overlay_args(self, style: OverlayStyle, alpha: Alpha) -> Vec<String> {
+    pub fn overlay_args(self, style: SurfaceStyle, alpha: Alpha) -> Vec<String> {
         let mut args = self.overlay_default_args();
         let bg = style
             .palette()
@@ -368,7 +331,7 @@ mod tests {
             );
         }
         let term_style = OverlayConfig {
-            style: OverlayStyle::Terminal,
+            style: SurfaceStyle::Terminal,
             ..OverlayConfig::default()
         };
         assert_eq!(term_style.effective_terminal_args("foot"), foot);
@@ -378,7 +341,7 @@ mod tests {
         );
         assert_eq!(term_style.effective_terminal_args("ghostty"), defaults);
         let dark = OverlayConfig {
-            style: OverlayStyle::N1Dark,
+            style: SurfaceStyle::N1Dark,
             ..OverlayConfig::default()
         };
         assert!(
@@ -434,10 +397,10 @@ mod tests {
     #[test]
     fn surround_is_default_bg_matrix() {
         let styles = [
-            OverlayStyle::Terminal,
-            OverlayStyle::N1Dark,
-            OverlayStyle::N1Med,
-            OverlayStyle::N1Light,
+            SurfaceStyle::Terminal,
+            SurfaceStyle::N1Dark,
+            SurfaceStyle::N1Med,
+            SurfaceStyle::N1Light,
         ];
         let programs = [
             ("foot", true),
@@ -457,7 +420,7 @@ mod tests {
                     style,
                     ..OverlayConfig::default()
                 };
-                let want = kind_ok && style != OverlayStyle::Terminal;
+                let want = kind_ok && style != SurfaceStyle::Terminal;
                 assert_eq!(unset.surround_is_default_bg(p), want, "{p} {style:?}");
                 assert_eq!(TerminalKind::of(p).sets_default_bg(style), want, "{p}");
                 for args in [vec![], vec!["--x".to_string()]] {
@@ -479,7 +442,7 @@ mod tests {
             alpha: Alpha::from_milli(alpha).unwrap(),
             ..OverlayConfig::default()
         };
-        let n1 = glass(OverlayStyle::N1Med, 850);
+        let n1 = glass(SurfaceStyle::N1Med, 850);
         let foot = n1.effective_terminal_args("foot");
         assert!(foot.contains(&"colors-dark.alpha=0.85".to_string()));
         assert!(!foot.contains(&"colors-dark.alpha=1.0".to_string()));
@@ -492,7 +455,7 @@ mod tests {
             ["+sb", "-bg", "#3a3a3b", "-b", "0"].map(String::from)
         );
         // `terminal` style: alpha only, no colours.
-        let term = glass(OverlayStyle::Terminal, 500);
+        let term = glass(SurfaceStyle::Terminal, 500);
         assert_eq!(
             term.effective_terminal_args("cterm"),
             ["-o", "colors.alpha=0.5"].map(String::from)
@@ -508,7 +471,7 @@ mod tests {
     }
 
     /// The pre-WP-R7 `overlay_args` body, kept verbatim as the byte-identity oracle.
-    fn legacy_overlay_args(kind: TerminalKind, style: OverlayStyle, alpha: u32) -> Vec<String> {
+    fn legacy_overlay_args(kind: TerminalKind, style: SurfaceStyle, alpha: u32) -> Vec<String> {
         let mut args = kind.overlay_default_args();
         let glass = alpha < 1000;
         let alpha_text = if glass {
@@ -571,7 +534,7 @@ mod tests {
             TerminalKind::Other,
         ];
         for kind in kinds {
-            for &(style, _) in OverlayStyle::NAMES {
+            for &(style, _) in SurfaceStyle::NAMES {
                 for milli in [1000, 999, 850, 500, 1, 0] {
                     let alpha = Alpha::from_milli(milli).unwrap();
                     assert_eq!(
@@ -631,10 +594,10 @@ mod tests {
 
     #[test]
     fn palette_is_the_n1_table_and_terminal_has_none() {
-        assert_eq!(OverlayStyle::Terminal.palette(), None);
-        assert_eq!(OverlayStyle::N1Dark.palette(), Some(N1_DARK));
-        assert_eq!(OverlayStyle::N1Med.palette(), Some(N1_MED));
-        assert_eq!(OverlayStyle::N1Light.palette(), Some(N1_LIGHT));
+        assert_eq!(SurfaceStyle::Terminal.palette(), None);
+        assert_eq!(SurfaceStyle::N1Dark.palette(), Some(N1_DARK));
+        assert_eq!(SurfaceStyle::N1Med.palette(), Some(N1_MED));
+        assert_eq!(SurfaceStyle::N1Light.palette(), Some(N1_LIGHT));
         // The compositor's border accents: dark/med #ff8a3d, light #f07714.
         assert_eq!(N1_DARK.accent, Rgb(0xff, 0x8a, 0x3d));
         assert_eq!(N1_LIGHT.accent, Rgb(0xf0, 0x77, 0x14));
@@ -642,12 +605,12 @@ mod tests {
 
     #[test]
     fn style_names_roundtrip_in_table_order() {
-        let names: Vec<&str> = OverlayStyle::NAMES.iter().map(|(_, n)| *n).collect();
+        let names: Vec<&str> = SurfaceStyle::NAMES.iter().map(|(_, n)| *n).collect();
         assert_eq!(names, ["terminal", "n1-dark", "n1-med", "n1-light"]);
-        for &(style, name) in OverlayStyle::NAMES {
+        for &(style, name) in SurfaceStyle::NAMES {
             assert_eq!(style.as_str(), name);
-            assert_eq!(OverlayStyle::from_name(name), Some(style));
+            assert_eq!(SurfaceStyle::from_name(name), Some(style));
         }
-        assert_eq!(OverlayStyle::from_name("N1-Med"), None);
+        assert_eq!(SurfaceStyle::from_name("N1-Med"), None);
     }
 }

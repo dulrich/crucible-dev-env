@@ -1,9 +1,7 @@
 //! Smithay-free chrome planning: pip geometry, tile rings/fills/frames, the mark ring, and the one
 //! paint list with its overlay-rule [`resolve`]r. Everything here works in layout [`Rect`]s.
 
-use crucible_config::{
-    OverlayStyle, Rgb, SurfaceAccent, ThemeConfig, TilingConfig, resolve_accent,
-};
+use crucible_config::{Rgb, TilingConfig};
 use crucible_layout::Rect;
 
 use crate::{
@@ -122,34 +120,6 @@ pub fn stack_pips(
 // Overlay.
 // ---------------------------------------------------------------------------
 
-/// Border colour for an overlay of `style`: the N1 palette accent, or [`BORDER_COLOR`] for `terminal`.
-#[must_use]
-pub fn overlay_border_color(style: OverlayStyle) -> [f32; 4] {
-    style
-        .palette()
-        .map_or(BORDER_COLOR, |palette| palette.accent.to_rgba_f32())
-}
-
-/// The ring colour override for an overlay of `style` with `accent`: `None` keeps
-/// [`overlay_border_color`]. Under [`SurfaceAccent::Style`] only a `terminal` overlay with
-/// `theme.accent` set overrides (its teal default otherwise); `Theme`/`Color` always override with
-/// the resolved accent.
-#[must_use]
-pub fn overlay_ring_accent(
-    style: OverlayStyle,
-    accent: SurfaceAccent,
-    theme: Option<&ThemeConfig>,
-) -> Option<Rgb> {
-    match accent {
-        SurfaceAccent::Style => style
-            .palette()
-            .is_none()
-            .then(|| theme.and_then(|t| t.accent))
-            .flatten(),
-        _ => Some(resolve_accent(style, accent, theme)),
-    }
-}
-
 /// The mapped overlay's global rect plus its border settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OverlayChrome {
@@ -157,10 +127,9 @@ pub struct OverlayChrome {
     pub rect: Rect,
     /// Whether to draw the border ring.
     pub border: bool,
-    /// The overlay style (selects the ring colour).
-    pub style: OverlayStyle,
-    /// The ring colour override ([`overlay_ring_accent`]); `None` keeps the style's colour.
-    pub accent: Option<Rgb>,
+    /// The ring colour, resolved from the overlay style and accent
+    /// ([`crucible_config::surface_accent`] for [`crucible_config::Surface::OverlayRing`]).
+    pub ring: Rgb,
 }
 
 // ---------------------------------------------------------------------------
@@ -357,9 +326,7 @@ pub fn paint_list(
         && o.border
     {
         let t = BORDER_THICKNESS;
-        let color = o
-            .accent
-            .map_or_else(|| overlay_border_color(o.style), Rgb::to_rgba_f32);
+        let color = o.ring.to_rgba_f32();
         out.extend(
             o.rect
                 .outset(t)
@@ -434,7 +401,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::palette::{BORDER_COLOR, MARK_COLOR};
-    use crucible_config::Rgb;
+    use crucible_config::{Rgb, SurfaceStyle};
 
     fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
         Rect::new(x, y, w, h)
@@ -510,12 +477,26 @@ mod tests {
 
     // ---- overlay chrome ----
 
-    fn overlay(border: bool, style: OverlayStyle) -> Option<OverlayChrome> {
+    /// The ring colour of an overlay of `style` with no accent, through the one resolver.
+    fn overlay_border_color(style: SurfaceStyle) -> [f32; 4] {
+        ring_of_style(style).to_rgba_f32()
+    }
+
+    fn ring_of_style(style: SurfaceStyle) -> Rgb {
+        crucible_config::surface_accent(
+            crucible_config::Surface::OverlayRing,
+            Some(style),
+            crucible_config::SurfaceAccent::Style,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn overlay(border: bool, style: SurfaceStyle) -> Option<OverlayChrome> {
         Some(OverlayChrome {
             rect: rect(100, 100, 400, 300),
             border,
-            style,
-            accent: None,
+            ring: ring_of_style(style),
         })
     }
 
@@ -633,7 +614,7 @@ mod tests {
         // The overlay rect is (100, 100, 400, 300); its ring's top strip spans y 97..100. A marked
         // pip at y 92..100 stays clear of the overlay rect but overlaps that ring strip.
         let pip = rect(200, 92, 8, 8);
-        let over = overlay(true, OverlayStyle::N1Med);
+        let over = overlay(true, SurfaceStyle::N1Med);
         assert!(!pip.intersects(over.unwrap().rect));
         let parts = ChromeParts {
             pips: vec![(pip, PipKind::Marked)],
@@ -641,7 +622,7 @@ mod tests {
         };
         let out = resolve(&paint_list(&parts, APP_FILL, None, over), over, (0, 0));
         assert_eq!(out.len(), 5);
-        let ring_c = overlay_border_color(OverlayStyle::N1Med);
+        let ring_c = overlay_border_color(SurfaceStyle::N1Med);
         assert!(out[..4].iter().all(|(_, c)| *c == ring_c));
         assert!(out[..4].iter().any(|(s, _)| s.intersects(pip)));
         // The pip comes after (behind) the ring strip it overlaps.
@@ -734,7 +715,7 @@ mod tests {
     fn mark_chrome_respects_overlay_and_output_origin() {
         let ring = rect(100, 100, 50, 50).border_strips(3);
         let pip = rect(120, 105, 8, 8);
-        let over = overlay(true, OverlayStyle::Terminal).map(|mut o| {
+        let over = overlay(true, SurfaceStyle::Terminal).map(|mut o| {
             o.rect = rect(110, 100, 100, 100);
             o
         });
@@ -757,7 +738,7 @@ mod tests {
             &[],
             APP_FILL,
             &[],
-            overlay(false, OverlayStyle::N1Med),
+            overlay(false, SurfaceStyle::N1Med),
             (0, 0),
         );
         assert!(out.is_empty(), "no ring and no overlay border: {out:?}");
@@ -774,7 +755,7 @@ mod tests {
             &[],
             APP_FILL,
             &pips,
-            overlay(false, OverlayStyle::N1Med),
+            overlay(false, SurfaceStyle::N1Med),
             (0, 0),
         );
         assert_eq!(out.len(), 1);
@@ -788,14 +769,14 @@ mod tests {
             &[],
             APP_FILL,
             &[],
-            overlay(true, OverlayStyle::N1Med),
+            overlay(true, SurfaceStyle::N1Med),
             (0, 0),
         );
         assert_eq!(out.len(), 4);
         let t = BORDER_THICKNESS;
         let inner = rect(100, 100, 400, 300);
         for (strip, color) in &out {
-            assert_eq!(*color, overlay_border_color(OverlayStyle::N1Med));
+            assert_eq!(*color, overlay_border_color(SurfaceStyle::N1Med));
             assert!(!strip.intersects(inner), "strip inside: {strip:?}");
             assert!(strip.x >= 100 - t && strip.y >= 100 - t);
             assert!(strip.x + strip.width <= 500 + t);
@@ -813,7 +794,7 @@ mod tests {
             &[],
             APP_FILL,
             &[],
-            overlay(true, OverlayStyle::Terminal),
+            overlay(true, SurfaceStyle::Terminal),
             (50, 20),
         );
         assert_eq!(out[0].0.x, 100 - BORDER_THICKNESS - 50);
@@ -823,67 +804,25 @@ mod tests {
 
     #[test]
     fn overlay_border_colours_per_style() {
-        assert_eq!(overlay_border_color(OverlayStyle::Terminal), BORDER_COLOR);
+        assert_eq!(overlay_border_color(SurfaceStyle::Terminal), BORDER_COLOR);
         assert_eq!(
-            overlay_border_color(OverlayStyle::N1Dark),
-            overlay_border_color(OverlayStyle::N1Med)
+            overlay_border_color(SurfaceStyle::N1Dark),
+            overlay_border_color(SurfaceStyle::N1Med)
         );
         assert_ne!(
-            overlay_border_color(OverlayStyle::N1Light),
-            overlay_border_color(OverlayStyle::N1Med)
+            overlay_border_color(SurfaceStyle::N1Light),
+            overlay_border_color(SurfaceStyle::N1Med)
         );
     }
 
     #[test]
-    fn overlay_ring_accent_cases() {
+    fn overlay_ring_paints_the_resolved_colour() {
+        // The resolved ring colour (any accent rule; the rules are tested in `crucible-config`)
+        // paints the ring.
         let teal = Rgb(0x33, 0xcc, 0xcc);
-        let t = ThemeConfig {
-            accent: Some(Rgb(9, 9, 9)),
-            cursor: Some(Rgb(4, 4, 4)),
-            ..ThemeConfig::default()
-        };
-        let cursor_only = ThemeConfig {
-            accent: None,
-            ..t.clone()
-        };
-        let all = [
-            OverlayStyle::Terminal,
-            OverlayStyle::N1Dark,
-            OverlayStyle::N1Med,
-            OverlayStyle::N1Light,
-        ];
-        for s in all {
-            // No accent anywhere: today's ring.
-            assert_eq!(overlay_ring_accent(s, SurfaceAccent::Style, None), None);
-            assert_eq!(
-                overlay_ring_accent(s, SurfaceAccent::Style, Some(&cursor_only)),
-                None
-            );
-            assert_eq!(
-                overlay_ring_accent(s, SurfaceAccent::Color(teal), Some(&t)),
-                Some(teal)
-            );
-            assert_eq!(
-                overlay_ring_accent(s, SurfaceAccent::Theme, Some(&t)),
-                Some(Rgb(9, 9, 9))
-            );
-            assert_eq!(
-                overlay_ring_accent(s, SurfaceAccent::Theme, Some(&cursor_only)),
-                Some(Rgb(4, 4, 4))
-            );
-        }
-        assert_eq!(
-            overlay_ring_accent(OverlayStyle::Terminal, SurfaceAccent::Style, Some(&t)),
-            Some(Rgb(9, 9, 9))
-        );
-        assert_eq!(
-            overlay_ring_accent(OverlayStyle::N1Dark, SurfaceAccent::Style, Some(&t)),
-            None
-        );
-        // The override paints the ring.
         let o = OverlayChrome {
-            accent: Some(teal),
-            ..overlay(true, OverlayStyle::N1Dark).unwrap()
+            ring: teal,
+            ..overlay(true, SurfaceStyle::N1Dark).unwrap()
         };
         let parts = ChromeParts::default();
         let list = paint_list(&parts, [0.0; 4], None, Some(o));
@@ -955,8 +894,7 @@ mod tests {
         let overlay = OverlayChrome {
             rect: rect(0, 0, 100000, 100000),
             border: false,
-            style: OverlayStyle::N1Med,
-            accent: None,
+            ring: crucible_config::N1_MED.accent,
         };
         assert!(frame_plan(frame_of(&idle), [0.0; 4], Some(overlay), (0, 0)).is_empty());
         assert_eq!(

@@ -35,14 +35,14 @@ pub use model::{
 };
 pub use overlay::{
     FOOT_UNBOUND_ACTIONS, GHOSTTY_OVERLAY_DEFAULT_ARGS, N1_DARK, N1_LIGHT, N1_MED, OverlayConfig,
-    OverlayStyle, Palette, TerminalKind,
+    Palette, TerminalKind,
 };
 pub use schema::parse;
 pub use surface::{
-    DEFAULT_GREETER_BACKGROUND, DEFAULT_GREETER_POSITION, DEFAULT_GREETER_SESSION,
+    CHROME_ACCENT, DEFAULT_GREETER_BACKGROUND, DEFAULT_GREETER_POSITION, DEFAULT_GREETER_SESSION,
     DEFAULT_GREETER_STYLE, DEFAULT_LOCK_BACKGROUND, DEFAULT_LOCK_STYLE, GreeterConfig, LockConfig,
-    PanelPosition, SurfaceAccent, SurfaceBackground, SurfaceStyle, resolve_accent, resolve_palette,
-    surface_palette,
+    PanelPosition, Surface, SurfaceAccent, SurfaceBackground, SurfaceStyle, resolve_accent,
+    resolve_palette, surface_accent, surface_palette,
 };
 pub use theme::{
     Alpha, Milli, ThemeConfig, ThemeFont, ThemeTarget, render as render_theme, theme_dir,

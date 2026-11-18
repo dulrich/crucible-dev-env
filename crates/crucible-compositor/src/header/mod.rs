@@ -32,13 +32,13 @@ pub use render::build_header_elements;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crucible_config::{
-    DEFAULT_DIVIDER_COLOR, HeaderActive, HeaderConfig, HeaderMode, HeaderStart, OverlayStyle, Rgb,
-    SurfaceAccent, ThemeConfig, resolve_accent, surface_palette,
+    CHROME_ACCENT, DEFAULT_DIVIDER_COLOR, HeaderActive, HeaderConfig, HeaderMode, HeaderStart, Rgb,
+    Surface, ThemeConfig, resolve_palette, surface_accent,
 };
 use crucible_layout::{OutputId, Rect, WorkspaceId};
 use crucible_persist::session::HeaderPref;
 
-use crate::palette::{BORDER_COLOR, STRIP_BG};
+use crate::palette::STRIP_BG;
 use crate::{
     layout::model_output_id,
     state::{Backend, CrucibleState},
@@ -68,77 +68,67 @@ pub struct HeaderColors {
     pub divider: Rgb,
 }
 
-/// The strip colours: today's fixed look without `header.style`; with a style, the strip is the
-/// palette `bg`, labels `text`, the active highlight `accent` (its label `bg`, for contrast) and
-/// the divider `line` unless `divider color=` was set explicitly.
+/// The strip colours: today's fixed look without `header.style` (only the highlight follows a
+/// non-default `accent`); with a style, the strip is the palette `bg`, labels `text`, the active
+/// highlight `accent` (its label `bg`, for contrast) and the divider `line`. An explicit
+/// `divider color=` always wins. The accent comes from [`surface_accent`].
 #[must_use]
 pub fn header_colors(header: &HeaderConfig, theme: Option<&ThemeConfig>) -> HeaderColors {
+    let accent = surface_accent(Surface::Header, header.style, header.accent, theme)
+        .unwrap_or(CHROME_ACCENT)
+        .to_rgba_f32();
     let Some(style) = header.style else {
-        // Without a style only a non-default `accent` changes anything: the highlight.
-        let highlight = match header.accent {
-            SurfaceAccent::Style => BORDER_COLOR,
-            accent => resolve_accent(OverlayStyle::Terminal, accent, theme).to_rgba_f32(),
-        };
         return HeaderColors {
             strip_bg: STRIP_BG,
-            highlight,
+            highlight: accent,
             label: LABEL_RGBA,
             label_active: LABEL_ACTIVE_RGBA,
-            divider: header.divider_color,
+            divider: header.divider_color.unwrap_or(DEFAULT_DIVIDER_COLOR),
         };
     };
-    let p = surface_palette(style, header.accent, theme);
+    let p = resolve_palette(style, theme);
     let rgba = |c: Rgb| [c.0, c.1, c.2, 255];
     HeaderColors {
         strip_bg: p.bg.to_rgba_f32(),
-        highlight: p.accent.to_rgba_f32(),
+        highlight: accent,
         label: rgba(p.text),
         label_active: rgba(p.bg),
-        divider: if header.divider_color == DEFAULT_DIVIDER_COLOR {
-            p.line
-        } else {
-            header.divider_color
-        },
+        divider: header.divider_color.unwrap_or(p.line),
     }
 }
 
-/// The width of one label: the active label of a `text-bold` strip is measured in the bold face
-/// (`bold`, falling back to `regular` when no bold face is loaded), every other label in the
-/// regular one. `None` (no font) when the chosen measurement is unavailable.
-#[must_use]
-pub fn label_width(
-    is_active: bool,
-    style: HeaderActive,
-    regular: Option<i32>,
-    bold: Option<i32>,
-) -> Option<i32> {
-    if is_active && style == HeaderActive::TextBold {
-        bold.or(regular)
-    } else {
-        regular
-    }
+/// How the active segment is drawn, resolved once from `header { active }` and the colours.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActiveLook {
+    /// The `header { active }` mode (selects the face, [`crate::text::HeaderFonts::face`]).
+    pub mode: HeaderActive,
+    /// The solid block behind the active segment (`fill` only).
+    pub block: Option<[f32; 4]>,
+    /// The active label colour: `label_active` on the `fill` block, else the highlight itself.
+    pub label: [u8; 4],
 }
 
-/// Whether the active segment gets a solid highlight block (`fill` only).
-#[must_use]
-pub fn draws_highlight_block(style: HeaderActive) -> bool {
-    style == HeaderActive::Fill
+impl ActiveLook {
+    /// The look of `mode` in `colors`.
+    #[must_use]
+    pub fn new(mode: HeaderActive, colors: &HeaderColors) -> Self {
+        let fill = mode == HeaderActive::Fill;
+        Self {
+            mode,
+            block: fill.then_some(colors.highlight),
+            label: if fill {
+                colors.label_active
+            } else {
+                highlight_to_rgba(colors.highlight)
+            },
+        }
+    }
 }
 
 /// A premultiplied-free `[f32; 4]` colour as straight RGBA bytes, rounded.
 #[must_use]
 pub fn highlight_to_rgba(c: [f32; 4]) -> [u8; 4] {
     c.map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
-}
-
-/// The colour of the active label: `label_active` on the `fill` block, else the highlight itself.
-#[must_use]
-pub fn active_label_rgba(style: HeaderActive, colors: &HeaderColors) -> [u8; 4] {
-    if draws_highlight_block(style) {
-        colors.label_active
-    } else {
-        highlight_to_rgba(colors.highlight)
-    }
 }
 
 /// Width estimate per character when no font is loaded (so the strip still has segments).
@@ -308,8 +298,8 @@ pub struct HeaderLayout {
     pub workspaces: Vec<WorkspaceId>,
     /// Index of the active workspace.
     pub active: usize,
-    /// How the active label is drawn (`header { active }`).
-    pub active_style: HeaderActive,
+    /// How the active label is drawn (`header { active }`), resolved once.
+    pub active_look: ActiveLook,
     /// Segment rects for `names`.
     pub segments: Vec<Segment>,
     /// Divider rects between adjacent segments (empty when the divider is 0).
@@ -399,18 +389,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .iter()
             .enumerate()
             .map(|(i, n)| {
-                let bold = self
-                    .header_text
-                    .bold
-                    .as_ref()
-                    .and_then(|b| b.measure(n, size));
-                label_width(
-                    i == active,
-                    style,
-                    self.header_text.regular.measure(n, size),
-                    bold,
-                )
-                .unwrap_or_else(|| fallback_width(n, size))
+                self.header_text
+                    .face(i == active, style)
+                    .measure(n, size)
+                    .unwrap_or_else(|| fallback_width(n, size))
             })
             .collect();
         let (segments, dividers) = segment_layout(&widths, strip, divider);
@@ -424,7 +406,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             names,
             workspaces,
             active,
-            active_style: style,
+            active_look: ActiveLook::new(style, &colors),
             segments,
             dividers,
             colors,
@@ -482,18 +464,20 @@ fn fallback_width(name: &str, size: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::palette::BORDER_COLOR;
+    use crucible_config::{SurfaceAccent, SurfaceStyle};
 
     #[test]
     fn label_width_uses_the_bold_face_for_the_active_text_bold_label_only() {
-        let (r, b) = (Some(50), Some(58));
+        use crate::text::header_face;
+        let (r, b) = (50, 58);
         for style in [HeaderActive::Fill, HeaderActive::Text] {
-            assert_eq!(label_width(true, style, r, b), r, "{style:?}");
+            assert_eq!(header_face(true, style, r, Some(b)), r, "{style:?}");
         }
-        assert_eq!(label_width(true, HeaderActive::TextBold, r, b), b);
-        assert_eq!(label_width(false, HeaderActive::TextBold, r, b), r);
-        // No bold face loaded: the regular measurement; no font at all: None.
-        assert_eq!(label_width(true, HeaderActive::TextBold, r, None), r);
-        assert_eq!(label_width(true, HeaderActive::TextBold, None, None), None);
+        assert_eq!(header_face(true, HeaderActive::TextBold, r, Some(b)), b);
+        assert_eq!(header_face(false, HeaderActive::TextBold, r, Some(b)), r);
+        // No bold face loaded: the regular face.
+        assert_eq!(header_face(true, HeaderActive::TextBold, r, None), r);
     }
 
     #[test]
@@ -506,8 +490,9 @@ mod tests {
             (c.highlight, c.label_active),
             (BORDER_COLOR, LABEL_ACTIVE_RGBA)
         );
-        assert_eq!(active_label_rgba(HeaderActive::Fill, &c), c.label_active);
-        assert!(draws_highlight_block(HeaderActive::Fill));
+        let look = ActiveLook::new(HeaderActive::Fill, &c);
+        assert_eq!(look.label, c.label_active);
+        assert_eq!(look.block, Some(c.highlight));
     }
 
     #[test]
@@ -516,8 +501,9 @@ mod tests {
         // Straight RGBA, rounded (not truncated) from the f32 highlight.
         let want = c.highlight.map(|v| (v * 255.0).round() as u8);
         for style in [HeaderActive::Text, HeaderActive::TextBold] {
-            assert!(!draws_highlight_block(style));
-            assert_eq!(active_label_rgba(style, &c), want);
+            let look = ActiveLook::new(style, &c);
+            assert_eq!(look.block, None);
+            assert_eq!(look.label, want);
         }
         assert_eq!(highlight_to_rgba([0.5, 0.0, 1.0, 1.0]), [128, 0, 255, 255]);
     }
@@ -530,7 +516,7 @@ mod tests {
         assert_eq!(c.highlight, BORDER_COLOR);
         assert_eq!((c.label, c.label_active), (LABEL_RGBA, LABEL_ACTIVE_RGBA));
         assert_eq!(c.divider, DEFAULT_DIVIDER_COLOR);
-        h.style = Some(crucible_config::OverlayStyle::N1Dark);
+        h.style = Some(crucible_config::SurfaceStyle::N1Dark);
         let p = crucible_config::N1_DARK;
         let c = header_colors(&h, None);
         assert_eq!(c.strip_bg, p.bg.to_rgba_f32());
@@ -538,8 +524,27 @@ mod tests {
         assert_eq!(c.label, [p.text.0, p.text.1, p.text.2, 255]);
         assert_eq!(c.divider, p.line);
         // An explicit divider colour wins.
-        h.divider_color = Rgb(1, 2, 3);
+        h.divider_color = Some(Rgb(1, 2, 3));
         assert_eq!(header_colors(&h, None).divider, Rgb(1, 2, 3));
+    }
+
+    #[test]
+    fn an_explicit_default_valued_divider_colour_is_honoured_under_a_style() {
+        // C1: `color="#cdd0d6"` set explicitly is no longer read as "unset".
+        let h = crucible_config::parse(
+            "header {\n style \"n1-dark\"\n divider (px)1 color=\"#cdd0d6\"\n}\n",
+        )
+        .unwrap()
+        .header;
+        assert_eq!(header_colors(&h, None).divider, DEFAULT_DIVIDER_COLOR);
+        let unset = HeaderConfig {
+            divider_color: None,
+            ..h
+        };
+        assert_eq!(
+            header_colors(&unset, None).divider,
+            crucible_config::N1_DARK.line
+        );
     }
 
     #[test]
@@ -563,7 +568,7 @@ mod tests {
             header_colors(&HeaderConfig::default(), None)
         );
         // With a style: the accent replaces the palette accent only.
-        h.style = Some(OverlayStyle::N1Dark);
+        h.style = Some(SurfaceStyle::N1Dark);
         h.accent = SurfaceAccent::Color(teal);
         let c = header_colors(&h, None);
         assert_eq!(c.highlight, teal.to_rgba_f32());

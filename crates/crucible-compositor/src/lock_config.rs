@@ -220,9 +220,9 @@ pub fn locker_args(program: &str, words: &[&str], fragment: Option<&Path>) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crucible_config::OverlayStyle;
+    use crucible_config::SurfaceStyle;
 
-    fn lock(style: OverlayStyle, background: SurfaceBackground) -> LockConfig {
+    fn lock(style: SurfaceStyle, background: SurfaceBackground) -> LockConfig {
         LockConfig {
             style,
             background,
@@ -233,7 +233,7 @@ mod tests {
     #[test]
     fn colour_background_and_style_colours() {
         let l = lock(
-            OverlayStyle::N1Dark,
+            SurfaceStyle::N1Dark,
             SurfaceBackground::Color(Rgb(0x10, 0x20, 0x30)),
         );
         let text = swaylock_config(&l, None, Path::new("/s.png"), None);
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn stock_background_points_at_the_installed_png() {
-        let l = lock(OverlayStyle::N1Med, SurfaceBackground::Stock);
+        let l = lock(SurfaceStyle::N1Med, SurfaceBackground::Stock);
         let text = swaylock_config(&l, None, Path::new("/d/cde/backgrounds/stock.png"), None);
         assert!(
             text.contains("color=000000\nimage=/d/cde/backgrounds/stock.png\nscaling=fill\n"),
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn user_background_reads_the_state_lines() {
-        let l = lock(OverlayStyle::N1Med, SurfaceBackground::User);
+        let l = lock(SurfaceStyle::N1Med, SurfaceBackground::User);
         let state = "DP-1\t/w/a.png\nHDMI-A-1\t/w/b.png\n";
         let text = swaylock_config(&l, None, Path::new("/s.png"), Some(state));
         assert!(
@@ -290,7 +290,7 @@ mod tests {
             ..ThemeConfig::default()
         };
         let l = lock(
-            OverlayStyle::Terminal,
+            SurfaceStyle::Terminal,
             SurfaceBackground::Color(Rgb(0, 0, 0)),
         );
         let text = swaylock_config(&l, Some(&theme), Path::new("/s.png"), None);
@@ -299,7 +299,7 @@ mod tests {
 
     #[test]
     fn lock_accent_colours_the_ring() {
-        let base = lock(OverlayStyle::N1Med, SurfaceBackground::Color(Rgb(0, 0, 0)));
+        let base = lock(SurfaceStyle::N1Med, SurfaceBackground::Color(Rgb(0, 0, 0)));
         let l = LockConfig {
             accent: crucible_config::SurfaceAccent::Color(Rgb(0x33, 0xcc, 0xcc)),
             ..base

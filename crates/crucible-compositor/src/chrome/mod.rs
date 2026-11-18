@@ -30,8 +30,8 @@ pub mod plan;
 
 pub use plan::{
     BORDER_THICKNESS, ChromeParts, MARK_THICKNESS, OverlayChrome, PIP_GAP, PIP_MARGIN, PIP_SIZE,
-    PaintEntry, PipKind, StripKind, TilePlan, UnderOverlay, overlay_border_color, paint_list,
-    pip_margin, plan_mark_ring, plan_tile, resolve, stack_pips,
+    PaintEntry, PipKind, StripKind, TilePlan, UnderOverlay, paint_list, pip_margin, plan_mark_ring,
+    plan_tile, resolve, stack_pips,
 };
 
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
@@ -176,12 +176,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
         Some(OverlayChrome {
             rect: self.mapped_overlay_rect()?,
             border: self.config.overlay.border,
-            style: self.config.overlay.style,
-            accent: plan::overlay_ring_accent(
-                self.config.overlay.style,
+            ring: crucible_config::surface_accent(
+                crucible_config::Surface::OverlayRing,
+                Some(self.config.overlay.style),
                 self.config.overlay.accent,
                 self.config.theme.as_ref(),
-            ),
+            )
+            .unwrap_or(crucible_config::CHROME_ACCENT),
         })
     }
 }

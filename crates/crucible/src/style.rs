@@ -10,7 +10,7 @@
 //! background is SGR 49 instead of the explicit truecolor `bg`.
 
 use crucible_compositor::ipc::{OVERLAY_ACCENT_ENV, OVERLAY_STYLE_ENV, OVERLAY_SURROUND_ENV};
-use crucible_config::{Named, OverlayStyle, Palette, Rgb};
+use crucible_config::{Named, Palette, Rgb, SurfaceStyle};
 
 /// The overlay style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,8 +22,8 @@ pub enum Style {
     N1Default(Palette),
 }
 
-impl From<OverlayStyle> for Style {
-    fn from(style: OverlayStyle) -> Style {
+impl From<SurfaceStyle> for Style {
+    fn from(style: SurfaceStyle) -> Style {
         style.palette().map_or(Style::Terminal, Style::N1)
     }
 }
@@ -40,12 +40,12 @@ fn bg(Rgb(r, g, b): Rgb) -> String {
 }
 
 impl Style {
-    /// Parses a style name through the config's [`OverlayStyle::from_name`]; unset, empty or
+    /// Parses a style name through the config's [`SurfaceStyle::from_name`]; unset, empty or
     /// unknown values explicitly give `Terminal`.
     #[must_use]
     pub fn parse(value: Option<&str>) -> Style {
         value
-            .and_then(OverlayStyle::from_name)
+            .and_then(SurfaceStyle::from_name)
             .map_or(Style::Terminal, Style::from)
     }
 
@@ -164,16 +164,16 @@ mod tests {
 
     #[test]
     fn from_overlay_style_covers_every_variant() {
-        assert_eq!(Style::from(OverlayStyle::Terminal), Style::Terminal);
-        assert_eq!(Style::from(OverlayStyle::N1Dark), Style::N1(N1_DARK));
-        assert_eq!(Style::from(OverlayStyle::N1Med), Style::N1(N1_MED));
-        assert_eq!(Style::from(OverlayStyle::N1Light), Style::N1(N1_LIGHT));
+        assert_eq!(Style::from(SurfaceStyle::Terminal), Style::Terminal);
+        assert_eq!(Style::from(SurfaceStyle::N1Dark), Style::N1(N1_DARK));
+        assert_eq!(Style::from(SurfaceStyle::N1Med), Style::N1(N1_MED));
+        assert_eq!(Style::from(SurfaceStyle::N1Light), Style::N1(N1_LIGHT));
         // The names the compositor exports round-trip through the config's spelling.
         for s in [
-            OverlayStyle::Terminal,
-            OverlayStyle::N1Dark,
-            OverlayStyle::N1Med,
-            OverlayStyle::N1Light,
+            SurfaceStyle::Terminal,
+            SurfaceStyle::N1Dark,
+            SurfaceStyle::N1Med,
+            SurfaceStyle::N1Light,
         ] {
             assert_eq!(Style::parse(Some(s.as_str())), Style::from(s));
         }

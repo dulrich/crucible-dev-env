@@ -62,7 +62,7 @@ header {
     start "hidden"  // "shown" | "hidden" (toggle mode, first run per monitor)
     font "DejaVu Sans"
     size (px)14     // or (pt)N
-    divider (px)0 inset=(px)0 color="#cdd0d6"
+    divider (px)0 inset=(px)0
     slots #false
     // Strip colours; absent keeps the legacy header colours. "terminal" uses the theme block.
     /-style "n1-med"

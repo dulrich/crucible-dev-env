@@ -230,12 +230,33 @@ impl HeaderFonts {
         Self { regular, bold }
     }
 
-    /// The face the active label is drawn in under `active`.
-    pub fn active_face(&mut self, active: crucible_config::HeaderActive) -> &mut TextRenderer {
-        match (active, self.bold.as_mut()) {
-            (crucible_config::HeaderActive::TextBold, Some(b)) => b,
-            _ => &mut self.regular,
-        }
+    /// The face a label is measured and drawn in: the bold face for the active label under
+    /// `active "text-bold"` (the regular one when no bold face is loaded), else the regular one.
+    pub fn face(&self, is_active: bool, active: crucible_config::HeaderActive) -> &TextRenderer {
+        header_face(is_active, active, &self.regular, self.bold.as_ref())
+    }
+
+    /// [`Self::face`], mutable (drawing fills the face's cache).
+    pub fn face_mut(
+        &mut self,
+        is_active: bool,
+        active: crucible_config::HeaderActive,
+    ) -> &mut TextRenderer {
+        header_face(is_active, active, &mut self.regular, self.bold.as_mut())
+    }
+}
+
+/// The header face rule behind [`HeaderFonts::face`]: `bold` (when loaded) for the active label
+/// of a `text-bold` strip, `regular` for every other label. **Pure.**
+pub fn header_face<T>(
+    is_active: bool,
+    active: crucible_config::HeaderActive,
+    regular: T,
+    bold: Option<T>,
+) -> T {
+    match bold {
+        Some(b) if is_active && active == crucible_config::HeaderActive::TextBold => b,
+        _ => regular,
     }
 }
 

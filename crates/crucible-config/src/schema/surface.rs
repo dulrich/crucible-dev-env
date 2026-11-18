@@ -87,7 +87,7 @@ mod tests {
     use super::super::{err_at, parse};
     use crate::error::ConfigError;
     use crate::model::{Config, Rgb};
-    use crate::overlay::OverlayStyle;
+    use crate::surface::SurfaceStyle;
     use crate::surface::{GreeterConfig, LockConfig, SurfaceBackground};
 
     #[test]
@@ -108,14 +108,14 @@ mod tests {
         assert_eq!(lock, LockConfig::default());
         assert_eq!(
             (lock.style, lock.background),
-            (OverlayStyle::N1Med, SurfaceBackground::Color(Rgb(0, 0, 0)))
+            (SurfaceStyle::N1Med, SurfaceBackground::Color(Rgb(0, 0, 0)))
         );
         let g = c.greeter.unwrap();
         assert_eq!(g, GreeterConfig::default());
         assert_eq!(
             (g.style, g.background, g.session.as_str()),
             (
-                OverlayStyle::N1Dark,
+                SurfaceStyle::N1Dark,
                 SurfaceBackground::Stock,
                 "cde-session"
             )
@@ -133,13 +133,13 @@ mod tests {
         let lock = c.lock.unwrap();
         assert_eq!(
             (lock.style, lock.background),
-            (OverlayStyle::N1Dark, SurfaceBackground::User)
+            (SurfaceStyle::N1Dark, SurfaceBackground::User)
         );
         let g = c.greeter.unwrap();
         assert_eq!(
             (g.style, g.background, g.session.as_str()),
             (
-                OverlayStyle::Terminal,
+                SurfaceStyle::Terminal,
                 SurfaceBackground::Color(Rgb(0x10, 0x20, 0x30)),
                 "sway"
             )

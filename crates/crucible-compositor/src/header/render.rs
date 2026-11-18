@@ -6,7 +6,7 @@ use smithay::{
     utils::{Physical, Point, Scale},
 };
 
-use super::{HeaderLayout, PAD_X, active_label_rgba, draws_highlight_block};
+use super::{HeaderLayout, PAD_X};
 use crate::{
     physical::{PhysicalMap, solid},
     render::CustomRenderElements,
@@ -40,21 +40,17 @@ where
     for seg in &l.segments {
         let active = seg.index == l.active;
         let seg_rect = map.rect(to_origin(seg.rect));
-        if active && draws_highlight_block(l.active_style) {
-            solids.push(solid(seg_rect, l.colors.highlight));
+        if active && let Some(block) = l.active_look.block {
+            solids.push(solid(seg_rect, block));
         }
         let rgba = if active {
-            active_label_rgba(l.active_style, &l.colors)
+            l.active_look.label
         } else {
             l.colors.label
         };
         let loc =
             Point::<f64, Physical>::from((f64::from(seg_rect.loc.x + pad_x), f64::from(text_y)));
-        let text = if active {
-            fonts.active_face(l.active_style)
-        } else {
-            &mut fonts.regular
-        };
+        let text = fonts.face_mut(active, l.active_look.mode);
         if let Some(el) = text.element(renderer, loc, &l.names[seg.index], size, rgba, scale) {
             labels.push(CustomRenderElements::Text(el));
         }
