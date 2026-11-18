@@ -5,6 +5,17 @@ use std::path::{Path, PathBuf};
 
 use crate::overlay::{OverlayConfig, TerminalKind};
 
+mod header;
+mod tiling;
+
+pub use header::{
+    DEFAULT_DIVIDER_COLOR, DEFAULT_HEADER_FONT, HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX,
+    HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderActive, HeaderConfig, HeaderMode, HeaderStart,
+};
+pub use tiling::{
+    AppTiling, TerminalTiling, TilingConfig, clamp_ring, clamp_ring_inset, substitute_gap,
+};
+
 /// A closed set of config spellings: one `NAMES` table, in the order error messages list them,
 /// drives both parsing ([`Named::from_name`]) and printing ([`Named::as_str`]).
 pub trait Named: Copy + Eq + 'static {
@@ -89,308 +100,6 @@ impl Rgb {
             f32::from(self.2) / 255.0,
             1.0,
         ]
-    }
-}
-
-/// Tiling of CDE-spawned terminals, in pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalTiling {
-    /// Space between the tile edge and the terminal content; the terminal draws it as its own
-    /// padding.
-    pub gap: u32,
-    /// Focus-ring thickness; never more than `gap` (clamped at parse time).
-    pub ring: u32,
-    /// Distance the focus ring and `frame` are drawn inside the tile edge; with `ring` never more
-    /// than `gap` (clamped at parse time).
-    pub ring_inset: u32,
-    /// Colour of the frame drawn at the ring position on unfocused tiles. `None` (default) draws
-    /// no frame.
-    pub frame: Option<Rgb>,
-}
-
-/// Tiling of every other managed window, in pixels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AppTiling {
-    /// Space between the tile edge and the window; CDE insets the window and paints the inset.
-    pub gap: u32,
-    /// Focus-ring thickness; never more than `gap` (clamped at parse time).
-    pub ring: u32,
-    /// Colour painted over the part of the inset the ring does not cover.
-    pub fill: Rgb,
-}
-
-/// Per-class tiling: terminals fill their tile, apps are inset by their gap.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TilingConfig {
-    /// CDE-spawned terminals.
-    pub terminal: TerminalTiling,
-    /// Every other managed window.
-    pub app: AppTiling,
-    /// The program-less `terminal-args` node (`{gap}` = the terminal gap, see [`substitute_gap`]),
-    /// inserted before the exec flag on spawns of the configured terminal. `None`: no node (the
-    /// built-in default applies); `Some(vec![])`: an explicit empty node (no arguments).
-    pub terminal_args: Option<Vec<String>>,
-    /// `terminal-args program="<basename>"` nodes: `(basename, args)`, one per program (a repeated
-    /// node keeps the last). An empty list disables that program's built-in default.
-    pub program_terminal_args: Vec<(String, Vec<String>)>,
-}
-
-/// The built-in `tiling.terminal-args` for a spawned terminal of `kind` (`{gap}` unsubstituted):
-/// foot-style padding for `cterm`/`foot`, urxvt's internal border, ghostty's window padding;
-/// nothing for [`TerminalKind::Other`] (`footclient` and `urxvtc` included). Pure.
-#[must_use]
-pub fn builtin_tiling_args(kind: TerminalKind) -> &'static [&'static str] {
-    match kind {
-        TerminalKind::Cterm | TerminalKind::Foot => &["-o", "pad={gap}x{gap} center"],
-        TerminalKind::Urxvt => &["-b", "{gap}"],
-        TerminalKind::Ghostty => &[
-            "--window-padding-x={gap}",
-            "--window-padding-y={gap}",
-            "--window-padding-color=extend-always",
-            "--window-padding-balance=true",
-        ],
-        TerminalKind::Other => &[],
-    }
-}
-
-impl Default for TilingConfig {
-    /// Terminal gap 6 / ring 3; app gap 0 / ring 0 with the muted chrome grey (`#737373`, the
-    /// inactive stack-pip colour) as fill.
-    fn default() -> Self {
-        Self {
-            terminal: TerminalTiling {
-                gap: 6,
-                ring: 3,
-                ring_inset: 0,
-                frame: None,
-            },
-            app: AppTiling {
-                gap: 0,
-                ring: 0,
-                fill: Rgb(0x73, 0x73, 0x73),
-            },
-            terminal_args: None,
-            program_terminal_args: Vec::new(),
-        }
-    }
-}
-
-impl TilingConfig {
-    /// The terminal args for a spawn of the program whose basename is `program_basename`, with
-    /// `{gap}` replaced by the terminal gap. Order: a `program=` node equal to the basename; else
-    /// the program-less node, only when `is_configured_terminal`; else the built-in default
-    /// ([`builtin_tiling_args`]). An explicit node, even an empty one, replaces the default for the
-    /// program(s) it applies to. Pure.
-    #[must_use]
-    pub fn effective_terminal_args(
-        &self,
-        program_basename: &str,
-        is_configured_terminal: bool,
-    ) -> Vec<String> {
-        let gap = self.terminal.gap;
-        if let Some((_, args)) = self
-            .program_terminal_args
-            .iter()
-            .find(|(p, _)| p == program_basename)
-        {
-            return substitute_gap(args, gap);
-        }
-        if is_configured_terminal && let Some(args) = &self.terminal_args {
-            return substitute_gap(args, gap);
-        }
-        builtin_tiling_args(TerminalKind::of(program_basename))
-            .iter()
-            .map(|a| a.replace("{gap}", &gap.to_string()))
-            .collect()
-    }
-
-    /// The arguments a tiling terminal spawn of `program` (`configured` when it is the configured
-    /// terminal) puts before the exec flag: [`Self::effective_terminal_args`] for its basename,
-    /// then the `theme`'s spawn arguments (ghostty's `--config-file=` into `theme_dir`; nothing
-    /// without a `theme`). **Pure.**
-    #[must_use]
-    pub fn spawn_args(
-        &self,
-        program: &str,
-        configured: bool,
-        theme: Option<&crate::theme::ThemeConfig>,
-        theme_dir: Option<&Path>,
-    ) -> Vec<String> {
-        let basename = Path::new(program)
-            .file_name()
-            .and_then(|b| b.to_str())
-            .unwrap_or(program);
-        let mut args = self.effective_terminal_args(basename, configured);
-        args.extend(crate::theme::theme_spawn_args(
-            theme,
-            TerminalKind::of(program),
-            theme_dir,
-        ));
-        args
-    }
-}
-
-/// Replaces every `{gap}` in `args` with `gap`. Pure.
-#[must_use]
-pub fn substitute_gap(args: &[String], gap: u32) -> Vec<String> {
-    let gap = gap.to_string();
-    args.iter().map(|a| a.replace("{gap}", &gap)).collect()
-}
-
-/// `(ring, clamped)`: `ring` limited to `gap`; `clamped` is whether it was reduced. Pure.
-#[must_use]
-pub fn clamp_ring(gap: u32, ring: u32) -> (u32, bool) {
-    if ring > gap {
-        (gap, true)
-    } else {
-        (ring, false)
-    }
-}
-
-/// `(ring_inset, clamped)`: `ring_inset` limited to `gap - ring` (callers clamp `ring` to `gap`
-/// first); `clamped` is whether it was reduced. Pure.
-#[must_use]
-pub fn clamp_ring_inset(gap: u32, ring: u32, ring_inset: u32) -> (u32, bool) {
-    let max = gap.saturating_sub(ring);
-    if ring_inset > max {
-        (max, true)
-    } else {
-        (ring_inset, false)
-    }
-}
-
-/// When the workspace header strip is shown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeaderMode {
-    /// Never shown.
-    Off,
-    /// Always shown; its height is reserved at the top of each output.
-    Always,
-    /// Hidden until `toggle-header` (Super+B) shows it; while shown its height is reserved at the top
-    /// of each output (the default).
-    Toggle,
-}
-
-impl Named for HeaderMode {
-    /// Every mode with its config spelling, in the order error messages list them.
-    const NAMES: &'static [(Self, &'static str)] = &[
-        (Self::Off, "off"),
-        (Self::Always, "always"),
-        (Self::Toggle, "toggle"),
-    ];
-}
-
-/// How the active workspace label is drawn in the header strip (`header { active }`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum HeaderActive {
-    /// A solid highlight block behind the label (the default).
-    #[default]
-    Fill,
-    /// No block; the label is drawn in the highlight colour.
-    Text,
-    /// Like `Text`, in the bold face of the header font.
-    TextBold,
-}
-
-impl Named for HeaderActive {
-    /// Every value with its config spelling, in the order error messages list them.
-    const NAMES: &'static [(Self, &'static str)] = &[
-        (Self::Fill, "fill"),
-        (Self::Text, "text"),
-        (Self::TextBold, "text-bold"),
-    ];
-}
-
-/// Whether a never-toggled output's `toggle`-mode strip starts shown or hidden (`header { start }`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeaderStart {
-    /// The strip starts shown.
-    Shown,
-    /// The strip starts hidden (the default).
-    Hidden,
-}
-
-impl Named for HeaderStart {
-    /// Every value with its config spelling, in the order error messages list them.
-    const NAMES: &'static [(Self, &'static str)] =
-        &[(Self::Shown, "shown"), (Self::Hidden, "hidden")];
-}
-
-impl HeaderStart {
-    /// Whether this start state is "shown".
-    #[must_use]
-    pub fn is_shown(self) -> bool {
-        self == Self::Shown
-    }
-}
-
-/// Smallest accepted header font size, in logical pixels.
-pub const HEADER_SIZE_MIN: u32 = 6;
-/// Largest accepted header font size, in logical pixels.
-pub const HEADER_SIZE_MAX: u32 = 96;
-/// Largest accepted header divider width, in logical pixels (`0` = no divider).
-pub const HEADER_DIVIDER_MAX: u32 = 16;
-/// Largest accepted header divider inset (top and bottom), in logical pixels.
-pub const HEADER_DIVIDER_INSET_MAX: u32 = 32;
-/// Default header divider colour: the inactive label colour.
-pub const DEFAULT_DIVIDER_COLOR: Rgb = Rgb(0xcd, 0xd0, 0xd6);
-/// Default header font family (resolved through `fc-match`).
-pub const DEFAULT_HEADER_FONT: &str = "DejaVu Sans";
-
-/// Workspace header strip settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeaderConfig {
-    /// When the strip is shown.
-    pub mode: HeaderMode,
-    /// Initial `toggle`-mode state of an output with no saved preference (`start`).
-    pub start: HeaderStart,
-    /// How the active workspace label is drawn (`active`).
-    pub active: HeaderActive,
-    /// A font file path (contains `/`) or a fontconfig family name.
-    pub font: String,
-    /// Font size in logical pixels, within [`HEADER_SIZE_MIN`]..=[`HEADER_SIZE_MAX`].
-    pub size: u32,
-    /// Width in logical pixels of the divider drawn between workspace labels, within
-    /// `0..=`[`HEADER_DIVIDER_MAX`]; `0` draws none.
-    pub divider: u32,
-    /// Logical pixels trimmed from the top and bottom of each divider, within
-    /// `0..=`[`HEADER_DIVIDER_INSET_MAX`]; no effect when `divider` is 0.
-    pub divider_inset: u32,
-    /// Explicit divider colour (`divider ... color=`), which always wins; `None` takes the label
-    /// colour ([`DEFAULT_DIVIDER_COLOR`]) without a `style` and the palette `line` with one.
-    pub divider_color: Option<Rgb>,
-    /// Whether labels of slot-pinned workspaces carry a slot badge (`slots`).
-    pub slots: bool,
-    /// Strip, label and accent colours (`style`); `None` keeps the legacy header colours.
-    pub style: Option<crate::surface::SurfaceStyle>,
-    /// Highlight accent (`accent`); with no `style`, a non-default value replaces only the
-    /// highlight colour.
-    pub accent: crate::surface::SurfaceAccent,
-}
-
-impl Default for HeaderConfig {
-    fn default() -> Self {
-        Self {
-            mode: HeaderMode::Toggle,
-            start: HeaderStart::Hidden,
-            active: HeaderActive::Fill,
-            font: DEFAULT_HEADER_FONT.to_string(),
-            size: 14,
-            divider: 0,
-            divider_inset: 0,
-            divider_color: None,
-            slots: false,
-            style: None,
-            accent: crate::surface::SurfaceAccent::Style,
-        }
-    }
-}
-
-impl HeaderConfig {
-    /// The font as a path override when it contains `/`, else `None` (it is a family name).
-    #[must_use]
-    pub fn font_path(&self) -> Option<&Path> {
-        self.font.contains('/').then(|| Path::new(&self.font))
     }
 }
 
@@ -657,43 +366,13 @@ mod tests {
     use crate::surface::SurfaceStyle;
 
     /// Every `all` variant is in `NAMES` (same count, each round-trips through its spelling).
-    fn assert_names_round_trip<T: Named + std::fmt::Debug>(all: &[T]) {
+    pub(super) fn assert_names_round_trip<T: Named + std::fmt::Debug>(all: &[T]) {
         assert_eq!(T::NAMES.len(), all.len(), "NAMES lists every variant");
         for v in all {
             assert_eq!(T::from_name(v.as_str()), Some(*v), "{v:?}");
         }
         assert_eq!(T::from_name("no-such-name"), None);
     }
-
-    #[test]
-    fn header_mode_names_round_trip() {
-        // The exhaustive match fails to compile when a variant is added without listing it here.
-        let _ = |m: HeaderMode| match m {
-            HeaderMode::Off | HeaderMode::Always | HeaderMode::Toggle => (),
-        };
-        assert_names_round_trip(&[HeaderMode::Off, HeaderMode::Always, HeaderMode::Toggle]);
-    }
-
-    #[test]
-    fn header_active_names_round_trip() {
-        let _ = |m: HeaderActive| match m {
-            HeaderActive::Fill | HeaderActive::Text | HeaderActive::TextBold => (),
-        };
-        assert_names_round_trip(&[
-            HeaderActive::Fill,
-            HeaderActive::Text,
-            HeaderActive::TextBold,
-        ]);
-    }
-
-    #[test]
-    fn header_start_names_round_trip() {
-        let _ = |m: HeaderStart| match m {
-            HeaderStart::Shown | HeaderStart::Hidden => (),
-        };
-        assert_names_round_trip(&[HeaderStart::Shown, HeaderStart::Hidden]);
-    }
-
     #[test]
     fn overlay_style_names_round_trip() {
         let _ = |m: SurfaceStyle| match m {
@@ -754,30 +433,9 @@ mod tests {
     }
 
     #[test]
-    fn ring_clamps_to_gap_and_gap_substitutes() {
-        assert_eq!(clamp_ring(6, 3), (3, false));
-        assert_eq!(clamp_ring(2, 9), (2, true));
-        assert_eq!(clamp_ring_inset(9, 1, 4), (4, false));
-        assert_eq!(clamp_ring_inset(6, 3, 5), (3, true));
-        assert_eq!(clamp_ring_inset(2, 2, 1), (0, true));
-        assert_eq!(
-            substitute_gap(&["a={gap}-{gap}".to_string(), "b".to_string()], 7),
-            vec!["a=7-7".to_string(), "b".to_string()]
-        );
-    }
-
-    #[test]
     fn rgb_parses_exactly_six_hex_digits() {
         assert_eq!(Rgb::from_hex("#10aBcD"), Some(Rgb(0x10, 0xab, 0xcd)));
         assert_eq!(Rgb::from_hex("10aBcD"), None);
         assert_eq!(Rgb::from_hex("#10ab"), None);
-    }
-
-    #[test]
-    fn header_font_path_versus_family() {
-        let mut h = HeaderConfig::default();
-        assert_eq!(h.font_path(), None);
-        h.font = "/usr/share/fonts/x.ttf".to_string();
-        assert_eq!(h.font_path(), Some(Path::new("/usr/share/fonts/x.ttf")));
     }
 }
