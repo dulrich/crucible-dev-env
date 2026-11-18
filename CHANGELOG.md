@@ -4,6 +4,16 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.14 — 2026-11-18
+
+### Changed
+
+- The greeter's root install is now one script. A deploy to a greeter host stages `cde-greeter-install` beside the greeter binaries, the stock image, the `cde-login` unit and its two PAM files, and prints a single `sudo …/cde-greeter-install` command in place of the long `sudo sh -c '…'` line. The script installs every staged file, reloads systemd and never restarts a unit; `--rollback` puts the previous greeter binaries back.
+
+### Fixed
+
+- A deploy now ships the `cde-login` systemd unit and PAM files, which had to be copied by hand before, and counts a greeter host as current only when the installed stock image, unit and PAM files match the staged ones.
+
 ## 0.7.13 — 2026-11-18
 
 ### Fixed
