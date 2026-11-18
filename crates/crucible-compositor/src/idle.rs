@@ -133,13 +133,6 @@ impl IdleMachine {
     }
 }
 
-/// Whether the key press that woke blanked outputs is dropped instead of delivered: only in
-/// greeter mode, where it would otherwise land in the login field. Ordinary sessions deliver it.
-#[must_use]
-pub fn drops_wake_key(woke: bool, greeter: bool, key_press: bool) -> bool {
-    woke && greeter && key_press
-}
-
 // ---- compositor glue -------------------------------------------------------------------------
 
 /// Idle runtime state held by [`CrucibleState`].
@@ -183,7 +176,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Marks input activity: restarts the idle period, wakes blanked outputs and tells
     /// `ext-idle-notify` clients. Called for every user-activity input event (not device add/remove)
     /// and on VT return; never consumes the event itself
-    /// (the caller decides, see [`drops_wake_key`]). Returns whether this event woke blanked
+    /// (the caller decides: the input routers' pre-dispatch step). Returns whether this event woke blanked
     /// outputs.
     pub fn idle_activity(&mut self) -> bool {
         let woke = self.idle.machine.activity();
@@ -299,17 +292,6 @@ mod tests {
             .map(|_| m.tick(secs(1), inh, locked, c))
             .filter(|s| *s != IdleStep::default())
             .collect()
-    }
-
-    #[test]
-    fn only_a_greeter_key_press_that_woke_the_outputs_is_dropped() {
-        assert!(drops_wake_key(true, true, true));
-        assert!(!drops_wake_key(true, false, true), "sessions deliver it");
-        assert!(!drops_wake_key(false, true, true), "not a wake");
-        assert!(
-            !drops_wake_key(true, true, false),
-            "pointer/release events pass"
-        );
     }
 
     #[test]

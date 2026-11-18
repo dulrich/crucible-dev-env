@@ -216,16 +216,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     /// Delivers a pointer button to the seat, moving keyboard focus on press. Snip mode never
-    /// reaches here (see `process_snip_input`).
+    /// reaches here (see `process_snip_input`), nor does a button while the logout notice shows
+    /// (the routers' pre-dispatch step drops it).
     pub(super) fn process_pointer_button<I: InputBackend>(
         &mut self,
         mode: &InputMode,
         evt: I::PointerButtonEvent,
     ) {
-        // The logout modal: no button reaches a client.
-        if mode.is_logging_out() {
-            return;
-        }
         let serial = SERIAL_COUNTER.next_serial();
         let button = evt.button_code();
         let state = wl_pointer::ButtonState::from(evt.state());
@@ -298,12 +295,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.deliver_motion_to(None, location, SERIAL_COUNTER.next_serial(), time, None);
     }
 
-    /// Delivers a scroll axis frame to the seat. Snip mode drops axis events before here.
+    /// Delivers a scroll axis frame to the seat. Snip mode drops axis events before here, as
+    /// does the routers' pre-dispatch step while the logout notice shows.
     pub(super) fn process_pointer_axis<I: InputBackend>(&mut self, evt: I::PointerAxisEvent) {
-        // The logout modal: no scroll reaches a client.
-        if self.login_ready.logging_out().is_some() {
-            return;
-        }
         let horizontal = evt
             .amount(Axis::Horizontal)
             .unwrap_or_else(|| evt.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0);
@@ -345,20 +339,23 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 
     /// Returns the [`PointerFocusTarget`] (and its top-left in global logical coords) under `pos`
-    /// in `mode`: the lock surface while locked, else the space's ([`Self::space_surface_under`]).
-    /// Snip mode never resolves a surface: its router delivers motion with no focus.
+    /// in `mode`: the lock surface while locked (greeter included), nothing while logging out
+    /// (motion moves no focus), else the space's ([`Self::space_surface_under`]). The snip router
+    /// never asks: it delivers motion with no focus.
     fn surface_under(
         &self,
         mode: &InputMode,
         pos: Point<f64, Logical>,
     ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
-        if mode.is_locked() {
-            return crate::lock::lock_surface_under(&self.session_lock, &self.space, pos);
+        match mode {
+            InputMode::Greeter | InputMode::Locked => {
+                crate::lock::lock_surface_under(&self.session_lock, &self.space, pos)
+            }
+            InputMode::LoggingOut => None,
+            InputMode::Snip | InputMode::Overlay(_) | InputMode::Normal => {
+                self.space_surface_under(pos)
+            }
         }
-        if mode.is_logging_out() {
-            return None;
-        }
-        self.space_surface_under(pos)
     }
 
     /// The [`PointerFocusTarget`] (and its top-left in global logical coords) under `pos` in the

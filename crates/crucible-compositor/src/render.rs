@@ -214,9 +214,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             scale,
             cursor,
             // Greeter mode draws no pane chrome (no focus ring around the empty pane).
-            empty_focus_rect: self
-                .greeter
-                .is_none()
+            empty_focus_rect: (!self.input_mode().is_greeter())
                 .then(|| self.focused_empty_pane_rect())
                 .flatten(),
             overlay: self.overlay_chrome(),

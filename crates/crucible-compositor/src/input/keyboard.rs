@@ -152,7 +152,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                         return FilterResult::Intercept(None);
                     }
                     // Greeter mode: a non-admitted press goes to the login panel, never a client.
-                    if action.is_none() && state.greeter.is_some() {
+                    if action.is_none() && mode.is_greeter() {
                         state.suppressed_keys.consume_press(raw_keycode);
                         let ch = if modifiers.ctrl || modifiers.alt || modifiers.logo {
                             None

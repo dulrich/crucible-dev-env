@@ -33,17 +33,24 @@ fn run_response(spawned: Result<u32, String>) -> Response {
 }
 
 /// The lock admission for an IPC request: while `locked`, every request that acts
-/// ([`Request::acts`]) is refused; `candidates`, `bindings` and `save` stay allowed. The one
-/// exception is an `exec` whose text parses to an action the lock rule allows
-/// ([`Action::allowed_while_locked`]), i.e. `set-layout` (`vt-switch` is not parseable). An
-/// unparsable or other `exec` is refused as `session locked`, without parse detail.
+/// ([`Request::acts`]) is refused; `candidates`, `bindings` and `save` stay allowed. `exec` passes
+/// through: its lock rule is the action gate's ([`crate::input::admit`] via `handle_key_action`),
+/// with [`exec_action`] refusing what never reaches that gate.
 fn admit_request(locked: bool, request: &Request) -> Result<(), ActionError> {
-    if !locked || !request.acts() {
+    if !locked || !request.acts() || matches!(request, Request::Exec(_)) {
         return Ok(());
     }
-    match request {
-        Request::Exec(line) if parse_exec(line).is_ok_and(|a| a.allowed_while_locked()) => Ok(()),
-        _ => Err(ActionError::Locked),
+    Err(ActionError::Locked)
+}
+
+/// Parses an `exec` for running; the error is the reply reason. While `locked`, an unparsable
+/// text and a `run-on` (which runs outside the action gate) are refused as `session locked`,
+/// without parse detail; every other action goes on to the action gate, which applies the lock
+/// rule ([`Action::allowed_while_locked`]).
+fn exec_action(locked: bool, text: &str) -> Result<Action, String> {
+    match parse_exec(text) {
+        Err(_) | Ok(Action::RunOn { .. }) if locked => Err(ActionError::Locked.to_string()),
+        parsed => parsed,
     }
 }
 
@@ -97,8 +104,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Answers one IPC request. `peer` is the connecting process's PID (`SO_PEERCRED`); only
     /// `relaunch` uses it.
     ///
-    /// Every acting request passes the lock admission first ([`admit_request`]); `exec` then goes
-    /// through the action gate (`handle_key_action`), which answers a failed action with `err`.
+    /// Every acting request but `exec` passes the lock admission first ([`admit_request`]); `exec`
+    /// goes through [`exec_action`] and the action gate (`handle_key_action`), which answers a
+    /// refused action (`session locked` while locked) with `err`.
     pub fn handle_ipc(&mut self, request: Request, peer: Option<u32>) -> Reply {
         if let Err(err) = admit_request(self.is_session_locked(), &request) {
             return Reply::Now(Response::Err(err.to_string()));
@@ -140,9 +148,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 Ok(())
             }
             Request::Exec(text) => {
-                return match parse_exec(&text) {
+                return match exec_action(self.is_session_locked(), &text) {
                     Err(reason) => Response::Err(reason),
-                    // `run-on` answers `ok <pid>`. The lock was admitted above, and it is exempt
+                    // `run-on` answers `ok <pid>`. The lock was refused above, and it is exempt
                     // from IPC overlay dismissal (`closes_overlay`), so nothing else in the action
                     // gate applies to it.
                     Ok(Action::RunOn { workspace, command }) => {
@@ -622,10 +630,6 @@ mod tests {
     #[test]
     fn locked_refuses_every_acting_request() {
         for r in [
-            Request::Exec("quit".into()),
-            Request::Exec("run firefox".into()),
-            Request::Exec("run-in-terminal htop".into()),
-            Request::Exec("run-on scratch foot".into()),
             Request::Open("a".into()),
             Request::OpenFolder("/tmp".into()),
             Request::New("n".into()),
@@ -649,22 +653,61 @@ mod tests {
     }
 
     #[test]
-    fn locked_admits_only_exec_of_a_lock_allowed_action() {
-        for line in ["set-layout us", "set-layout"] {
+    fn exec_passes_the_admission_to_the_action_gate() {
+        for line in [
+            "set-layout us",
+            "quit",
+            "run-on scratch foot",
+            "garbage ~~",
+            "none",
+            "",
+        ] {
             let r = Request::Exec(line.into());
-            let want = if line == "set-layout" {
-                Err(ActionError::Locked)
-            } else {
-                Ok(())
-            };
-            assert_eq!(admit_request(true, &r), want, "{line}");
+            assert_eq!(admit_request(true, &r), Ok(()), "{line}");
             assert_eq!(admit_request(false, &r), Ok(()), "{line}");
         }
-        for line in ["focus left", "vt-switch 2", "garbage ~~", "none", ""] {
-            let r = Request::Exec(line.into());
-            assert_eq!(admit_request(true, &r), Err(ActionError::Locked), "{line}");
-            assert_eq!(admit_request(false, &r), Ok(()), "{line}");
+    }
+
+    #[test]
+    fn locked_exec_replies_session_locked_unless_the_lock_allows_it() {
+        // End to end: `exec_action`, then the action gate's `admit` in the mode a locked session
+        // resolves to (`Locked`, or `Greeter`), exactly as `answer_ipc` and `handle_key_action`.
+        let reply = |locked: bool, mode: &crate::input::TestInputMode<()>, line: &str| {
+            exec_action(locked, line)
+                .and_then(|a| crate::input::admit(mode, &a).map_err(|e| e.to_string()))
+        };
+        let locked_modes = [
+            crate::input::TestInputMode::<()>::Locked,
+            crate::input::TestInputMode::<()>::Greeter,
+        ];
+        for mode in &locked_modes {
+            assert!(reply(true, mode, "set-layout us").is_ok());
+            for line in [
+                "set-layout",
+                "quit",
+                "focus left",
+                "run firefox",
+                "run-in-terminal htop",
+                "run-on scratch foot",
+                "vt-switch 2",
+                "garbage ~~",
+                "none",
+                "",
+            ] {
+                assert_eq!(
+                    reply(true, mode, line),
+                    Err("session locked".into()),
+                    "{line}"
+                );
+            }
         }
+        // Unlocked, a parse failure keeps its detail.
+        assert!(
+            exec_action(false, "garbage ~~")
+                .unwrap_err()
+                .starts_with("bad action")
+        );
+        assert!(exec_action(false, "run-on scratch foot").is_ok());
     }
 
     #[test]

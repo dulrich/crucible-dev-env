@@ -487,7 +487,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::modal_test_support::greeter_admits;
+    use crate::input::{TestInputMode, admit};
     use crucible_keys::{Action, Bindings, Modifiers};
 
     #[test]
@@ -555,6 +555,7 @@ mod tests {
             ctrl: false,
         };
         let run = crucible_keys::resolve(&b, sup, Keysym::Return).expect("Super+Return is bound");
+        let greeter_admits = |action: &Action| admit(&TestInputMode::<()>::Greeter, action).is_ok();
         assert!(
             !greeter_admits(&run),
             "a user bind like Super+Return does nothing"

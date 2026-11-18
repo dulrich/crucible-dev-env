@@ -33,25 +33,13 @@
 mod execute;
 
 pub(crate) use execute::{ActionError, Origin};
+/// Test support: the one admission gate and the mode it takes (greeter-mode tests).
+#[cfg(test)]
+pub(crate) use {execute::admit, modal::InputMode as TestInputMode};
 mod hover;
 mod keyboard;
 mod modal;
 mod pointer;
-
-/// Test support: the real admission path greeter mode uses (mode resolution + `admit`).
-pub(crate) mod modal_test_support {
-    /// Whether a chord `action` runs in greeter mode (session not locked, no snip or overlay).
-    #[cfg(test)]
-    pub(crate) fn greeter_admits(action: &crucible_keys::Action) -> bool {
-        let mode = super::modal::resolve_mode::<()>(
-            super::modal::admits_as_locked(false, true),
-            false,
-            false,
-            None,
-        );
-        super::execute::admit(&mode, action).is_ok()
-    }
-}
 
 use smithay::backend::input::{
     ButtonState, Event, InputBackend, InputEvent, KeyboardKeyEvent, PointerButtonEvent,
@@ -79,12 +67,10 @@ impl CrucibleState<WinitData> {
     /// arrive with the udev/libinput path ([`CrucibleState::process_input_event_libinput`]).
     pub fn process_input_event(&mut self, event: InputEvent<smithay::backend::winit::WinitInput>) {
         type B = smithay::backend::winit::WinitInput;
-        let woke = self.input_activity(&event);
-        if self.drop_wake_key::<B>(woke, &event) {
-            return;
-        }
         // The mode is resolved once for the event; snip mode branches here, once.
-        let mode = self.input_mode();
+        let Some(mode) = self.pre_dispatch::<B>(&event) else {
+            return;
+        };
         if mode.is_snipping() {
             return self.process_snip_input::<B>(&mode, event);
         }
@@ -112,13 +98,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// motion through `process_pointer_motion_relative`. Device add/remove are surfaced to the
     /// caller (which configures libinput / tracks keyboards for LED sync) and otherwise ignored.
     pub fn process_input_event_libinput<I: InputBackend>(&mut self, event: InputEvent<I>) {
-        let woke = self.input_activity(&event);
-        if self.drop_wake_key::<I>(woke, &event) {
-            return;
-        }
         // The mode is resolved once for the event; snip mode branches here, once. Absolute
         // motion is not handled on this path in any mode.
-        let mode = self.input_mode();
+        let Some(mode) = self.pre_dispatch::<I>(&event) else {
+            return;
+        };
         match event {
             InputEvent::PointerMotionAbsolute { .. } => {}
             event if mode.is_snipping() => self.process_snip_input::<I>(&mode, event),
@@ -135,26 +119,51 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 }
 impl<B: Backend + 'static> CrucibleState<B> {
-    /// Feeds `event` to the idle machine when it is user activity (see [`is_user_activity`]);
-    /// returns whether it woke blanked outputs.
-    fn input_activity<I: InputBackend>(&mut self, event: &InputEvent<I>) -> bool {
-        is_user_activity(input_kind(event)) && self.idle_activity()
+    /// The routers' one shared pre-dispatch step, run once per event before any handler:
+    ///
+    /// 1. user activity ([`EventKind::is_user_activity`]) feeds the idle machine;
+    /// 2. the input mode is resolved, once;
+    /// 3. in greeter mode the key press that woke blanked outputs is dropped (its release too),
+    ///    so it never lands in the login field;
+    /// 4. while the logout notice is active, every pointer button and axis event is dropped,
+    ///    whatever mode won (the lock or greeter included); motion is kept (with no focus under
+    ///    the pointer while the mode is `LoggingOut`, see `surface_under`), keys run the filter.
+    ///
+    /// Returns the mode for the handlers, or `None` when the event was dropped.
+    fn pre_dispatch<I: InputBackend>(&mut self, event: &InputEvent<I>) -> Option<InputMode> {
+        let kind = EventKind::of(event);
+        let woke = kind.is_user_activity() && self.idle_activity();
+        let mode = self.input_mode();
+        if self.drop_wake_key::<I>(woke, kind, &mode, event) {
+            return None;
+        }
+        if drops_while_logging_out(kind, self.login_ready.logging_out().is_some()) {
+            return None;
+        }
+        Some(mode)
     }
-}
 
-impl<B: Backend + 'static> CrucibleState<B> {
-    /// Greeter mode only: swallows the key press that woke blanked outputs (so it never reaches
-    /// the login field) and records its keycode so the matching release is swallowed too.
-    /// Returns whether `event` was dropped. Ordinary sessions never drop it.
-    fn drop_wake_key<I: InputBackend>(&mut self, woke: bool, event: &InputEvent<I>) -> bool {
+    /// Logs a wake and, in greeter mode only, swallows the key press that woke blanked outputs
+    /// (recording its keycode so the matching release is swallowed too) and traces the first key
+    /// press after blanking. Returns whether `event` was dropped. Other modes never drop it.
+    fn drop_wake_key<I: InputBackend>(
+        &mut self,
+        woke: bool,
+        kind: EventKind,
+        mode: &InputMode,
+        event: &InputEvent<I>,
+    ) -> bool {
         if woke {
-            tracing::info!(event = input_kind(event), "idle: outputs woken by input");
+            tracing::info!(event = kind.as_str(), "idle: outputs woken by input");
         }
         let InputEvent::Keyboard { event } = event else {
             return false;
         };
         let press = event.state() == smithay::backend::input::KeyState::Pressed;
-        if press && self.greeter.is_some() && std::mem::take(&mut self.idle.trace_next_key) {
+        if !(press && mode.is_greeter()) {
+            return false;
+        }
+        if std::mem::take(&mut self.idle.trace_next_key) {
             let outputs: Vec<_> = self.space.outputs().cloned().collect();
             let off = outputs
                 .iter()
@@ -166,13 +175,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 "greeter: first key press after blanking"
             );
         }
-        if !crate::idle::drops_wake_key(woke, self.greeter.is_some(), press) {
+        if !woke {
             return false;
         }
         self.suppressed_keys.consume_press(event.key_code().raw());
         true
     }
+}
 
+impl<B: Backend + 'static> CrucibleState<B> {
     /// The snip-mode router: every event of a snipping session lands here, once, from either
     /// backend router, and no client receives pointer focus, motion, buttons or axis.
     ///
@@ -208,53 +219,120 @@ impl<B: Backend + 'static> CrucibleState<B> {
     }
 }
 
-/// A short name for an input event's kind, for logs (never its key, button or position).
-fn input_kind<I: InputBackend>(event: &InputEvent<I>) -> &'static str {
-    match event {
-        InputEvent::Keyboard { .. } => "keyboard",
-        InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. } => {
-            "pointer-motion"
+/// The kind of an input event: what the pre-dispatch step classifies (activity, the logout drop)
+/// and logs (never its key, button or position).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventKind {
+    Keyboard,
+    PointerMotion,
+    PointerButton,
+    PointerAxis,
+    DeviceAdded,
+    DeviceRemoved,
+    Switch,
+    Touch,
+    Other,
+}
+
+impl EventKind {
+    fn of<I: InputBackend>(event: &InputEvent<I>) -> Self {
+        match event {
+            InputEvent::Keyboard { .. } => Self::Keyboard,
+            InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. } => {
+                Self::PointerMotion
+            }
+            InputEvent::PointerButton { .. } => Self::PointerButton,
+            InputEvent::PointerAxis { .. } => Self::PointerAxis,
+            InputEvent::DeviceAdded { .. } => Self::DeviceAdded,
+            InputEvent::DeviceRemoved { .. } => Self::DeviceRemoved,
+            InputEvent::SwitchToggle { .. } => Self::Switch,
+            InputEvent::TouchDown { .. }
+            | InputEvent::TouchMotion { .. }
+            | InputEvent::TouchUp { .. }
+            | InputEvent::TouchCancel { .. }
+            | InputEvent::TouchFrame { .. } => Self::Touch,
+            _ => Self::Other,
         }
-        InputEvent::PointerButton { .. } => "pointer-button",
-        InputEvent::PointerAxis { .. } => "pointer-axis",
-        InputEvent::DeviceAdded { .. } => "device-added",
-        InputEvent::DeviceRemoved { .. } => "device-removed",
-        InputEvent::SwitchToggle { .. } => "switch",
-        InputEvent::TouchDown { .. }
-        | InputEvent::TouchMotion { .. }
-        | InputEvent::TouchUp { .. }
-        | InputEvent::TouchCancel { .. }
-        | InputEvent::TouchFrame { .. } => "touch",
-        _ => "other",
+    }
+
+    /// The kind's log name.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Keyboard => "keyboard",
+            Self::PointerMotion => "pointer-motion",
+            Self::PointerButton => "pointer-button",
+            Self::PointerAxis => "pointer-axis",
+            Self::DeviceAdded => "device-added",
+            Self::DeviceRemoved => "device-removed",
+            Self::Switch => "switch",
+            Self::Touch => "touch",
+            Self::Other => "other",
+        }
+    }
+
+    /// Whether an event of this kind is user activity for the idle machine. Device add/remove are
+    /// not: libinput queues its start-up device enumeration until the first real input is
+    /// dispatched, so those events arrive just ahead of the key that wakes a blanked greeter.
+    /// Counting them woke the outputs first, and the key was then delivered to the login field.
+    fn is_user_activity(self) -> bool {
+        !matches!(self, Self::DeviceAdded | Self::DeviceRemoved)
     }
 }
 
-/// Whether an input event of `kind` (see [`input_kind`]) is user activity for the idle machine.
-/// Device add/remove are not: libinput queues its start-up device enumeration until the first real
-/// input is dispatched, so those events arrive just ahead of the key that wakes a blanked greeter.
-/// Counting them woke the outputs first, and the key was then delivered to the login field.
-fn is_user_activity(kind: &str) -> bool {
-    !matches!(kind, "device-added" | "device-removed")
+/// Whether an event of `kind` is dropped because the logout notice is active: buttons and axis
+/// events, keyed on the notice (not the resolved mode), so a lock or greeter that wins the mode
+/// during logout still drops them. Motion and keys pass.
+fn drops_while_logging_out(kind: EventKind, logout_notice: bool) -> bool {
+    logout_notice && matches!(kind, EventKind::PointerButton | EventKind::PointerAxis)
 }
 
 #[cfg(test)]
 mod activity_tests {
-    use super::is_user_activity;
+    use super::{EventKind, drops_while_logging_out};
+
+    const ALL: [EventKind; 9] = [
+        EventKind::Keyboard,
+        EventKind::PointerMotion,
+        EventKind::PointerButton,
+        EventKind::PointerAxis,
+        EventKind::DeviceAdded,
+        EventKind::DeviceRemoved,
+        EventKind::Switch,
+        EventKind::Touch,
+        EventKind::Other,
+    ];
 
     #[test]
     fn device_enumeration_is_not_user_activity() {
-        assert!(!is_user_activity("device-added"));
-        assert!(!is_user_activity("device-removed"));
-        for kind in [
-            "keyboard",
-            "pointer-motion",
-            "pointer-button",
-            "pointer-axis",
-            "switch",
-            "touch",
-            "other",
-        ] {
-            assert!(is_user_activity(kind), "{kind}");
+        for kind in ALL {
+            let device = matches!(kind, EventKind::DeviceAdded | EventKind::DeviceRemoved);
+            assert_eq!(kind.is_user_activity(), !device, "{}", kind.as_str());
         }
+    }
+
+    #[test]
+    fn the_logout_notice_drops_buttons_and_axis_only() {
+        for kind in ALL {
+            assert!(!drops_while_logging_out(kind, false), "{}", kind.as_str());
+            let dropped = matches!(kind, EventKind::PointerButton | EventKind::PointerAxis);
+            assert_eq!(
+                drops_while_logging_out(kind, true),
+                dropped,
+                "{}",
+                kind.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn lock_during_logout_drops_buttons_and_axis_keeps_motion() {
+        // A lock (or greeter) taken while the logout notice shows wins the mode, but the drop is
+        // keyed on the notice: the button no longer reaches the lock surface (plan WP-R11).
+        let mode = super::modal::resolve_mode::<()>(false, true, true, false, None);
+        assert!(mode.is_locked());
+        assert!(drops_while_logging_out(EventKind::PointerButton, true));
+        assert!(drops_while_logging_out(EventKind::PointerAxis, true));
+        assert!(!drops_while_logging_out(EventKind::PointerMotion, true));
+        assert!(!drops_while_logging_out(EventKind::Keyboard, true));
     }
 }
