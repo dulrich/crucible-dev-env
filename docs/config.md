@@ -334,12 +334,12 @@ greeter {
 }
 ```
 
-Configures the optional greetd greeter (setup in [`greeter.md`](greeter.md)). Every child is optional and may appear once; an unknown child, a repeated child or a bad value is a located config error.
+Configures the optional login screen, run by the `cde-login` daemon (setup in [`greeter.md`](greeter.md)). Every child is optional and may appear once; an unknown child, a repeated child or a bad value is a located config error.
 
 - `style` — `"terminal"`, `"n1-dark"` (default), `"n1-med"` or `"n1-light"`.
 - `accent` — `"style"` (default), `"theme"` or `"#rrggbb"`: the panel accent (field frame and message), published as the profile's palette accent, see [Surface styles](#surface-styles).
 - `background` — `"stock"` (default), `"user"` or `"color" "#rrggbb"`, as in [`lock`](#lock).
-- `position` — where the login panel sits on every output: `"center"`, `"upper"`, `"lower"` (default), `"upper-left"`, `"upper-right"`, `"lower-left"` or `"lower-right"`. The value names the centre of a screen region as a share of the output (`center` 50 % / 50 %, `upper` 50 % / 25 %, `lower` 50 % / 75 %, `upper-left` 25 % / 25 %, `upper-right` 75 % / 25 %, `lower-left` 25 % / 75 %, `lower-right` 75 % / 75 %); the panel is centred on that point and clamped to stay fully on the output. The default `lower` keeps the stock background's centre clear.
+- `position` — where the login panel sits on every output: `"center"`, `"upper"`, `"lower"` (default), `"upper-left"`, `"upper-right"`, `"lower-left"` or `"lower-right"`. The value names the centre of a screen region as a share of the output (`center` 50 % / 50 %, `upper` 50 % / 25 %, `lower` 50 % / 75 %, `upper-left` 25 % / 25 %, `upper-right` 75 % / 25 %, `lower-left` 25 % / 75 %, `lower-right` 75 % / 75 %); the panel is centred on that point and clamped to stay fully on the output. The default `lower` keeps the stock background's centre clear. The "Logging out" panel shown on quit is always centred and ignores `position`.
 - `session` — the command started after a successful login, a non-empty string; default `"cde-session"`.
 
 The greeter also blanks the screens after inactivity: after `idle { blank-after }` seconds (published in the profile), or 600 s when `idle` sets none. It never locks, whatever `idle { lock-after }` says.
