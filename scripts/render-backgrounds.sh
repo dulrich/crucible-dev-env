@@ -30,13 +30,8 @@ USAGE
 here=$(dirname "$(readlink -f "$0")")
 root=$(dirname "$here")
 
-# scripts/lib/build-id.sh is bash-only (local, BASH_SOURCE), so this is its sh equivalent.
-build_id() {
-	sha=$(git --no-optional-locks -C "$root" log -1 --format=%H -- "$root" 2>/dev/null) || sha=
-	[ -n "$sha" ] || { echo unknown; return 0; }
-	st=$(git --no-optional-locks -C "$root" status --porcelain --untracked-files=no -- "$root" 2>/dev/null) || st=
-	if [ -n "$st" ]; then echo "$sha-dirty"; else echo "$sha"; fi
-}
+# shellcheck source=lib/build-id.sh
+. "$here/lib/build-id.sh"
 
 out=$root/target/backgrounds
 for a in "$@"; do
@@ -44,11 +39,7 @@ for a in "$@"; do
 		--help | -h) usage; exit 0 ;;
 	esac
 done
-for a in "$@"; do
-	case $a in
-		--build | --version) build_id; exit 0 ;;
-	esac
-done
+build_flags "$0" "$@"
 while [ $# -gt 0 ]; do
 	case $1 in
 		--out)

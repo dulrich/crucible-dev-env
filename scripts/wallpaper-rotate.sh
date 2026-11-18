@@ -167,12 +167,15 @@ output_names() {
 	printf '%s\n' "$out" | cut -f1 | grep -v '^$'
 }
 
-names=()
+# Mirror is a single "output" named `*`; separate lists the real output names.
+names=('*')
 if [ "$outputs_mode" = separate ]; then
+	names=()
 	while IFS= read -r n; do [ -n "$n" ] && names+=("$n"); done < <(output_names)
 	if [ ${#names[@]} -eq 0 ]; then
 		echo "wallpaper-rotate: cannot read the output names (not CDE, or no IPC socket); using mirror" >&2
-		outputs_mode=separate_fallback
+		outputs_mode=mirror
+		names=('*')
 	fi
 fi
 
@@ -197,19 +200,11 @@ pick() {
 	printf '%s\0' "${c[@]}" | shuf -z -n 1 | tr -d '\0'
 }
 
-img=
 chosen=()
-if [ "$outputs_mode" = separate ]; then
-	for n in "${names[@]}"; do
-		p=${prev[$n]:-${prev['*']:-}}
-		chosen+=("$(pick "$p" "${chosen[@]}")")
-	done
-else
-	candidates=()
-	for f in "${images[@]}"; do [ "$f" = "$last" ] || candidates+=("$f"); done
-	[ ${#candidates[@]} -gt 0 ] || candidates=("${images[@]}")
-	img=$(printf '%s\0' "${candidates[@]}" | shuf -z -n 1 | tr -d '\0')
-fi
+for n in "${names[@]}"; do
+	if [ "$outputs_mode" = separate ]; then p=${prev[$n]:-${prev['*']:-}}; else p=$last; fi
+	chosen+=("$(pick "$p" "${chosen[@]}")")
+done
 
 if [ "$dry_run" = 1 ]; then
 	echo "socket: $sock"
@@ -217,7 +212,7 @@ if [ "$dry_run" = 1 ]; then
 		echo "mode $mode, ${#images[@]} images in $dir"
 		for i in "${!names[@]}"; do echo "${names[$i]}: ${chosen[$i]}"; done
 	else
-		echo "image:  $img (mode $mode, ${#images[@]} images in $dir)"
+		echo "image:  ${chosen[0]} (mode $mode, ${#images[@]} images in $dir)"
 	fi
 	exit 0
 fi
@@ -242,26 +237,24 @@ greeter_background() {
 old_pids=$(pgrep -u "$(id -u)" -x swaybg || true)
 
 bg_args=()
-if [ "$outputs_mode" = separate ]; then
-	for i in "${!names[@]}"; do bg_args+=(-o "${names[$i]}" -i "${chosen[$i]}" -m "$mode"); done
-else
-	bg_args=(-o '*' -i "$img" -m "$mode")
-fi
+for i in "${!names[@]}"; do bg_args+=(-o "${names[$i]}" -i "${chosen[$i]}" -m "$mode"); done
 
 # setsid + /dev/null: detach fully so cron does not wait on the long-lived swaybg.
 setsid swaybg "${bg_args[@]}" </dev/null >/dev/null 2>&1 &
 new_pid=$!
 sleep 1
 if ! kill -0 "$new_pid" 2>/dev/null; then
-	echo "wallpaper-rotate: swaybg exited at startup (image: ${img:-${chosen[*]}}); keeping the previous background" >&2
+	echo "wallpaper-rotate: swaybg exited at startup (image: ${chosen[*]}); keeping the previous background" >&2
 	exit 1
 fi
 
 for p in $old_pids; do kill "$p" 2>/dev/null || true; done
 mkdir -p "$state_dir"
-if [ "$outputs_mode" = separate ]; then
-	for i in "${!names[@]}"; do printf '%s\t%s\n' "${names[$i]}" "${chosen[$i]}"; done >"$state_dir/current.tmp"
-else
-	printf '%s\n' "$img" >"$state_dir/current.tmp"
-fi && mv "$state_dir/current.tmp" "$state" && greeter_background "${img:-${chosen[0]:-}}"
+{
+	if [ "$outputs_mode" = separate ]; then
+		for i in "${!names[@]}"; do printf '%s\t%s\n' "${names[$i]}" "${chosen[$i]}"; done
+	else
+		printf '%s\n' "${chosen[0]}"
+	fi
+} >"$state_dir/current.tmp" && mv "$state_dir/current.tmp" "$state" && greeter_background "${chosen[0]:-}"
 exit 0
