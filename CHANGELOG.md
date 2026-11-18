@@ -4,6 +4,21 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.13 — 2026-11-18
+
+### Fixed
+
+- `cde-login` now stops in order on SIGHUP (its unit sets `SendSIGHUP=yes`): running sessions get the stop grace instead of the daemon dying at once.
+- `cde-login` no longer reads a `waitpid` error as the session's exit, and its SIGKILL escalation goes through the session's pidfd, so it can never reach a reused pid.
+- A wrong password no longer stalls `cde-login` for the PAM fail delay: PAM replies arrive as events, and the daemon keeps serving meanwhile. A queued session start that is dropped because the greeter exited now gets an error reply, and the logout fallback can fire while the logout greeter is still starting.
+- Unplugging or powering off the output a pending lock was waiting on now confirms the lock instead of leaving it unconfirmed. The "Logging out" ellipsis timer stops with the notice.
+- A pointer button pressed while the "Logging out" notice shows is dropped even when a lock or the greeter holds input.
+- A nested `crucible greeter --winit` takes the ready fd and signals ready, instead of leaking the fd to `swaybg`.
+- The greeter's `user` background follows the lock's wallpaper state-file rules: a whitespace-only line is blank, a bare path is trimmed, and a tab line with an empty output or path is skipped.
+- `header { divider … color= }`: an explicit colour equal to the old default is now honoured under a `style`, instead of being replaced by the style's colour.
+- An overlay change that alters only its style (with explicit `terminal-args`) now restarts the warm overlay host, instead of keeping the stale one.
+- `scripts/deploy.sh` installs `crucible`, `cde-session` and `cde-wallpaper-rotate` together from a verified staging directory, so a failed deploy cannot leave a new `crucible` beside old scripts. Each remote host is probed before its build, and an unreachable one fails without building.
+
 ## 0.7.12 — 2026-11-17
 
 ### Fixed
