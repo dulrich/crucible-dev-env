@@ -318,7 +318,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 );
                 let theme_file = crate::terminal_theme::urxvt_fragment(
                     self.config.theme.as_ref(),
-                    crucible_config::theme_dir().as_deref(),
+                    self.theme_dir.as_deref(),
                 );
                 merge = merge_xresources(display_number, theme_file.as_deref());
             }

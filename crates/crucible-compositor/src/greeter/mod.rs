@@ -266,7 +266,7 @@ pub fn swaybg_args(bg: &ProfileBackground) -> Vec<String> {
             args.extend(["-m".into(), "fill".into()]);
         }
         ProfileBackground::Color(c) => {
-            args.extend(["-c".into(), format!("{:02x}{:02x}{:02x}", c.0, c.1, c.2)]);
+            args.extend(["-c".into(), format!("{c:x}")]);
         }
     }
     args

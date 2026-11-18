@@ -309,6 +309,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// The active configuration (defaults until a config file is applied); see
     /// [`Self::apply_config`].
     pub config: Config,
+    /// The `theme` fragment directory, resolved once per [`Self::apply_config`] (`None` before the first apply).
+    pub theme_dir: Option<std::path::PathBuf>,
     /// The active chord table, rebuilt from `config.binds` by [`Self::apply_config`].
     pub bindings: Bindings,
     /// The last hover target seen by focus-follows-mouse; focus moves only when this changes
@@ -541,6 +543,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             xwm: None,
             xdisplay: None,
             startup: crate::autostart::Startup::default(),
+            theme_dir: None,
             // Only `keyboard` is pre-seeded (the seat was built from it above); the first
             // `apply_config` sees no keyboard change and leaves the keymap alone.
             config: Config {

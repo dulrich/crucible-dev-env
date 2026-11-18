@@ -45,8 +45,8 @@ pub use surface::{
     surface_palette,
 };
 pub use theme::{
-    Milli, ThemeConfig, ThemeFont, ThemeTarget, render as render_theme, theme_dir, theme_dir_from,
-    theme_spawn_args,
+    Alpha, Milli, ThemeConfig, ThemeFont, ThemeTarget, render as render_theme, theme_dir,
+    theme_dir_from, theme_spawn_args,
 };
 
 /// Resolves the config path from the two environment values (`None` or empty = unset).
@@ -110,6 +110,23 @@ pub fn parse_with_home(text: &str, home: Option<&str>) -> Result<Config, ConfigE
 /// [`ConfigError::Io`] for an unreadable file, otherwise as [`parse`].
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
     load_with_home(path, std::env::var("HOME").ok().as_deref())
+}
+
+/// The config path from the environment ([`config_path`]) and [`load`] of it: `Ok((None,
+/// default))` when neither variable is set, `Ok((Some(path), config))` on success, and
+/// `Err((path, error))` when the file cannot be read or parsed. Each caller decides what a failure
+/// means (the CLIs exit, the compositor falls back to the defaults).
+///
+/// # Errors
+/// The config path with its [`load`] error.
+pub fn load_from_env() -> Result<(Option<PathBuf>, Config), (PathBuf, ConfigError)> {
+    let Some(path) = config_path() else {
+        return Ok((None, Config::default()));
+    };
+    match load(&path) {
+        Ok(config) => Ok((Some(path), config)),
+        Err(err) => Err((path, err)),
+    }
 }
 
 fn load_with_home(path: &Path, home: Option<&str>) -> Result<Config, ConfigError> {

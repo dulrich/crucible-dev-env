@@ -285,10 +285,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         let program = self.terminal_program();
         let args = with_terminal_args(
-            &crate::config::overlay_terminal_args(
-                &self.config,
+            &self.config.overlay.spawn_args(
                 &program,
-                crucible_config::theme_dir().as_deref(),
+                self.config.theme.as_ref(),
+                self.theme_dir.as_deref(),
             ),
             args,
         );
@@ -474,10 +474,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         );
         let program = self.terminal_program();
         let args = with_terminal_args(
-            &crate::config::overlay_terminal_args(
-                &self.config,
+            &self.config.overlay.spawn_args(
                 &program,
-                crucible_config::theme_dir().as_deref(),
+                self.config.theme.as_ref(),
+                self.theme_dir.as_deref(),
             ),
             Invocation::OverlayHost {
                 socket: socket.clone(),

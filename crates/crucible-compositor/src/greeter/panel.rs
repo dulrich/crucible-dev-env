@@ -1,7 +1,7 @@
 //! The login panel: a pure layout (centred on its region point, the secret field masked) and its render
 //! elements (labels, then the field and panel solids, front-to-back).
 
-use crucible_config::{Config, GreeterConfig, Milli, Palette, PanelPosition, Rgb, surface_palette};
+use crucible_config::{Alpha, Config, GreeterConfig, Palette, PanelPosition, Rgb, surface_palette};
 use crucible_layout::Rect;
 use smithay::{
     backend::renderer::{ImportAll, ImportMem, Renderer},
@@ -47,7 +47,7 @@ pub struct PanelFrame {
     /// The panel colours.
     pub palette: Palette,
     /// The panel fill alpha.
-    pub alpha: Milli,
+    pub alpha: Alpha,
     /// Where the panel sits on the output.
     pub position: PanelPosition,
     /// The output clear colour (the profile colour, or black under an image).
@@ -160,9 +160,9 @@ fn rgba_u8(c: Rgb) -> [u8; 4] {
 }
 
 /// `c` at `alpha`, premultiplied (the solid element's colour space).
-fn with_alpha(c: Rgb, alpha: Milli) -> [f32; 4] {
+fn with_alpha(c: Rgb, alpha: Alpha) -> [f32; 4] {
     #[allow(clippy::cast_precision_loss)]
-    let a = (alpha.0.min(1000) as f32) / 1000.0;
+    let a = (alpha.milli() as f32) / 1000.0;
     let [r, g, b, _] = c.to_rgba_f32();
     [r * a, g * a, b * a, a]
 }

@@ -7,6 +7,7 @@ use kdl::{KdlDocument, KdlEntry, KdlNode, KdlValue};
 
 use crate::error::{ConfigError, Location};
 use crate::model::{Named, Rgb};
+use crate::theme::Alpha;
 
 /// Converts a char offset into a 1-based line/column.
 pub(crate) fn locate(text: &str, offset: usize) -> Location {
@@ -496,8 +497,20 @@ impl<'a> NodeReader<'a> {
     /// Exactly one `"#rrggbb"` string argument, validated.
     pub(crate) fn hex_arg(&self) -> Result<Rgb, ConfigError> {
         let s = self.string_arg("a \"#rrggbb\" string")?;
-        Rgb::from_hex(s)
-            .ok_or_else(|| self.invalid("argument", format!("`{s}` is not a #rrggbb colour")))
+        self.hex_value("argument", s)
+    }
+
+    /// The already-read string argument `s` (named `what`, e.g. `argument 2`) as a `#rrggbb`
+    /// colour; the `InvalidValue` is at the node, as for [`Self::hex_arg`].
+    pub(crate) fn hex_value(&self, what: &str, s: &str) -> Result<Rgb, ConfigError> {
+        Rgb::from_hex(s).ok_or_else(|| self.invalid(what, format!("`{s}` is not a #rrggbb colour")))
+    }
+
+    /// Exactly one number argument in `0.0..=1.0`, as an [`Alpha`].
+    pub(crate) fn alpha_arg(&self) -> Result<Alpha, ConfigError> {
+        let a = self.float_arg()?;
+        Alpha::from_f64(a)
+            .ok_or_else(|| self.invalid("argument", format!("{a} is outside 0.0..=1.0")))
     }
 
     /// Exactly two arguments, an integer then a string (`palette 1 "#f62b5a"`), with the

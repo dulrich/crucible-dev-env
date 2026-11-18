@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use crucible_config::{
-    GreeterConfig, KeyboardConfig, Milli, N1_DARK, N1_MED, Named, Palette, PanelPosition, Rgb,
+    Alpha, GreeterConfig, KeyboardConfig, N1_DARK, N1_MED, Named, Palette, PanelPosition, Rgb,
     SurfaceBackground, SurfaceStyle, ThemeConfig, resolve_palette, surface_palette,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
@@ -51,7 +51,7 @@ pub struct GreeterProfile {
     /// The resolved panel colours (style `terminal` carries the user's theme colours here).
     pub palette: Palette,
     /// The panel fill alpha (`1` opaque, below it the glass look).
-    pub alpha: Milli,
+    pub alpha: Alpha,
     /// Where the login panel sits.
     pub position: PanelPosition,
     /// Seconds of idle before the outputs blank (the greeter never locks).
@@ -88,7 +88,7 @@ impl GreeterProfile {
             style: SurfaceStyle::N1Dark,
             background: ProfileBackground::Color(Rgb(0, 0, 0)),
             palette: N1_DARK,
-            alpha: Milli(1000),
+            alpha: Alpha::OPAQUE,
             position: crucible_config::DEFAULT_GREETER_POSITION,
             blank_after: DEFAULT_BLANK_AFTER,
             session: crucible_config::DEFAULT_GREETER_SESSION.to_string(),
@@ -105,7 +105,7 @@ impl GreeterProfile {
     pub fn from_config(
         greeter: &GreeterConfig,
         theme: Option<&ThemeConfig>,
-        alpha: Milli,
+        alpha: Alpha,
         blank_after: Option<u32>,
         keyboard: &KeyboardConfig,
         binds: &[(String, String)],
@@ -146,10 +146,6 @@ fn is_layout_bind(action: &str) -> bool {
     action.split_whitespace().next() == Some("set-layout")
 }
 
-fn hex(c: Rgb) -> String {
-    format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2)
-}
-
 fn node1(name: &str, value: impl Into<KdlValue>) -> KdlNode {
     let mut n = KdlNode::new(name);
     n.push(kdl::KdlEntry::new(value));
@@ -171,7 +167,7 @@ pub fn write_profile(p: &GreeterProfile) -> String {
     let nodes = doc.nodes_mut();
     nodes.push(node1("style", p.style.as_str()));
     let bg = match &p.background {
-        ProfileBackground::Color(c) => node1("color", hex(*c)),
+        ProfileBackground::Color(c) => node1("color", c.to_string()),
         ProfileBackground::Image(path) => node1("image", path.to_string_lossy().into_owned()),
     };
     nodes.push(block("background", vec![bg]));
@@ -179,13 +175,13 @@ pub fn write_profile(p: &GreeterProfile) -> String {
     nodes.push(block(
         "palette",
         vec![
-            node1("bg", hex(pal.bg)),
-            node1("text", hex(pal.text)),
-            node1("line", hex(pal.line)),
-            node1("accent", hex(pal.accent)),
+            node1("bg", pal.bg.to_string()),
+            node1("text", pal.text.to_string()),
+            node1("line", pal.line.to_string()),
+            node1("accent", pal.accent.to_string()),
         ],
     ));
-    nodes.push(node1("alpha", f64::from(p.alpha.0) / 1000.0));
+    nodes.push(node1("alpha", f64::from(p.alpha.milli()) / 1000.0));
     nodes.push(node1("position", p.position.as_str()));
     nodes.push(node1("blank-after", i128::from(p.blank_after)));
     nodes.push(node1("session", p.session.clone()));
@@ -291,7 +287,7 @@ pub fn parse_profile(text: &str) -> Result<GreeterProfile, ProfileError> {
                 };
                 p.alpha = v
                     .filter(|a| (0.0..=1.0).contains(a))
-                    .and_then(Milli::from_f64)
+                    .and_then(Alpha::from_f64)
                     .ok_or_else(|| invalid(name, "expects a number in 0.0..=1.0"))?;
             }
             "position" => {
@@ -404,7 +400,7 @@ mod tests {
         let p = GreeterProfile::from_config(
             &greeter,
             Some(&theme),
-            Milli(850),
+            Alpha::from_milli(850).unwrap(),
             Some(90),
             &kb,
             &binds,
@@ -412,7 +408,7 @@ mod tests {
         );
         assert_eq!((p.position, p.blank_after), (PanelPosition::UpperRight, 90));
         assert!(write_profile(&p).contains("blank-after 90"));
-        let none = GreeterProfile::from_config(&greeter, None, Milli(1000), None, &kb, &[], None);
+        let none = GreeterProfile::from_config(&greeter, None, Alpha::OPAQUE, None, &kb, &[], None);
         assert_eq!(none.blank_after, 600);
         assert_eq!(
             (
@@ -447,7 +443,7 @@ mod tests {
         };
         let plain = GreeterConfig::default();
         let p =
-            GreeterProfile::from_config(&plain, Some(&theme), Milli(1000), None, &kb, &[], None);
+            GreeterProfile::from_config(&plain, Some(&theme), Alpha::OPAQUE, None, &kb, &[], None);
         assert_eq!(
             p.palette,
             crucible_config::N1_DARK,
@@ -457,7 +453,7 @@ mod tests {
             accent: crucible_config::SurfaceAccent::Theme,
             ..GreeterConfig::default()
         };
-        let p = GreeterProfile::from_config(&g, Some(&theme), Milli(1000), None, &kb, &[], None);
+        let p = GreeterProfile::from_config(&g, Some(&theme), Alpha::OPAQUE, None, &kb, &[], None);
         assert_eq!(p.palette.accent, Rgb(0x33, 0xcc, 0xcc));
         assert_eq!(p.palette.bg, crucible_config::N1_DARK.bg);
         let text = write_profile(&p);
@@ -508,7 +504,7 @@ mod tests {
             (f.style, f.alpha, f.layouts.as_slice()),
             (
                 SurfaceStyle::N1Dark,
-                Milli(1000),
+                Alpha::OPAQUE,
                 ["us".to_string()].as_slice()
             )
         );

@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use crate::model::{Named, Rgb};
-use crate::theme::Milli;
+use crate::theme::{Alpha, ThemeConfig, ThemeTarget, theme_spawn_args};
 
 /// The four colours of one N1 palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,9 +91,9 @@ pub struct OverlayConfig {
     /// default for those terminals.
     /// `Some(list)` (even empty) replaces the default.
     pub terminal_args: Option<Vec<String>>,
-    /// Overlay background opacity, `0..=1000` thousandths (`alpha 0.85` is `Milli(850)`); default
-    /// 1000 (opaque). Below 1000 is the translucent "glass" look.
-    pub alpha: Milli,
+    /// Overlay background opacity; default [`Alpha::OPAQUE`]. Below opaque is the translucent
+    /// "glass" look.
+    pub alpha: Alpha,
     /// The overlay accent (ring and TUI highlight; default [`SurfaceAccent::Style`]).
     pub accent: crate::surface::SurfaceAccent,
 }
@@ -104,7 +104,7 @@ impl Default for OverlayConfig {
             border: true,
             style: OverlayStyle::N1Med,
             terminal_args: None,
-            alpha: Milli(1000),
+            alpha: Alpha::OPAQUE,
             accent: crate::surface::SurfaceAccent::Style,
         }
     }
@@ -165,7 +165,8 @@ pub const FOOT_UNBOUND_ACTIONS: [&str; 28] = [
     "quit",
 ];
 
-/// The terminal programs CDE has overlay defaults for, classified by exact basename.
+/// The terminal programs CDE has defaults for, classified by exact basename: the only terminal
+/// classifier (overlay and tiling defaults, theme spawn args and fragments all take a kind).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalKind {
     /// `ghostty` or `ghostty-cde`.
@@ -184,15 +185,16 @@ pub enum TerminalKind {
 }
 
 impl TerminalKind {
-    /// Classifies the terminal `program` (a bare name or a path) by its exact basename.
+    /// Classifies the terminal `program` (a bare name or a path) by its exact basename: a
+    /// canonical [`ThemeTarget`] name, or one of the spawn aliases `ghostty-cde` and
+    /// `rxvt-unicode`.
     #[must_use]
     pub fn of(program: &str) -> Self {
         match Path::new(program).file_name().and_then(|n| n.to_str()) {
-            Some("ghostty" | "ghostty-cde") => Self::Ghostty,
-            Some("foot") => Self::Foot,
-            Some("cterm") => Self::Cterm,
-            Some("urxvt" | "rxvt-unicode") => Self::Urxvt,
-            _ => Self::Other,
+            Some("ghostty-cde") => Self::Ghostty,
+            Some("rxvt-unicode") => Self::Urxvt,
+            Some(name) => ThemeTarget::from_name(name).map_or(Self::Other, Self::from),
+            None => Self::Other,
         }
     }
 
@@ -223,67 +225,61 @@ impl TerminalKind {
         style.palette().is_some() && matches!(self, Self::Foot | Self::Cterm | Self::Urxvt)
     }
 
-    /// [`Self::overlay_default_args`] plus what depends on the overlay `style`. foot has no
-    /// ghostty `--window-padding-color=extend-always`: the strip left where the cell grid does
-    /// not divide the overlay shows foot's own background, so that becomes the opaque N1
-    /// surround (no gap between the surround and the border).
+    /// [`Self::overlay_default_args`] plus what depends on the overlay `style` and `alpha`: one
+    /// background rule and one alpha rule per kind. The background is the N1 palette `bg`
+    /// exactly when [`Self::sets_default_bg`]; foot has no ghostty
+    /// `--window-padding-color=extend-always`, so the strip left where the cell grid does not
+    /// divide the overlay shows foot's own background, which becomes the opaque N1 surround (no
+    /// gap between the surround and the border).
     #[must_use]
-    pub fn overlay_args(self, style: OverlayStyle, alpha: Milli) -> Vec<String> {
+    pub fn overlay_args(self, style: OverlayStyle, alpha: Alpha) -> Vec<String> {
         let mut args = self.overlay_default_args();
-        let glass = alpha.0 < 1000;
-        let alpha_text = if glass {
-            alpha.to_string()
-        } else {
-            "1.0".to_string()
-        };
-        if let Some(Rgb(r, g, b)) = style
+        let bg = style
             .palette()
             .filter(|_| self.sets_default_bg(style))
-            .map(|p| p.bg)
-        {
-            match self {
-                Self::Foot => args.extend([
-                    "-o".to_string(),
-                    format!("colors-dark.background={r:02x}{g:02x}{b:02x}"),
-                    "-o".to_string(),
-                    format!("colors-dark.alpha={alpha_text}"),
-                ]),
-                // cterm paints its whole buffer (padding and the cell-grid remainder) in
-                // `theme.bg` at `alpha`, so the same opaque surround closes the gap; zero
-                // padding with `center` splits the remainder evenly on every side.
-                Self::Cterm => args.extend([
-                    "-o".to_string(),
-                    format!("colors.background={r:02x}{g:02x}{b:02x}"),
-                    "-o".to_string(),
-                    format!("colors.alpha={alpha_text}"),
-                    "-o".to_string(),
-                    "pad=0x0 center".to_string(),
-                ]),
-                // urxvt's internal border and the strip the cell grid leaves show its own
-                // background, so the opaque surround closes the gap; `-b 0` drops the border.
-                Self::Urxvt => args.extend([
-                    "-bg".to_string(),
-                    format!("#{r:02x}{g:02x}{b:02x}"),
-                    "-b".to_string(),
-                    "0".to_string(),
-                ]),
-                Self::Ghostty | Self::Other => unreachable!("sets_default_bg excludes these"),
-            }
-        } else if glass {
-            // The `terminal` style leaves the colours alone; glass still applies. urxvt takes
-            // no alpha.
-            match self {
-                Self::Foot => {
-                    args.extend(["-o".to_string(), format!("colors-dark.alpha={alpha_text}")])
+            .map(|p| p.bg);
+        // The alpha goes out with a set background (opaque `1.0` included) or when glass.
+        let alpha_set = (bg.is_some() || !alpha.is_opaque()).then(|| alpha.decimal());
+        let opt = |kv: String| ["-o".to_string(), kv];
+        match self {
+            Self::Foot => {
+                if let Some(bg) = bg {
+                    args.extend(opt(format!("colors-dark.background={bg:x}")));
                 }
-                Self::Cterm => {
-                    args.extend(["-o".to_string(), format!("colors.alpha={alpha_text}")]);
+                if let Some(a) = alpha_set {
+                    args.extend(opt(format!("colors-dark.alpha={a}")));
                 }
-                Self::Ghostty | Self::Urxvt | Self::Other => {}
             }
-        }
-        if glass && self == Self::Ghostty {
-            args.push(format!("--background-opacity={alpha_text}"));
+            // cterm paints its whole buffer (padding and the cell-grid remainder) in `theme.bg`
+            // at `alpha`, so the same opaque surround closes the gap; zero padding with `center`
+            // splits the remainder evenly on every side.
+            Self::Cterm => {
+                if let Some(bg) = bg {
+                    args.extend(opt(format!("colors.background={bg:x}")));
+                }
+                if let Some(a) = alpha_set {
+                    args.extend(opt(format!("colors.alpha={a}")));
+                }
+                if bg.is_some() {
+                    args.extend(opt("pad=0x0 center".to_string()));
+                }
+            }
+            // urxvt's internal border and the strip the cell grid leaves show its own
+            // background, so the opaque surround closes the gap; `-b 0` drops the border.
+            // urxvt takes no alpha.
+            Self::Urxvt => {
+                if let Some(bg) = bg {
+                    args.extend(["-bg".to_string(), bg.to_string()]);
+                    args.extend(["-b".to_string(), "0".to_string()]);
+                }
+            }
+            // ghostty keeps its own colours; only glass sets its opacity.
+            Self::Ghostty => {
+                if !alpha.is_opaque() {
+                    args.push(format!("--background-opacity={}", alpha.decimal()));
+                }
+            }
+            Self::Other => {}
         }
         args
     }
@@ -294,10 +290,30 @@ impl OverlayConfig {
     /// set (even if empty), else the [`TerminalKind`] defaults, else nothing.
     #[must_use]
     pub fn effective_terminal_args(&self, program: &str) -> Vec<String> {
+        self.effective_args_for(TerminalKind::of(program))
+    }
+
+    fn effective_args_for(&self, kind: TerminalKind) -> Vec<String> {
         match &self.terminal_args {
             Some(list) => list.clone(),
-            None => TerminalKind::of(program).overlay_args(self.style, self.alpha),
+            None => kind.overlay_args(self.style, self.alpha),
         }
+    }
+
+    /// The arguments an overlay spawn of `program` puts before the exec flag: the effective
+    /// `overlay.terminal-args`, then the `theme`'s spawn arguments (ghostty's `--config-file=`
+    /// into `theme_dir`; nothing without a `theme`). **Pure.**
+    #[must_use]
+    pub fn spawn_args(
+        &self,
+        program: &str,
+        theme: Option<&ThemeConfig>,
+        theme_dir: Option<&Path>,
+    ) -> Vec<String> {
+        let kind = TerminalKind::of(program);
+        let mut args = self.effective_args_for(kind);
+        args.extend(theme_spawn_args(theme, kind, theme_dir));
+        args
     }
 
     /// Whether the overlay terminal `program`'s default background is the N1 palette `bg`: false
@@ -460,7 +476,7 @@ mod tests {
     fn glass_alpha_goes_to_each_terminals_args() {
         let glass = |style, alpha| OverlayConfig {
             style,
-            alpha: Milli(alpha),
+            alpha: Alpha::from_milli(alpha).unwrap(),
             ..OverlayConfig::default()
         };
         let n1 = glass(OverlayStyle::N1Med, 850);
@@ -489,6 +505,83 @@ mod tests {
             term.effective_terminal_args("urxvt"),
             ["+sb"].map(String::from)
         );
+    }
+
+    /// The pre-WP-R7 `overlay_args` body, kept verbatim as the byte-identity oracle.
+    fn legacy_overlay_args(kind: TerminalKind, style: OverlayStyle, alpha: u32) -> Vec<String> {
+        let mut args = kind.overlay_default_args();
+        let glass = alpha < 1000;
+        let alpha_text = if glass {
+            crate::theme::Milli(alpha).to_string()
+        } else {
+            "1.0".to_string()
+        };
+        if let Some(Rgb(r, g, b)) = style
+            .palette()
+            .filter(|_| kind.sets_default_bg(style))
+            .map(|p| p.bg)
+        {
+            match kind {
+                TerminalKind::Foot => args.extend([
+                    "-o".to_string(),
+                    format!("colors-dark.background={r:02x}{g:02x}{b:02x}"),
+                    "-o".to_string(),
+                    format!("colors-dark.alpha={alpha_text}"),
+                ]),
+                TerminalKind::Cterm => args.extend([
+                    "-o".to_string(),
+                    format!("colors.background={r:02x}{g:02x}{b:02x}"),
+                    "-o".to_string(),
+                    format!("colors.alpha={alpha_text}"),
+                    "-o".to_string(),
+                    "pad=0x0 center".to_string(),
+                ]),
+                TerminalKind::Urxvt => args.extend([
+                    "-bg".to_string(),
+                    format!("#{r:02x}{g:02x}{b:02x}"),
+                    "-b".to_string(),
+                    "0".to_string(),
+                ]),
+                TerminalKind::Ghostty | TerminalKind::Other => unreachable!(),
+            }
+        } else if glass {
+            match kind {
+                TerminalKind::Foot => {
+                    args.extend(["-o".to_string(), format!("colors-dark.alpha={alpha_text}")]);
+                }
+                TerminalKind::Cterm => {
+                    args.extend(["-o".to_string(), format!("colors.alpha={alpha_text}")]);
+                }
+                _ => {}
+            }
+        }
+        if glass && kind == TerminalKind::Ghostty {
+            args.push(format!("--background-opacity={alpha_text}"));
+        }
+        args
+    }
+
+    #[test]
+    fn overlay_args_table_is_byte_identical_for_every_kind_style_and_alpha() {
+        let kinds = [
+            TerminalKind::Ghostty,
+            TerminalKind::Foot,
+            TerminalKind::Cterm,
+            TerminalKind::Urxvt,
+            TerminalKind::Other,
+        ];
+        for kind in kinds {
+            for &(style, _) in OverlayStyle::NAMES {
+                for milli in [1000, 999, 850, 500, 1, 0] {
+                    let alpha = Alpha::from_milli(milli).unwrap();
+                    assert_eq!(
+                        kind.overlay_args(style, alpha),
+                        legacy_overlay_args(kind, style, milli),
+                        "{kind:?} {style:?} {milli}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

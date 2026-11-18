@@ -50,15 +50,12 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let config = match crucible_config::config_path() {
-        None => Config::default(),
-        Some(path) => match crucible_config::load(&path) {
-            Ok(c) => c,
-            Err(err) => {
-                eprintln!("crucible terminal-theme: {err}");
-                return 1;
-            }
-        },
+    let config = match crucible_config::load_from_env() {
+        Ok((_, c)) => c,
+        Err((_, err)) => {
+            eprintln!("crucible terminal-theme: {err}");
+            return 1;
+        }
     };
     match fragment(&config, target) {
         Ok(text) => {
@@ -94,6 +91,24 @@ mod tests {
         assert!(parse_args(&s(&[])).is_err());
         assert!(parse_args(&s(&["kitty"])).is_err());
         assert!(parse_args(&s(&["foot", "cterm"])).is_err());
+    }
+
+    #[test]
+    fn accepts_exactly_the_four_canonical_names() {
+        for name in ["foot", "cterm", "urxvt", "ghostty"] {
+            assert!(
+                matches!(parse_args(&s(&[name])), Ok(Parsed::Run(_))),
+                "{name}"
+            );
+        }
+        // Spawn aliases and an `Other` basename are not terminal-theme names.
+        for name in ["ghostty-cde", "rxvt-unicode", "footclient", "/usr/bin/foot"] {
+            assert_eq!(
+                parse_args(&s(&[name])),
+                Err(format!("unknown terminal {name:?}")),
+                "{name}"
+            );
+        }
     }
 
     #[test]

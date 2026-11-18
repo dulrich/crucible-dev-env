@@ -6,7 +6,6 @@ use crate::error::ConfigError;
 use crate::model::{LauncherConfig, PickerConfig};
 use crate::overlay::OverlayConfig;
 use crate::reader::NodeReader;
-use crate::theme::Milli;
 
 /// Parses the `picker` block into its `root` directories and the `slots` badge setting.
 pub(super) fn parse_picker(node: NodeReader<'_>) -> Result<PickerConfig, ConfigError> {
@@ -66,12 +65,7 @@ pub(super) fn parse_overlay(node: NodeReader<'_>) -> Result<OverlayConfig, Confi
             "border" => out.border = child.bool_arg()?,
             "style" => out.style = child.enum_arg("a style string")?,
             "accent" => out.accent = super::surface::parse_accent(&child)?,
-            "alpha" => {
-                let a = child.float_arg()?;
-                out.alpha = Milli::from_f64(a).filter(|m| m.0 <= 1000).ok_or_else(|| {
-                    child.invalid("argument", format!("{a} is outside 0.0..=1.0"))
-                })?;
-            }
+            "alpha" => out.alpha = child.alpha_arg()?,
             "terminal-args" => out.terminal_args = Some(child.string_list()?),
             _ => return Err(child.unknown_node("overlay")),
         }
@@ -217,19 +211,28 @@ mod tests {
     }
 
     #[test]
+    fn overlay_alpha_error_text_and_location_are_unchanged() {
+        let (err, _) = err_at("overlay {\n  alpha 1.01\n}\n");
+        assert_eq!(
+            err.to_string(),
+            "2:3: `alpha` argument: 1.01 is outside 0.0..=1.0"
+        );
+    }
+
+    #[test]
     fn overlay_alpha_defaults_opaque_and_is_validated() {
-        use crate::theme::Milli;
-        assert_eq!(parse("").unwrap().overlay.alpha, Milli(1000));
+        use crate::theme::Alpha;
+        assert_eq!(parse("").unwrap().overlay.alpha, Alpha::OPAQUE);
         assert_eq!(
             parse("overlay {\n alpha 0.8125\n}\n")
                 .unwrap()
                 .overlay
                 .alpha,
-            Milli(813)
+            Alpha::from_milli(813).unwrap()
         );
         assert_eq!(
             parse("overlay {\n alpha 0\n}\n").unwrap().overlay.alpha,
-            Milli(0)
+            Alpha::from_milli(0).unwrap()
         );
         for bad in [
             "alpha 1.01",

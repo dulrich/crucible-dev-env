@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::overlay::OverlayConfig;
+use crate::overlay::{OverlayConfig, TerminalKind};
 
 /// A closed set of config spellings: one `NAMES` table, in the order error messages list them,
 /// drives both parsing ([`Named::from_name`]) and printing ([`Named::as_str`]).
@@ -51,9 +51,22 @@ impl Default for TerminalConfig {
     }
 }
 
-/// An sRGB colour, parsed from `"#rrggbb"`.
+/// An sRGB colour, parsed from `"#rrggbb"`. Formats as lowercase `#rrggbb` with `{}` and as the
+/// bare lowercase `rrggbb` digits with `{:x}` (the one formatter every config consumer uses).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rgb(pub u8, pub u8, pub u8);
+
+impl std::fmt::LowerHex for Rgb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:02x}{:02x}{:02x}", self.0, self.1, self.2)
+    }
+}
+
+impl std::fmt::Display for Rgb {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "#{self:x}")
+    }
+}
 
 impl Rgb {
     /// Parses exactly `#rrggbb` (hex digits, either case); anything else is `None`.
@@ -122,21 +135,21 @@ pub struct TilingConfig {
     pub program_terminal_args: Vec<(String, Vec<String>)>,
 }
 
-/// The built-in `tiling.terminal-args` for the spawned program's `basename` (`{gap}` unsubstituted):
+/// The built-in `tiling.terminal-args` for a spawned terminal of `kind` (`{gap}` unsubstituted):
 /// foot-style padding for `cterm`/`foot`, urxvt's internal border, ghostty's window padding;
-/// nothing for any other basename (`footclient` and `urxvtc` included). Pure.
+/// nothing for [`TerminalKind::Other`] (`footclient` and `urxvtc` included). Pure.
 #[must_use]
-pub fn builtin_tiling_args(basename: &str) -> &'static [&'static str] {
-    match basename {
-        "cterm" | "foot" => &["-o", "pad={gap}x{gap} center"],
-        "urxvt" | "rxvt-unicode" => &["-b", "{gap}"],
-        "ghostty" | "ghostty-cde" => &[
+pub fn builtin_tiling_args(kind: TerminalKind) -> &'static [&'static str] {
+    match kind {
+        TerminalKind::Cterm | TerminalKind::Foot => &["-o", "pad={gap}x{gap} center"],
+        TerminalKind::Urxvt => &["-b", "{gap}"],
+        TerminalKind::Ghostty => &[
             "--window-padding-x={gap}",
             "--window-padding-y={gap}",
             "--window-padding-color=extend-always",
             "--window-padding-balance=true",
         ],
-        _ => &[],
+        TerminalKind::Other => &[],
     }
 }
 
@@ -185,10 +198,35 @@ impl TilingConfig {
         if is_configured_terminal && let Some(args) = &self.terminal_args {
             return substitute_gap(args, gap);
         }
-        builtin_tiling_args(program_basename)
+        builtin_tiling_args(TerminalKind::of(program_basename))
             .iter()
             .map(|a| a.replace("{gap}", &gap.to_string()))
             .collect()
+    }
+
+    /// The arguments a tiling terminal spawn of `program` (`configured` when it is the configured
+    /// terminal) puts before the exec flag: [`Self::effective_terminal_args`] for its basename,
+    /// then the `theme`'s spawn arguments (ghostty's `--config-file=` into `theme_dir`; nothing
+    /// without a `theme`). **Pure.**
+    #[must_use]
+    pub fn spawn_args(
+        &self,
+        program: &str,
+        configured: bool,
+        theme: Option<&crate::theme::ThemeConfig>,
+        theme_dir: Option<&Path>,
+    ) -> Vec<String> {
+        let basename = Path::new(program)
+            .file_name()
+            .and_then(|b| b.to_str())
+            .unwrap_or(program);
+        let mut args = self.effective_terminal_args(basename, configured);
+        args.extend(crate::theme::theme_spawn_args(
+            theme,
+            TerminalKind::of(program),
+            theme_dir,
+        ));
+        args
     }
 }
 

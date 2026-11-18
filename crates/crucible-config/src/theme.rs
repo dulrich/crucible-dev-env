@@ -9,6 +9,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::model::{Named, Rgb};
+use crate::overlay::TerminalKind;
 
 /// A non-negative decimal kept to three places (`thousandths / 1000`), so the config stays `Eq`.
 /// Displays without trailing zeros: `11`, `11.5`, `0.875`.
@@ -39,6 +40,63 @@ impl std::fmt::Display for Milli {
     }
 }
 
+/// An opacity, `0..=1000` thousandths (`alpha 0.85` is 850); 1000 is opaque. Displays like
+/// [`Milli`] (`0.85`, `1`); [`Alpha::decimal`] is the one rendering with a decimal point
+/// (`1.0` when opaque).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Alpha(u32);
+
+impl Alpha {
+    /// Fully opaque (1000 thousandths).
+    pub const OPAQUE: Self = Self(1000);
+
+    /// `milli` thousandths; `None` above 1000.
+    #[must_use]
+    pub const fn from_milli(milli: u32) -> Option<Self> {
+        if milli <= 1000 {
+            Some(Self(milli))
+        } else {
+            None
+        }
+    }
+
+    /// `value` rounded to three decimal places; `None` outside `0.0..=1.0` (after rounding) or
+    /// not finite.
+    #[must_use]
+    pub fn from_f64(value: f64) -> Option<Self> {
+        Milli::from_f64(value).and_then(|m| Self::from_milli(m.0))
+    }
+
+    /// The thousandths, `0..=1000`.
+    #[must_use]
+    pub const fn milli(self) -> u32 {
+        self.0
+    }
+
+    /// Whether this is [`Alpha::OPAQUE`].
+    #[must_use]
+    pub const fn is_opaque(self) -> bool {
+        self.0 >= 1000
+    }
+
+    /// The value as terminals take it on the command line: `1.0` when opaque, else the
+    /// [`Display`](std::fmt::Display) form (`0.85`).
+    #[must_use]
+    pub fn decimal(self) -> String {
+        if self.is_opaque() {
+            "1.0".to_string()
+        } else {
+            self.to_string()
+        }
+    }
+}
+
+impl std::fmt::Display for Alpha {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Milli(self.0).fmt(f)
+    }
+}
+
 /// The `font "<family>" size=(pt)N` child of `theme`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThemeFont {
@@ -62,13 +120,16 @@ pub struct ThemeConfig {
     pub cursor: Option<Rgb>,
     /// CDE-only accent of `terminal`-styled surfaces; never emitted to a terminal fragment.
     pub accent: Option<Rgb>,
-    /// Background opacity, `0..=1000` thousandths (`alpha 0.9` is `Milli(900)`).
-    pub alpha: Option<Milli>,
+    /// Background opacity (`alpha 0.9` is 900 thousandths).
+    pub alpha: Option<Alpha>,
     /// ANSI palette entries 0-15.
     pub palette: [Option<Rgb>; 16],
 }
 
-/// A terminal a theme fragment is rendered for.
+/// A terminal a theme fragment is rendered for: the [`TerminalKind`]s with a fragment (every kind
+/// but [`TerminalKind::Other`]). Its [`Named`] table holds the four canonical terminal names,
+/// which [`TerminalKind::of`] also classifies by; the spawn aliases (`ghostty-cde`,
+/// `rxvt-unicode`) are not theme target names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThemeTarget {
     /// foot (`foot.ini`, included with `include=`).
@@ -90,6 +151,32 @@ impl Named for ThemeTarget {
     ];
 }
 
+impl TryFrom<TerminalKind> for ThemeTarget {
+    type Error = ();
+
+    /// The target of `kind`; `Err` for [`TerminalKind::Other`].
+    fn try_from(kind: TerminalKind) -> Result<Self, ()> {
+        match kind {
+            TerminalKind::Foot => Ok(Self::Foot),
+            TerminalKind::Cterm => Ok(Self::Cterm),
+            TerminalKind::Urxvt => Ok(Self::Urxvt),
+            TerminalKind::Ghostty => Ok(Self::Ghostty),
+            TerminalKind::Other => Err(()),
+        }
+    }
+}
+
+impl From<ThemeTarget> for TerminalKind {
+    fn from(target: ThemeTarget) -> Self {
+        match target {
+            ThemeTarget::Foot => Self::Foot,
+            ThemeTarget::Cterm => Self::Cterm,
+            ThemeTarget::Urxvt => Self::Urxvt,
+            ThemeTarget::Ghostty => Self::Ghostty,
+        }
+    }
+}
+
 impl ThemeTarget {
     /// Every target, in file-writing order.
     pub const ALL: [Self; 4] = [Self::Foot, Self::Cterm, Self::Urxvt, Self::Ghostty];
@@ -109,14 +196,6 @@ impl ThemeTarget {
 /// foot's default background, the cursor text colour when the theme sets no `background`
 /// (foot's `cursor=` takes the text and the cursor colour together).
 const FOOT_DEFAULT_BACKGROUND: Rgb = Rgb(0x00, 0x2b, 0x36);
-
-fn bare(c: Rgb) -> String {
-    format!("{:02x}{:02x}{:02x}", c.0, c.1, c.2)
-}
-
-fn hash(c: Rgb) -> String {
-    format!("#{}", bare(c))
-}
 
 /// Renders `theme` in `target`'s native syntax. **Pure.** An empty theme renders the header only.
 #[must_use]
@@ -143,14 +222,14 @@ fn render_foot(t: &ThemeConfig) -> String {
     }
     let mut colors = String::new();
     if let Some(c) = t.foreground {
-        writeln!(colors, "foreground={}", bare(c)).ok();
+        writeln!(colors, "foreground={c:x}").ok();
     }
     if let Some(c) = t.background {
-        writeln!(colors, "background={}", bare(c)).ok();
+        writeln!(colors, "background={c:x}").ok();
     }
     if let Some(c) = t.cursor {
         let text = t.background.unwrap_or(FOOT_DEFAULT_BACKGROUND);
-        writeln!(colors, "cursor={} {}", bare(text), bare(c)).ok();
+        writeln!(colors, "cursor={text:x} {c:x}").ok();
     }
     if let Some(a) = t.alpha {
         writeln!(colors, "alpha={a}").ok();
@@ -162,7 +241,7 @@ fn render_foot(t: &ThemeConfig) -> String {
             } else {
                 ("bright", i - 8)
             };
-            writeln!(colors, "{bank}{n}={}", bare(*c)).ok();
+            writeln!(colors, "{bank}{n}={c:x}").ok();
         }
     }
     if !colors.is_empty() {
@@ -201,7 +280,7 @@ fn render_cterm(t: &ThemeConfig) -> String {
         ("cursor", t.cursor),
     ] {
         if let Some(c) = c {
-            writeln!(colors, "    {key} \"{}\"", hash(c)).ok();
+            writeln!(colors, "    {key} \"{}\"", c).ok();
         }
     }
     if let Some(a) = t.alpha {
@@ -209,7 +288,7 @@ fn render_cterm(t: &ThemeConfig) -> String {
     }
     for (i, c) in t.palette.iter().enumerate() {
         if let Some(c) = c {
-            writeln!(colors, "    palette {i} \"{}\"", hash(*c)).ok();
+            writeln!(colors, "    palette {i} \"{}\"", *c).ok();
         }
     }
     if !colors.is_empty() {
@@ -220,9 +299,9 @@ fn render_cterm(t: &ThemeConfig) -> String {
     s
 }
 
-/// A KDL float literal (`1.0`, `0.9`), so the value reads as a number with a decimal point.
-fn float_literal(m: Milli) -> String {
-    let s = m.to_string();
+/// A KDL float literal (`1.0`, `0.9`, `0.0`), so the value reads as a number with a decimal point.
+fn float_literal(a: Alpha) -> String {
+    let s = a.decimal();
     if s.contains('.') { s } else { format!("{s}.0") }
 }
 
@@ -236,25 +315,25 @@ fn render_urxvt(t: &ThemeConfig) -> String {
         .ok();
     }
     if let Some(c) = t.foreground {
-        writeln!(s, "URxvt*foreground: {}", hash(c)).ok();
+        writeln!(s, "URxvt*foreground: {}", c).ok();
     }
     if let Some(c) = t.background {
         match t.alpha {
             // urxvt's `[NN]` prefix is a percentage; it takes effect only with `URxvt.depth: 32`,
             // which stays in the user's own resources.
-            Some(a) if a.0 < 1000 => {
-                writeln!(s, "URxvt*background: [{}]{}", (a.0 + 5) / 10, hash(c))
+            Some(a) if !a.is_opaque() => {
+                writeln!(s, "URxvt*background: [{}]{}", (a.milli() + 5) / 10, c)
             }
-            _ => writeln!(s, "URxvt*background: {}", hash(c)),
+            _ => writeln!(s, "URxvt*background: {}", c),
         }
         .ok();
     }
     if let Some(c) = t.cursor {
-        writeln!(s, "URxvt*cursorColor: {}", hash(c)).ok();
+        writeln!(s, "URxvt*cursorColor: {}", c).ok();
     }
     for (i, c) in t.palette.iter().enumerate() {
         if let Some(c) = c {
-            writeln!(s, "*color{i}: {}", hash(*c)).ok();
+            writeln!(s, "*color{i}: {}", *c).ok();
         }
     }
     s
@@ -274,7 +353,7 @@ fn render_ghostty(t: &ThemeConfig) -> String {
         ("cursor-color", t.cursor),
     ] {
         if let Some(c) = c {
-            writeln!(s, "{key} = {}", hash(c)).ok();
+            writeln!(s, "{key} = {}", c).ok();
         }
     }
     if let Some(a) = t.alpha {
@@ -282,7 +361,7 @@ fn render_ghostty(t: &ThemeConfig) -> String {
     }
     for (i, c) in t.palette.iter().enumerate() {
         if let Some(c) = c {
-            writeln!(s, "palette = {i}={}", hash(*c)).ok();
+            writeln!(s, "palette = {i}={}", *c).ok();
         }
     }
     s
@@ -305,21 +384,17 @@ pub fn theme_dir() -> Option<PathBuf> {
     )
 }
 
-/// The extra spawn arguments a theme adds for terminal `program`: with a theme and a fragment
-/// `dir`, `--config-file=<dir>/ghostty.conf` for a program whose basename is `ghostty` or
-/// `ghostty-cde`; nothing otherwise. **Pure.**
+/// The extra spawn arguments a theme adds for a terminal of `kind`: with a theme and a fragment
+/// `dir`, `--config-file=<dir>/ghostty.conf` for [`TerminalKind::Ghostty`]; nothing otherwise.
+/// **Pure.**
 #[must_use]
 pub fn theme_spawn_args(
     theme: Option<&ThemeConfig>,
-    program: &str,
+    kind: TerminalKind,
     dir: Option<&Path>,
 ) -> Vec<String> {
-    let basename = Path::new(program)
-        .file_name()
-        .and_then(|b| b.to_str())
-        .unwrap_or(program);
     match (theme, dir) {
-        (Some(_), Some(dir)) if matches!(basename, "ghostty" | "ghostty-cde") => vec![format!(
+        (Some(_), Some(dir)) if kind == TerminalKind::Ghostty => vec![format!(
             "--config-file={}",
             dir.join(ThemeTarget::Ghostty.file_name()).display()
         )],
@@ -345,7 +420,7 @@ mod tests {
             background: Some(Rgb(0x11, 0x11, 0x11)),
             cursor: Some(Rgb(0xff, 0x00, 0x80)),
             accent: None,
-            alpha: Some(Milli(900)),
+            alpha: Alpha::from_milli(900),
             palette,
         }
     }
@@ -428,7 +503,7 @@ mod tests {
     fn partial_theme_emits_only_what_is_set() {
         let t = ThemeConfig {
             cursor: Some(Rgb(1, 2, 3)),
-            alpha: Some(Milli(1000)),
+            alpha: Alpha::from_milli(1000),
             ..ThemeConfig::default()
         };
         assert_eq!(
@@ -446,7 +521,7 @@ mod tests {
         );
         let t = ThemeConfig {
             background: Some(Rgb(0, 0, 0)),
-            alpha: Some(Milli(1000)),
+            alpha: Alpha::from_milli(1000),
             font: Some(ThemeFont {
                 family: "Mono".into(),
                 size: None,
@@ -473,7 +548,7 @@ mod tests {
     fn urxvt_alpha_percentage_rounds() {
         let t = |a| ThemeConfig {
             background: Some(Rgb(0, 0, 0)),
-            alpha: Some(Milli(a)),
+            alpha: Alpha::from_milli(a),
             ..ThemeConfig::default()
         };
         assert!(render(&t(875), ThemeTarget::Urxvt).contains("[88]#000000"));
@@ -499,13 +574,49 @@ mod tests {
         let t = ThemeConfig::default();
         let dir = Path::new("/c/cde/terminal-theme");
         let want = vec!["--config-file=/c/cde/terminal-theme/ghostty.conf".to_string()];
-        assert_eq!(theme_spawn_args(Some(&t), "ghostty", Some(dir)), want);
+        let kind = TerminalKind::of;
+        assert_eq!(theme_spawn_args(Some(&t), kind("ghostty"), Some(dir)), want);
         assert_eq!(
-            theme_spawn_args(Some(&t), "/opt/bin/ghostty-cde", Some(dir)),
+            theme_spawn_args(Some(&t), kind("/opt/bin/ghostty-cde"), Some(dir)),
             want
         );
-        assert!(theme_spawn_args(None, "ghostty", Some(dir)).is_empty());
-        assert!(theme_spawn_args(Some(&t), "ghostty", None).is_empty());
-        assert!(theme_spawn_args(Some(&t), "foot", Some(dir)).is_empty());
+        assert!(theme_spawn_args(None, kind("ghostty"), Some(dir)).is_empty());
+        assert!(theme_spawn_args(Some(&t), kind("ghostty"), None).is_empty());
+        assert!(theme_spawn_args(Some(&t), kind("foot"), Some(dir)).is_empty());
+    }
+
+    #[test]
+    fn alpha_is_bounded_and_renders_one_opaque_decimal() {
+        assert_eq!(Alpha::from_f64(0.85), Alpha::from_milli(850));
+        assert_eq!(Alpha::from_f64(1.0), Some(Alpha::OPAQUE));
+        assert_eq!(Alpha::from_f64(1.0005), None);
+        assert_eq!(Alpha::from_f64(-0.1), None);
+        assert_eq!(Alpha::from_milli(1001), None);
+        assert!(Alpha::OPAQUE.is_opaque());
+        assert_eq!(Alpha::OPAQUE.to_string(), "1");
+        assert_eq!(Alpha::OPAQUE.decimal(), "1.0");
+        let glass = Alpha::from_milli(850).unwrap();
+        assert!(!glass.is_opaque());
+        assert_eq!(
+            (glass.to_string(), glass.decimal()),
+            ("0.85".into(), "0.85".into())
+        );
+    }
+
+    #[test]
+    fn theme_targets_are_the_four_canonical_kinds() {
+        let names: Vec<&str> = ThemeTarget::NAMES.iter().map(|(_, n)| *n).collect();
+        assert_eq!(names, ["foot", "cterm", "urxvt", "ghostty"]);
+        for &(target, name) in ThemeTarget::NAMES {
+            assert_eq!(TerminalKind::of(name), TerminalKind::from(target), "{name}");
+            assert_eq!(
+                ThemeTarget::try_from(TerminalKind::from(target)),
+                Ok(target)
+            );
+        }
+        assert_eq!(ThemeTarget::try_from(TerminalKind::Other), Err(()));
+        for alias in ["ghostty-cde", "rxvt-unicode", "footclient"] {
+            assert_eq!(ThemeTarget::from_name(alias), None, "{alias}");
+        }
     }
 }

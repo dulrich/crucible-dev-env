@@ -2,7 +2,6 @@
 //! cursor "#rrggbb"; accent "#rrggbb"; alpha 0.9; palette <0-15> "#rrggbb" }` block.
 
 use crate::error::ConfigError;
-use crate::model::Rgb;
 use crate::reader::NodeReader;
 use crate::theme::{Milli, ThemeConfig, ThemeFont};
 
@@ -39,13 +38,7 @@ pub(super) fn parse_theme(node: NodeReader<'_>) -> Result<ThemeConfig, ConfigErr
             "background" => theme.background = Some(child.hex_arg()?),
             "cursor" => theme.cursor = Some(child.hex_arg()?),
             "accent" => theme.accent = Some(child.hex_arg()?),
-            "alpha" => {
-                let a = child.float_arg()?;
-                theme.alpha =
-                    Some(Milli::from_f64(a).filter(|m| m.0 <= 1000).ok_or_else(|| {
-                        child.invalid("argument", format!("{a} is outside 0.0..=1.0"))
-                    })?);
-            }
+            "alpha" => theme.alpha = Some(child.alpha_arg()?),
             "palette" => {
                 let (index, at, s) =
                     child.int_string_args(["an index 0-15", "a \"#rrggbb\" string"])?;
@@ -55,9 +48,7 @@ pub(super) fn parse_theme(node: NodeReader<'_>) -> Result<ThemeConfig, ConfigErr
                     .ok_or_else(|| {
                         child.invalid_at(at, "argument 1", format!("{index} is outside 0..=15"))
                     })?;
-                let colour = Rgb::from_hex(s).ok_or_else(|| {
-                    child.invalid("argument 2", format!("`{s}` is not a #rrggbb colour"))
-                })?;
+                let colour = child.hex_value("argument 2", s)?;
                 if theme.palette[slot].replace(colour).is_some() {
                     return Err(ConfigError::Duplicate {
                         at: child.at(),
@@ -76,7 +67,27 @@ mod tests {
     use super::super::{err_at, parse};
     use crate::error::ConfigError;
     use crate::model::{Config, Rgb};
-    use crate::theme::{Milli, ThemeConfig, ThemeFont};
+    use crate::theme::{Alpha, Milli, ThemeConfig, ThemeFont};
+
+    #[test]
+    fn alpha_and_palette_colour_errors_keep_their_text_and_location() {
+        for (text, want) in [
+            (
+                "theme {\n  alpha -0.5\n}\n",
+                "2:3: `alpha` argument: -0.5 is outside 0.0..=1.0",
+            ),
+            (
+                "theme {\n    palette 3 \"#12345\"\n}\n",
+                "2:5: `palette` argument 2: `#12345` is not a #rrggbb colour",
+            ),
+            (
+                "theme {\n cursor \"red\"\n}\n",
+                "2:2: `cursor` argument: `red` is not a #rrggbb colour",
+            ),
+        ] {
+            assert_eq!(err_at(text).0.to_string(), want, "{text}");
+        }
+    }
 
     #[test]
     fn absent_block_is_none_and_empty_block_is_empty_theme() {
@@ -106,7 +117,7 @@ mod tests {
             })
         );
         assert_eq!(t.cursor, Some(Rgb(0xff, 0, 0x80)));
-        assert_eq!(t.alpha, Some(Milli(900)));
+        assert_eq!(t.alpha, Alpha::from_milli(900));
         assert_eq!(t.palette[0], Some(Rgb(0x24, 0x24, 0x24)));
         assert_eq!(t.palette[15], Some(Rgb(0xff, 0xff, 0xff)));
         assert_eq!(t.palette[1], None);
@@ -116,7 +127,7 @@ mod tests {
             .theme
             .unwrap();
         assert_eq!(t.font.unwrap().size, Some(Milli(12_000)));
-        assert_eq!(t.alpha, Some(Milli(1000)));
+        assert_eq!(t.alpha, Some(Alpha::OPAQUE));
         let t = parse("theme { font \"Mono\"; }\n").unwrap().theme.unwrap();
         assert_eq!(t.font.unwrap().size, None);
     }

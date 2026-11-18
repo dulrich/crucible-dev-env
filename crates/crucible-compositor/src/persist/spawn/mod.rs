@@ -67,27 +67,6 @@ pub fn with_terminal_args(terminal_args: &[String], args: Vec<OsString>) -> Vec<
         .collect()
 }
 
-/// The arguments a tiling terminal spawn of `program` (basename `basename`; `configured` when it
-/// is the configured terminal) puts before the exec flag: the effective `tiling.terminal-args`,
-/// then the `theme`'s spawn arguments (ghostty's `--config-file=` into `theme_dir`; nothing
-/// without a `theme`). **Pure.**
-#[must_use]
-pub fn tiling_terminal_args(
-    config: &crucible_config::Config,
-    program: &str,
-    basename: &str,
-    configured: bool,
-    theme_dir: Option<&Path>,
-) -> Vec<String> {
-    let mut args = config.tiling.effective_terminal_args(basename, configured);
-    args.extend(crucible_config::theme_spawn_args(
-        config.theme.as_ref(),
-        program,
-        theme_dir,
-    ));
-    args
-}
-
 /// One spawn: `program args…`, optionally in `cwd`, remembered as a CDE spawn of `kind` with
 /// `origin` (the saved record it stands for, if any).
 #[derive(Debug, Clone)]
@@ -300,18 +279,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// ([`crucible_config::TilingConfig::effective_terminal_args`]). Overlays use
     /// `overlay.terminal-args` only; apps get none.
     pub(super) fn with_tiling_args(&self, program: &str, args: Vec<OsString>) -> Vec<OsString> {
-        let basename = Path::new(program)
-            .file_name()
-            .and_then(|b| b.to_str())
-            .unwrap_or(program);
         let configured = same_program(program, &self.terminal_program());
         with_terminal_args(
-            &tiling_terminal_args(
-                &self.config,
+            &self.config.tiling.spawn_args(
                 program,
-                basename,
                 configured,
-                crucible_config::theme_dir().as_deref(),
+                self.config.theme.as_ref(),
+                self.theme_dir.as_deref(),
             ),
             args,
         )
@@ -541,10 +515,14 @@ mod tests {
         let dir = p("/c/cde/terminal-theme");
         let base = plain.tiling.effective_terminal_args("ghostty", true);
         assert_eq!(
-            tiling_terminal_args(&plain, "ghostty", "ghostty", true, dir),
+            plain
+                .tiling
+                .spawn_args("ghostty", true, plain.theme.as_ref(), dir),
             base
         );
-        let got = tiling_terminal_args(&themed, "/x/ghostty-cde", "ghostty-cde", true, dir);
+        let got = themed
+            .tiling
+            .spawn_args("/x/ghostty-cde", true, themed.theme.as_ref(), dir);
         assert_eq!(
             got.last().map(String::as_str),
             Some("--config-file=/c/cde/terminal-theme/ghostty.conf")
@@ -556,7 +534,9 @@ mod tests {
             "--config-file=/c/cde/terminal-theme/ghostty.conf"
         );
         assert_eq!(
-            tiling_terminal_args(&themed, "foot", "foot", true, dir),
+            themed
+                .tiling
+                .spawn_args("foot", true, themed.theme.as_ref(), dir),
             plain.tiling.effective_terminal_args("foot", true)
         );
     }

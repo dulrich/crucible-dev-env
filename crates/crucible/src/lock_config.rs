@@ -3,7 +3,6 @@
 //! state file); writes nothing.
 
 use crucible_compositor::lock_config::render_for_env;
-use crucible_config::Config;
 
 use crate::cli::{Parsed, help_requested};
 
@@ -37,15 +36,12 @@ pub fn run(args: &[String]) -> i32 {
             return 2;
         }
     }
-    let config = match crucible_config::config_path() {
-        None => Config::default(),
-        Some(path) => match crucible_config::load(&path) {
-            Ok(c) => c,
-            Err(err) => {
-                eprintln!("crucible lock-config: {err}");
-                return 1;
-            }
-        },
+    let config = match crucible_config::load_from_env() {
+        Ok((_, c)) => c,
+        Err((_, err)) => {
+            eprintln!("crucible lock-config: {err}");
+            return 1;
+        }
     };
     match render_for_env(&config) {
         Some(text) => print!("{text}"),

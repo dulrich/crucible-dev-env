@@ -22,12 +22,12 @@ const WRONG: Rgb = Rgb(0xe0, 0x4f, 0x5f);
 
 /// `rrggbbaa` for swaylock.
 fn rgba(c: Rgb, alpha: u8) -> String {
-    format!("{:02x}{:02x}{:02x}{alpha:02x}", c.0, c.1, c.2)
+    format!("{c:x}{alpha:02x}")
 }
 
 /// `rrggbb` for swaylock's `color=`.
 fn rgb(c: Rgb) -> String {
-    format!("{:02x}{:02x}{:02x}", c.0, c.1, c.2)
+    format!("{c:x}")
 }
 
 /// The `image=` values for the wallpaper state text: one `<output>:<path>` per `<output>\t<path>`

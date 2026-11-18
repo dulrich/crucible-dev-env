@@ -39,11 +39,9 @@ fn parse_background(child: &NodeReader<'_>) -> Result<SurfaceBackground, ConfigE
         }
         "color" => {
             let a = child.string_args(&["a background kind string", "a \"#rrggbb\" string"])?;
-            Rgb::from_hex(a[1])
+            child
+                .hex_value("argument 2", a[1])
                 .map(SurfaceBackground::Color)
-                .ok_or_else(|| {
-                    child.invalid("argument 2", format!("`{}` is not a #rrggbb colour", a[1]))
-                })
         }
         other => Err(child.invalid(
             "argument",
@@ -91,6 +89,15 @@ mod tests {
     use crate::model::{Config, Rgb};
     use crate::overlay::OverlayStyle;
     use crate::surface::{GreeterConfig, LockConfig, SurfaceBackground};
+
+    #[test]
+    fn background_colour_error_keeps_its_text_and_location() {
+        let (err, _) = err_at("lock {\n   background \"color\" \"#zzzzzz\"\n}\n");
+        assert_eq!(
+            err.to_string(),
+            "2:4: `background` argument 2: `#zzzzzz` is not a #rrggbb colour"
+        );
+    }
 
     #[test]
     fn absent_blocks_are_none_and_empty_blocks_are_defaults() {

@@ -17,16 +17,16 @@ use crate::state::{Backend, CrucibleState};
 /// falls back to the defaults.
 #[must_use]
 pub fn load_startup_config() -> Config {
-    let Some(path) = crucible_config::config_path() else {
-        info!("neither XDG_CONFIG_HOME nor HOME is set; using the default config");
-        return Config::default();
-    };
-    match crucible_config::load(&path) {
-        Ok(config) => {
+    match crucible_config::load_from_env() {
+        Ok((None, config)) => {
+            info!("neither XDG_CONFIG_HOME nor HOME is set; using the default config");
+            config
+        }
+        Ok((Some(path), config)) => {
             info!(path = %path.display(), "config loaded");
             config
         }
-        Err(err) => {
+        Err((path, err)) => {
             log_config_error(&path, &err);
             Config::default()
         }
@@ -71,24 +71,6 @@ pub struct WarmKey {
     pub output_scales: Vec<(String, u32)>,
 }
 
-/// The arguments an overlay spawn of `program` puts before the exec flag: the effective
-/// `overlay.terminal-args`, then the `theme`'s spawn arguments (ghostty's `--config-file=` into
-/// `theme_dir`; nothing without a `theme`). **Pure.**
-#[must_use]
-pub fn overlay_terminal_args(
-    config: &Config,
-    program: &str,
-    theme_dir: Option<&std::path::Path>,
-) -> Vec<String> {
-    let mut args = config.overlay.effective_terminal_args(program);
-    args.extend(crucible_config::theme_spawn_args(
-        config.theme.as_ref(),
-        program,
-        theme_dir,
-    ));
-    args
-}
-
 /// The `CDE_OVERLAY_ACCENT` value (lowercase `#rrggbb`) for `config`'s overlay: `Some` only when
 /// the overlay style is N1 and the resolved overlay accent differs from the style's own. **Pure.**
 #[must_use]
@@ -96,14 +78,16 @@ pub fn overlay_tui_accent(config: &Config) -> Option<String> {
     let style = config.overlay.style;
     let own = style.palette()?.accent;
     let c = crucible_config::resolve_accent(style, config.overlay.accent, config.theme.as_ref());
-    (c != own).then(|| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2))
+    (c != own).then(|| c.to_string())
 }
 
 /// The [`WarmKey`] of `config` given the resolved `terminal` program and the theme fragment
 /// directory (the theme's ghostty `--config-file=` is part of the overlay args).
 #[must_use]
 pub fn warm_key(config: &Config, terminal: String, theme_dir: Option<&std::path::Path>) -> WarmKey {
-    let overlay_args = overlay_terminal_args(config, &terminal, theme_dir);
+    let overlay_args = config
+        .overlay
+        .spawn_args(&terminal, config.theme.as_ref(), theme_dir);
     let overlay_surround_default = config.overlay.surround_is_default_bg(&terminal);
     WarmKey {
         terminal,
@@ -194,7 +178,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// Public so the persist tick's config reload can call it; safe to call before any output exists.
     pub fn apply_config(&mut self, config: Config) {
         let fallback_terminal = crucible_keys::terminal_command();
-        let theme_dir = crucible_config::theme_dir();
+        // The one environment read of the fragment directory per apply; spawns between applies
+        // use the stored value.
+        self.theme_dir = crucible_config::theme_dir();
         let delta = ConfigDelta::between(
             &self.config,
             &config,
@@ -202,7 +188,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 cursor_loaded: self.cursor.loaded(),
                 env: &|k| std::env::var(k).ok(),
                 fallback_terminal: &fallback_terminal,
-                theme_dir: theme_dir.as_deref(),
+                theme_dir: self.theme_dir.as_deref(),
             },
         );
         let (bindings, bind_error) = plan_bindings(&self.bindings, &config);
@@ -265,22 +251,21 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// changed and XWayland is already running, it is re-merged so new urxvt windows pick it up.
     /// Failures are logged at `warn!`; a config apply never fails on them.
     fn write_terminal_theme(&self, theme: &crucible_config::ThemeConfig) {
-        let Some(dir) = crucible_config::theme_dir() else {
+        let Some(dir) = self.theme_dir.as_deref() else {
             warn!("neither XDG_CONFIG_HOME nor HOME is set; terminal theme files not written");
             return;
         };
-        match crate::terminal_theme::write_fragments(theme, &dir) {
+        match crate::terminal_theme::write_fragments(theme, dir) {
             Ok(changed) => {
                 if !changed.is_empty() {
                     info!(dir = %dir.display(), ?changed, "terminal theme files written");
                 }
                 if changed.contains(&crucible_config::ThemeTarget::Urxvt)
                     && let Some(display) = self.xdisplay
+                    && let Some(urxvt) =
+                        crate::terminal_theme::urxvt_fragment(Some(theme), Some(dir))
                 {
-                    crate::xwayland::remerge_xresources(
-                        display,
-                        &dir.join(crucible_config::ThemeTarget::Urxvt.file_name()),
-                    );
+                    crate::xwayland::remerge_xresources(display, &urxvt);
                 }
             }
             Err(err) => warn!(dir = %dir.display(), %err, "cannot write the terminal theme files"),
@@ -573,15 +558,26 @@ mod tests {
         let defaults = crucible_config::TerminalKind::Ghostty.overlay_default_args();
         // No theme: byte-identical to the overlay args alone.
         assert_eq!(
-            overlay_terminal_args(&plain, "ghostty", Some(dir)),
+            plain
+                .overlay
+                .spawn_args("ghostty", plain.theme.as_ref(), Some(dir)),
             defaults
         );
         let mut want = defaults.clone();
         want.push("--config-file=/c/cde/terminal-theme/ghostty.conf".into());
-        assert_eq!(overlay_terminal_args(&themed, "ghostty", Some(dir)), want);
         assert_eq!(
-            overlay_terminal_args(&themed, "foot", Some(dir)),
-            overlay_terminal_args(&plain, "foot", Some(dir))
+            themed
+                .overlay
+                .spawn_args("ghostty", themed.theme.as_ref(), Some(dir)),
+            want
+        );
+        assert_eq!(
+            themed
+                .overlay
+                .spawn_args("foot", themed.theme.as_ref(), Some(dir)),
+            plain
+                .overlay
+                .spawn_args("foot", plain.theme.as_ref(), Some(dir))
         );
         // Adding the theme restarts a ghostty warm host; a theme edit does not.
         // The fallback terminal here is foot, whose overlay args a theme does not touch.
