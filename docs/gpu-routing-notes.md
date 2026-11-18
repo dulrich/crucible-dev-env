@@ -19,7 +19,7 @@ When the discrete GPU is wanted for inference (llama-server and similar), the de
 
 ## How a client ends up on a GPU (mechanics the design must respect)
 
-- **GL/EGL Wayland clients (Mesa):** use the compositor's `linux-dmabuf` feedback **main device**, which CDE sets from its primary GPU (`udev/output.rs`, `DmabufFeedbackBuilder::new(primary_gpu…)`). `DRI_PRIME=<n|pci-id>` in the client's environment overrides it.
+- **GL/EGL Wayland clients (Mesa):** use the compositor's `linux-dmabuf` feedback **main device**, which CDE sets from its primary GPU (`udev/output/records.rs`, `DmabufFeedbackBuilder::new(primary_gpu…)`). `DRI_PRIME=<n|pci-id>` in the client's environment overrides it.
 - **Vulkan clients (Mesa RADV):** pick a device by enumeration order; `DRI_PRIME` (Mesa device-select layer) or `MESA_VK_DEVICE_SELECT` steers it. Games launched by Steam/Proton mostly choose their own device; the Steam process's environment is what children inherit.
 - **X11 clients through Xwayland:** Xwayland's glamor renders on one GPU for all X clients; an X client's own GL/Vulkan can still be steered with `DRI_PRIME`.
 - **No live swap:** a process binds its GPU at context/device creation. A running app moves only by restarting it (or if it recreates its context itself — unverified for Firefox's GPU process and for cvault-editor). So "swap the ENV live" means *relaunch*, and CDE's own restore machinery (workspace persistence, `close-pid`, relaunch-on-restore) is the natural tool for that.
