@@ -101,7 +101,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         resolve_mode(
             self.greeter.is_some(),
             self.is_session_locked(),
-            self.login_ready.logging_out().is_some(),
+            self.logging_out(),
             self.snip.is_some(),
             self.mapped_overlay().cloned(),
         )

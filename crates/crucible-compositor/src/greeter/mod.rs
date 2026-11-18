@@ -25,7 +25,7 @@ use smithay::reexports::calloop::channel::{self, Event as ChannelEvent};
 use tracing::{error, info, warn};
 
 use crate::state::{Backend, CrucibleState};
-use panel::{ELLIPSIS_STEP, PanelFrame, ellipsis, field_text, layout_label};
+use panel::{HandoffNotice, PanelFrame, field_text, layout_label};
 use profile::{GreeterProfile, ProfileBackground};
 
 /// The swaybg binary (a system path: the greeter user has no `$PATH` worth trusting).
@@ -152,8 +152,6 @@ pub struct Greeter {
     swaybg: Option<Child>,
     /// The active layout's index in the profile's `layouts` (the xkb group; 0 at start).
     layout: usize,
-    /// Since when the post-auth "Loading CDE" panel shows (`None`: the login panel).
-    loading: Option<Instant>,
     /// The process exit status once the loop stops: 0 after `start_session` succeeded.
     pub exit_code: i32,
 }
@@ -177,39 +175,33 @@ impl Drop for Greeter {
 }
 
 impl Greeter {
-    /// What the panel draws this frame.
+    /// What the panel draws this frame: the hand-off `notice` ("Loading CDE") when one shows,
+    /// else the login panel.
     #[must_use]
-    pub fn frame(&self) -> PanelFrame {
-        self.frame_at(Instant::now())
+    pub fn frame(&self, notice: Option<&HandoffNotice>) -> PanelFrame {
+        self.frame_at(notice, Instant::now())
     }
 
     /// Takes a finished exchange's view. A non-final reply (a `start_session` error reply, back
-    /// to the prompt with its message) clears the loading panel; the started session keeps it
-    /// (the keep-lit exit holds that frame). Returns whether loading was cleared.
-    fn accept(&mut self, view: View, done: bool) -> bool {
+    /// to the prompt with its message) clears the `notice`; the started session keeps it (the
+    /// keep-lit exit holds that frame).
+    fn accept(&mut self, view: View, done: bool, notice: &mut Option<HandoffNotice>) {
         self.view = view;
-        !done && self.loading.take().is_some()
-    }
-
-    /// Whether the post-auth "Loading CDE" panel shows.
-    #[must_use]
-    pub fn loading(&self) -> bool {
-        self.loading.is_some()
+        if !done {
+            *notice = None;
+        }
     }
 
     /// [`frame`](Self::frame) at `now` (the ellipsis phase).
-    fn frame_at(&self, now: Instant) -> PanelFrame {
+    fn frame_at(&self, notice: Option<&HandoffNotice>, now: Instant) -> PanelFrame {
         let clear = match &self.profile.background {
             ProfileBackground::Color(c) => c.to_rgba_f32(),
             ProfileBackground::Image(_) => [0.0, 0.0, 0.0, 1.0],
         };
-        if let Some(since) = self.loading {
+        if let Some(notice) = notice {
             // No prompt, no field (nor its frame): the hand-off panel.
             return PanelFrame {
-                prompt: format!(
-                    "{LOADING_TEXT}{}",
-                    ellipsis(now.saturating_duration_since(since))
-                ),
+                prompt: notice.prompt_at(now),
                 field: None,
                 message: None,
                 layout: None,
@@ -373,7 +365,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
             events,
             swaybg,
             layout: 0,
-            loading: None,
             exit_code: 1,
         }));
     }
@@ -385,14 +376,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
         g.input.done();
         match reply {
             Ok((view, done)) => {
-                let was_loading = g.accept(view, done);
+                g.accept(view, done, &mut self.handoff_notice);
                 if done {
                     // The "Loading CDE" frame stays: the keep-lit exit holds the last frame.
                     info!("session started; greeter exiting");
                     g.exit_code = 0;
                     self.running.store(false, Ordering::SeqCst);
-                } else if was_loading {
-                    self.set_idle_suppressed(false);
                 }
             }
             Err(err) => {
@@ -401,31 +390,17 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.running.store(false, Ordering::SeqCst);
             }
         }
-        self.redraw_greeter();
+        self.redraw_all_outputs();
     }
 
-    /// Authentication succeeded: show "Loading CDE", animate it, hold idle blanking off and arm
-    /// the presentation gate, whose release acks the worker (which then writes `start_session`).
+    /// Authentication succeeded: show the "Loading CDE" notice, whose gate release acks the
+    /// worker (which then writes `start_session`).
     fn on_greeter_loading(&mut self, ack: mpsc::Sender<()>) {
-        let Some(g) = self.greeter.as_mut() else {
+        if self.greeter.is_none() {
             return;
-        };
-        g.loading = Some(Instant::now());
-        self.set_idle_suppressed(true);
-        let timer = smithay::reexports::calloop::timer::Timer::from_duration(ELLIPSIS_STEP);
-        if let Err(err) = self.handle.insert_source(timer, |_, _, data| {
-            use smithay::reexports::calloop::timer::TimeoutAction;
-            if data.greeter.as_ref().is_some_and(|g| g.loading()) {
-                data.redraw_greeter();
-                TimeoutAction::ToDuration(ELLIPSIS_STEP)
-            } else {
-                TimeoutAction::Drop
-            }
-        }) {
-            warn!(%err, "no ellipsis timer; the loading panel is static");
         }
-        // `arm_present_gate` redraws every armed output itself.
-        let armed = self.arm_present_gate(
+        let armed = self.show_handoff_notice(
+            LOADING_TEXT,
             "greeter start_session",
             Box::new(move |_| {
                 // The worker may have given up (backstop): nothing to do then.
@@ -437,7 +412,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
             // transport-failure exit; `start_session` is never written ungated.
             warn!("present gate already armed; aborting the login");
         }
-        self.redraw_greeter();
     }
 
     /// Feeds a panel key (only called in greeter mode).
@@ -451,7 +425,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             error!("the greetd worker is gone; greeter exiting");
             self.running.store(false, Ordering::SeqCst);
         }
-        self.redraw_greeter();
+        self.redraw_all_outputs();
     }
 
     /// Records that `set-layout` switched to group `idx` and redraws the indicator (a no-op
@@ -461,14 +435,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return;
         };
         g.layout = idx;
-        self.redraw_greeter();
-    }
-
-    fn redraw_greeter(&mut self) {
-        let outputs: Vec<_> = self.space.outputs().cloned().collect();
-        for o in &outputs {
-            B::schedule_render(self, o);
-        }
+        self.redraw_all_outputs();
     }
 
     /// Whether the greeter's wallpaper client is running (`None` outside greeter mode).
@@ -632,39 +599,48 @@ mod tests {
             events,
             swaybg: None,
             layout: 0,
-            loading: None,
             exit_code: 1,
         }
     }
 
+    fn loading(since: Instant) -> Option<HandoffNotice> {
+        Some(HandoffNotice {
+            text: LOADING_TEXT,
+            since,
+        })
+    }
+
     #[test]
     fn loading_frame_has_no_prompt_or_field_and_animates() {
-        let mut g = test_greeter();
+        let g = test_greeter();
         assert_eq!(
-            g.frame().field.as_deref(),
+            g.frame(None).field.as_deref(),
             Some(""),
             "the login panel has a field"
         );
         let t0 = Instant::now();
-        g.loading = Some(t0);
-        let f = g.frame_at(t0);
+        let n = loading(t0);
+        let f = g.frame_at(n.as_ref(), t0);
         assert_eq!(f.prompt, "Loading CDE");
         assert_eq!((f.field, f.message, f.layout), (None, None, None));
-        assert_eq!(g.frame_at(t0 + ELLIPSIS_STEP * 3).prompt, "Loading CDE...");
+        assert_eq!(
+            g.frame_at(n.as_ref(), t0 + panel::ELLIPSIS_STEP * 3).prompt,
+            "Loading CDE..."
+        );
     }
 
     #[test]
     fn an_error_reply_after_loading_returns_to_the_prompt_with_its_message() {
         let mut g = test_greeter();
-        g.loading = Some(Instant::now());
+        let mut n = loading(Instant::now());
         let err = View {
             prompt: "Username".into(),
             secret: false,
             message: Some("session failed".into()),
         };
-        assert!(g.accept(err.clone(), false), "loading cleared");
-        assert!(!g.loading());
-        let f = g.frame();
+        g.accept(err.clone(), false, &mut n);
+        assert!(n.is_none(), "loading cleared");
+        let f = g.frame(n.as_ref());
         assert_eq!(f.prompt, "Username");
         assert_eq!(f.field.as_deref(), Some(""));
         assert_eq!(f.message.as_deref(), Some("session failed"));
@@ -672,8 +648,8 @@ mod tests {
     #[test]
     fn the_started_session_keeps_the_loading_frame() {
         let mut g = test_greeter();
-        g.loading = Some(Instant::now());
-        assert!(!g.accept(g.view.clone(), true));
-        assert!(g.loading(), "the last frame stays Loading CDE");
+        let mut n = loading(Instant::now());
+        g.accept(g.view.clone(), true, &mut n);
+        assert!(n.is_some(), "the last frame stays Loading CDE");
     }
 }

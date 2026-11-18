@@ -10,7 +10,7 @@
 //! ## Scope
 //! Window previews are not rendered.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crucible_config::TilingConfig;
 use crucible_layout::{Projection, Rect};
@@ -119,10 +119,9 @@ pub struct FrameInputs {
     pub header: Option<HeaderLayout>,
     /// The header font size.
     pub header_size: u32,
-    /// The greeter login panel (greeter mode only).
-    pub greeter: Option<crate::greeter::panel::PanelFrame>,
-    /// The "Logging out" modal (plan 49), shown from the first quit until the loop stops.
-    pub logout: Option<crate::greeter::panel::PanelFrame>,
+    /// The one panel: the greeter's login panel or its "Loading CDE" notice (greeter mode), or
+    /// the session's "Logging out" modal (plan 49, from the first quit until the loop stops).
+    pub panel: Option<crate::greeter::panel::PanelFrame>,
 }
 
 /// The read-only state one output's frame is composed from: disjoint borrows of
@@ -185,8 +184,6 @@ pub fn cursor_on_output(
     })
 }
 
-use crate::greeter::panel::logout_frame;
-
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Starts `output`'s frame: resets a dead client cursor surface to the default, then builds
     /// the frame's owned [`FrameInputs`] (only this output's header is laid out).
@@ -220,11 +217,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
             overlay: self.overlay_chrome(),
             header,
             header_size: self.config.header.size,
-            greeter: self.greeter.as_ref().map(|g| g.frame()),
-            logout: self
-                .login_ready
-                .logging_out()
-                .map(|since| logout_frame(&self.config, since.elapsed())),
+            panel: self.panel_frame(),
+        }
+    }
+
+    /// This frame's panel: in greeter mode the greeter's (its login panel, or the hand-off
+    /// notice in its profile's look), else the hand-off notice's modal.
+    fn panel_frame(&self) -> Option<crate::greeter::panel::PanelFrame> {
+        let notice = self.handoff_notice.as_ref();
+        match &self.greeter {
+            Some(g) => Some(g.frame(notice)),
+            None => {
+                notice.map(|n| crate::greeter::panel::notice_frame(&self.config, n, Instant::now()))
+            }
         }
     }
 
@@ -296,7 +301,7 @@ where
         return (elements, crate::lock::LOCK_CLEAR_COLOR.into());
     }
     // The logout modal sits above a snip too (snip input already stopped): the snip is not drawn.
-    if let Some(snip) = view.snip.filter(|_| inputs.logout.is_none())
+    if let Some(snip) = view.snip.filter(|_| inputs.panel.is_none())
         && let Some(elements) = crate::snip::snip_elements(
             snip,
             view.output,
@@ -341,22 +346,9 @@ where
         );
     }
     let mut clear: Color32F = CLEAR_COLOR.into();
-    // The modal is above everything but the cursor (it follows the cursor/drag icon in the list).
-    // The lock branch above returns first: lock wins.
-    if let Some(panel) = &inputs.logout {
-        let size = view
-            .space
-            .output_geometry(view.output)
-            .map_or((0, 0), |g| (g.size.w, g.size.h));
-        custom.extend(crate::greeter::panel::build_panel_elements(
-            panel,
-            size,
-            &mut header_text.regular,
-            renderer,
-            scale,
-        ));
-    }
-    if let Some(panel) = &inputs.greeter {
+    // The panel is above everything but the cursor (it follows the cursor/drag icon in the
+    // list). The lock branch above returns first: lock wins.
+    if let Some(panel) = &inputs.panel {
         let size = view
             .space
             .output_geometry(view.output)

@@ -137,7 +137,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         if self.drop_wake_key::<I>(woke, kind, &mode, event) {
             return None;
         }
-        if drops_while_logging_out(kind, self.login_ready.logging_out().is_some()) {
+        if drops_while_logging_out(kind, self.logging_out()) {
             return None;
         }
         Some(mode)

@@ -6,10 +6,11 @@
 //!
 //! ## States
 //! - `Unlocked` — normal operation.
-//! - `Locking { pending, progress }` — a locker was accepted (its locker and per-output presented
-//!   set ride in the phase as [`LockProgress`]); every output shows black (plus its lock
-//!   surface) and CDE waits until each output has *presented* such a frame before it sends
-//!   `locked` (`SessionLocker::lock`).
+//! - `Locking { pending, progress }` — a locker was accepted (its [`SessionLocker`] rides in the
+//!   phase); every output shows black (plus its lock surface) and CDE waits until each lit output
+//!   has *presented* such a frame before it sends `locked` (`SessionLocker::lock`). The wait is
+//!   the presentation gate's lock arm ([`crate::present_gate::ArmKind::Lock`]), keyed to the
+//!   accepted lock.
 //! - `Locked { confirmed }` — `locked` was sent. If the confirmed lock object dies without a
 //!   valid unlock (the locker crashed) the session stays locked and black, and a new locker may
 //!   take the lock (it goes through `Locking` again).
@@ -45,6 +46,7 @@ use tracing::{info, warn};
 use crate::{
     element::WindowElement,
     focus::{KeyboardFocusTarget, PointerFocusTarget},
+    present_gate::ArmKind,
     render::CustomRenderElements,
     state::{Backend, CrucibleState},
 };
@@ -61,7 +63,7 @@ pub enum LockPhase<L, P = ()> {
     Locking {
         /// The accepted, not yet confirmed lock.
         pending: L,
-        /// What only exists while locking (the glue's [`LockProgress`]); handed back on
+        /// What only exists while locking (the glue's [`SessionLocker`]); handed back on
         /// confirmation and dropped with the phase otherwise.
         progress: P,
     },
@@ -96,14 +98,6 @@ impl<L, P> LockMachine<L, P> {
         &self.phase
     }
 
-    /// The `Locking` payload, while locking.
-    pub fn progress_mut(&mut self) -> Option<&mut P> {
-        match &mut self.phase {
-            LockPhase::Locking { progress, .. } => Some(progress),
-            _ => None,
-        }
-    }
-
     /// Whether the session is locked or locking (only lock surfaces and black are shown).
     #[must_use]
     pub fn is_locked(&self) -> bool {
@@ -136,11 +130,15 @@ impl<L, P> LockMachine<L, P> {
         true
     }
 
-    /// Every output presented a locked frame. Returns the `Locking` payload when this confirms the
-    /// pending lock (the caller then sends `locked`), `None` otherwise.
-    pub fn all_outputs_presented(&mut self) -> Option<P> {
+    /// Every output presented a locked frame for the lock `handle`. Returns the `Locking` payload
+    /// when this confirms that pending lock (the caller then sends `locked`), `None` otherwise (a
+    /// replaced lock's report never confirms its successor).
+    pub fn all_outputs_presented(&mut self, handle: &L) -> Option<P>
+    where
+        L: PartialEq,
+    {
         match std::mem::replace(&mut self.phase, LockPhase::Unlocked) {
-            LockPhase::Locking { pending, progress } => {
+            LockPhase::Locking { pending, progress } if pending == *handle => {
                 self.phase = LockPhase::Locked { confirmed: pending };
                 Some(progress)
             }
@@ -178,22 +176,11 @@ impl<L, P> LockMachine<L, P> {
 pub struct SessionLock {
     /// Smithay's `ext_session_lock_manager_v1` global state.
     pub manager: SessionLockManagerState,
-    /// The authoritative lock state; while `Locking` it carries the [`LockProgress`].
-    pub machine: LockMachine<ExtSessionLockV1, LockProgress>,
+    /// The authoritative lock state; while `Locking` it carries the accepted [`SessionLocker`]
+    /// (consumed to send `locked`).
+    pub machine: LockMachine<ExtSessionLockV1, SessionLocker>,
     /// Lock surfaces, one per output.
     surfaces: Vec<(Output, LockSurface)>,
-    /// Outputs (udev) whose last queued frame was rendered while locked.
-    queued: Vec<Output>,
-}
-
-/// What exists only while a lock is pending: the accepted locker (consumed to send `locked`) and
-/// the outputs that presented a locked frame since it was accepted.
-#[derive(Debug)]
-pub struct LockProgress {
-    /// The accepted locker.
-    locker: SessionLocker,
-    /// Outputs that presented a locked frame since the lock was accepted.
-    presented: Vec<Output>,
 }
 
 impl SessionLock {
@@ -204,15 +191,12 @@ impl SessionLock {
             manager,
             machine: LockMachine::default(),
             surfaces: Vec::new(),
-            queued: Vec::new(),
         }
     }
 
-    /// Forgets every lock surface and queued-locked-frame flag (on accepting a lock and on
-    /// unlocking).
+    /// Forgets every lock surface (on accepting a lock and on unlocking).
     fn reset_surfaces(&mut self) {
         self.surfaces.clear();
-        self.queued.clear();
     }
 
     /// Whether the session is locked or locking.
@@ -228,21 +212,6 @@ impl SessionLock {
             .iter()
             .find(|(o, s)| o == output && s.alive())
             .map(|(_, s)| s)
-    }
-
-    /// Records that `output`'s just-queued frame was (`locked`) or was not a locked frame (udev).
-    pub fn note_queued(&mut self, output: &Output, locked: bool) {
-        self.queued.retain(|o| o != output);
-        if locked {
-            self.queued.push(output.clone());
-        }
-    }
-
-    /// Consumes the "locked frame queued" flag of `output` (udev page-flip completion).
-    pub fn take_queued(&mut self, output: &Output) -> bool {
-        let had = self.queued.contains(output);
-        self.queued.retain(|o| o != output);
-        had
     }
 
     fn current_alive(&self) -> bool {
@@ -338,31 +307,13 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// Records that `output` presented a locked frame; confirms the lock once every output did.
-    pub(crate) fn lock_output_presented(&mut self, output: &Output) {
-        let Some(progress) = self.session_lock.machine.progress_mut() else {
-            return;
-        };
-        if !progress.presented.contains(output) {
-            progress.presented.push(output.clone());
-        }
-        self.lock_confirm_if_presented();
-    }
-
-    /// Confirms a pending lock once every output presented a locked frame or is powered off (an
-    /// off output shows nothing, so nothing unlocked is visible). Re-run after idle blanking.
-    pub(crate) fn lock_confirm_if_presented(&mut self) {
-        let LockPhase::Locking { progress, .. } = self.session_lock.machine.phase() else {
-            return;
-        };
-        let all = all_presented_or_off(
-            self.space.outputs(),
-            |o| progress.presented.contains(o),
-            |o| self.backend_data.output_powered_off(o),
-        );
-        if all && let Some(progress) = self.session_lock.machine.all_outputs_presented() {
+    /// The lock arm released: every lit output presented a frame queued after `handle` was
+    /// accepted (every such frame is a locked one), or no output is lit. Confirms `handle` if it is
+    /// still the pending lock — the machine moves to `Locked`, then `locked` is sent.
+    fn lock_confirm(&mut self, handle: &ExtSessionLockV1) {
+        if let Some(locker) = self.session_lock.machine.all_outputs_presented(handle) {
             info!("lock: every output presented a locked frame; session locked");
-            progress.locker.lock();
+            locker.lock();
         }
     }
 
@@ -427,14 +378,10 @@ impl<B: Backend + 'static> SessionLockHandler for CrucibleState<B> {
     fn lock(&mut self, confirmation: SessionLocker) {
         let handle = confirmation.ext_session_lock().clone();
         let alive = self.session_lock.current_alive();
-        let progress = LockProgress {
-            locker: confirmation,
-            presented: Vec::new(),
-        };
         if !self
             .session_lock
             .machine
-            .request_lock(handle, progress, alive)
+            .request_lock(handle.clone(), confirmation, alive)
         {
             info!("lock: refusing a lock request while already locked");
             // The refused request dropped the unconfirmed locker, which sends `finished`.
@@ -449,10 +396,15 @@ impl<B: Backend + 'static> SessionLockHandler for CrucibleState<B> {
         self.discard_snip();
         self.force_keyboard_focus(None);
         self.lock_redraw_all();
-        // Confirms at once when no output exists or every output is powered off by idle
-        // blanking (an off output renders nothing, so no frame would ever confirm it later).
-        // An output that is on and has not presented a locked frame still blocks confirmation.
-        self.lock_confirm_if_presented();
+        // The lock arm, keyed to this lock (a replaced lock's arm is dropped unrun). It confirms
+        // at once when no output is lit (an off output renders nothing, so no frame would ever
+        // confirm it later); a lit output that has not presented a locked frame blocks it.
+        drop(self.present_gate.disarm(ArmKind::Lock));
+        self.arm_present_gate(
+            ArmKind::Lock,
+            "lock",
+            Box::new(move |state| state.lock_confirm(&handle)),
+        );
     }
 
     fn unlock(&mut self) {
@@ -498,82 +450,25 @@ impl<B: Backend + 'static> SessionLockHandler for CrucibleState<B> {
     }
 }
 
-/// Whether every output either presented a locked frame or is powered off (the Smithay-free core
-/// of the lock-confirmation check).
-fn all_presented_or_off<O>(
-    mut outputs: impl Iterator<Item = O>,
-    presented: impl Fn(&O) -> bool,
-    powered_off: impl Fn(&O) -> bool,
-) -> bool {
-    outputs.all(|o| presented(&o) || powered_off(&o))
-}
-
-/// Whether a synchronous commit counts as its output's locked presentation (plan 44 invariant 5).
-///
-/// An output's start-up adoption commit is synchronous: it is on screen when the commit returns
-/// and no VBlank follows, so the `note_queued`/`take_queued` page-flip bookkeeping never sees it.
-/// It is the output's locked presentation iff it committed and was rendered while locked.
-pub(crate) fn sync_commit_presents_lock(rendered_locked: bool, committed: bool) -> bool {
-    rendered_locked && committed
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{LockMachine, LockPhase, all_presented_or_off, sync_commit_presents_lock};
+    use super::{LockMachine, LockPhase};
+
+    // The presentation rules (every lit output presents a post-acceptance frame, off outputs
+    // exempt, a synchronous adoption commit counts, output removal re-evaluates) are the gate's
+    // lock arm: `present_gate::tests`.
 
     #[test]
-    fn lock_during_pending_adoption_confirms_on_the_adoption_commit() {
-        // Two outputs: 1 adopted and presenting via page flips, 2 still pending adoption. A lock
-        // is accepted; output 1's locked frame flips, output 2 then adopts (synchronous commit,
-        // no VBlank, no later damage).
-        let mut m: LockMachine<u8, Vec<u8>> = LockMachine::default();
-        assert!(m.request_lock(1, Vec::new(), false));
-        m.progress_mut().unwrap().push(1);
-        let confirm = |m: &mut LockMachine<u8, Vec<u8>>| {
-            let presented = m.progress_mut().cloned().unwrap_or_default();
-            all_presented_or_off([1u8, 2].iter(), |o| presented.contains(o), |_| false)
-        };
-        assert!(!confirm(&mut m), "output 2 has shown nothing locked yet");
-        if sync_commit_presents_lock(m.is_locked(), true) {
-            m.progress_mut().unwrap().push(2);
-        }
-        assert!(confirm(&mut m));
-        assert!(m.all_outputs_presented().is_some());
-        assert_eq!(m.phase(), &LockPhase::Locked { confirmed: 1 });
-        // A failed or unlocked adoption commit presents nothing locked.
-        assert!(!sync_commit_presents_lock(true, false));
-        assert!(!sync_commit_presents_lock(false, true));
-    }
-
-    #[test]
-    fn lock_confirms_when_every_output_presented_or_off() {
-        let outputs = [1u8, 2, 3];
-        // 1 presented, 2 powered off, 3 neither: not confirmed.
-        assert!(!all_presented_or_off(
-            outputs.iter(),
-            |o| **o == 1,
-            |o| **o == 2
-        ));
-        // 3 also off: confirmed.
-        assert!(all_presented_or_off(
-            outputs.iter(),
-            |o| **o == 1,
-            |o| **o != 1
-        ));
-        // All presented, none off: confirmed (the pre-blanking behaviour).
-        assert!(all_presented_or_off(outputs.iter(), |_| true, |_| false));
-        // An output whose power-off failed is not off, so it must still present.
-        assert!(!all_presented_or_off(
-            outputs.iter(),
-            |o| **o != 2,
-            |_| false
-        ));
-        // No outputs: vacuously confirmed (as `lock` relies on).
-        assert!(all_presented_or_off(
-            std::iter::empty::<u8>(),
-            |_| false,
-            |_| false
-        ));
+    fn a_replaced_locks_confirmation_never_confirms_its_successor() {
+        let mut m: LockMachine<u8, &str> = LockMachine::default();
+        assert!(m.request_lock(1, "first", false));
+        // The pending locker died; a new one is accepted.
+        assert!(m.request_lock(2, "second", false));
+        assert_eq!(m.all_outputs_presented(&1), None, "a stale arm");
+        assert!(matches!(m.phase(), LockPhase::Locking { pending: 2, .. }));
+        assert_eq!(m.all_outputs_presented(&2), Some("second"));
+        assert_eq!(m.phase(), &LockPhase::Locked { confirmed: 2 });
+        assert_eq!(m.all_outputs_presented(&2), None, "confirms once");
     }
 
     #[test]
@@ -581,7 +476,7 @@ mod tests {
         let mut m = LockMachine::default();
         assert!(m.request_lock(1, (), false));
         assert!(m.is_locked());
-        assert!(m.all_outputs_presented().is_some());
+        assert!(m.all_outputs_presented(&1).is_some());
         assert_eq!(m.phase(), &LockPhase::Locked { confirmed: 1 });
         // Valid unlock_and_destroy: alive at the call, destroyed by the deferred check.
         assert!(m.unlock_called(true));
@@ -593,7 +488,7 @@ mod tests {
     fn b3_rejected_second_lock_and_its_invalid_unlock_leave_cde_locked() {
         let mut m = LockMachine::default();
         assert!(m.request_lock(1, (), false));
-        assert!(m.all_outputs_presented().is_some());
+        assert!(m.all_outputs_presented(&1).is_some());
         // A second locker while the confirmed one is alive is rejected.
         assert!(!m.request_lock(2, (), true));
         // Its invalid unlock: Smithay still calls unlock(); the confirmed lock stays alive.
@@ -606,7 +501,7 @@ mod tests {
     fn unlock_after_locker_death_stays_locked() {
         let mut m = LockMachine::default();
         assert!(m.request_lock(1, (), false));
-        assert!(m.all_outputs_presented().is_some());
+        assert!(m.all_outputs_presented(&1).is_some());
         assert!(!m.unlock_called(false));
         assert!(!m.unlock_check(false));
         assert!(m.is_locked());
@@ -616,7 +511,7 @@ mod tests {
     fn new_locker_after_death_is_accepted_and_relocks() {
         let mut m = LockMachine::default();
         assert!(m.request_lock(1, (), false));
-        assert!(m.all_outputs_presented().is_some());
+        assert!(m.all_outputs_presented(&1).is_some());
         assert!(m.request_lock(2, (), false));
         assert_eq!(
             m.phase(),
@@ -625,7 +520,7 @@ mod tests {
                 progress: ()
             }
         );
-        assert!(m.all_outputs_presented().is_some());
+        assert!(m.all_outputs_presented(&2).is_some());
         assert!(m.unlock_called(true));
         assert!(m.unlock_check(false));
         assert!(!m.is_locked());

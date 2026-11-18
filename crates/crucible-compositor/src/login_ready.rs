@@ -17,13 +17,13 @@ use std::fs::File;
 use std::io::Write as _;
 use std::os::fd::{FromRawFd as _, OwnedFd, RawFd};
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use smithay::output::Output;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use tracing::{info, warn};
 
-use crate::greeter::panel::ELLIPSIS_STEP;
+use crate::greeter::panel::LOGOUT_TEXT;
 use crate::startup::{
     GreeterReadyInputs, READY_TIMEOUT, ReadyInputs, elapsed_ms, greeter_ready, login_ready,
 };
@@ -222,17 +222,9 @@ pub struct LoginReady {
     backgrounds: HashSet<String>,
     /// The quit sequence.
     quit: QuitPhase,
-    /// When the "Logging out" modal started showing (`None` until the first quit).
-    logging_out: Option<Instant>,
 }
 
 impl LoginReady {
-    /// Since when the "Logging out" modal shows; `None` before the first quit.
-    #[must_use]
-    pub fn logging_out(&self) -> Option<Instant> {
-        self.logging_out
-    }
-
     /// Whether the rule is still being evaluated (armed and not yet held).
     #[must_use]
     pub fn pending(&self) -> bool {
@@ -382,9 +374,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
         true
     }
 
-    /// `Action::Quit` after the flush (plan 49): the first quit shows the "Logging out" modal,
-    /// holds idle blanking off, animates the ellipsis and arms the presentation gate; its release
-    /// runs [`Self::quit_released`]. A repeat before the release does nothing; after it, the
+    /// `Action::Quit` after the flush (plan 49): the first quit shows the "Logging out" notice
+    /// ([`CrucibleState::show_handoff_notice`]); its gate release runs [`Self::quit_released`]. A repeat before the release does nothing; after it, the
     /// repeat stops the loop at once.
     pub(crate) fn begin_quit(&mut self) {
         match self.login_ready.quit.request() {
@@ -394,31 +385,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.running.store(false, Ordering::SeqCst);
             }
             QuitRequest::Arm => {
-                self.login_ready.logging_out = Some(Instant::now());
-                self.set_idle_suppressed(true);
                 self.clear_pointer_focus();
-                let timer = Timer::from_duration(ELLIPSIS_STEP);
-                if let Err(err) = self.handle.insert_source(timer, |_, _, state| {
-                    state.redraw_all_outputs();
-                    TimeoutAction::ToDuration(ELLIPSIS_STEP)
-                }) {
-                    warn!(%err, "no ellipsis timer; the logout panel is static");
-                }
                 // The gate drops its continuation when already armed (never in a session): then
                 // the quit work runs at once rather than being lost.
-                if !self.arm_present_gate("logout", Box::new(|state| state.quit_released())) {
+                let then = Box::new(|state: &mut Self| state.quit_released());
+                if !self.show_handoff_notice(LOGOUT_TEXT, "logout", then) {
                     warn!("present gate already armed; quitting unpresented");
                     self.quit_released();
                 }
             }
-        }
-    }
-
-    /// Schedules a render on every mapped output.
-    fn redraw_all_outputs(&mut self) {
-        let outputs: Vec<_> = self.space.outputs().cloned().collect();
-        for o in &outputs {
-            B::schedule_render(self, o);
         }
     }
 

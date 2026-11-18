@@ -310,7 +310,6 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
             let backend = &mut state.backend_data.backend;
             let damage_tracker = &mut state.backend_data.damage_tracker;
             let age = backend.buffer_age().unwrap_or(0);
-            let locked = state.session_lock.is_locked();
             let view = frame_view!(state, &output, &inputs, state.dnd_icon.as_ref());
             let header_text = &mut state.header_text;
             let cursor = &mut state.cursor;
@@ -324,10 +323,9 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
                     })
             });
 
-            // A locked frame counts as presented once submitted (or when nothing changed since the
-            // last one: the first locked frame always carries damage, its clear colour differs).
-            let mut presented_locked = false;
-            // Plan 49: a submitted frame stands in for presentation (a nested proxy).
+            // Plan 49: a submitted frame stands in for presentation (a nested proxy), also when
+            // nothing changed since the last one (the first locked frame always carries damage,
+            // its clear colour differs).
             let mut submitted = false;
             match render_res {
                 Ok(render_output_result) => {
@@ -342,11 +340,9 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
                         if let Err(err) = backend.submit(Some(damage)) {
                             warn!("Failed to submit buffer: {}", err);
                         } else {
-                            presented_locked = locked;
                             submitted = true;
                         }
                     } else {
-                        presented_locked = locked;
                         submitted = true;
                     }
                 }
@@ -357,9 +353,6 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
                         .store(false, std::sync::atomic::Ordering::SeqCst);
                 }
                 Err(err) => warn!("Rendering error: {}", err),
-            }
-            if presented_locked {
-                state.lock_output_presented(&output);
             }
             if submitted {
                 state.present_gate_presented_now(&output);

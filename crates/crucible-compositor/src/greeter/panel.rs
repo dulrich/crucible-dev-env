@@ -89,22 +89,49 @@ pub(crate) fn ellipsis(elapsed: std::time::Duration) -> &'static str {
 /// The prompt of the "Logging out" modal.
 pub const LOGOUT_TEXT: &str = "Logging out";
 
-/// The modal's palette: the `greeter` block's style and accent (alpha from `overlay { alpha }`),
-/// or [`GreeterConfig::default`] without one (the tty1 default), as the published profile. It is
-/// always centred on the output; the greeter's `position` places only the login panel.
+/// The hand-off notice ("Loading CDE" in the greeter, "Logging out" in a session): its text and
+/// since when it shows (the ellipsis phase). The state holds at most one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandoffNotice {
+    /// The notice text; the animated ellipsis follows it.
+    pub text: &'static str,
+    /// Since when it shows.
+    pub since: std::time::Instant,
+}
+
+impl HandoffNotice {
+    /// The prompt at `now`: the text and its ellipsis.
+    #[must_use]
+    pub fn prompt_at(&self, now: std::time::Instant) -> String {
+        format!(
+            "{}{}",
+            self.text,
+            ellipsis(now.saturating_duration_since(self.since))
+        )
+    }
+}
+
+/// The session's notice panel (the "Logging out" modal) at `now`: the `greeter` block's style and
+/// accent (alpha from `overlay { alpha }`), or [`GreeterConfig::default`] without one (the tty1
+/// default), as the published profile. It is always centred on the output (the greeter's
+/// `position` places only the login panel) and keeps the session clear colour.
 #[must_use]
-pub fn logout_frame(config: &Config, elapsed: std::time::Duration) -> PanelFrame {
+pub fn notice_frame(
+    config: &Config,
+    notice: &HandoffNotice,
+    now: std::time::Instant,
+) -> PanelFrame {
     let default = GreeterConfig::default();
     let g = config.greeter.as_ref().unwrap_or(&default);
     PanelFrame {
-        prompt: format!("{LOGOUT_TEXT}{}", ellipsis(elapsed)),
+        prompt: notice.prompt_at(now),
         field: None,
         message: None,
         layout: None,
         palette: surface_palette(g.style, g.accent, config.theme.as_ref()),
         alpha: config.overlay.alpha,
         position: PanelPosition::Center,
-        clear: [0.0, 0.0, 0.0, 1.0],
+        clear: crate::render::CLEAR_COLOR,
     }
 }
 
@@ -322,12 +349,24 @@ mod tests {
 
     #[test]
     fn logout_frame_is_a_fieldless_prompt_with_the_animated_ellipsis() {
-        use std::time::Duration;
-        let f = logout_frame(&Config::default(), Duration::ZERO);
+        let n = logout(std::time::Instant::now());
+        let f = notice_frame(&Config::default(), &n, n.since);
         assert_eq!(f.prompt, "Logging out");
         assert_eq!((f.field, f.message, f.layout), (None, None, None));
-        let f = logout_frame(&Config::default(), ELLIPSIS_STEP * 3);
+        assert_eq!(
+            f.clear,
+            crate::render::CLEAR_COLOR,
+            "the session clear colour"
+        );
+        let f = notice_frame(&Config::default(), &n, n.since + ELLIPSIS_STEP * 3);
         assert_eq!(f.prompt, "Logging out...");
+    }
+
+    fn logout(since: std::time::Instant) -> HandoffNotice {
+        HandoffNotice {
+            text: LOGOUT_TEXT,
+            since,
+        }
     }
 
     #[test]
@@ -337,7 +376,8 @@ mod tests {
         assert!(none.greeter.is_none());
         let d = GreeterConfig::default();
         let want = surface_palette(d.style, d.accent, None);
-        let f = logout_frame(&none, std::time::Duration::ZERO);
+        let n = logout(std::time::Instant::now());
+        let f = notice_frame(&none, &n, n.since);
         assert_eq!((f.palette, f.position), (want, PanelPosition::Center));
         let block = GreeterConfig {
             style: SurfaceStyle::N1Light,
@@ -349,7 +389,7 @@ mod tests {
             greeter: Some(block.clone()),
             ..Config::default()
         };
-        let f = logout_frame(&cfg, std::time::Duration::ZERO);
+        let f = notice_frame(&cfg, &n, n.since);
         assert_eq!(f.palette, surface_palette(block.style, block.accent, None));
         assert_ne!(f.palette, want, "the block, not the default");
         assert_eq!(

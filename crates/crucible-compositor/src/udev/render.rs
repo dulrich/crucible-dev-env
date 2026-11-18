@@ -92,11 +92,9 @@ impl CrucibleState<UdevData> {
             (self.clock.now(), wp_presentation_feedback::Kind::Vsync)
         };
 
-        // Powered off: the flip that was pending at `clear()` time. Nothing is shown, so a locked
-        // frame it carried is not counted (the off output is exempt from the lock handshake).
+        // Powered off: the flip that was pending at `clear()` time. Nothing is shown, so it is not
+        // counted: the off output leaves the presentation gate (the lock arm's exemption).
         if surface.power.is_off() {
-            self.session_lock.take_queued(&output);
-            // An off output leaves the presentation gate's armed set.
             self.present_gate_prune();
             return;
         }
@@ -140,11 +138,7 @@ impl CrucibleState<UdevData> {
             }
         };
 
-        // E2: the page-flip of a locked frame completed, so that output now shows it.
-        if self.session_lock.take_queued(&output) {
-            self.lock_output_presented(&output);
-        }
-        // Plan 49: the flip of a frame queued after the gate armed presents this output.
+        // E2 / plan 49: the flip of a frame queued after an arm presents this output for it.
         self.present_gate_flipped(&output);
 
         if schedule_render {
@@ -233,7 +227,6 @@ impl CrucibleState<UdevData> {
 
         // Compose from disjoint field borrows: `renderer` holds `self.backend_data.gpus`; the
         // cursor is the separate `self.cursor` field.
-        let locked = self.session_lock.is_locked();
         let view = frame_view!(self, &output, &inputs, self.dnd_icon.as_ref());
         let (elements, clear_color) =
             frame_elements(view, &mut self.header_text, &mut self.cursor, &mut renderer);
@@ -275,9 +268,8 @@ impl CrucibleState<UdevData> {
                     .drm_output
                     .queue_frame(Some(feedback))
                     .map_err(Into::<SwapBuffersError>::into)?;
-                // E2: `frame_finish` counts this output as presented iff this frame was locked.
-                self.session_lock.note_queued(&output, locked);
-                // Plan 49: a frame queued now counts for the presentation gate once it flips.
+                // A frame queued now counts for every pending gate arm once it flips (after the
+                // lock arm, every frame is a locked one).
                 self.present_gate_queued(&output);
                 if let Some(surface) = self
                     .backend_data

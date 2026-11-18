@@ -374,7 +374,7 @@ fn drop_mapped_output(state: &mut CrucibleState<UdevData>, key: UdevOutputId) {
     state.space.unmap_output(&output);
     state.space.refresh();
     drop(record);
-    // A removed output leaves the presentation gate's armed set.
+    // A removed output leaves the presentation gate (a pending lock waiting on it re-evaluates).
     state.present_gate_prune();
 }
 
@@ -572,7 +572,6 @@ impl CrucibleState<UdevData> {
             "startup: adopting output"
         );
 
-        let locked = self.session_lock.is_locked();
         let inputs = deferred.then(|| self.begin_frame(&output));
         let mut renderer = self
             .backend_data
@@ -667,14 +666,10 @@ impl CrucibleState<UdevData> {
         self.night_light.cache.remove(&(node, crtc));
         self.evaluate_night_light();
 
-        // The adoption commit is synchronous and raises no VBlank: if it showed a locked frame,
-        // it is this output's locked presentation (no later damage need follow).
-        if deferred && crate::lock::sync_commit_presents_lock(locked, true) {
-            self.lock_output_presented(&output);
-        }
-        // Plan 49: the same synchronous commit presents the gate's post-arm frame (it was
-        // rendered just now). A non-deferred adoption committed nothing rendered: the kick-off
-        // render below queues one, and its flip reports as usual.
+        // The deferred adoption commit is synchronous and raises no VBlank: it presents the frame
+        // rendered just now (a locked one while a lock is pending) for every gate arm. A
+        // non-deferred adoption committed nothing rendered: the kick-off render below queues one,
+        // and its flip reports as usual.
         if deferred {
             self.present_gate_presented_now(&output);
         }

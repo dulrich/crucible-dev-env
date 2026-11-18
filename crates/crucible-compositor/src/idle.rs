@@ -145,10 +145,6 @@ pub struct IdleRuntime {
     /// Greeter diagnostics: set when the outputs blank, cleared by the next key press, which is
     /// then logged once (whether it woke the outputs and how many were off), never its key.
     pub trace_next_key: bool,
-    /// A hand-off panel ("Loading CDE", "Logging out") is showing: the idle tick treats the
-    /// session as inhibited, so the outputs never blank under it. Set via
-    /// [`CrucibleState::set_idle_suppressed`].
-    pub suppressed: bool,
     last_tick: Option<Instant>,
 }
 
@@ -233,11 +229,6 @@ impl<B: Backend + 'static> CrucibleState<B> {
         inhibited
     }
 
-    /// Suppresses idle blanking while `on` (a hand-off panel is showing; plan 49).
-    pub(crate) fn set_idle_suppressed(&mut self, on: bool) {
-        self.idle.suppressed = on;
-    }
-
     /// One timer tick at `now`: advances the machine and acts on its step.
     pub(crate) fn idle_tick(&mut self, now: Instant) {
         let elapsed = self
@@ -245,7 +236,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             .last_tick
             .replace(now)
             .map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
-        let inhibited = self.compute_idle_inhibited() || self.idle.suppressed;
+        // A hand-off notice ("Loading CDE", "Logging out") holds blanking off while it shows.
+        let inhibited = self.compute_idle_inhibited() || self.handoff_notice.is_some();
         let locked = self.is_session_locked();
         let config = self.config.idle;
         let step = self.idle.machine.tick(elapsed, inhibited, locked, &config);
@@ -258,10 +250,8 @@ impl<B: Backend + 'static> CrucibleState<B> {
             info!("idle: blanking outputs");
             B::set_outputs_powered(self, false);
             self.idle.trace_next_key = true;
-            // Outputs that just went dark may complete a pending lock. Harmless on winit: no output
-            // reports powered off there, so it only confirms what the render path would anyway.
-            self.lock_confirm_if_presented();
-            // ... and leave the presentation gate's armed set.
+            // Outputs that just went dark leave the presentation gate (and may confirm a pending
+            // lock). Harmless on winit: no output reports powered off there.
             self.present_gate_prune();
         }
         if step.lock {
