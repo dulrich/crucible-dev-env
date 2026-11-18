@@ -3,8 +3,8 @@
     {
       "path": "dist/systemd/cde-login.service",
       "scope": "system",
-      "ceiling": 9.6,
-      "reason": "a display-manager root service whose sandbox would be inherited by every user session, so no sandboxing directive applies"
+      "ceiling": 9.8,
+      "reason": "a display-manager root service whose sandbox would be inherited by every user session, so no sandboxing directive applies; 9.8 because the host baseline scores the loaded unit online, which also counts PrivateMounts= (offline 9.6, online 9.8 on systemd 257, measured on host-b 2026-11-17)"
     }
   ]
 }
