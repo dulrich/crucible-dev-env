@@ -351,6 +351,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub reveal_holds: crate::reveal_hold::RevealHolds<Output, WlSurface>,
     /// The login ready rule and readiness fd (plan 45).
     pub login_ready: crate::login_ready::LoginReady,
+    /// The quit sequence (plan 46/49).
+    pub quit: crate::login_ready::QuitPhase,
     /// IPC captures of a held output, answered once the hold releases.
     pub pending_captures: Vec<crate::capture::PendingCapture>,
     /// Greeter mode (`crucible greeter`): the login panel and greetd worker; `None` normally.
@@ -542,6 +544,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             snip: None,
             reveal_holds: crate::reveal_hold::RevealHolds::default(),
             login_ready: crate::login_ready::LoginReady::default(),
+            quit: crate::login_ready::QuitPhase::default(),
             pending_captures: Vec::new(),
             xwm: None,
             xdisplay: None,
@@ -571,5 +574,29 @@ impl<B: Backend + 'static> CrucibleState<B> {
             present_gate: crate::present_gate::PresentGate::default(),
             handoff_notice: None,
         }
+    }
+
+    /// The mode start, first half (right after `init`): the greeter, or a session's `config`
+    /// and persistence (slot pins, IPC socket, 1 s auto-save/config tick).
+    pub fn start_mode(&mut self, config: Config, greeter: Option<crate::greeter::GreeterSetup>) {
+        match greeter {
+            Some(setup) => self.start_greeter(setup),
+            None => {
+                self.apply_config(config);
+                self.start_persistence();
+            }
+        }
+    }
+
+    /// The mode start, second half (just before the main loop): XWayland for a session (which
+    /// starts at its first outcome), then the mode's ready rule on the fd taken at entry.
+    pub fn finish_mode_start(&mut self, ready_fd: Option<crate::login_ready::ReadyFd>) {
+        let rule = if self.greeter.is_some() {
+            crate::login_ready::ReadyRule::Greeter
+        } else {
+            self.start_xwayland();
+            crate::login_ready::ReadyRule::Session
+        };
+        self.arm_login_ready(ready_fd, rule);
     }
 }

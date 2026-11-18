@@ -84,6 +84,7 @@ use crate::{
     element::WindowElement,
     night_light::{Decision, model::ramp},
     render::OutputRenderElements,
+    startup::{StartupEvent, StartupPhase},
     state::{Backend, CrucibleState},
 };
 
@@ -129,13 +130,10 @@ pub struct UdevData {
     /// The `zwp_linux_dmabuf_v1` state and global; `None` until the primary renderer exists (or
     /// when it could not be created).
     dmabuf_state: Option<(DmabufState, DmabufGlobal)>,
-    /// Start-up adoption window (plan 44): while open, a connected output's DRM adoption waits
-    /// for its wallpaper; closed by the [`crate::startup::ADOPTION_TIMEOUT`] timer.
-    adoption_window_open: bool,
-    /// Background start (plan 45): the libseat session was inactive at start and has not been
-    /// activated yet. While set, devices stay paused, nothing is committed, tested or disabled on
-    /// DRM, and every output's adoption waits for the first `ActivateSession`.
-    background_start: bool,
+    /// The start-up phase (plans 44/45): a background start awaiting activation, the adoption
+    /// window open, or running. On a background start devices stay paused and nothing is
+    /// committed, tested or disabled on DRM until the first `ActivateSession`.
+    phase: StartupPhase,
     /// Devices that could not be added during a background start, retried at activation.
     deferred_devices: Vec<(libc::dev_t, std::path::PathBuf)>,
 }
@@ -302,24 +300,16 @@ impl Backend for UdevData {
     /// an idle callback: the commit handler is no place for a DRM commit and a render.
     fn background_buffer_committed(state: &mut CrucibleState<Self>, output: &Output) {
         // A background start adopts every output at session activation instead (plan 45).
-        if state.backend_data.background_start {
+        if !state.backend_data.phase.adopts_on_wallpaper() {
             return;
         }
         let Some(id) = output.user_data().get::<UdevOutputId>().copied() else {
             return;
         };
-        let pending: Vec<crtc::Handle> = state
-            .backend_data
-            .backends
-            .get(&id.device_id)
-            .map(|gpu| gpu.pending.keys().copied().collect())
-            .unwrap_or_default();
-        for crtc in crate::startup::ready_to_adopt(&pending, Some(id.crtc), false) {
-            let node = id.device_id;
-            state
-                .handle
-                .insert_idle(move |state| state.adopt_pending(node, crtc));
-        }
+        // Only this output's entry; an output not pending (adopted already) is a no-op there.
+        state
+            .handle
+            .insert_idle(move |state| state.adopt_pending(id.device_id, Some(id.crtc)));
     }
 
     /// Enqueues a real `render_surface` for a released reveal hold, as the wake path does; a
@@ -450,8 +440,8 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     };
     // Plan 45: a session that is inactive at start (a login daemon starting CDE on a background
     // VT) defers every DRM adoption to its first activation.
-    let background_start = !session.is_active();
-    if background_start {
+    let phase = StartupPhase::at_start(session.is_active());
+    if phase.background() {
         info!(
             elapsed_ms = crate::startup::elapsed_ms(),
             "startup: background start"
@@ -485,31 +475,23 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
         backends: HashMap::new(),
         keyboards: Vec::new(),
         dmabuf_state: None,
-        adoption_window_open: true,
-        background_start,
+        phase,
         deferred_devices: Vec::new(),
     };
     let startup_config = match &greeter {
         Some(g) => crate::greeter::greeter_config(&g.profile),
         None => crate::config::load_startup_config(),
     };
+    let greeter_mode = greeter.is_some();
     let mut state = CrucibleState::init(
         display,
         event_loop.handle(),
         data,
         true,
         &startup_config.keyboard,
-        greeter.is_some(),
+        greeter_mode,
     );
-    let greeter_mode = greeter.is_some();
-    match greeter {
-        Some(setup) => state.start_greeter(setup),
-        None => {
-            state.apply_config(startup_config);
-            // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
-            state.start_persistence();
-        }
-    }
+    state.start_mode(startup_config, greeter);
 
     // Initialize the udev backend (GPU enumeration + hotplug).
     let udev_backend = match UdevBackend::new(&state.seat_name) {
@@ -531,7 +513,7 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     // Plan 45: on a background start logind will not hand out live evdev fds for the inactive
     // session, so the devices just opened are dead. Suspend now so the first `ActivateSession`'s
     // `resume()` re-opens them (resume on a never-suspended context is a no-op).
-    if state.backend_data.background_start {
+    if state.backend_data.phase.background() {
         libinput_context.suspend();
         info!("startup: libinput suspended until session activation");
     }
@@ -574,20 +556,16 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
                 // Plan 46: a pause after a delivered quit notice ends the session.
                 data.quit_on_pause();
             }
-            SessionEvent::ActivateSession if data.backend_data.background_start => {
-                info!("resuming session");
-                data.backend_data.background_start = false;
-                data.night_light.cache.invalidate_all();
-                if let Err(err) = libinput_context.resume() {
-                    error!("Failed to resume libinput context: {:?}", err);
-                }
-                data.activate_background_start();
-            }
             SessionEvent::ActivateSession => {
                 info!("resuming session");
                 data.night_light.cache.invalidate_all();
                 if let Err(err) = libinput_context.resume() {
                     error!("Failed to resume libinput context: {:?}", err);
+                }
+                // The first activation of a background start adopts every output (plan 45).
+                if data.backend_data.phase.advance(StartupEvent::Activated) {
+                    data.activate_background_start();
+                    return;
                 }
                 let nodes: Vec<DrmNode> = data.backend_data.backends.keys().copied().collect();
                 let was_off: Vec<(DrmNode, crtc::Handle)> = data
@@ -706,13 +684,6 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
         })
         .unwrap();
 
-    // Bring up XWayland so X11 apps run alongside Wayland clients.
-    // The session (restore / cold-start picker / warm overlay host) starts at the first XWayland
-    // outcome so its X11 spawns get a real `DISPLAY`; see `CrucibleState::on_xwayland_outcome`.
-    if !greeter_mode {
-        state.start_xwayland();
-    }
-
     info!(
         elapsed_ms = crate::startup::elapsed_ms(),
         "startup: main loop starting"
@@ -721,7 +692,7 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     // Plan 44: outputs still waiting for their wallpaper are adopted this long after main-loop
     // start, and the CRTCs CDE did not adopt are then disabled. A background start (plan 45) runs
     // no such timer: its adoption happens at the first `ActivateSession`.
-    if !state.backend_data.background_start {
+    if state.backend_data.phase.adopts_on_wallpaper() {
         event_loop
             .handle()
             .insert_source(
@@ -733,9 +704,9 @@ pub fn run_udev_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
             )
             .expect("failed to schedule the start-up adoption timeout");
     }
-    // Plan 45: the login ready rule (and readiness fd) from main-loop start; plan 46: the greeter
-    // arms its own rule.
-    state.arm_login_ready(ready_fd, greeter_mode);
+    // XWayland for a session, then the login ready rule (and readiness fd) from main-loop start
+    // (plan 45; plan 46: the greeter arms its own rule).
+    state.finish_mode_start(ready_fd);
     while state.running.load(Ordering::SeqCst) {
         let result = event_loop.dispatch(Some(Duration::from_millis(16)), &mut state);
         if result.is_err() {

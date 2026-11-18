@@ -40,6 +40,7 @@ use tracing::{debug, info, warn};
 use crate::{
     element::WindowElement,
     render::{frame_elements, frame_view},
+    startup::StartupEvent,
     state::CrucibleState,
 };
 
@@ -249,6 +250,19 @@ pub(super) struct PendingAdoption {
     connector: connector::Handle,
     mode: drm_control::Mode,
     planes: Planes,
+}
+
+/// The start-up adoptions due now (plan 44), taken from `pending`: the entry a wallpaper buffer
+/// `landed` on (nothing if it is not pending, e.g. adopted already), or every one at the window's
+/// close (`None`).
+fn due_adoptions<K: Eq + std::hash::Hash + Copy, P>(
+    pending: &mut HashMap<K, P>,
+    landed: Option<K>,
+) -> Vec<(K, P)> {
+    match landed {
+        Some(key) => pending.remove(&key).map(|p| (key, p)).into_iter().collect(),
+        None => pending.drain().collect(),
+    }
 }
 
 /// One mapped output's backend record: adopted (it has a swapchain) or still pending adoption.
@@ -492,7 +506,7 @@ impl CrucibleState<UdevData> {
 
         // Start-up (plan 44): the first commit waits for this output's wallpaper buffer, or for
         // the adoption timeout. An output connected later adopts at once, as before.
-        if self.backend_data.adoption_window_open {
+        if self.backend_data.phase.defers_adoption() {
             info!(
                 elapsed_ms = crate::startup::elapsed_ms(),
                 output = %output.name(),
@@ -507,33 +521,25 @@ impl CrucibleState<UdevData> {
         self.adopt_output(node, crtc, pending, false);
     }
 
-    /// Adopts a pending start-up output if it is still pending (a wallpaper buffer landed on it).
-    pub(super) fn adopt_pending(&mut self, node: DrmNode, crtc: crtc::Handle) {
-        let Some(pending) = self
-            .backend_data
-            .backends
-            .get_mut(&node)
-            .and_then(|device| device.pending.remove(&crtc))
-        else {
+    /// Adopts `node`'s start-up outputs [`due_adoptions`] names: the one a wallpaper `landed` on
+    /// (if still pending), or all of them.
+    pub(super) fn adopt_pending(&mut self, node: DrmNode, landed: Option<crtc::Handle>) {
+        let Some(device) = self.backend_data.backends.get_mut(&node) else {
             return;
         };
-        self.adopt_output(node, crtc, pending, true);
+        for (crtc, pending) in due_adoptions(&mut device.pending, landed) {
+            self.adopt_output(node, crtc, pending, true);
+        }
     }
 
-    /// Closes the start-up adoption window (the timeout): adopts every still-pending output, then
-    /// disables the CRTCs CDE did not adopt (`DrmDevice::new(fd, false)` keeps them as found).
+    /// Closes the start-up adoption window (the timeout, or a background start's activation):
+    /// adopts every still-pending output, then disables the CRTCs CDE did not adopt
+    /// (`DrmDevice::new(fd, false)` keeps them as found).
     pub(super) fn finish_startup_adoption(&mut self) {
-        self.backend_data.adoption_window_open = false;
+        self.backend_data.phase.advance(StartupEvent::WindowClosed);
         let nodes: Vec<DrmNode> = self.backend_data.backends.keys().copied().collect();
         for node in &nodes {
-            let pending: Vec<crtc::Handle> = self.backend_data.backends[node]
-                .pending
-                .keys()
-                .copied()
-                .collect();
-            for crtc in crate::startup::ready_to_adopt(&pending, None, true) {
-                self.adopt_pending(*node, crtc);
-            }
+            self.adopt_pending(*node, None);
         }
         for node in nodes {
             self.disable_unadopted_crtcs(node);
@@ -712,6 +718,31 @@ impl CrucibleState<UdevData> {
 mod tests {
     use super::*;
     use smithay::backend::allocator::{Format, Fourcc, Modifier};
+
+    #[test]
+    fn a_wallpaper_adopts_only_its_own_pending_output() {
+        let mut pending: HashMap<u8, &str> = HashMap::from([(1, "p1"), (2, "p2")]);
+        assert_eq!(due_adoptions(&mut pending, Some(2)), vec![(2, "p2")]);
+        assert_eq!(pending.len(), 1, "output 1 keeps waiting");
+    }
+
+    #[test]
+    fn a_wallpaper_on_an_output_not_pending_adopts_nothing() {
+        // Output 3 is adopted already (or not ours): pending 1 keeps waiting.
+        let mut pending: HashMap<u8, &str> = HashMap::from([(1, "p1")]);
+        assert!(due_adoptions(&mut pending, Some(3)).is_empty());
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn the_window_close_adopts_every_pending_output() {
+        let mut pending: HashMap<u8, &str> = HashMap::from([(1, "p1"), (2, "p2")]);
+        let mut due = due_adoptions(&mut pending, None);
+        due.sort_unstable();
+        assert_eq!(due, vec![(1, "p1"), (2, "p2")]);
+        assert!(pending.is_empty());
+        assert!(due_adoptions(&mut pending, None).is_empty());
+    }
 
     #[test]
     fn disconnect_before_adoption_takes_the_pending_record() {

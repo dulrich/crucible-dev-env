@@ -160,22 +160,17 @@ impl QuitPhase {
         }
     }
 
-    /// The gate released: the first quit's work ([`QuitPhase::on_quit`]). Returns whether to exit
-    /// now; nothing unless a request was pending.
+    /// The gate released: the first quit's work. `notice_delivered` reports whether `quit\n`
+    /// reached the daemon (asked only here, once). Returns whether to exit now; nothing unless a
+    /// request was pending.
     pub fn on_release(&mut self, notice_delivered: impl FnOnce() -> bool) -> bool {
         if *self != Self::Gated {
             return false;
         }
-        *self = Self::Running;
-        self.on_quit(notice_delivered)
-    }
-
-    /// A quit request; `notice_delivered` reports whether `quit\n` reached the daemon (only asked
-    /// on the first quit). Returns whether to exit now.
-    pub fn on_quit(&mut self, notice_delivered: impl FnOnce() -> bool) -> bool {
-        *self = match *self {
-            Self::Running if notice_delivered() => Self::AwaitingPause,
-            _ => Self::Exiting,
+        *self = if notice_delivered() {
+            Self::AwaitingPause
+        } else {
+            Self::Exiting
         };
         *self == Self::Exiting
     }
@@ -206,55 +201,101 @@ impl QuitPhase {
     }
 }
 
+/// Which ready rule applies, chosen when the rule is armed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadyRule {
+    /// The session's rule ([`login_ready`]); the fd stays open after `ready\n` (the session channel).
+    Session,
+    /// The greeter's rule ([`greeter_ready`]); the fd closes after `ready\n`.
+    Greeter,
+}
+
+/// The readiness signal's phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ReadyPhase {
+    /// Not armed yet.
+    #[default]
+    Inert,
+    /// Armed: `rule` is evaluated until it holds or [`READY_TIMEOUT`] passed (`timed_out`).
+    Pending { rule: ReadyRule, timed_out: bool },
+    /// The rule held (or timed out); `ready\n` went out if an fd was passed.
+    Signalled,
+}
+
 /// The ready-rule tracking (a field of [`CrucibleState`]); inert until [`CrucibleState::arm_login_ready`].
 #[derive(Debug, Default)]
 pub struct LoginReady {
-    armed: bool,
-    done: bool,
-    timed_out: bool,
-    /// Greeter mode: the greeter rule, and the fd closes after `ready\n`.
-    greeter: bool,
+    phase: ReadyPhase,
     /// The readiness fd; in a session it stays open after `ready\n` as the session channel.
     fd: Option<ReadyFd>,
     /// The PIDs the session step spawned for the active workspaces; `None` until it ran.
     awaited: Option<Vec<u32>>,
     /// Names of the outputs a background-layer buffer landed on.
     backgrounds: HashSet<String>,
-    /// The quit sequence.
-    quit: QuitPhase,
 }
 
 impl LoginReady {
     /// Whether the rule is still being evaluated (armed and not yet held).
     #[must_use]
     pub fn pending(&self) -> bool {
-        self.armed && !self.done
+        matches!(self.phase, ReadyPhase::Pending { .. })
     }
 
     /// Whether the rule held (or timed out) already.
     #[must_use]
     pub fn done(&self) -> bool {
-        self.done
+        self.phase == ReadyPhase::Signalled
+    }
+
+    fn arm(&mut self, fd: Option<ReadyFd>, rule: ReadyRule) {
+        self.phase = ReadyPhase::Pending {
+            rule,
+            timed_out: false,
+        };
+        self.fd = fd;
+    }
+
+    fn time_out(&mut self) {
+        if let ReadyPhase::Pending { timed_out, .. } = &mut self.phase {
+            *timed_out = true;
+        }
+    }
+
+    /// Marks the rule signalled and writes `ready\n` (if an fd was passed); whether one was. A
+    /// failed write drops the fd (no channel: a later quit exits at once); the greeter's rule
+    /// closes it (no quit notice).
+    fn signal(&mut self, rule: ReadyRule) -> bool {
+        self.phase = ReadyPhase::Signalled;
+        let Some(fd) = self.fd.as_ref() else {
+            return false;
+        };
+        if let Err(err) = fd.signal() {
+            warn!(%err, "cannot write the login readiness fd");
+            self.fd = None;
+        }
+        if rule == ReadyRule::Greeter {
+            self.fd = None;
+        }
+        true
     }
 
     /// Sends `quit\n` on the session channel; delivered only once `ready\n` went out on a live
     /// channel (never in greeter mode, whose fd is closed by then).
     fn send_quit(&self) -> bool {
-        self.done && self.fd.as_ref().is_some_and(ReadyFd::send_quit)
+        self.done() && self.fd.as_ref().is_some_and(ReadyFd::send_quit)
     }
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Starts the ready-rule tracking with the inherited readiness fd (if any) and arms its
-    /// [`READY_TIMEOUT`]; `greeter` selects the greeter's rule. Call just before the main loop.
-    pub fn arm_login_ready(&mut self, fd: Option<ReadyFd>, greeter: bool) {
-        self.login_ready.armed = true;
-        self.login_ready.greeter = greeter;
-        self.login_ready.fd = fd;
+    /// [`READY_TIMEOUT`]; `rule` selects the session's or the greeter's rule. Call just before the
+    /// main loop (from [`CrucibleState::finish_mode_start`]).
+    pub(crate) fn arm_login_ready(&mut self, fd: Option<ReadyFd>, rule: ReadyRule) {
+        self.login_ready.arm(fd, rule);
         let timer =
             self.handle
                 .insert_source(Timer::from_duration(READY_TIMEOUT), |_, _, state| {
-                    state.login_ready.timed_out = true;
+                    state.login_ready.time_out();
                     state.check_login_ready();
                     TimeoutAction::Drop
                 });
@@ -269,11 +310,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         self.login_ready.awaited = Some(pids);
     }
 
-    /// A background-layer buffer landed on `output`.
-    pub(crate) fn note_background_landed(&mut self, output: &Output) {
+    /// The one background-landed hook: a background buffer committed on `output`. Feeds the
+    /// start-up diagnostic, the readiness set (while pending) and the backend's adoption.
+    pub(crate) fn background_landed(&mut self, output: &Output) {
+        crate::startup::note_background_buffer_committed();
         if self.login_ready.pending() {
             self.login_ready.backgrounds.insert(output.name());
         }
+        B::background_buffer_committed(self, output);
     }
 
     fn output_counts(&self) -> (usize, usize) {
@@ -309,76 +353,51 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// The greeter's ready-rule inputs sampled from the live state.
+    /// The greeter's ready-rule inputs (armed only after `start_greeter`, so swaybg is known).
     fn greeter_ready_inputs(&self) -> GreeterReadyInputs {
         let (outputs, outputs_with_background) = self.output_counts();
-        let swaybg = self.greeter_has_swaybg();
         GreeterReadyInputs {
-            panel_prepared: swaybg.is_some(),
-            background_expected: swaybg.unwrap_or(false),
+            background_expected: self.greeter_has_swaybg().unwrap_or(false),
             outputs,
             outputs_with_background,
         }
     }
 
-    /// Evaluates the ready rule; the first time it holds, signals the readiness fd (if any) and
-    /// logs `startup: login ready`. Cheap no-op once done or when not armed.
+    /// Evaluates the armed rule once; the first time it holds, signals the readiness fd (if any)
+    /// and logs `startup: login ready`. Cheap no-op once done or when not armed.
     pub fn check_login_ready(&mut self) {
-        if !self.login_ready.pending() {
+        let ReadyPhase::Pending { rule, timed_out } = self.login_ready.phase else {
+            return;
+        };
+        let (holds, inputs): (bool, Box<dyn std::fmt::Debug>) = match rule {
+            ReadyRule::Session => {
+                let i = self.ready_inputs();
+                (login_ready(i, timed_out), Box::new(i))
+            }
+            ReadyRule::Greeter => {
+                let i = self.greeter_ready_inputs();
+                (greeter_ready(i, timed_out), Box::new(i))
+            }
+        };
+        if !holds {
             return;
         }
-        let timed_out = self.login_ready.timed_out;
-        if self.login_ready.greeter {
-            let inputs = self.greeter_ready_inputs();
-            if !greeter_ready(inputs, timed_out) {
-                return;
-            }
-            let signalled = self.signal_ready();
-            // The greeter has no quit notice: close the fd now.
-            self.login_ready.fd = None;
-            info!(
-                elapsed_ms = elapsed_ms(),
-                timed_out,
-                signalled,
-                greeter = true,
-                ?inputs,
-                "startup: login ready"
-            );
-        } else {
-            let inputs = self.ready_inputs();
-            if !login_ready(inputs, timed_out) {
-                return;
-            }
-            let signalled = self.signal_ready();
-            info!(
-                elapsed_ms = elapsed_ms(),
-                timed_out,
-                signalled,
-                ?inputs,
-                "startup: login ready"
-            );
-        }
-    }
-
-    /// Marks the rule done and writes `ready\n` (if an fd was passed); whether one was. A failed
-    /// write drops the fd (no channel: a later quit exits at once).
-    fn signal_ready(&mut self) -> bool {
-        self.login_ready.done = true;
-        let Some(fd) = self.login_ready.fd.as_ref() else {
-            return false;
-        };
-        if let Err(err) = fd.signal() {
-            warn!(%err, "cannot write the login readiness fd");
-            self.login_ready.fd = None;
-        }
-        true
+        let signalled = self.login_ready.signal(rule);
+        info!(
+            elapsed_ms = elapsed_ms(),
+            timed_out,
+            signalled,
+            greeter = rule == ReadyRule::Greeter,
+            ?inputs,
+            "startup: login ready"
+        );
     }
 
     /// `Action::Quit` after the flush (plan 49): the first quit shows the "Logging out" notice
     /// ([`CrucibleState::show_handoff_notice`]); its gate release runs [`Self::quit_released`]. A repeat before the release does nothing; after it, the
     /// repeat stops the loop at once.
     pub(crate) fn begin_quit(&mut self) {
-        match self.login_ready.quit.request() {
+        match self.quit.request() {
             QuitRequest::Pending => info!("logout: repeat quit while the modal is held; ignored"),
             QuitRequest::Exit => {
                 info!("logout: second quit, exiting");
@@ -401,21 +420,19 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// the quit notice on a live session channel and keeps running until the session pauses or
     /// [`QUIT_TIMEOUT`]; else (no channel or not delivered) stops the loop at once.
     fn quit_released(&mut self) {
-        let mut quit = self.login_ready.quit;
-        let exit = quit.on_release(|| self.login_ready.send_quit());
-        self.login_ready.quit = quit;
-        if exit {
+        let login_ready = &self.login_ready;
+        if self.quit.on_release(|| login_ready.send_quit()) {
             self.running.store(false, Ordering::SeqCst);
             return;
         }
-        if !self.login_ready.quit.awaiting() {
+        if !self.quit.awaiting() {
             return;
         }
         info!("logout: quit notice sent");
         let timer = self
             .handle
             .insert_source(Timer::from_duration(QUIT_TIMEOUT), |_, _, state| {
-                if state.login_ready.quit.on_timeout() {
+                if state.quit.on_timeout() {
                     info!("logout: timeout, exiting");
                     state.running.store(false, Ordering::SeqCst);
                 }
@@ -429,7 +446,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// The session paused: after a delivered quit notice, stop the loop.
     pub(crate) fn quit_on_pause(&mut self) {
-        if self.login_ready.quit.on_pause() {
+        if self.quit.on_pause() {
             info!("logout: paused, exiting");
             self.running.store(false, Ordering::SeqCst);
         }
@@ -493,17 +510,69 @@ mod tests {
             ..LoginReady::default()
         };
         assert!(!lr.send_quit(), "ready not sent yet");
-        lr.done = true;
+        lr.phase = ReadyPhase::Signalled;
         assert!(lr.send_quit());
         lr.fd = None;
         assert!(!lr.send_quit(), "no channel");
     }
 
     #[test]
+    fn readiness_goes_pending_then_signalled_and_the_session_keeps_its_channel() {
+        let (mut rd, fd, _) = adopted_pipe();
+        let mut lr = LoginReady::default();
+        assert!(!lr.pending() && !lr.done(), "inert until armed");
+        lr.arm(Some(fd), ReadyRule::Session);
+        assert!(lr.pending() && !lr.done());
+        assert!(lr.signal(ReadyRule::Session), "an fd was passed");
+        assert!(lr.done() && !lr.pending());
+        assert!(lr.send_quit(), "the session channel stays open");
+        drop(lr);
+        let mut got = String::new();
+        rd.read_to_string(&mut got).expect("read to EOF");
+        assert_eq!(got, "ready\nquit\n");
+    }
+
+    #[test]
+    fn readiness_timeout_is_recorded_only_while_pending() {
+        let mut lr = LoginReady::default();
+        lr.time_out();
+        assert_eq!(lr.phase, ReadyPhase::Inert, "no timeout before arming");
+        lr.arm(None, ReadyRule::Greeter);
+        lr.time_out();
+        assert_eq!(
+            lr.phase,
+            ReadyPhase::Pending {
+                rule: ReadyRule::Greeter,
+                timed_out: true
+            }
+        );
+        assert!(!lr.signal(ReadyRule::Greeter), "no fd was passed");
+        lr.time_out();
+        assert_eq!(lr.phase, ReadyPhase::Signalled);
+    }
+
+    #[test]
+    fn the_greeter_closes_its_fd_after_ready() {
+        let (mut rd, fd, _) = adopted_pipe();
+        let mut lr = LoginReady::default();
+        lr.arm(Some(fd), ReadyRule::Greeter);
+        assert!(lr.signal(ReadyRule::Greeter));
+        assert!(
+            lr.fd.is_none() && !lr.send_quit(),
+            "no quit notice in greeter mode"
+        );
+        let mut got = String::new();
+        // EOF while `lr` is alive: the fd closed right after `ready`.
+        rd.read_to_string(&mut got).expect("read to EOF");
+        assert_eq!(got, "ready\n");
+    }
+
+    #[test]
     fn quit_notice_then_pause_exits() {
         let mut q = QuitPhase::default();
         assert!(!q.on_pause(), "a pause without a quit is a VT switch");
-        assert!(!q.on_quit(|| true));
+        assert_eq!(q.request(), QuitRequest::Arm);
+        assert!(!q.on_release(|| true));
         assert!(q.awaiting());
         assert!(q.on_pause());
         assert_eq!(q, QuitPhase::Exiting);
@@ -513,7 +582,8 @@ mod tests {
     #[test]
     fn quit_notice_then_timeout_exits() {
         let mut q = QuitPhase::default();
-        assert!(!q.on_quit(|| true));
+        assert_eq!(q.request(), QuitRequest::Arm);
+        assert!(!q.on_release(|| true));
         assert!(q.on_timeout());
         assert!(!q.on_pause());
     }
@@ -521,14 +591,17 @@ mod tests {
     #[test]
     fn second_quit_exits_without_a_second_notice() {
         let mut q = QuitPhase::default();
-        assert!(!q.on_quit(|| true));
-        assert!(q.on_quit(|| panic!("no second notice")));
+        assert_eq!(q.request(), QuitRequest::Arm);
+        assert!(!q.on_release(|| true));
+        assert_eq!(q.request(), QuitRequest::Exit);
+        assert!(!q.on_release(|| panic!("no second notice")));
     }
 
     #[test]
     fn undelivered_quit_exits_at_once() {
         let mut q = QuitPhase::default();
-        assert!(q.on_quit(|| false));
+        assert_eq!(q.request(), QuitRequest::Arm);
+        assert!(q.on_release(|| false));
         assert_eq!(q, QuitPhase::Exiting);
     }
 

@@ -335,8 +335,8 @@ pub fn ensure_initial_configure(
         let mut map = layer_map_for_output(output);
         // Arrange before configuring so the client's requested size is respected.
         map.arrange();
-        // Startup timing: the first background-layer commit that carries a buffer. Every such
-        // commit also reports its output (per-output start-up adoption, plan 44).
+        // A background-layer commit that carries a buffer reports its output: the caller's
+        // background-landed hook (start-up diagnostics, readiness, adoption; plans 43-45).
         let background_buffer = map
             .layer_for_surface(surface, WindowSurfaceType::TOPLEVEL)
             .is_some_and(|layer| layer.layer() == Layer::Background)
@@ -344,9 +344,6 @@ pub fn ensure_initial_configure(
                 s.buffer().is_some()
             })
             .unwrap_or(false);
-        if background_buffer {
-            crate::startup::note_background_buffer_committed();
-        }
         if !initial_configure_sent {
             if let Some(layer) = map.layer_for_surface(surface, WindowSurfaceType::TOPLEVEL) {
                 layer.layer_surface().send_configure();

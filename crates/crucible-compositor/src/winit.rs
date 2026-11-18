@@ -128,12 +128,9 @@ pub fn run_winit() {
 /// [`run_winit`], optionally in greeter mode (`crucible greeter --winit`); returns the process
 /// exit status (greeter mode: 0 once the session started).
 pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
-    // Plan 45: the login readiness fd, taken before any thread or child exists (never the greeter).
-    let ready_fd = if greeter.is_none() {
-        crate::login_ready::take_from_env()
-    } else {
-        None
-    };
+    // Plan 45/46: the login readiness fd, taken before any thread or child exists (the greeter
+    // takes it too).
+    let ready_fd = crate::login_ready::take_from_env();
     let mut event_loop: EventLoop<CrucibleState<WinitData>> = match EventLoop::try_new() {
         Ok(loop_) => loop_,
         Err(err) => {
@@ -233,15 +230,7 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
         &startup_config.keyboard,
         greeter.is_some(),
     );
-    let greeter_mode = greeter.is_some();
-    match greeter {
-        Some(setup) => state.start_greeter(setup),
-        None => {
-            state.apply_config(startup_config);
-            // Persistence init: slot pins, IPC socket, 1 s auto-save/config tick.
-            state.start_persistence();
-        }
-    }
+    state.start_mode(startup_config, greeter);
     state
         .shm_state
         .update_formats(state.backend_data.backend.renderer().shm_formats());
@@ -249,18 +238,10 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     // Adopt the model's initial output for this single winit output and size it to its logical
     // size (the window's pixels divided by the configured scale).
     state.register_output(&output);
-    // Bring up XWayland so X11 apps run alongside Wayland clients. On readiness this exports
-    // `DISPLAY` and attaches the X11 window manager; see `crate::xwayland`.
-    // The session (restore / cold-start picker / warm overlay host) starts at the first XWayland
-    // outcome so its X11 spawns get a real `DISPLAY`; see `CrucibleState::on_xwayland_outcome`.
-    if !greeter_mode {
-        state.start_xwayland();
-    }
-
+    // XWayland for a session (on readiness it exports `DISPLAY` and attaches the X11 window
+    // manager; see `crate::xwayland`), then the mode's ready rule.
+    state.finish_mode_start(ready_fd);
     let start_time = Instant::now();
-    if !greeter_mode {
-        state.arm_login_ready(ready_fd, false);
-    }
 
     info!("Initialization completed, starting the main loop.");
 

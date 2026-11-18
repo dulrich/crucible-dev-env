@@ -2,7 +2,7 @@
 //!
 //! One process-start [`Instant`] is captured at the backend entry; every `startup:` `info!` line
 //! carries `elapsed_ms` measured from it. Besides the logging, this holds the pure start-up
-//! adoption rule (plan 44): [`ADOPTION_TIMEOUT`] and [`ready_to_adopt`].
+//! adoption phases (plan 44/45): [`ADOPTION_TIMEOUT`] and [`StartupPhase`].
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,21 +106,65 @@ pub fn note_flip_completed() {
 /// much later).
 pub const ADOPTION_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
 
-/// The pending outputs to adopt now: all of them once the start-up deadline passed, else the one a
-/// background buffer just landed on (if it is pending at all). Pure, so the readiness rule is
-/// unit-testable without a compositor.
-pub fn ready_to_adopt<K: PartialEq + Copy>(
-    pending: &[K],
-    buffer_on: Option<K>,
-    timed_out: bool,
-) -> Vec<K> {
-    if timed_out {
-        return pending.to_vec();
+/// The udev start-up phase (plans 44/45): which DRM adoption rule applies right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupPhase {
+    /// Background start: devices paused, nothing reaches DRM, adoption waits for activation.
+    AwaitingActivation,
+    /// The adoption window is open: an output's adoption waits for its wallpaper or the close.
+    AwaitingWallpaper,
+    /// The window closed: a connected output adopts at once.
+    Running,
+}
+
+/// What moves the [`StartupPhase`] on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupEvent {
+    /// A libseat `ActivateSession`.
+    Activated,
+    /// The adoption window closes (`finish_startup_adoption`).
+    WindowClosed,
+}
+
+impl StartupPhase {
+    /// The phase at start: a session inactive at start is a background start.
+    #[must_use]
+    pub fn at_start(session_active: bool) -> Self {
+        if session_active {
+            Self::AwaitingWallpaper
+        } else {
+            Self::AwaitingActivation
+        }
     }
-    buffer_on
-        .filter(|key| pending.contains(key))
-        .into_iter()
-        .collect()
+
+    /// The one transition; whether the phase changed. A background start's first activation
+    /// keeps the window open while it adds deferred devices; only the close reaches `Running`.
+    pub fn advance(&mut self, event: StartupEvent) -> bool {
+        let next = match (*self, event) {
+            (Self::AwaitingActivation, StartupEvent::Activated) => Self::AwaitingWallpaper,
+            (Self::AwaitingWallpaper, StartupEvent::WindowClosed) => Self::Running,
+            (phase, _) => phase,
+        };
+        std::mem::replace(self, next) != next
+    }
+
+    /// A background start not yet activated.
+    #[must_use]
+    pub fn background(self) -> bool {
+        self == Self::AwaitingActivation
+    }
+
+    /// A wallpaper landing adopts its pending output now (and the timeout is armed).
+    #[must_use]
+    pub fn adopts_on_wallpaper(self) -> bool {
+        self == Self::AwaitingWallpaper
+    }
+
+    /// A connected output's adoption waits (the window is open).
+    #[must_use]
+    pub fn defers_adoption(self) -> bool {
+        self != Self::Running
+    }
 }
 
 /// How long, from main-loop start, the login ready rule waits before it holds anyway (plan 45).
@@ -156,10 +200,6 @@ pub fn login_ready(inputs: ReadyInputs, timed_out: bool) -> bool {
 /// What the greeter's ready rule (plan 46 WP-1 invariant 3) looks at, sampled from the greeter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct GreeterReadyInputs {
-    /// The login panel's state is built (`start_greeter` ran), so its elements are prepared for
-    /// the first adoption frame. A rendered panel frame is deliberately not awaited: a background
-    /// start renders nothing until adoption at activation.
-    pub panel_prepared: bool,
     /// Whether a wallpaper client (swaybg) is running, so a background buffer is expected.
     pub background_expected: bool,
     /// Usable outputs enumerated (mapped in the Space).
@@ -168,12 +208,14 @@ pub struct GreeterReadyInputs {
     pub outputs_with_background: usize,
 }
 
-/// The greeter's ready rule: every output's background buffer committed (when one is expected)
-/// and the panel prepared, or `timed_out` ([`READY_TIMEOUT`]). Holds before activation. Pure.
+/// The greeter's ready rule: every output's background buffer committed (when one is expected),
+/// or `timed_out` ([`READY_TIMEOUT`]). The rule is armed after `start_greeter` built the panel, so
+/// its elements are prepared for the first adoption frame; a rendered panel frame is deliberately
+/// not awaited (a background start renders nothing until adoption at activation). Holds before
+/// activation. Pure.
 pub fn greeter_ready(inputs: GreeterReadyInputs, timed_out: bool) -> bool {
     timed_out
-        || (inputs.panel_prepared
-            && inputs.outputs > 0
+        || (inputs.outputs > 0
             && (!inputs.background_expected || inputs.outputs_with_background >= inputs.outputs))
 }
 
@@ -183,9 +225,8 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn greeter_ready_waits_for_backgrounds_and_panel() {
+    fn greeter_ready_waits_for_backgrounds() {
         let full = GreeterReadyInputs {
-            panel_prepared: true,
             background_expected: true,
             outputs: 2,
             outputs_with_background: 2,
@@ -197,11 +238,6 @@ mod tests {
         };
         assert!(!greeter_ready(partial, false));
         assert!(greeter_ready(partial, true), "the timeout always holds");
-        let no_panel = GreeterReadyInputs {
-            panel_prepared: false,
-            ..full
-        };
-        assert!(!greeter_ready(no_panel, false));
         let no_outputs = GreeterReadyInputs {
             outputs: 0,
             outputs_with_background: 0,
@@ -213,7 +249,6 @@ mod tests {
     #[test]
     fn greeter_ready_without_swaybg_needs_no_background() {
         let inputs = GreeterReadyInputs {
-            panel_prepared: true,
             background_expected: false,
             outputs: 1,
             outputs_with_background: 0,
@@ -248,22 +283,42 @@ mod tests {
     }
 
     #[test]
-    fn adoption_waits_for_a_buffer_on_that_output() {
-        let pending = [1u8, 2];
-        assert_eq!(ready_to_adopt(&pending, Some(2), false), vec![2]);
-        assert!(ready_to_adopt(&pending, None, false).is_empty());
+    fn foreground_start_adopts_on_wallpaper_until_the_timeout_closes_the_window() {
+        let mut p = StartupPhase::at_start(true);
+        assert_eq!(p, StartupPhase::AwaitingWallpaper);
+        assert!(p.adopts_on_wallpaper() && p.defers_adoption() && !p.background());
+        assert!(
+            !p.advance(StartupEvent::Activated),
+            "a VT switch back is no transition"
+        );
+        assert!(p.advance(StartupEvent::WindowClosed));
+        assert_eq!(p, StartupPhase::Running);
+        assert!(!p.adopts_on_wallpaper() && !p.defers_adoption());
+        assert!(!p.advance(StartupEvent::WindowClosed) && !p.advance(StartupEvent::Activated));
     }
 
     #[test]
-    fn a_buffer_on_another_output_adopts_nothing() {
-        // Output 3 is already adopted (or not ours): pending 1 and 2 keep waiting.
-        assert!(ready_to_adopt(&[1u8, 2], Some(3), false).is_empty());
-    }
-
-    #[test]
-    fn the_timeout_adopts_every_pending_output() {
-        assert_eq!(ready_to_adopt(&[1u8, 2], None, true), vec![1, 2]);
-        assert!(ready_to_adopt::<u8>(&[], Some(1), true).is_empty());
+    fn background_start_adopts_only_through_activation() {
+        let mut p = StartupPhase::at_start(false);
+        assert_eq!(p, StartupPhase::AwaitingActivation);
+        assert!(p.background() && p.defers_adoption());
+        assert!(
+            !p.adopts_on_wallpaper(),
+            "a wallpaper landing adopts nothing"
+        );
+        assert!(
+            !p.advance(StartupEvent::WindowClosed),
+            "no timeout closes it"
+        );
+        assert!(p.advance(StartupEvent::Activated));
+        // Activation: deferred devices still defer their outputs, then the close adopts them all.
+        assert!(!p.background() && p.defers_adoption());
+        assert!(
+            !p.advance(StartupEvent::Activated),
+            "only the first activation"
+        );
+        assert!(p.advance(StartupEvent::WindowClosed));
+        assert_eq!(p, StartupPhase::Running);
     }
 
     fn ready() -> ReadyInputs {

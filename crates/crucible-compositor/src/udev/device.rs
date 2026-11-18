@@ -173,7 +173,7 @@ impl CrucibleState<UdevData> {
         path: &Path,
     ) -> Result<(), DeviceAddError> {
         let result = self.try_device_added(node, path);
-        if result.is_err() && self.backend_data.background_start {
+        if result.is_err() && self.backend_data.phase.background() {
             info!(
                 ?node,
                 "startup: device deferred until the session activates"
@@ -335,7 +335,7 @@ impl CrucibleState<UdevData> {
         );
         // Background start (plan 45): smithay marks a new device active; it is not, so mark it
         // paused until `ActivateSession` (no commit can reach the kernel meanwhile).
-        if self.backend_data.background_start {
+        if self.backend_data.phase.background() {
             drm_output_manager.pause();
         }
 
@@ -354,7 +354,7 @@ impl CrucibleState<UdevData> {
         self.device_changed(node);
         // A device added after start-up adopts its outputs at once: clean it up now. At start-up
         // the cleanup waits for every output's adoption (`finish_startup_adoption`).
-        if !self.backend_data.adoption_window_open {
+        if !self.backend_data.phase.defers_adoption() {
             self.disable_unadopted_crtcs(node);
         }
         Ok(())
