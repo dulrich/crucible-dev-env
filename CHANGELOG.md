@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.7.15 — 2026-11-18
+
+### Added
+
+- `input-device "<vendor>:<product>"` remaps every keyboard node of a USB device before chord resolution: `map "<SRC>" "<DST>"` rewrites a key, `map "<SRC>" action="<action>"` runs a `binds` action on press, and one optional `layer "<KEY>" { map … }` overrides the base table while its key is held. Unmapped keys of a configured device are swallowed, and a release always replays its press. An action that does not compile keeps the previous `input-device` set. See `docs/config.md` `### input-device` for the Razer Orbweaver starting mapping.
+
 ## 0.7.14 — 2026-11-18
 
 ### Changed
