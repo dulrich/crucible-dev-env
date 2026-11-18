@@ -222,6 +222,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
         mode: &InputMode,
         evt: I::PointerButtonEvent,
     ) {
+        // The logout modal: no button reaches a client.
+        if mode.is_logging_out() {
+            return;
+        }
         let serial = SERIAL_COUNTER.next_serial();
         let button = evt.button_code();
         let state = wl_pointer::ButtonState::from(evt.state());
@@ -296,6 +300,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
 
     /// Delivers a scroll axis frame to the seat. Snip mode drops axis events before here.
     pub(super) fn process_pointer_axis<I: InputBackend>(&mut self, evt: I::PointerAxisEvent) {
+        // The logout modal: no scroll reaches a client.
+        if self.login_ready.logging_out().is_some() {
+            return;
+        }
         let horizontal = evt
             .amount(Axis::Horizontal)
             .unwrap_or_else(|| evt.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0);
@@ -346,6 +354,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
     ) -> Option<(PointerFocusTarget, Point<f64, Logical>)> {
         if mode.is_locked() {
             return crate::lock::lock_surface_under(&self.session_lock, &self.space, pos);
+        }
+        if mode.is_logging_out() {
+            return None;
         }
         self.space_surface_under(pos)
     }

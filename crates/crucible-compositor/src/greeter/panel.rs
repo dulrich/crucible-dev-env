@@ -1,7 +1,7 @@
 //! The login panel: a pure layout (centred on its region point, the secret field masked) and its render
 //! elements (labels, then the field and panel solids, front-to-back).
 
-use crucible_config::{Milli, Palette, PanelPosition, Rgb};
+use crucible_config::{Config, GreeterConfig, Milli, Palette, PanelPosition, Rgb, surface_palette};
 use crucible_layout::Rect;
 use smithay::{
     backend::renderer::{ImportAll, ImportMem, Renderer},
@@ -84,6 +84,27 @@ pub(crate) fn ellipsis(elapsed: std::time::Duration) -> &'static str {
     const STEPS: [&str; 4] = ["", ".", "..", "..."];
     let i = elapsed.as_millis() / ELLIPSIS_STEP.as_millis();
     STEPS[usize::try_from(i % 4).unwrap_or(0)]
+}
+
+/// The prompt of the "Logging out" modal.
+pub const LOGOUT_TEXT: &str = "Logging out";
+
+/// The modal's palette: the `greeter` block's style and accent (alpha from `overlay { alpha }`),
+/// or [`GreeterConfig::default`] without one (the tty1 default), as the published profile.
+#[must_use]
+pub fn logout_frame(config: &Config, elapsed: std::time::Duration) -> PanelFrame {
+    let default = GreeterConfig::default();
+    let g = config.greeter.as_ref().unwrap_or(&default);
+    PanelFrame {
+        prompt: format!("{LOGOUT_TEXT}{}", ellipsis(elapsed)),
+        field: None,
+        message: None,
+        layout: None,
+        palette: surface_palette(g.style, g.accent, config.theme.as_ref()),
+        alpha: config.overlay.alpha,
+        position: g.position,
+        clear: [0.0, 0.0, 0.0, 1.0],
+    }
 }
 
 /// The border ring just inside `r`, `w` wide: top, bottom, left, right.
@@ -296,5 +317,38 @@ mod tests {
             crate::palette::PANEL_BORDER,
             crucible_config::Rgb(0x4a, 0x4b, 0x4f)
         );
+    }
+
+    #[test]
+    fn logout_frame_is_a_fieldless_prompt_with_the_animated_ellipsis() {
+        use std::time::Duration;
+        let f = logout_frame(&Config::default(), Duration::ZERO);
+        assert_eq!(f.prompt, "Logging out");
+        assert_eq!((f.field, f.message, f.layout), (None, None, None));
+        let f = logout_frame(&Config::default(), ELLIPSIS_STEP * 3);
+        assert_eq!(f.prompt, "Logging out...");
+    }
+
+    #[test]
+    fn logout_palette_follows_the_greeter_block_else_the_default() {
+        use crucible_config::{SurfaceAccent, SurfaceStyle};
+        let none = Config::default();
+        assert!(none.greeter.is_none());
+        let d = GreeterConfig::default();
+        let want = surface_palette(d.style, d.accent, None);
+        let f = logout_frame(&none, std::time::Duration::ZERO);
+        assert_eq!((f.palette, f.position), (want, d.position));
+        let block = GreeterConfig {
+            style: SurfaceStyle::N1Light,
+            accent: SurfaceAccent::Style,
+            ..GreeterConfig::default()
+        };
+        let cfg = Config {
+            greeter: Some(block.clone()),
+            ..Config::default()
+        };
+        let f = logout_frame(&cfg, std::time::Duration::ZERO);
+        assert_eq!(f.palette, surface_palette(block.style, block.accent, None));
+        assert_ne!(f.palette, want, "the block, not the default");
     }
 }

@@ -17,12 +17,13 @@ use std::fs::File;
 use std::io::Write as _;
 use std::os::fd::{FromRawFd as _, OwnedFd, RawFd};
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay::output::Output;
 use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use tracing::{info, warn};
 
+use crate::greeter::panel::ELLIPSIS_STEP;
 use crate::startup::{
     GreeterReadyInputs, READY_TIMEOUT, ReadyInputs, elapsed_ms, greeter_ready, login_ready,
 };
@@ -123,13 +124,52 @@ pub enum QuitPhase {
     /// No quit yet.
     #[default]
     Running,
+    /// The "Logging out" modal shows and the presentation gate is pending; the quit work runs on
+    /// release ([`QuitPhase::on_release`]).
+    Gated,
     /// `quit\n` was delivered; waiting for the session pause (or [`QUIT_TIMEOUT`]).
     AwaitingPause,
     /// The loop must stop.
     Exiting,
 }
 
+/// What a quit request does ([`QuitPhase::request`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitRequest {
+    /// The first quit: show the modal and arm the presentation gate.
+    Arm,
+    /// A repeat before the gate released: nothing (no re-arm, no early exit).
+    Pending,
+    /// A repeat after release: exit at once.
+    Exit,
+}
+
 impl QuitPhase {
+    /// A quit request (the first quit arms the gate; see [`QuitRequest`]).
+    pub fn request(&mut self) -> QuitRequest {
+        match *self {
+            Self::Running => {
+                *self = Self::Gated;
+                QuitRequest::Arm
+            }
+            Self::Gated => QuitRequest::Pending,
+            Self::AwaitingPause | Self::Exiting => {
+                *self = Self::Exiting;
+                QuitRequest::Exit
+            }
+        }
+    }
+
+    /// The gate released: the first quit's work ([`QuitPhase::on_quit`]). Returns whether to exit
+    /// now; nothing unless a request was pending.
+    pub fn on_release(&mut self, notice_delivered: impl FnOnce() -> bool) -> bool {
+        if *self != Self::Gated {
+            return false;
+        }
+        *self = Self::Running;
+        self.on_quit(notice_delivered)
+    }
+
     /// A quit request; `notice_delivered` reports whether `quit\n` reached the daemon (only asked
     /// on the first quit). Returns whether to exit now.
     pub fn on_quit(&mut self, notice_delivered: impl FnOnce() -> bool) -> bool {
@@ -182,9 +222,17 @@ pub struct LoginReady {
     backgrounds: HashSet<String>,
     /// The quit sequence.
     quit: QuitPhase,
+    /// When the "Logging out" modal started showing (`None` until the first quit).
+    logging_out: Option<Instant>,
 }
 
 impl LoginReady {
+    /// Since when the "Logging out" modal shows; `None` before the first quit.
+    #[must_use]
+    pub fn logging_out(&self) -> Option<Instant> {
+        self.logging_out
+    }
+
     /// Whether the rule is still being evaluated (armed and not yet held).
     #[must_use]
     pub fn pending(&self) -> bool {
@@ -334,19 +382,58 @@ impl<B: Backend + 'static> CrucibleState<B> {
         true
     }
 
-    /// `Action::Quit` after the flush: sends the quit notice on a live session channel and keeps
-    /// running until the session pauses or [`QUIT_TIMEOUT`]; else (no channel, not delivered, or
-    /// a second quit) stops the loop at once.
+    /// `Action::Quit` after the flush (plan 49): the first quit shows the "Logging out" modal,
+    /// holds idle blanking off, animates the ellipsis and arms the presentation gate; its release
+    /// runs [`Self::quit_released`]. A repeat before the release does nothing; after it, the
+    /// repeat stops the loop at once.
     pub(crate) fn begin_quit(&mut self) {
+        match self.login_ready.quit.request() {
+            QuitRequest::Pending => info!("logout: repeat quit while the modal is held; ignored"),
+            QuitRequest::Exit => {
+                info!("logout: second quit, exiting");
+                self.running.store(false, Ordering::SeqCst);
+            }
+            QuitRequest::Arm => {
+                self.login_ready.logging_out = Some(Instant::now());
+                self.set_idle_suppressed(true);
+                self.clear_pointer_focus();
+                let timer = Timer::from_duration(ELLIPSIS_STEP);
+                if let Err(err) = self.handle.insert_source(timer, |_, _, state| {
+                    state.redraw_all_outputs();
+                    TimeoutAction::ToDuration(ELLIPSIS_STEP)
+                }) {
+                    warn!(%err, "no ellipsis timer; the logout panel is static");
+                }
+                // The gate drops its continuation when already armed (never in a session): then
+                // the quit work runs at once rather than being lost.
+                if !self.arm_present_gate("logout", Box::new(|state| state.quit_released())) {
+                    warn!("present gate already armed; quitting unpresented");
+                    self.quit_released();
+                }
+            }
+        }
+    }
+
+    /// Schedules a render on every mapped output.
+    fn redraw_all_outputs(&mut self) {
+        let outputs: Vec<_> = self.space.outputs().cloned().collect();
+        for o in &outputs {
+            B::schedule_render(self, o);
+        }
+    }
+
+    /// The gate released (presented or deadline): what `begin_quit` did before the modal. Sends
+    /// the quit notice on a live session channel and keeps running until the session pauses or
+    /// [`QUIT_TIMEOUT`]; else (no channel or not delivered) stops the loop at once.
+    fn quit_released(&mut self) {
         let mut quit = self.login_ready.quit;
-        let second = quit.awaiting();
-        let exit = quit.on_quit(|| self.login_ready.send_quit());
+        let exit = quit.on_release(|| self.login_ready.send_quit());
         self.login_ready.quit = quit;
         if exit {
-            if second {
-                info!("logout: second quit, exiting");
-            }
             self.running.store(false, Ordering::SeqCst);
+            return;
+        }
+        if !self.login_ready.quit.awaiting() {
             return;
         }
         info!("logout: quit notice sent");
@@ -468,5 +555,43 @@ mod tests {
         let mut q = QuitPhase::default();
         assert!(q.on_quit(|| false));
         assert_eq!(q, QuitPhase::Exiting);
+    }
+
+    #[test]
+    fn quit_work_runs_only_after_the_gate_releases() {
+        let mut q = QuitPhase::default();
+        assert_eq!(q.request(), QuitRequest::Arm);
+        assert!(!q.awaiting(), "no notice before release");
+        assert!(
+            !q.on_pause() && !q.on_timeout(),
+            "nothing waits while gated"
+        );
+        assert!(!q.on_release(|| true));
+        assert!(q.awaiting(), "the notice went out on release");
+        // Without a channel the loop stops, again only on release.
+        let mut q = QuitPhase::default();
+        assert_eq!(q.request(), QuitRequest::Arm);
+        assert!(q.on_release(|| false));
+        assert_eq!(q, QuitPhase::Exiting);
+    }
+
+    #[test]
+    fn repeat_quit_before_release_is_a_no_op() {
+        let mut q = QuitPhase::default();
+        assert_eq!(q.request(), QuitRequest::Arm);
+        assert_eq!(q.request(), QuitRequest::Pending, "no re-arm");
+        assert_eq!(q.request(), QuitRequest::Pending);
+        assert_eq!(q, QuitPhase::Gated, "no early exit");
+        assert!(!q.on_release(|| true), "one notice, still waiting");
+    }
+
+    #[test]
+    fn quit_after_release_exits_at_once() {
+        let mut q = QuitPhase::default();
+        q.request();
+        q.on_release(|| true);
+        assert_eq!(q.request(), QuitRequest::Exit);
+        assert_eq!(q, QuitPhase::Exiting);
+        assert!(!q.on_release(|| panic!("no second notice")));
     }
 }

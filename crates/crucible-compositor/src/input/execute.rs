@@ -46,6 +46,9 @@ pub(crate) enum ActionError {
     /// Snip mode is active and the action is not `snip` (cancel) or a VT switch.
     #[error("snip in progress (only snip and vt-switch run; press Esc to cancel)")]
     Snipping,
+    /// The logout modal shows and the action is not `quit` or a VT switch.
+    #[error("logging out (only quit and vt-switch run)")]
+    LoggingOut,
 }
 
 /// The one admission gate for an action in `mode`: the lock rule first
@@ -55,10 +58,13 @@ pub(crate) enum ActionError {
 ///
 /// # Errors
 /// [`ActionError::Locked`] while locked for every action but a VT switch and `set-layout`;
+/// [`ActionError::LoggingOut`] while the logout modal shows for every action but `quit` and a VT switch;
 /// [`ActionError::Snipping`] while snipping for every action but `snip` and a VT switch.
 pub(crate) fn admit<O>(mode: &InputMode<O>, action: &Action) -> Result<(), ActionError> {
     if mode.is_locked() && !action.allowed_while_locked() {
         Err(ActionError::Locked)
+    } else if mode.is_logging_out() && !matches!(action, Action::Quit | Action::VtSwitch(_)) {
+        Err(ActionError::LoggingOut)
     } else if mode.is_snipping() && !action.allowed_while_snipping() {
         Err(ActionError::Snipping)
     } else {
@@ -748,5 +754,15 @@ mod tests {
         };
         assert!(!dispatch_vt_switch(&mut backend, 2));
         assert_eq!(backend.last_vt, Some(2));
+    }
+
+    #[test]
+    fn only_quit_and_vt_switch_are_admitted_while_logging_out() {
+        let m = InputMode::<()>::LoggingOut;
+        assert_eq!(admit(&m, &Action::Quit), Ok(()));
+        assert_eq!(admit(&m, &Action::VtSwitch(2)), Ok(()));
+        for action in [Action::RunTerminal, Action::NewWorkspace, Action::Snip] {
+            assert_eq!(admit(&m, &action), Err(ActionError::LoggingOut), "{action}");
+        }
     }
 }

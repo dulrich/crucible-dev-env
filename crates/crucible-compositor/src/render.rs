@@ -121,6 +121,8 @@ pub struct FrameInputs {
     pub header_size: u32,
     /// The greeter login panel (greeter mode only).
     pub greeter: Option<crate::greeter::panel::PanelFrame>,
+    /// The "Logging out" modal (plan 49), shown from the first quit until the loop stops.
+    pub logout: Option<crate::greeter::panel::PanelFrame>,
 }
 
 /// The read-only state one output's frame is composed from: disjoint borrows of
@@ -183,6 +185,8 @@ pub fn cursor_on_output(
     })
 }
 
+use crate::greeter::panel::logout_frame;
+
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Starts `output`'s frame: resets a dead client cursor surface to the default, then builds
     /// the frame's owned [`FrameInputs`] (only this output's header is laid out).
@@ -219,6 +223,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             header,
             header_size: self.config.header.size,
             greeter: self.greeter.as_ref().map(|g| g.frame()),
+            logout: self
+                .login_ready
+                .logging_out()
+                .map(|since| logout_frame(&self.config, since.elapsed())),
         }
     }
 
@@ -289,7 +297,8 @@ where
                 .collect();
         return (elements, crate::lock::LOCK_CLEAR_COLOR.into());
     }
-    if let Some(snip) = view.snip
+    // The logout modal sits above a snip too (snip input already stopped): the snip is not drawn.
+    if let Some(snip) = view.snip.filter(|_| inputs.logout.is_none())
         && let Some(elements) = crate::snip::snip_elements(
             snip,
             view.output,
@@ -334,6 +343,21 @@ where
         );
     }
     let mut clear: Color32F = CLEAR_COLOR.into();
+    // The modal is above everything but the cursor (it follows the cursor/drag icon in the list).
+    // The lock branch above returns first: lock wins.
+    if let Some(panel) = &inputs.logout {
+        let size = view
+            .space
+            .output_geometry(view.output)
+            .map_or((0, 0), |g| (g.size.w, g.size.h));
+        custom.extend(crate::greeter::panel::build_panel_elements(
+            panel,
+            size,
+            &mut header_text.regular,
+            renderer,
+            scale,
+        ));
+    }
     if let Some(panel) = &inputs.greeter {
         let size = view
             .space

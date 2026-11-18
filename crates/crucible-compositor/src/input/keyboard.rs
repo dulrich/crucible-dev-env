@@ -146,6 +146,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
                             None => KeyHit::Snip(snip_key(keysym)),
                         }));
                     }
+                    // The logout modal: a non-admitted press is swallowed, never a client's.
+                    if mode.is_logging_out() && action.is_none() {
+                        state.suppressed_keys.consume_press(raw_keycode);
+                        return FilterResult::Intercept(None);
+                    }
                     // Greeter mode: a non-admitted press goes to the login panel, never a client.
                     if action.is_none() && state.greeter.is_some() {
                         state.suppressed_keys.consume_press(raw_keycode);

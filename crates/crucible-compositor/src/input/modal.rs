@@ -16,6 +16,9 @@ use crate::state::{Backend, CrucibleState};
 pub(crate) enum InputMode<O = WindowElement> {
     /// The session is locked: only the lock surface receives input; only VT switching and `set-layout` run.
     Locked,
+    /// The "Logging out" modal shows (below the lock, above snip): no input reaches clients;
+    /// only `quit` (the repeat) and VT switches run.
+    LoggingOut,
     /// Snip mode (`snip` action): every output shows a frozen frame and all pointer and key
     /// input feeds the selection; clients receive nothing. Only `Snip` and `VtSwitch` run.
     Snip,
@@ -36,6 +39,11 @@ impl<O> InputMode<O> {
         matches!(self, Self::Overlay(_))
     }
 
+    /// Whether the logout modal shows (and the session is not locked).
+    pub(crate) fn is_logging_out(&self) -> bool {
+        matches!(self, Self::LoggingOut)
+    }
+
     /// Whether snip mode is active (and not shadowed by the lock).
     pub(crate) fn is_snipping(&self) -> bool {
         matches!(self, Self::Snip)
@@ -49,11 +57,18 @@ impl<O> InputMode<O> {
 }
 
 /// The pure precedence resolver behind [`CrucibleState::input_mode`]:
-/// **Locked > Snip > Overlay > Normal**.
+/// **Locked > LoggingOut > Snip > Overlay > Normal**.
 #[must_use]
-pub(crate) fn resolve_mode<O>(locked: bool, snipping: bool, overlay: Option<O>) -> InputMode<O> {
+pub(crate) fn resolve_mode<O>(
+    locked: bool,
+    logging_out: bool,
+    snipping: bool,
+    overlay: Option<O>,
+) -> InputMode<O> {
     if locked {
         InputMode::Locked
+    } else if logging_out {
+        InputMode::LoggingOut
     } else if snipping {
         InputMode::Snip
     } else if let Some(overlay) = overlay {
@@ -71,11 +86,12 @@ pub(crate) fn admits_as_locked(session_locked: bool, greeter: bool) -> bool {
 }
 
 impl<B: Backend + 'static> CrucibleState<B> {
-    /// Resolves the input mode for one event. Precedence is **Locked > Snip > Overlay >
-    /// Normal** ([`resolve_mode`]), and this is the only place it is written.
+    /// Resolves the input mode for one event. Precedence is **Locked > LoggingOut > Snip >
+    /// Overlay > Normal** ([`resolve_mode`]), and this is the only place it is written.
     pub(crate) fn input_mode(&self) -> InputMode {
         resolve_mode(
             admits_as_locked(self.is_session_locked(), self.greeter.is_some()),
+            self.login_ready.logging_out().is_some(),
             self.snip.is_some(),
             self.mapped_overlay().cloned(),
         )
@@ -102,7 +118,7 @@ pub(super) struct PressRoute {
 #[must_use]
 pub(super) fn press_route<O: PartialEq>(mode: &InputMode<O>, under: Option<&O>) -> PressRoute {
     match mode {
-        InputMode::Locked | InputMode::Snip => PressRoute {
+        InputMode::Locked | InputMode::LoggingOut | InputMode::Snip => PressRoute {
             try_header: false,
             close_overlay: false,
             click_focus: false,
@@ -123,7 +139,7 @@ pub(super) fn press_route<O: PartialEq>(mode: &InputMode<O>, under: Option<&O>) 
 /// Whether focus-follows-mouse tracks hover enters at all (not while locked or snipping).
 #[must_use]
 pub(super) fn hover_tracks<O>(mode: &InputMode<O>) -> bool {
-    !mode.is_locked() && !mode.is_snipping()
+    !mode.is_locked() && !mode.is_logging_out() && !mode.is_snipping()
 }
 
 /// What a hover does to focus ([`hover_decision`]).
@@ -342,15 +358,30 @@ mod tests {
 
     #[test]
     fn mode_precedence_is_locked_snip_overlay_normal() {
-        assert_eq!(resolve_mode(true, true, Some(OVERLAY)), InputMode::Locked);
-        assert_eq!(resolve_mode(true, false, None::<u32>), InputMode::Locked);
-        assert_eq!(resolve_mode(false, true, Some(OVERLAY)), InputMode::Snip);
-        assert_eq!(resolve_mode(false, true, None::<u32>), InputMode::Snip);
         assert_eq!(
-            resolve_mode(false, false, Some(OVERLAY)),
+            resolve_mode(true, true, true, Some(OVERLAY)),
+            InputMode::Locked
+        );
+        assert_eq!(
+            resolve_mode(true, false, false, None::<u32>),
+            InputMode::Locked
+        );
+        assert_eq!(
+            resolve_mode(false, false, true, Some(OVERLAY)),
+            InputMode::Snip
+        );
+        assert_eq!(
+            resolve_mode(false, false, true, None::<u32>),
+            InputMode::Snip
+        );
+        assert_eq!(
+            resolve_mode(false, false, false, Some(OVERLAY)),
             InputMode::Overlay(OVERLAY)
         );
-        assert_eq!(resolve_mode(false, false, None::<u32>), InputMode::Normal);
+        assert_eq!(
+            resolve_mode(false, false, false, None::<u32>),
+            InputMode::Normal
+        );
     }
 
     #[test]
@@ -401,5 +432,22 @@ mod tests {
         ] {
             assert!(!chord_closes_overlay(&overlay(), &action), "{action}");
         }
+    }
+
+    #[test]
+    fn logging_out_blocks_clients_below_the_lock_above_snip() {
+        assert_eq!(
+            resolve_mode(true, true, true, Some(OVERLAY)),
+            InputMode::Locked,
+            "lock wins"
+        );
+        let m = resolve_mode(false, true, true, Some(OVERLAY));
+        assert_eq!(m, InputMode::LoggingOut);
+        assert!(m.is_modal());
+        let r = press_route(&m, Some(&OTHER));
+        assert!(!r.try_header && !r.close_overlay && !r.click_focus);
+        assert!(!hover_tracks(&m));
+        assert_eq!(hover_decision(&m, true, false), HoverDecision::Ignore);
+        assert!(!chord_closes_overlay(&m, &Action::Slot(1)));
     }
 }

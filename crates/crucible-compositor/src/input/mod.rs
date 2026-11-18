@@ -46,6 +46,7 @@ pub(crate) mod modal_test_support {
         let mode = super::modal::resolve_mode::<()>(
             super::modal::admits_as_locked(false, true),
             false,
+            false,
             None,
         );
         super::execute::admit(&mode, action).is_ok()
