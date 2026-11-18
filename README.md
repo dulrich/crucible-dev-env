@@ -58,7 +58,7 @@ Pre-alpha, but **the MVP (Phases 0–3 of the roadmap) is implemented** and CDE 
 
 ## Running
 
-The installed TTY launcher is `cde-session` (put in `~/.local/bin` by `scripts/deploy.sh`, no checkout needed). From a checkout, `scripts/cde.sh` does the same after rebuilding: it exports a fallback `$TERMINAL` (default `foot`, used only when `config.kdl` sets no `terminal`), logs to `/tmp/cde/latest.log`, and can be symlinked as `~/cde.sh`; `scripts/cde.sh --help` lists the env overrides. Set `CDE_BIN` to a prebuilt binary (e.g. a release install) to skip the rebuild and run that instead. To boot straight into CDE from tty1, see [`docs/session.md`](docs/session.md). For the optional graphical login screen (the `cde-login` daemon, which replaces greetd), see [`docs/greeter.md`](docs/greeter.md).
+The installed TTY launcher is `cde-session` (installed into `~/.local/bin` by the deploy, no checkout needed). From a checkout, `scripts/cde.sh` does the same after rebuilding: it exports a fallback `$TERMINAL` (default `foot`, used only when `config.kdl` sets no `terminal`), logs to `/tmp/cde/latest.log`, and can be symlinked as `~/cde.sh`; `scripts/cde.sh --help` lists the env overrides. Set `CDE_BIN` to a prebuilt binary (e.g. a release install) to skip the rebuild and run that instead. To boot straight into CDE from tty1, see [`docs/session.md`](docs/session.md). For the optional graphical login screen (the `cde-login` daemon, which replaces greetd), see [`docs/greeter.md`](docs/greeter.md).
 
 Requires a recent stable Rust (1.85+, edition 2024) and a terminal emulator. CDE uses the `terminal` setting in `config.kdl` if it is set, otherwise `$TERMINAL`, otherwise `foot` from `$PATH`.
 
