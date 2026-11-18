@@ -17,7 +17,7 @@ CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.
 - The greeter's `user` background follows the lock's wallpaper state-file rules: a whitespace-only line is blank, a bare path is trimmed, and a tab line with an empty output or path is skipped.
 - `header { divider … color= }`: an explicit colour equal to the old default is now honoured under a `style`, instead of being replaced by the style's colour.
 - An overlay change that alters only its style (with explicit `terminal-args`) now restarts the warm overlay host, instead of keeping the stale one.
-- `scripts/deploy.sh` installs `crucible`, `cde-session` and `cde-wallpaper-rotate` together from a verified staging directory, so a failed deploy cannot leave a new `crucible` beside old scripts. Each remote host is probed before its build, and an unreachable one fails without building.
+- A deploy installs `crucible`, `cde-session` and `cde-wallpaper-rotate` together from a verified staging directory, so a failed one cannot leave a new `crucible` beside old scripts.
 
 ## 0.7.12 — 2026-11-17
 
