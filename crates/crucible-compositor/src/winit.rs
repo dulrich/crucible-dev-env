@@ -327,6 +327,8 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
             // A locked frame counts as presented once submitted (or when nothing changed since the
             // last one: the first locked frame always carries damage, its clear colour differs).
             let mut presented_locked = false;
+            // Plan 49: a submitted frame stands in for presentation (a nested proxy).
+            let mut submitted = false;
             match render_res {
                 Ok(render_output_result) => {
                     // Track primary scan-out so the fractional-scale walk below has an output.
@@ -341,9 +343,11 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
                             warn!("Failed to submit buffer: {}", err);
                         } else {
                             presented_locked = locked;
+                            submitted = true;
                         }
                     } else {
                         presented_locked = locked;
+                        submitted = true;
                     }
                 }
                 Err(smithay::backend::SwapBuffersError::ContextLost(err)) => {
@@ -356,6 +360,9 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
             }
             if presented_locked {
                 state.lock_output_presented(&output);
+            }
+            if submitted {
+                state.present_gate_presented_now(&output);
             }
         }
 

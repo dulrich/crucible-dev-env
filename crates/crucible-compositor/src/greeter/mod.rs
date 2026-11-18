@@ -15,7 +15,8 @@ pub use crucible_greetd;
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
 
 use crucible_config::{Config, HeaderConfig, HeaderMode, IdleConfig};
 use crucible_greetd::{Event, Secret, Session, View};
@@ -24,7 +25,7 @@ use smithay::reexports::calloop::channel::{self, Event as ChannelEvent};
 use tracing::{error, info, warn};
 
 use crate::state::{Backend, CrucibleState};
-use panel::{PanelFrame, field_text, layout_label};
+use panel::{ELLIPSIS_STEP, PanelFrame, ellipsis, field_text, layout_label};
 use profile::{GreeterProfile, ProfileBackground};
 
 /// The swaybg binary (a system path: the greeter user has no `$PATH` worth trusting).
@@ -126,6 +127,22 @@ impl Drop for LoginInput {
 /// A finished exchange: the new view and whether the session started, or the failure.
 type Reply = Result<(View, bool), String>;
 
+/// The "Loading CDE" text (the animated ellipsis follows it).
+pub const LOADING_TEXT: &str = "Loading CDE";
+
+/// How long the worker waits for the compositor's presentation ack before it aborts the
+/// exchange (a deadlock guard only, far above the gate's deadline).
+pub const ACK_BACKSTOP: Duration = Duration::from_secs(2);
+
+/// What the greetd worker tells the compositor.
+enum WorkerMsg {
+    /// Authentication succeeded and `start_session` is next: show "Loading CDE" and ack once it
+    /// is on screen (the worker writes `start_session` only after the ack).
+    Loading(mpsc::Sender<()>),
+    /// A finished exchange.
+    Reply(Reply),
+}
+
 /// The live greeter state on [`CrucibleState`].
 pub struct Greeter {
     profile: GreeterProfile,
@@ -135,6 +152,8 @@ pub struct Greeter {
     swaybg: Option<Child>,
     /// The active layout's index in the profile's `layouts` (the xkb group; 0 at start).
     layout: usize,
+    /// Since when the post-auth "Loading CDE" panel shows (`None`: the login panel).
+    loading: Option<Instant>,
     /// The process exit status once the loop stops: 0 after `start_session` succeeded.
     pub exit_code: i32,
 }
@@ -161,13 +180,48 @@ impl Greeter {
     /// What the panel draws this frame.
     #[must_use]
     pub fn frame(&self) -> PanelFrame {
+        self.frame_at(Instant::now())
+    }
+
+    /// Takes a finished exchange's view. A non-final reply (a `start_session` error reply, back
+    /// to the prompt with its message) clears the loading panel; the started session keeps it
+    /// (the keep-lit exit holds that frame). Returns whether loading was cleared.
+    fn accept(&mut self, view: View, done: bool) -> bool {
+        self.view = view;
+        !done && self.loading.take().is_some()
+    }
+
+    /// Whether the post-auth "Loading CDE" panel shows.
+    #[must_use]
+    pub fn loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// [`frame`](Self::frame) at `now` (the ellipsis phase).
+    fn frame_at(&self, now: Instant) -> PanelFrame {
         let clear = match &self.profile.background {
             ProfileBackground::Color(c) => c.to_rgba_f32(),
             ProfileBackground::Image(_) => [0.0, 0.0, 0.0, 1.0],
         };
+        if let Some(since) = self.loading {
+            // No prompt, no field (nor its frame): the hand-off panel.
+            return PanelFrame {
+                prompt: format!(
+                    "{LOADING_TEXT}{}",
+                    ellipsis(now.saturating_duration_since(since))
+                ),
+                field: None,
+                message: None,
+                layout: None,
+                palette: self.profile.palette,
+                alpha: self.profile.alpha,
+                position: self.profile.position,
+                clear,
+            };
+        }
         PanelFrame {
             prompt: self.view.prompt.clone(),
-            field: field_text(self.input.text(), self.view.secret),
+            field: Some(field_text(self.input.text(), self.view.secret)),
             message: if self.input.busy() {
                 Some("Authenticating\u{2026}".to_string())
             } else {
@@ -236,11 +290,29 @@ fn spawn_swaybg(bg: &ProfileBackground, socket: Option<&str>) -> Option<Child> {
 }
 
 /// Owns the greetd session on a thread: feeds each event and hands the reply to `send` (which
-/// returns `false` once nobody listens). The thread ends after an error or the started session.
+/// returns `false` once nobody listens). Just before `start_session` it sends
+/// [`WorkerMsg::Loading`] and blocks until the compositor acks (the loading frame is on screen);
+/// no ack within [`ACK_BACKSTOP`], or a dropped ack, aborts the exchange without writing it. The
+/// thread ends after an error or the started session.
 fn spawn_worker(
     mut session: Session<UnixStream>,
-    send: impl Fn(Reply) -> bool + Send + 'static,
+    send: impl Fn(WorkerMsg) -> bool + Send + Sync + 'static,
 ) -> mpsc::Sender<Event> {
+    let send = Arc::new(send);
+    let progress = Arc::clone(&send);
+    session.set_before_start(Box::new(move || {
+        let (ack_tx, ack_rx) = mpsc::channel::<()>();
+        if !progress(WorkerMsg::Loading(ack_tx)) {
+            return false;
+        }
+        match ack_rx.recv_timeout(ACK_BACKSTOP) {
+            Ok(()) => true,
+            Err(err) => {
+                warn!(%err, "no presentation ack before start_session; aborting");
+                false
+            }
+        }
+    }));
     let (tx, rx) = mpsc::channel::<Event>();
     std::thread::spawn(move || {
         for event in rx {
@@ -249,7 +321,7 @@ fn spawn_worker(
                 .map(|view| (view, session.is_done()))
                 .map_err(|e| e.to_string());
             let stop = reply.is_err() || reply.as_ref().is_ok_and(|(_, done)| *done);
-            if !send(reply) || stop {
+            if !send(WorkerMsg::Reply(reply)) || stop {
                 break;
             }
         }
@@ -281,12 +353,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let swaybg = spawn_swaybg(&profile.background, self.socket_name.as_deref());
         let session = Session::new(stream, &profile.session);
         let view = session.view();
-        let (reply_tx, reply_rx) = channel::channel::<Reply>();
-        if let Err(err) = self.handle.insert_source(reply_rx, |event, _, data| {
-            if let ChannelEvent::Msg(reply) = event {
-                data.on_greeter_reply(reply);
-            }
-        }) {
+        let (reply_tx, reply_rx) = channel::channel::<WorkerMsg>();
+        if let Err(err) = self
+            .handle
+            .insert_source(reply_rx, |event, _, data| match event {
+                ChannelEvent::Msg(WorkerMsg::Reply(reply)) => data.on_greeter_reply(reply),
+                ChannelEvent::Msg(WorkerMsg::Loading(ack)) => data.on_greeter_loading(ack),
+                ChannelEvent::Closed => {}
+            })
+        {
             error!(%err, "cannot watch the greetd worker");
         }
         let events = spawn_worker(session, move |r| reply_tx.send(r).is_ok());
@@ -298,6 +373,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             events,
             swaybg,
             layout: 0,
+            loading: None,
             exit_code: 1,
         }));
     }
@@ -309,11 +385,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         g.input.done();
         match reply {
             Ok((view, done)) => {
-                g.view = view;
+                let was_loading = g.accept(view, done);
                 if done {
+                    // The "Loading CDE" frame stays: the keep-lit exit holds the last frame.
                     info!("session started; greeter exiting");
                     g.exit_code = 0;
                     self.running.store(false, Ordering::SeqCst);
+                } else if was_loading {
+                    self.set_idle_suppressed(false);
                 }
             }
             Err(err) => {
@@ -321,6 +400,42 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 g.exit_code = 1;
                 self.running.store(false, Ordering::SeqCst);
             }
+        }
+        self.redraw_greeter();
+    }
+
+    /// Authentication succeeded: show "Loading CDE", animate it, hold idle blanking off and arm
+    /// the presentation gate, whose release acks the worker (which then writes `start_session`).
+    fn on_greeter_loading(&mut self, ack: mpsc::Sender<()>) {
+        let Some(g) = self.greeter.as_mut() else {
+            return;
+        };
+        g.loading = Some(Instant::now());
+        self.set_idle_suppressed(true);
+        let timer = smithay::reexports::calloop::timer::Timer::from_duration(ELLIPSIS_STEP);
+        if let Err(err) = self.handle.insert_source(timer, |_, _, data| {
+            use smithay::reexports::calloop::timer::TimeoutAction;
+            if data.greeter.as_ref().is_some_and(|g| g.loading()) {
+                data.redraw_greeter();
+                TimeoutAction::ToDuration(ELLIPSIS_STEP)
+            } else {
+                TimeoutAction::Drop
+            }
+        }) {
+            warn!(%err, "no ellipsis timer; the loading panel is static");
+        }
+        // `arm_present_gate` redraws every armed output itself.
+        let armed = self.arm_present_gate(
+            "greeter start_session",
+            Box::new(move |_| {
+                // The worker may have given up (backstop): nothing to do then.
+                let _ = ack.send(());
+            }),
+        );
+        if !armed {
+            // Already armed (never in the greeter): dropping the ack aborts the exchange, the
+            // transport-failure exit; `start_session` is never written ungated.
+            warn!("present gate already armed; aborting the login");
         }
         self.redraw_greeter();
     }
@@ -453,27 +568,40 @@ mod tests {
         let script = "{\"type\":\"auth_message\",\"auth_message_type\":\"secret\",\"auth_message\":\"Password:\"}\n{\"type\":\"success\"}\n{\"type\":\"success\"}\n";
         let replies = crucible_greetd::fake::parse_replies(script).unwrap();
         let (stream, server) = crucible_greetd::fake::connect(replies).unwrap();
-        let (tx, rx) = mpsc::channel::<Reply>();
+        let (tx, rx) = mpsc::channel::<WorkerMsg>();
         let events = spawn_worker(Session::new(stream, "cde-session"), move |r| {
             tx.send(r).is_ok()
         });
         let mut input = LoginInput::default();
+        let mut loadings = 0;
         let mut submit = |text: &str| {
             for c in text.chars() {
                 input.key(GreeterKey::Char(c));
             }
             events.send(input.key(GreeterKey::Enter).unwrap()).unwrap();
-            let reply = rx.recv().unwrap().unwrap();
-            input.done();
-            reply
+            loop {
+                match rx.recv().unwrap() {
+                    // The compositor's gate released: ack, the worker writes start_session.
+                    WorkerMsg::Loading(ack) => {
+                        loadings += 1;
+                        ack.send(()).unwrap();
+                    }
+                    WorkerMsg::Reply(reply) => {
+                        input.done();
+                        return (reply.unwrap(), loadings);
+                    }
+                }
+            }
         };
-        let (view, done) = submit("dulrich");
+        let ((view, done), n) = submit("dulrich");
+        assert_eq!(n, 0, "no loading before start_session");
         assert_eq!(
             (view.prompt.as_str(), view.secret, done),
             ("Password:", true, false)
         );
-        let (_, done) = submit("pw");
+        let ((_, done), n) = submit("pw");
         assert!(done, "start_session succeeded");
+        assert_eq!(n, 1, "one loading ack, before start_session");
         assert_eq!(server.join().unwrap().len(), 3);
     }
 
@@ -489,5 +617,62 @@ mod tests {
             swaybg_args(&ProfileBackground::Image("/b.png".into())),
             ["-o", "*", "-i", "/b.png", "-m", "fill"]
         );
+    }
+    fn test_greeter() -> Greeter {
+        let (events, _) = mpsc::channel();
+        Greeter {
+            profile: GreeterProfile::fallback(),
+            view: View {
+                prompt: "Password:".into(),
+                secret: true,
+                message: None,
+            },
+            input: LoginInput::default(),
+            events,
+            swaybg: None,
+            layout: 0,
+            loading: None,
+            exit_code: 1,
+        }
+    }
+
+    #[test]
+    fn loading_frame_has_no_prompt_or_field_and_animates() {
+        let mut g = test_greeter();
+        assert_eq!(
+            g.frame().field.as_deref(),
+            Some(""),
+            "the login panel has a field"
+        );
+        let t0 = Instant::now();
+        g.loading = Some(t0);
+        let f = g.frame_at(t0);
+        assert_eq!(f.prompt, "Loading CDE");
+        assert_eq!((f.field, f.message, f.layout), (None, None, None));
+        assert_eq!(g.frame_at(t0 + ELLIPSIS_STEP * 3).prompt, "Loading CDE...");
+    }
+
+    #[test]
+    fn an_error_reply_after_loading_returns_to_the_prompt_with_its_message() {
+        let mut g = test_greeter();
+        g.loading = Some(Instant::now());
+        let err = View {
+            prompt: "Username".into(),
+            secret: false,
+            message: Some("session failed".into()),
+        };
+        assert!(g.accept(err.clone(), false), "loading cleared");
+        assert!(!g.loading());
+        let f = g.frame();
+        assert_eq!(f.prompt, "Username");
+        assert_eq!(f.field.as_deref(), Some(""));
+        assert_eq!(f.message.as_deref(), Some("session failed"));
+    }
+    #[test]
+    fn the_started_session_keeps_the_loading_frame() {
+        let mut g = test_greeter();
+        g.loading = Some(Instant::now());
+        assert!(!g.accept(g.view.clone(), true));
+        assert!(g.loading(), "the last frame stays Loading CDE");
     }
 }

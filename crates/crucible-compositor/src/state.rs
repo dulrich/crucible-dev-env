@@ -353,6 +353,8 @@ pub struct CrucibleState<B: Backend + 'static> {
     pub pending_captures: Vec<crate::capture::PendingCapture>,
     /// Greeter mode (`crucible greeter`): the login panel and greetd worker; `None` normally.
     pub greeter: Option<Box<crate::greeter::Greeter>>,
+    /// The presentation gate holding a hand-off step until a frame is on screen (plan 49).
+    pub present_gate: crate::present_gate::StateGate<B>,
 }
 
 /// The icon surface a client attached to a pointer drag, with its accumulated hotspot offset.
@@ -560,6 +562,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             dnd_icon: None,
             pending_keyboard_focus: PendingFocus::default(),
             greeter: None,
+            present_gate: crate::present_gate::PresentGate::default(),
         }
     }
 }

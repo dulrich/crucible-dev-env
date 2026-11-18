@@ -10,11 +10,15 @@ use std::io::{Read, Write};
 pub use codec::{AuthMessageType, CodecError, ErrorType, Request, Response, Secret};
 pub use machine::{Event, LoginMachine, Output, State, View};
 
+/// Called just before a `start_session` request is written; `false` aborts the exchange.
+pub type BeforeStart = Box<dyn FnMut() -> bool + Send>;
+
 /// Ties a [`LoginMachine`] to a greetd stream: user events go in, the view comes out, and every
 /// request the machine emits is sent and its reply fed back until the machine awaits the user.
 pub struct Session<S: Read + Write> {
     stream: S,
     machine: LoginMachine,
+    before_start: Option<BeforeStart>,
 }
 
 impl<S: Read + Write> Session<S> {
@@ -23,7 +27,15 @@ impl<S: Read + Write> Session<S> {
         Self {
             stream,
             machine: LoginMachine::new(session_cmd),
+            before_start: None,
         }
+    }
+
+    /// Sets the hook [`feed`](Self::feed) calls once, just before it writes `start_session` (never
+    /// for another request). It may block; returning `false` makes `feed` fail with an I/O error
+    /// without writing the request (a transport failure to the caller).
+    pub fn set_before_start(&mut self, hook: BeforeStart) {
+        self.before_start = Some(hook);
     }
 
     /// The current view without feeding an event.
@@ -43,6 +55,14 @@ impl<S: Read + Write> Session<S> {
             let out = self.machine.handle(event);
             match out.request {
                 Some(req) => {
+                    if matches!(req, Request::StartSession { .. })
+                        && let Some(hook) = self.before_start.as_mut()
+                        && !hook()
+                    {
+                        return Err(CodecError::Io(std::io::Error::other(
+                            "start_session aborted before it was written",
+                        )));
+                    }
                     codec::write_message(&mut self.stream, &req)?;
                     let resp: Response = codec::read_message(&mut self.stream)?;
                     event = Event::Response(resp);
@@ -171,5 +191,59 @@ mod tests {
         assert_eq!(v.message, None);
         let seen = srv.join().unwrap();
         assert_eq!(seen[1], json!({"type":"cancel_session"}));
+    }
+
+    #[test]
+    fn before_start_runs_once_just_before_start_session_and_is_waited_for() {
+        use std::sync::{Arc, Mutex};
+        let (client, server) = UnixStream::pair().unwrap();
+        let srv = fake_greetd(
+            server,
+            vec![
+                auth("secret", "Password:"),
+                json!({"type":"success"}),
+                json!({"type":"success"}),
+            ],
+        );
+        let mut s = Session::new(client, "cde-session");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&calls);
+        s.set_before_start(Box::new(move || {
+            // Blocks like the worker's ack wait; the request must not be written meanwhile.
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            log.lock().unwrap().push(std::time::Instant::now());
+            true
+        }));
+        submit(&mut s, "dulrich");
+        assert!(calls.lock().unwrap().is_empty(), "not for create_session");
+        submit(&mut s, "pw");
+        assert!(s.is_done());
+        assert_eq!(calls.lock().unwrap().len(), 1, "once, for start_session");
+        let seen = srv.join().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[2]["type"], "start_session");
+    }
+
+    #[test]
+    fn before_start_abort_fails_without_writing_start_session() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let srv = fake_greetd(
+            server,
+            vec![
+                auth("secret", "Password:"),
+                json!({"type":"success"}),
+                json!({"type":"success"}),
+            ],
+        );
+        let mut s = Session::new(client, "cde-session");
+        // A dropped ack: the hook reports abort.
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        drop(tx);
+        s.set_before_start(Box::new(move || rx.recv().is_ok()));
+        submit(&mut s, "dulrich");
+        assert!(s.feed(Event::Submit(Secret::new("pw"))).is_err());
+        drop(s);
+        let seen = srv.join().unwrap();
+        assert_eq!(seen.len(), 2, "start_session was never written: {seen:?}");
     }
 }

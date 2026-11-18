@@ -87,6 +87,9 @@ pub mod text;
 /// Screen lock (`ext-session-lock-v1`): the lock state machine and its Smithay glue.
 pub mod lock;
 
+/// The presentation gate: a hand-off step waits for a presented frame (plan 49).
+pub mod present_gate;
+
 /// Idle lock/blank timers and the idle-notify / idle-inhibit protocols.
 pub mod idle;
 

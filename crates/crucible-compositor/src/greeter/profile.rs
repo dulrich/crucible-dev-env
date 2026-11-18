@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 use crucible_config::{
-    GreeterConfig, KeyboardConfig, Milli, N1_MED, Named, Palette, PanelPosition, Rgb,
+    GreeterConfig, KeyboardConfig, Milli, N1_DARK, N1_MED, Named, Palette, PanelPosition, Rgb,
     SurfaceBackground, SurfaceStyle, ThemeConfig, resolve_palette, surface_palette,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
@@ -81,13 +81,13 @@ pub enum ProfileError {
 }
 
 impl GreeterProfile {
-    /// The look without a readable profile: `n1-med` on `#000000`, opaque, default layouts.
+    /// The look without a readable profile: `n1-dark` on `#000000`, opaque, default layouts.
     #[must_use]
     pub fn fallback() -> Self {
         Self {
-            style: SurfaceStyle::N1Med,
+            style: SurfaceStyle::N1Dark,
             background: ProfileBackground::Color(Rgb(0, 0, 0)),
-            palette: N1_MED,
+            palette: N1_DARK,
             alpha: Milli(1000),
             position: crucible_config::DEFAULT_GREETER_POSITION,
             blank_after: DEFAULT_BLANK_AFTER,
@@ -450,8 +450,8 @@ mod tests {
             GreeterProfile::from_config(&plain, Some(&theme), Milli(1000), None, &kb, &[], None);
         assert_eq!(
             p.palette,
-            crucible_config::N1_MED,
-            "default accent: today's palette"
+            crucible_config::N1_DARK,
+            "default style n1-dark, default accent"
         );
         let g = GreeterConfig {
             accent: crucible_config::SurfaceAccent::Theme,
@@ -459,9 +459,16 @@ mod tests {
         };
         let p = GreeterProfile::from_config(&g, Some(&theme), Milli(1000), None, &kb, &[], None);
         assert_eq!(p.palette.accent, Rgb(0x33, 0xcc, 0xcc));
-        assert_eq!(p.palette.bg, crucible_config::N1_MED.bg);
+        assert_eq!(p.palette.bg, crucible_config::N1_DARK.bg);
         let text = write_profile(&p);
         assert_eq!(parse_profile(&text).unwrap(), p, "{text}");
+    }
+
+    #[test]
+    fn the_fallback_look_is_n1_dark() {
+        let p = GreeterProfile::fallback();
+        assert_eq!((p.style, p.palette), (SurfaceStyle::N1Dark, N1_DARK));
+        assert_eq!(crucible_config::DEFAULT_GREETER_STYLE, SurfaceStyle::N1Dark);
     }
 
     #[test]
@@ -500,7 +507,7 @@ mod tests {
         assert_eq!(
             (f.style, f.alpha, f.layouts.as_slice()),
             (
-                SurfaceStyle::N1Med,
+                SurfaceStyle::N1Dark,
                 Milli(1000),
                 ["us".to_string()].as_slice()
             )

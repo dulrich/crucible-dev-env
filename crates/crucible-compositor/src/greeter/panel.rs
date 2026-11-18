@@ -24,6 +24,10 @@ pub const TEXT_PX: u32 = 16;
 pub const FIELD_H: i32 = 36;
 /// Line height of a label row (logical px).
 pub const LINE_H: i32 = 22;
+/// The panel border width (logical px).
+pub const BORDER_W: i32 = 2;
+/// One ellipsis step (see [`ellipsis`]).
+pub const ELLIPSIS_STEP: std::time::Duration = std::time::Duration::from_millis(400);
 /// The mask glyph for secret input.
 pub const BULLET: char = '\u{2022}';
 
@@ -32,8 +36,9 @@ pub const BULLET: char = '\u{2022}';
 pub struct PanelFrame {
     /// The field label.
     pub prompt: String,
-    /// The field contents as drawn (already masked for secret prompts).
-    pub field: String,
+    /// The field contents as drawn (already masked for secret prompts); `None` draws no field
+    /// at all (neither text nor its frame), as the post-auth "Loading CDE" panel.
+    pub field: Option<String>,
     /// The message line, if any.
     pub message: Option<String>,
     /// The active keyboard layout name, drawn right-aligned on the prompt row (`None` with a
@@ -70,6 +75,27 @@ pub fn field_text(input: &str, secret: bool) -> String {
     } else {
         input.to_string()
     }
+}
+
+/// The animated ellipsis after `elapsed`: `""`, `"."`, `".."`, `"..."`, one step per
+/// [`ELLIPSIS_STEP`], cycling.
+#[must_use]
+pub(crate) fn ellipsis(elapsed: std::time::Duration) -> &'static str {
+    const STEPS: [&str; 4] = ["", ".", "..", "..."];
+    let i = elapsed.as_millis() / ELLIPSIS_STEP.as_millis();
+    STEPS[usize::try_from(i % 4).unwrap_or(0)]
+}
+
+/// The border ring just inside `r`, `w` wide: top, bottom, left, right.
+#[must_use]
+pub fn border_rects(r: Rect, w: i32) -> [Rect; 4] {
+    let side_h = (r.height - 2 * w).max(0);
+    [
+        Rect::new(r.x, r.y, r.width, w),
+        Rect::new(r.x, r.y + r.height - w, r.width, w),
+        Rect::new(r.x, r.y + w, w, side_h),
+        Rect::new(r.x + r.width - w, r.y + w, w, side_h),
+    ]
 }
 
 /// The layout indicator text: the name of the active layout when two or more are configured.
@@ -151,7 +177,9 @@ where
     };
     label(&frame.prompt, l.prompt, rgba_u8(pal.text), &mut out);
     let field_at = (l.field.x + 8, l.field.y + (FIELD_H - LINE_H) / 2 + 2);
-    label(&frame.field, field_at, rgba_u8(pal.text), &mut out);
+    if let Some(field) = &frame.field {
+        label(field, field_at, rgba_u8(pal.text), &mut out);
+    }
     if let Some(msg) = &frame.message {
         label(msg, l.message, rgba_u8(pal.accent), &mut out);
     }
@@ -159,16 +187,25 @@ where
         let at = (l.panel.x + l.panel.width - PAD - layout_w, l.prompt.1);
         label(name, at, rgba_u8(pal.accent), &mut out);
     }
-    let f = l.field;
-    let inner = Rect::new(f.x + 1, f.y + 1, f.width - 2, f.height - 2);
-    out.push(CustomRenderElements::SolidColor(solid(
-        map.rect(inner),
-        pal.bg.to_rgba_f32(),
-    )));
-    out.push(CustomRenderElements::SolidColor(solid(
-        map.rect(f),
-        pal.accent.to_rgba_f32(),
-    )));
+    if frame.field.is_some() {
+        let f = l.field;
+        let inner = Rect::new(f.x + 1, f.y + 1, f.width - 2, f.height - 2);
+        out.push(CustomRenderElements::SolidColor(solid(
+            map.rect(inner),
+            pal.bg.to_rgba_f32(),
+        )));
+        out.push(CustomRenderElements::SolidColor(solid(
+            map.rect(f),
+            pal.accent.to_rgba_f32(),
+        )));
+    }
+    // The border ring sits on the panel edge, in front of the panel fill (front-to-back order).
+    for r in border_rects(l.panel, BORDER_W) {
+        out.push(CustomRenderElements::SolidColor(solid(
+            map.rect(r),
+            crate::palette::PANEL_BORDER.to_rgba_f32(),
+        )));
+    }
     out.push(CustomRenderElements::SolidColor(solid(
         map.rect(l.panel),
         with_alpha(pal.bg, frame.alpha),
@@ -237,5 +274,27 @@ mod tests {
         );
         assert_eq!(layout_label(&["us".to_string()], 0), None);
         assert_eq!(layout_label(&[], 0), None);
+    }
+    #[test]
+    fn ellipsis_steps_every_400ms_and_cycles() {
+        let at = |ms| ellipsis(std::time::Duration::from_millis(ms));
+        assert_eq!(
+            [at(0), at(399), at(400), at(800), at(1200), at(1600)],
+            ["", "", ".", "..", "...", ""]
+        );
+    }
+
+    #[test]
+    fn the_border_rings_the_panel_edge() {
+        let p = Rect::new(10, 20, 100, 50);
+        let [t, b, l, r] = border_rects(p, BORDER_W);
+        assert_eq!(t, Rect::new(10, 20, 100, 2));
+        assert_eq!(b, Rect::new(10, 68, 100, 2));
+        assert_eq!(l, Rect::new(10, 22, 2, 46));
+        assert_eq!(r, Rect::new(108, 22, 2, 46));
+        assert_eq!(
+            crate::palette::PANEL_BORDER,
+            crucible_config::Rgb(0x4a, 0x4b, 0x4f)
+        );
     }
 }

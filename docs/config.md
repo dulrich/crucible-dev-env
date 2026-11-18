@@ -327,7 +327,7 @@ With the block set, CDE writes the generated swaylock config to `$XDG_CONFIG_HOM
 
 ```kdl
 greeter {
-    style "n1-med"
+    style "n1-dark"
     background "stock"
     position "lower"
     session "cde-session"
@@ -336,7 +336,7 @@ greeter {
 
 Configures the optional greetd greeter (setup in [`greeter.md`](greeter.md)). Every child is optional and may appear once; an unknown child, a repeated child or a bad value is a located config error.
 
-- `style` — `"terminal"`, `"n1-dark"`, `"n1-med"` (default) or `"n1-light"`.
+- `style` — `"terminal"`, `"n1-dark"` (default), `"n1-med"` or `"n1-light"`.
 - `accent` — `"style"` (default), `"theme"` or `"#rrggbb"`: the panel accent (field frame and message), published as the profile's palette accent, see [Surface styles](#surface-styles).
 - `background` — `"stock"` (default), `"user"` or `"color" "#rrggbb"`, as in [`lock`](#lock).
 - `position` — where the login panel sits on every output: `"center"`, `"upper"`, `"lower"` (default), `"upper-left"`, `"upper-right"`, `"lower-left"` or `"lower-right"`. The value names the centre of a screen region as a share of the output (`center` 50 % / 50 %, `upper` 50 % / 25 %, `lower` 50 % / 75 %, `upper-left` 25 % / 25 %, `upper-right` 75 % / 25 %, `lower-left` 25 % / 75 %, `lower-right` 75 % / 75 %); the panel is centred on that point and clamped to stay fully on the output. The default `lower` keeps the stock background's centre clear.

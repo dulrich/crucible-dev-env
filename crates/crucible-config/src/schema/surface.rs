@@ -107,7 +107,11 @@ mod tests {
         assert_eq!(g, GreeterConfig::default());
         assert_eq!(
             (g.style, g.background, g.session.as_str()),
-            (OverlayStyle::N1Med, SurfaceBackground::Stock, "cde-session")
+            (
+                OverlayStyle::N1Dark,
+                SurfaceBackground::Stock,
+                "cde-session"
+            )
         );
     }
 

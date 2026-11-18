@@ -43,7 +43,7 @@ pub const DEFAULT_LOCK_STYLE: SurfaceStyle = OverlayStyle::N1Med;
 /// The default `lock` background: solid black.
 pub const DEFAULT_LOCK_BACKGROUND: SurfaceBackground = SurfaceBackground::Color(Rgb(0, 0, 0));
 /// The default `greeter` style.
-pub const DEFAULT_GREETER_STYLE: SurfaceStyle = OverlayStyle::N1Med;
+pub const DEFAULT_GREETER_STYLE: SurfaceStyle = OverlayStyle::N1Dark;
 /// The default `greeter` background.
 pub const DEFAULT_GREETER_BACKGROUND: SurfaceBackground = SurfaceBackground::Stock;
 /// The default `greeter` session command.

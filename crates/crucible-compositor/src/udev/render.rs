@@ -96,6 +96,8 @@ impl CrucibleState<UdevData> {
         // frame it carried is not counted (the off output is exempt from the lock handshake).
         if surface.power.is_off() {
             self.session_lock.take_queued(&output);
+            // An off output leaves the presentation gate's armed set.
+            self.present_gate_prune();
             return;
         }
 
@@ -142,6 +144,8 @@ impl CrucibleState<UdevData> {
         if self.session_lock.take_queued(&output) {
             self.lock_output_presented(&output);
         }
+        // Plan 49: the flip of a frame queued after the gate armed presents this output.
+        self.present_gate_flipped(&output);
 
         if schedule_render {
             // Schedule the next repaint roughly one frame out.
@@ -273,6 +277,8 @@ impl CrucibleState<UdevData> {
                     .map_err(Into::<SwapBuffersError>::into)?;
                 // E2: `frame_finish` counts this output as presented iff this frame was locked.
                 self.session_lock.note_queued(&output, locked);
+                // Plan 49: a frame queued now counts for the presentation gate once it flips.
+                self.present_gate_queued(&output);
                 if let Some(surface) = self
                     .backend_data
                     .backends

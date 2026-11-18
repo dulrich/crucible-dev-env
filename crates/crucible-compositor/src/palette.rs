@@ -18,3 +18,7 @@ pub const PIP_INACTIVE_COLOR: [f32; 4] = [0.45, 0.45, 0.45, 0.85];
 
 /// Header strip background (a dark neutral, distinct from the ring accent).
 pub const STRIP_BG: [f32; 4] = [0.09, 0.10, 0.12, 1.0];
+
+/// The greeter login panel's border: `#4a4b4f`, the stroke of the stock background's right-hand
+/// boxes (`assets/backgrounds/cde-0.7.svg`). Fixed, not style-derived.
+pub const PANEL_BORDER: crucible_config::Rgb = crucible_config::Rgb(0x4a, 0x4b, 0x4f);

@@ -35,7 +35,7 @@ bind "Super+E" "set-layout us"   // only set-layout binds are accepted
 - `background` is a colour or an absolute image path; the profile never holds `stock` or `user`, which the publisher resolves to a copied image file.
 - `palette` holds the panel colours resolved from the style (for `terminal`, the user's `theme` colours). Without it the style's own palette is used (`terminal` falls back to `n1-med`).
 - `position` is the screen region whose centre the panel is centred on (clamped to stay on the output); `blank-after` is the idle timeout in whole seconds, published from the config's `idle { blank-after }` (600 when it sets none). The greeter never locks, and the key press that wakes blanked screens is consumed.
-- The fallback look is style `n1-med` on colour `#000000`, alpha 1.0, position `lower`, blank after 600 s, layout `us`, session `cde-session` and the default binds.
+- The fallback look is style `n1-dark` on colour `#000000`, alpha 1.0, position `lower`, blank after 600 s, layout `us`, session `cde-session` and the default binds.
 
 ## Background
 
@@ -45,7 +45,7 @@ The stock CDE background image may change on a major release.
 
 ## Panel and keys
 
-The panel sits at the profile's `position` (default `lower`) on every output; keyboard focus is global. It shows the prompt ("Username", then the PAM prompts), the input field and a message line (errors, PAM info lines, and "Authenticating…" while greetd is answering).
+The panel sits at the profile's `position` (default `lower`) on every output; keyboard focus is global. It shows the prompt ("Username", then the PAM prompts), the input field and a message line (errors, PAM info lines, and "Authenticating…" while greetd is answering). A 2 px `#4a4b4f` border (the stroke of the stock background's boxes) rings the panel. After a successful authentication the prompt and field give way to "Loading CDE" with an animated ellipsis; the greeter writes `start_session` only once that frame is on screen (every lit output completed a page flip of it, or after a 250 ms cap), so it stays visible through the hand-off to the session. Idle blanking is held off while it shows. A `start_session` error returns to the prompt with its message.
 
 - Printable characters type into the field; a secret prompt shows one bullet per character, never the text.
 - `Backspace` deletes the last character.

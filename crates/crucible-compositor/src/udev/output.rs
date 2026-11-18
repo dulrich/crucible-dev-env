@@ -374,6 +374,8 @@ fn drop_mapped_output(state: &mut CrucibleState<UdevData>, key: UdevOutputId) {
     state.space.unmap_output(&output);
     state.space.refresh();
     drop(record);
+    // A removed output leaves the presentation gate's armed set.
+    state.present_gate_prune();
 }
 
 impl CrucibleState<UdevData> {
@@ -630,6 +632,7 @@ impl CrucibleState<UdevData> {
                 self.unregister_output(&output);
                 self.space.unmap_output(&output);
                 self.space.refresh();
+                self.present_gate_prune();
                 return;
             }
         };
@@ -669,11 +672,18 @@ impl CrucibleState<UdevData> {
         if deferred && crate::lock::sync_commit_presents_lock(locked, true) {
             self.lock_output_presented(&output);
         }
+        // Plan 49: the same synchronous commit presents the gate's post-arm frame (it was
+        // rendered just now). A non-deferred adoption committed nothing rendered: the kick-off
+        // render below queues one, and its flip reports as usual.
+        if deferred {
+            self.present_gate_presented_now(&output);
+        }
 
         // An output hot-plugged while the idle machine has the outputs blanked comes up powered
         // off and lights up on the next wake; if its power-off fails it renders as usual.
         if self.idle.machine.blanked() && self.backend_data.power_off_surface(node, crtc) {
             info!(?crtc, "idle: new output comes up powered off (blanked)");
+            self.present_gate_prune();
             return;
         }
 
