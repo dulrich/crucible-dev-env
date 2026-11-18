@@ -2,10 +2,13 @@
 //! implements it with PAM (one PAM handle per [`SessionHandle`], living in a root process for
 //! the session's lifetime), and the tests drive a fake.
 //!
-//! Lifecycle of one handle: [`Backend::begin`] → [`SessionHandle::auth_step`] until
-//! [`AuthStep::Authenticated`] → [`SessionHandle::open`] → [`SessionHandle::spawn`] →
-//! [`SessionHandle::close`]. `close` consumes the handle, so a handle is closed at most once; the
-//! daemon guarantees it is closed exactly once (also when authentication is abandoned).
+//! Lifecycle of one handle: [`Backend::begin`] (fixes the class) → [`SessionHandle::auth_step`]
+//! until [`AuthStep::Authenticated`] (fixes the account) → [`SessionHandle::open`] (fixes the
+//! VT) → [`SessionHandle::spawn`], which consumes the handle: the returned [`Child`] is the
+//! session, and the backend closes PAM when it ends (or itself when the spawn fails).
+//! [`SessionHandle::close`] is only for a handle that never spawned (failed or abandoned
+//! authentication, a failed `open`, a queued start dropped); it consumes the handle too, so the
+//! daemon closes each unspawned handle exactly once.
 
 use std::os::fd::{OwnedFd, RawFd};
 
@@ -68,12 +71,9 @@ pub enum AuthStep {
 /// What [`SessionHandle::open`] registers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenSpec {
-    /// The resolved account (from [`AuthStep::Authenticated`]).
-    pub account: String,
-    /// The VT number the session lives on (`XDG_VTNR`, `PAM_TTY=/dev/tty<vt>`).
+    /// The VT number the session lives on: the one value behind `PAM_TTY=tty<vt>`, the user
+    /// process's `/dev/tty<vt>` stdio and `XDG_VTNR`.
     pub vt: u32,
-    /// The session class.
-    pub class: Class,
     /// Extra `KEY=VALUE` entries for the PAM environment before `pam_open_session`.
     pub env: Vec<String>,
 }
@@ -81,15 +81,11 @@ pub struct OpenSpec {
 /// What [`SessionHandle::spawn`] runs.
 #[derive(Debug)]
 pub struct SpawnSpec {
-    /// The resolved account the command runs as (never root unless the account is root).
-    pub account: String,
     /// The command words; the backend runs them as `<shell> -l -c 'exec "$@"'` (the account's
     /// shell when `/etc/shells` lists it, else `/bin/sh`), so no word is re-split.
     pub cmd: Vec<String>,
     /// Extra `KEY=VALUE` entries added to the from-scratch environment.
     pub env: Vec<String>,
-    /// The VT that becomes the child's controlling tty and stdio (nothing is written to it).
-    pub vt: u32,
     /// An extra fd that crosses the exec: the ready pipe's write end, to be placed at the given
     /// fd number. Every other daemon fd stays close-on-exec.
     pub extra_fd: Option<(OwnedFd, RawFd)>,
@@ -142,10 +138,14 @@ pub trait SessionHandle {
     fn auth_step(&mut self, answer: Option<Secret>) -> Result<AuthStep, SeamError>;
     /// Opens the session (`pam_setcred` + `pam_open_session`) after authentication.
     fn open(&mut self, spec: &OpenSpec) -> Result<(), SeamError>;
-    /// Spawns the command as the account inside the open session.
-    fn spawn(&mut self, spec: SpawnSpec) -> Result<Self::Child, SeamError>;
-    /// Closes the session if it was opened, then ends the handle (`pam_close_session`,
-    /// `pam_end`); also how an abandoned authentication is cancelled.
+    /// Spawns the command as the authenticated account inside the open session, on the VT
+    /// given to `open` (it becomes the child's controlling tty and stdio; nothing is written to
+    /// it). Consumes the handle: on success the child is the session and its end closes PAM; on
+    /// failure the backend has closed PAM before returning the error.
+    fn spawn(self, spec: SpawnSpec) -> Result<Self::Child, SeamError>;
+    /// Ends a handle that never spawned: closes the session if it was opened, then ends PAM
+    /// (`pam_close_session`, `pam_setcred(DELETE_CRED)`, `pam_end`); also how an abandoned
+    /// authentication is cancelled.
     fn close(self) -> Result<(), SeamError>;
 }
 

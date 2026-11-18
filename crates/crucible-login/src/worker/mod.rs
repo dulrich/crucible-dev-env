@@ -7,8 +7,14 @@
 //!
 //! - `Step(answer)` → `Prompt` | `Authenticated` | `AuthError` | `Error` (the first `Step` starts
 //!   PAM; PAM's push-driven conversation blocks on the next `Step` for each message);
-//! - `Open` → `Ok` | `Error`; `Spawn` (+ the extra fd over `SCM_RIGHTS`) → `Spawned(pid)` (+ a
-//!   pidfd for the user process over `SCM_RIGHTS`, absent if `pidfd_open` failed) | `Error`; `Close` → the worker closes PAM and exits.
+//! - `Open { vt, env }` → `Ok` | `Error`; `Spawn { cmd, env, target_fd }` (+ the extra fd over
+//!   `SCM_RIGHTS`) → `Spawned(pid)` (+ a pidfd for the user process over `SCM_RIGHTS`, absent if
+//!   `pidfd_open` failed) | `Error`; `Close` → the worker closes PAM and exits.
+//!
+//! The worker knows its class from the fork, takes the account from PAM (`PAM_USER` after
+//! `pam_acct_mgmt`) and the VT from `Open`; that one VT is `PAM_TTY`, the user process's
+//! `/dev/tty<n>` and `XDG_VTNR`, so no request can contradict them. A `Spawn` that fails is
+//! followed by the daemon side's `Close` ([`PamHandle`]'s spawn consumes the handle).
 //!
 //! After `Spawned`, the worker forwards `SIGTERM`/`SIGINT`/`SIGHUP` to the user process, reaps
 //! it, runs `pam_close_session` + `pam_setcred(DELETE_CRED)` + `pam_end`, and exits with the

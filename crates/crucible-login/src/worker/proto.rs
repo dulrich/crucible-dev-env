@@ -7,23 +7,23 @@
 use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 
-use crucible_greetd::AuthMessageType;
 use crucible_greetd::codec::MAX_MESSAGE_LEN;
+use crucible_greetd::{AuthMessageType, Secret};
 use serde::{Deserialize, Serialize};
 
-use crate::seam::Class;
 use crate::sys::{cvt, retry_eintr};
 
-/// The datagram budget. The largest request is a `Spawn`: its `account` is `PAM_USER`, which
-/// comes from a `create_session` username (one greetd frame, at most [`MAX_MESSAGE_LEN`]), and
-/// its `cmd` and `env` come from one `start_session` frame (at most [`MAX_MESSAGE_LEN`]
-/// together). Those strings were decoded from JSON, and `serde_json` re-encodes each with the
-/// shortest escape, which is never longer than the escape the greetd peer had to send, so
-/// each frame's strings re-encode to at most its own length. On top come the daemon's
-/// ready-fd env entry (`CDE_LOGIN_READY_FD=3`, ~25 bytes), the variant and field names and
-/// numbers (~100 bytes): 4 KiB covers that with room to spare. 132 KiB stays well under the
-/// default unix socket send buffer (`net.core.wmem_default`, 208 KiB on Debian), so no
-/// `SO_SNDBUF` tuning is needed.
+/// The datagram budget. The largest request is a `Spawn`: its `cmd` and `env` come from one
+/// `start_session` frame (at most [`MAX_MESSAGE_LEN`] together); a `Step` answer comes from one
+/// `post_auth_message_response` frame (at most [`MAX_MESSAGE_LEN`]). Those strings were decoded
+/// from JSON, and `serde_json` re-encodes each with the shortest escape, which is never longer
+/// than the escape the greetd peer had to send, so each frame's strings re-encode to at most its
+/// own length. On top come the daemon's ready-fd env entry (`CDE_LOGIN_READY_FD=3`, ~25 bytes),
+/// the variant and field names and numbers (~100 bytes): 4 KiB covers that with room to spare.
+/// The second [`MAX_MESSAGE_LEN`] dates from when `Spawn` also carried the account name; it is
+/// kept so this refactor leaves the budget (and its boundary tests) unchanged, as headroom for
+/// one more frame-sized field. 132 KiB stays well under the default unix socket send buffer
+/// (`net.core.wmem_default`, 208 KiB on Debian), so no `SO_SNDBUF` tuning is needed.
 pub const MAX_MSG: usize = 2 * MAX_MESSAGE_LEN + 4 * 1024;
 
 /// Daemon → worker.
@@ -31,26 +31,22 @@ pub const MAX_MSG: usize = 2 * MAX_MESSAGE_LEN + 4 * 1024;
 #[serde(deny_unknown_fields)]
 pub enum Req {
     /// Advance the conversation (answer to the previous prompt; the first one starts PAM).
-    Step(Option<String>),
-    /// Open the session.
+    /// The answer stays a [`Secret`] (serialized transparently, so the bytes are those of a
+    /// plain string) and wipes itself when dropped.
+    Step(Option<Secret>),
+    /// Open the session (the class came with the worker's fork, the account from PAM).
     Open {
-        /// VT number.
+        /// VT number: `PAM_TTY`, the user process's tty and `XDG_VTNR`.
         vt: u32,
-        /// Session class.
-        class: Class,
         /// Extra PAM env entries.
         env: Vec<String>,
     },
     /// Spawn the user process; `target_fd` is where the passed fd lands (if one is passed).
     Spawn {
-        /// Resolved account.
-        account: String,
         /// Command words.
         cmd: Vec<String>,
         /// Extra env entries.
         env: Vec<String>,
-        /// VT number.
-        vt: u32,
         /// Target fd number for the `SCM_RIGHTS` fd.
         target_fd: Option<i32>,
     },
@@ -221,10 +217,8 @@ mod tests {
 
     fn spawn_req(cmd: Vec<String>, env: Vec<String>) -> Req {
         Req::Spawn {
-            account: "alice".into(),
             cmd,
             env,
-            vt: 8,
             target_fd: Some(3),
         }
     }
@@ -233,32 +227,30 @@ mod tests {
     fn requests_round_trip() {
         for r in [
             Req::Step(None),
-            Req::Step(Some("pass word".into())),
+            Req::Step(Some(Secret::new("pass word"))),
             Req::Open {
                 vt: 8,
-                class: Class::User,
                 env: s(&["A=1"]),
             },
-            Req::Open {
-                vt: 7,
-                class: Class::Greeter,
-                env: vec![],
-            },
+            Req::Open { vt: 7, env: vec![] },
             spawn_req(
                 s(&["cde", "a b", "q\"\\\n\u{1}é"]),
                 s(&["CDE_LOGIN_READY_FD=3"]),
             ),
             Req::Spawn {
-                account: "g".into(),
                 cmd: s(&["x"]),
                 env: vec![],
-                vt: 7,
                 target_fd: None,
             },
             Req::Close,
         ] {
             assert_eq!(Req::decode(&r.encode()).unwrap(), r);
         }
+        // A Secret answer is the same bytes a plain string was.
+        assert_eq!(
+            Req::Step(Some(Secret::new("pw"))).encode(),
+            br#"{"Step":"pw"}"#
+        );
     }
 
     #[test]
@@ -291,8 +283,9 @@ mod tests {
             b"garbage",
             br#""Reboot""#,
             br#"{"Spawned":"x"}"#,
-            br#"{"Open":{"vt":8,"class":"User","env":[],"extra":1}}"#,
-            br#"{"Open":{"vt":8,"env":[]}}"#,
+            br#"{"Open":{"vt":8,"env":[],"extra":1}}"#,
+            br#"{"Open":{"vt":8,"class":"User","env":[]}}"#,
+            br#"{"Open":{"env":[]}}"#,
         ] {
             assert!(Req::decode(b).is_err(), "{b:?}");
             assert!(Rep::decode(b).is_err(), "{b:?}");
@@ -309,7 +302,7 @@ mod tests {
     #[test]
     fn maximal_greetd_request_fits_the_budget() {
         // A `start_session` frame filled to the greetd cap with words full of characters JSON
-        // escapes, plus a cap-sized account name and the daemon's ready-fd entry.
+        // escapes, plus the daemon's ready-fd entry.
         let word = "a\"b\\c\nd\u{1}e".repeat(64);
         let frame = |cmd: &[String], env: &[String]| {
             serde_json::to_vec(&serde_json::json!({
@@ -330,10 +323,7 @@ mod tests {
         }
         assert!(frame(&cmd, &env) > MAX_MESSAGE_LEN - 4 * 1024);
         env.push("CDE_LOGIN_READY_FD=3".into());
-        let mut r = spawn_req(cmd, env);
-        if let Req::Spawn { account, .. } = &mut r {
-            *account = "u".repeat(MAX_MESSAGE_LEN);
-        }
+        let r = spawn_req(cmd, env);
         let len = r.encode().len();
         assert!(len <= MAX_MSG, "{len} > {MAX_MSG}");
     }

@@ -7,7 +7,7 @@ pub mod machine;
 
 use std::io::{Read, Write};
 
-pub use codec::{AuthMessageType, CodecError, ErrorType, Request, Response, Secret};
+pub use codec::{AuthMessageType, CodecError, ErrorType, Request, Response, Secret, wipe};
 pub use machine::{Event, LoginMachine, Output, State, View};
 
 /// Called just before a `start_session` request is written; `false` aborts the exchange.

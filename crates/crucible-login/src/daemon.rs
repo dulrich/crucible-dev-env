@@ -95,8 +95,8 @@ pub fn quit_seen(buf: &[u8]) -> bool {
     buf.windows(4).any(|w| w == b"quit")
 }
 
+/// A spawned session: the child is the session (its end closes PAM), so no handle is kept.
 struct Running<H: SessionHandle> {
-    handle: H,
     child: H::Child,
     started: Instant,
 }
@@ -231,38 +231,29 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
                 "greeter conversation did not finish".into(),
             ));
         };
+        tracing::debug!("greeter authenticated as {account:?}");
         let sock = format!("GREETD_SOCK={}", self.cfg.sock_path);
-        let res = handle
-            .open(&OpenSpec {
-                account: account.clone(),
-                vt: self.cfg.greeter_vt,
-                class: Class::Greeter,
-                env: vec![sock.clone()],
-            })
-            .and_then(|()| {
-                let mut env = vec![sock];
-                if ready.is_some() {
-                    env.push(format!("{READY_ENV}={READY_FD}"));
-                }
-                handle.spawn(SpawnSpec {
-                    account,
-                    cmd: self.cfg.greeter_cmd.clone(),
-                    env,
-                    vt: self.cfg.greeter_vt,
-                    extra_fd: ready.map(|w| (w, READY_FD)),
-                })
-            });
-        match res {
-            Ok(child) => Ok(Running {
-                handle,
-                child,
-                started: Instant::now(),
-            }),
-            Err(e) => {
-                close_handle(handle, "greeter session");
-                Err(e)
-            }
+        if let Err(e) = handle.open(&OpenSpec {
+            vt: self.cfg.greeter_vt,
+            env: vec![sock.clone()],
+        }) {
+            close_handle(handle, "greeter session");
+            return Err(e);
         }
+        let mut env = vec![sock];
+        if ready.is_some() {
+            env.push(format!("{READY_ENV}={READY_FD}"));
+        }
+        // A failed spawn has closed the handle already.
+        let child = handle.spawn(SpawnSpec {
+            cmd: self.cfg.greeter_cmd.clone(),
+            env,
+            extra_fd: ready.map(|w| (w, READY_FD)),
+        })?;
+        Ok(Running {
+            child,
+            started: Instant::now(),
+        })
     }
 
     fn start_greeter(&mut self, now: Instant) {
@@ -550,48 +541,47 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
         now: Instant,
     ) -> Option<Response> {
         let vt = self.cfg.session_vt;
-        let res = (|| {
+        let prepared = (|| {
             handle.open(&OpenSpec {
-                account: account.clone(),
                 vt,
-                class: Class::User,
                 env: Vec::new(),
             })?;
             self.vt
                 .set_graphics(vt)
                 .map_err(|e| SeamError::Other(format!("KD_GRAPHICS on VT {vt}: {e}")))?;
-            let (r, w) =
-                crate::sys::pipe_cloexec(0).map_err(|e| SeamError::Other(format!("pipe: {e}")))?;
-            let mut env = env;
-            env.push(format!("{READY_ENV}={READY_FD}"));
-            let child = handle.spawn(SpawnSpec {
-                account: account.clone(),
-                cmd,
-                env,
-                vt,
-                extra_fd: Some((w, READY_FD)),
-            })?;
-            // The write end was moved into the spec and dropped by the backend after spawn,
-            // so EOF on `r` means the session closed it.
-            Ok((child, r))
+            crate::sys::pipe_cloexec(0).map_err(|e| SeamError::Other(format!("pipe: {e}")))
         })();
-        match res {
-            Ok((child, ready)) => {
+        let (r, w) = match prepared {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!("session start failed: {e}");
+                close_handle(handle, "user session");
+                return Some(seam_reply(&e));
+            }
+        };
+        let mut env = env;
+        env.push(format!("{READY_ENV}={READY_FD}"));
+        // The write end is moved into the spec and dropped by the backend after spawn, so EOF on
+        // `r` means the session closed it. A failed spawn has closed the handle already.
+        match handle.spawn(SpawnSpec {
+            cmd,
+            env,
+            extra_fd: Some((w, READY_FD)),
+        }) {
+            Ok(child) => {
                 tracing::info!("session for {account:?} started (pid {})", child.pid());
                 self.session = UserSession::Starting {
                     run: Running {
-                        handle,
                         child,
                         started: now,
                     },
-                    ready,
+                    ready: r,
                     deadline: now + self.cfg.ready_timeout,
                 };
                 None
             }
             Err(e) => {
                 tracing::error!("session start failed: {e}");
-                close_handle(handle, "user session");
                 Some(seam_reply(&e))
             }
         }
@@ -655,25 +645,20 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
         };
         if session_exit.is_some() {
             match std::mem::replace(&mut self.session, UserSession::None) {
-                UserSession::Starting { run, .. } => {
-                    close_handle(run.handle, "user session");
+                UserSession::Starting { .. } => {
                     reply = Some(error("the session exited before it was ready"));
                 }
                 UserSession::Running {
-                    run,
-                    handed_off: true,
-                    ..
+                    handed_off: true, ..
                 } => {
                     // The greeter was brought up at `quit`; it (or its fallback) owns the switch.
-                    close_handle(run.handle, "user session");
                     tracing::info!("logout: session closed");
                     self.backoff.reset();
                     if let Some(q) = self.queued.take() {
                         reply = self.open_session(q.handle, q.account, q.cmd, q.env, now);
                     }
                 }
-                UserSession::Running { run, .. } => {
-                    close_handle(run.handle, "user session");
+                UserSession::Running { .. } => {
                     tracing::info!("session ended; restarting the greeter");
                     self.backoff.reset();
                     if self.greeter.is_none() {
@@ -693,7 +678,6 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             && let Some(g) = self.greeter.take()
         {
             let lived = now.saturating_duration_since(g.started);
-            close_handle(g.handle, "greeter session");
             self.cancel_auth();
             self.drop_queued();
             if self.logout.is_some() {
@@ -738,6 +722,8 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+        // Dropping each run drops its child: the worker closes PAM once it has reaped the user
+        // process.
         for (r, a) in runs.iter_mut().zip(&alive) {
             if *a {
                 let _ = r.child.signal(libc::SIGKILL);
@@ -748,9 +734,6 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
                     std::thread::sleep(Duration::from_millis(20));
                 }
             }
-        }
-        for r in runs {
-            close_handle(r.handle, "session");
         }
     }
 }

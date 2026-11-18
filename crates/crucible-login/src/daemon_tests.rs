@@ -17,11 +17,29 @@ struct Proc {
     wait_errs: usize,
     /// Every signal sent, with where the real backend would aim it.
     signals: Vec<(i32, SignalTarget)>,
+    /// The handle this process's session closes when it ends (as the real worker does after
+    /// reaping the user process): its id and class.
+    session: Option<(usize, Class)>,
 }
 
 struct FakeChild {
     pid: i32,
     proc_: Rc<RefCell<Proc>>,
+    s: S,
+}
+
+/// The process ends with `st` (unless it already has); its session then closes its handle.
+fn end_proc(s: &S, p: &Rc<RefCell<Proc>>, st: ExitStatus) {
+    let mut p = p.borrow_mut();
+    if p.exit.is_some() {
+        return;
+    }
+    p.exit = Some(st);
+    if let Some((id, class)) = p.session.take() {
+        let mut s = s.borrow_mut();
+        s.log.push(format!("close #{id} {}", class.xdg_class()));
+        s.closed_open += 1;
+    }
 }
 
 impl Child for FakeChild {
@@ -37,10 +55,13 @@ impl Child for FakeChild {
         Ok(p.exit)
     }
     fn signal(&mut self, sig: i32) -> Result<(), SeamError> {
-        let mut p = self.proc_.borrow_mut();
-        p.signals.push((sig, signal_target(sig)));
-        if sig == libc::SIGKILL || !p.ignores_term {
-            p.exit.get_or_insert(ExitStatus::Signal(sig));
+        let dies = {
+            let mut p = self.proc_.borrow_mut();
+            p.signals.push((sig, signal_target(sig)));
+            sig == libc::SIGKILL || !p.ignores_term
+        };
+        if dies {
+            end_proc(&self.s, &self.proc_, ExitStatus::Signal(sig));
         }
         Ok(())
     }
@@ -53,6 +74,8 @@ struct Shared {
     opened: usize,
     closed_open: usize,
     fail_greeter: usize,
+    /// The next this many spawns fail.
+    fail_spawn: usize,
 }
 
 type S = Rc<RefCell<Shared>>;
@@ -68,7 +91,10 @@ struct FakeHandle {
     class: Class,
     user: String,
     step: usize,
-    opened: bool,
+    /// The account authentication resolved, as the real worker takes it from `PAM_USER`.
+    account: Option<String>,
+    /// The VT given to `open`.
+    vt: Option<u32>,
 }
 
 impl Backend for FakeBackend {
@@ -88,7 +114,8 @@ impl Backend for FakeBackend {
             class,
             user,
             step: 0,
-            opened: false,
+            account: None,
+            vt: None,
         })
     }
 }
@@ -96,56 +123,77 @@ impl Backend for FakeBackend {
 impl SessionHandle for FakeHandle {
     type Child = FakeChild;
     fn auth_step(&mut self, answer: Option<Secret>) -> Result<AuthStep, SeamError> {
-        if self.class == Class::Greeter {
-            return Ok(AuthStep::Authenticated {
-                account: self.user.clone(),
-            });
+        let ok = if self.class == Class::Greeter {
+            true
+        } else {
+            self.step += 1;
+            match self.step {
+                1 => {
+                    return Ok(AuthStep::Prompt(
+                        AuthMessageType::Secret,
+                        "Password: ".into(),
+                    ));
+                }
+                _ => answer.as_ref().map(Secret::expose) == Some("pw"),
+            }
+        };
+        if !ok {
+            return Err(SeamError::Auth("Authentication failure".into()));
         }
-        self.step += 1;
-        match self.step {
-            1 => Ok(AuthStep::Prompt(
-                AuthMessageType::Secret,
-                "Password: ".into(),
-            )),
-            _ if answer.as_ref().map(Secret::expose) == Some("pw") => Ok(AuthStep::Authenticated {
-                account: self.user.clone(),
-            }),
-            _ => Err(SeamError::Auth("Authentication failure".into())),
-        }
+        self.account = Some(self.user.clone());
+        Ok(AuthStep::Authenticated {
+            account: self.user.clone(),
+        })
     }
     fn open(&mut self, spec: &OpenSpec) -> Result<(), SeamError> {
+        let account = self.account.as_deref().expect("open before authentication");
         let mut s = self.s.borrow_mut();
         s.log.push(format!(
-            "open {} {} vt{}",
-            spec.class.xdg_class(),
-            spec.account,
+            "open {} {account} vt{}",
+            self.class.xdg_class(),
             spec.vt
         ));
         s.opened += 1;
-        self.opened = true;
+        self.vt = Some(spec.vt);
         Ok(())
     }
-    fn spawn(&mut self, spec: SpawnSpec) -> Result<FakeChild, SeamError> {
-        let mut s = self.s.borrow_mut();
+    fn spawn(self, spec: SpawnSpec) -> Result<FakeChild, SeamError> {
+        assert!(self.vt.is_some(), "spawn before open");
+        let account = self.account.clone().expect("spawn before authentication");
         let fd = spec.extra_fd.as_ref().map(|(_, n)| *n);
-        s.log.push(format!(
-            "spawn {} {} env={} fd={fd:?}",
-            spec.account,
-            spec.cmd.join(" "),
-            spec.env.join(",")
-        ));
-        let p = Rc::new(RefCell::new(Proc::default()));
-        s.procs.push((spec.account.clone(), p.clone()));
+        let failed = {
+            let mut s = self.s.borrow_mut();
+            s.log.push(format!(
+                "spawn {account} {} env={} fd={fd:?}",
+                spec.cmd.join(" "),
+                spec.env.join(",")
+            ));
+            let failed = s.fail_spawn > 0;
+            s.fail_spawn = s.fail_spawn.saturating_sub(1);
+            failed
+        };
+        if failed {
+            // The backend closes PAM itself when nothing was spawned.
+            self.close()?;
+            return Err(SeamError::Other("spawn failed".into()));
+        }
+        let mut s = self.s.borrow_mut();
+        let p = Rc::new(RefCell::new(Proc {
+            session: Some((self.id, self.class)),
+            ..Proc::default()
+        }));
+        s.procs.push((account, p.clone()));
         Ok(FakeChild {
             pid: 100 + s.procs.len() as i32,
             proc_: p,
+            s: self.s.clone(),
         })
     }
     fn close(self) -> Result<(), SeamError> {
         let mut s = self.s.borrow_mut();
         s.log
             .push(format!("close #{} {}", self.id, self.class.xdg_class()));
-        if self.opened {
+        if self.vt.is_some() {
             s.closed_open += 1;
         }
         Ok(())
@@ -256,7 +304,7 @@ fn proc_of(s: &S, account: &str) -> Rc<RefCell<Proc>> {
 }
 
 fn exit(s: &S, account: &str) {
-    proc_of(s, account).borrow_mut().exit = Some(ExitStatus::Code(0));
+    end_proc(s, &proc_of(s, account), ExitStatus::Code(0));
 }
 
 #[test]
@@ -766,4 +814,54 @@ fn queued_start_times_out() {
     d.poll_children(now);
     assert!(!d.session_active());
     assert!(!log(&s).iter().any(|e| e.starts_with("open user bob")));
+}
+
+#[test]
+fn a4_failed_spawn_is_closed_once_by_the_backend() {
+    let (mut d, s, now) = setup(&[]);
+    s.borrow_mut().fail_spawn = 1;
+    create(&mut d, "alice", now);
+    assert_eq!(answer(&mut d, "pw", now), Some(Response::Success));
+    assert!(matches!(
+        start_cmd(&mut d, now),
+        Some(Response::Error { .. })
+    ));
+    assert!(!d.session_active() && d.ready_fd().is_none());
+    let l = log(&s);
+    assert_eq!(count_after(&l, "spawn alice", "close #"), 1, "{l:#?}");
+    assert!(
+        l[pos(&l, "spawn alice")..]
+            .iter()
+            .any(|e| e.ends_with(" user"))
+    );
+    d.shutdown(Duration::from_millis(50));
+    assert_all_closed_once(&s);
+}
+
+#[test]
+fn a4_failed_greeter_spawn_is_closed_once_and_retried() {
+    let (mut d, s, now) = setup(&[]);
+    exit(&s, "_greetd");
+    s.borrow_mut().fail_spawn = 1;
+    d.poll_children(now);
+    d.on_tick(d.greeter_due().unwrap());
+    assert!(!d.greeter_running(), "the restart's spawn failed");
+    d.on_tick(d.greeter_due().unwrap());
+    assert!(d.greeter_running());
+    d.shutdown(Duration::from_millis(50));
+    assert_all_closed_once(&s);
+}
+
+#[test]
+fn a4_a_session_that_ends_is_closed_by_its_child_not_the_daemon() {
+    let (mut d, s, now) = setup(&[]);
+    running_session(&mut d, &s, now);
+    exit(&s, "alice");
+    mark(&s, "exited");
+    d.poll_children(now);
+    let l = log(&s);
+    // The one close of alice's handle came with its end, before the daemon reaped it.
+    assert_eq!(count_after(&l, "running", "close #"), 1, "{l:#?}");
+    assert_eq!(count_after(&l, "exited", "close #"), 0, "{l:#?}");
+    assert!(!d.session_active());
 }

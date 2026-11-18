@@ -1,12 +1,19 @@
 //! Hand-written FFI to the system libpam (no dev package: links `libpam.so.0` verbatim) and a
 //! small owning wrapper. Only the per-session worker process ([`crate::worker`]) uses it; PAM
 //! never runs in the daemon process.
+//!
+//! Secret answers: the [`Prompter`] hands each answer over as a [`Secret`] (wiped on drop), and
+//! the conversation callback copies its bytes straight into the `malloc`ed `pam_response.resp`
+//! that PAM owns from then on. That copy is the end of this program's responsibility: the module
+//! stack owns, uses and frees the response. Not covered: `serde_json`'s internal buffers while
+//! decoding a request, the greetd socket read buffer in `crucible-greetd`, and kernel socket
+//! buffers.
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::ptr;
 
-use crucible_greetd::AuthMessageType;
+use crucible_greetd::{AuthMessageType, Secret};
 
 /// `PAM_SUCCESS`.
 pub const PAM_SUCCESS: c_int = 0;
@@ -96,8 +103,9 @@ pub fn map_style(style: c_int) -> Option<AuthMessageType> {
 }
 
 /// Builds the `malloc`-allocated response array PAM takes ownership of (`None`: null `resp`).
-/// Returns null on allocation failure or an answer containing NUL.
-pub fn marshal_responses(answers: &[Option<String>]) -> *mut PamResponse {
+/// Returns null on allocation failure or an answer containing NUL. Each answer is copied
+/// directly into its `malloc`ed slot, with no intermediate buffer.
+pub fn marshal_responses(answers: &[Option<Secret>]) -> *mut PamResponse {
     let n = answers.len().max(1);
     // SAFETY: calloc returns zeroed memory for n responses or null.
     let arr = unsafe { libc::calloc(n, std::mem::size_of::<PamResponse>()) }.cast::<PamResponse>();
@@ -106,19 +114,21 @@ pub fn marshal_responses(answers: &[Option<String>]) -> *mut PamResponse {
     }
     for (i, a) in answers.iter().enumerate() {
         let Some(a) = a else { continue };
-        let Ok(c) = CString::new(a.as_str()) else {
-            // SAFETY: arr is the live array built here.
-            unsafe { free_responses(arr, answers.len()) };
-            return ptr::null_mut();
-        };
-        // SAFETY: strdup copies a valid C string into malloc'd memory; arr has n slots.
+        let b = a.expose().as_bytes();
+        // SAFETY: malloc returns len + 1 bytes or null; arr has n slots and is the live array
+        // built here.
         unsafe {
-            let p = libc::strdup(c.as_ptr());
+            let p = if b.contains(&0) {
+                ptr::null_mut()
+            } else {
+                libc::malloc(b.len() + 1).cast::<c_char>()
+            };
             if p.is_null() {
-                // arr is the live array built here.
                 free_responses(arr, answers.len());
                 return ptr::null_mut();
             }
+            ptr::copy_nonoverlapping(b.as_ptr().cast::<c_char>(), p, b.len());
+            *p.add(b.len()) = 0;
             (*arr.add(i)).resp = p;
         }
     }
@@ -149,7 +159,7 @@ pub unsafe fn free_responses(arr: *mut PamResponse, n: usize) {
 }
 
 /// Answers one conversation message: `(type, text)` in, the answer out (`Err`: abort).
-pub type Prompter = Box<dyn FnMut(AuthMessageType, String) -> Result<Option<String>, ()>>;
+pub type Prompter = Box<dyn FnMut(AuthMessageType, String) -> Result<Option<Secret>, ()>>;
 
 struct ConvData {
     prompter: Prompter,
@@ -166,7 +176,8 @@ extern "C" fn conversation(
     }
     // SAFETY: appdata is the ConvData registered in Pam::start, alive for the handle's life.
     let data = unsafe { &mut *appdata.cast::<ConvData>() };
-    let mut answers = Vec::with_capacity(num_msg as usize);
+    // Collected as Secrets, so every answer is wiped when this returns.
+    let mut answers: Vec<Option<Secret>> = Vec::with_capacity(num_msg as usize);
     for i in 0..num_msg as usize {
         // SAFETY: Linux-PAM passes an array of num_msg message pointers.
         let m = unsafe { &**msg.add(i) };
@@ -388,7 +399,7 @@ mod tests {
 
     #[test]
     fn responses_are_malloced_copies_or_null() {
-        let answers = vec![Some("hunter 2".to_owned()), None, Some(String::new())];
+        let answers = vec![Some(Secret::new("hunter 2")), None, Some(Secret::new(""))];
         let arr = marshal_responses(&answers);
         assert!(!arr.is_null());
         // SAFETY: arr holds three responses built above.
@@ -400,6 +411,6 @@ mod tests {
         }
         // SAFETY: arr is the live array built here.
         unsafe { free_responses(arr, answers.len()) };
-        assert!(marshal_responses(&[Some("a\0b".into())]).is_null());
+        assert!(marshal_responses(&[Some(Secret::new("a\0b"))]).is_null());
     }
 }

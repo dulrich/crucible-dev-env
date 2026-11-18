@@ -4,7 +4,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 
-use crucible_greetd::Secret;
+use crucible_greetd::{Secret, wipe};
 
 use super::process::worker_main;
 use super::proto::{Rep, Req, recv, send};
@@ -23,12 +23,14 @@ pub struct PamBackend;
 pub struct PamHandle {
     sock: OwnedFd,
     pid: i32,
-    spawned: bool,
 }
 
-/// The worker process, as the daemon sees the session.
+/// The worker process, as the daemon sees the session. It takes over the handle's socket and
+/// worker pid at spawn; the socket is kept (unused) until the session is dropped, as long as the
+/// handle used to keep it, and the worker closes PAM itself once it has reaped the user process.
 #[derive(Debug)]
 pub struct WorkerChild {
+    _sock: OwnedFd,
     worker: i32,
     user: i32,
     /// The user process's pidfd from the `Spawned` reply; `None` if the worker sent none.
@@ -75,11 +77,7 @@ impl Backend for PamBackend {
             unsafe { libc::_exit(code) };
         }
         drop(theirs);
-        Ok(PamHandle {
-            sock: ours,
-            pid,
-            spawned: false,
-        })
+        Ok(PamHandle { sock: ours, pid })
     }
 }
 
@@ -88,20 +86,34 @@ impl PamHandle {
         self.call_fd(req, fd).map(|(r, _)| r)
     }
 
-    /// [`Self::call`], also returning an fd passed with the reply.
+    /// [`Self::call`], also returning an fd passed with the reply. The encoded request is
+    /// wiped after sending (it may carry a `Step` answer).
     fn call_fd(
         &mut self,
         req: &Req,
         fd: Option<RawFd>,
     ) -> Result<(Rep, Option<OwnedFd>), SeamError> {
-        send(self.sock.as_raw_fd(), &req.encode(), fd)
-            .map_err(|e| other(format!("worker: {e}")))?;
+        let mut data = req.encode();
+        let sent = send(self.sock.as_raw_fd(), &data, fd);
+        wipe(&mut data);
+        sent.map_err(|e| other(format!("worker: {e}")))?;
         match recv(self.sock.as_raw_fd()).map_err(|e| other(format!("worker: {e}")))? {
             Some((b, rfd)) => Rep::decode(&b)
                 .map(|r| (r, rfd))
                 .map_err(|e| other(format!("worker reply: {e}"))),
             None => Err(other("session worker exited")),
         }
+    }
+
+    /// Tells the worker to close PAM and exit, then reaps it.
+    fn end(self) -> Result<(), SeamError> {
+        let _ = send(self.sock.as_raw_fd(), &Req::Close.encode(), None);
+        drop(self.sock);
+        let mut st = 0;
+        // SAFETY: waiting on our own child.
+        retry_eintr(|| cvt(unsafe { libc::waitpid(self.pid, &mut st, 0) }))
+            .map(|_| ())
+            .map_err(|e| other(format!("waiting for the session worker: {e}")))
     }
 }
 
@@ -117,7 +129,7 @@ impl SessionHandle for PamHandle {
     type Child = WorkerChild;
 
     fn auth_step(&mut self, answer: Option<Secret>) -> Result<AuthStep, SeamError> {
-        let req = Req::Step(answer.map(|s| s.expose().to_owned()));
+        let req = Req::Step(answer);
         match self.call(&req, None)? {
             Rep::Prompt(k, t) => Ok(AuthStep::Prompt(k, t)),
             Rep::Authenticated(account) => Ok(AuthStep::Authenticated { account }),
@@ -128,7 +140,6 @@ impl SessionHandle for PamHandle {
     fn open(&mut self, spec: &OpenSpec) -> Result<(), SeamError> {
         let req = Req::Open {
             vt: spec.vt,
-            class: spec.class,
             env: spec.env.clone(),
         };
         match self.call(&req, None)? {
@@ -137,51 +148,46 @@ impl SessionHandle for PamHandle {
         }
     }
 
-    fn spawn(&mut self, spec: SpawnSpec) -> Result<WorkerChild, SeamError> {
+    fn spawn(mut self, spec: SpawnSpec) -> Result<WorkerChild, SeamError> {
         let (fd, target) = match &spec.extra_fd {
             Some((fd, t)) => (Some(fd.as_raw_fd()), Some(*t)),
             None => (None, None),
         };
         let req = Req::Spawn {
-            account: spec.account.clone(),
             cmd: spec.cmd.clone(),
             env: spec.env.clone(),
-            vt: spec.vt,
             target_fd: target,
         };
         let rep = self.call_fd(&req, fd);
         // Our copy of the extra fd is dropped here; the worker dropped its own after the fork.
         drop(spec);
-        match rep? {
-            (Rep::Spawned(user), user_pidfd) => {
-                self.spawned = true;
+        let failed = |h: Self, e: SeamError| {
+            // Nothing was spawned: close PAM here, so the daemon has nothing left to close.
+            if let Err(c) = h.end() {
+                tracing::warn!("closing the session worker after a failed spawn: {c}");
+            }
+            Err(e)
+        };
+        match rep {
+            Ok((Rep::Spawned(user), user_pidfd)) => {
                 if user_pidfd.is_none() {
                     tracing::warn!("no pidfd for user process {user}; SIGKILL will not reach it");
                 }
                 Ok(WorkerChild {
+                    _sock: self.sock,
                     worker: self.pid,
                     user,
                     user_pidfd,
                     status: None,
                 })
             }
-            (r, _) => Err(unexpected(r)),
+            Ok((r, _)) => failed(self, unexpected(r)),
+            Err(e) => failed(self, e),
         }
     }
 
     fn close(self) -> Result<(), SeamError> {
-        // A spawned worker closes PAM itself when the user process exits and is reaped through
-        // its WorkerChild; the Close it gets here is unread.
-        let _ = send(self.sock.as_raw_fd(), &Req::Close.encode(), None);
-        if self.spawned {
-            return Ok(());
-        }
-        drop(self.sock);
-        let mut st = 0;
-        // SAFETY: waiting on our own child.
-        retry_eintr(|| cvt(unsafe { libc::waitpid(self.pid, &mut st, 0) }))
-            .map(|_| ())
-            .map_err(|e| other(format!("waiting for the session worker: {e}")))
+        self.end()
     }
 }
 

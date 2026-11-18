@@ -23,7 +23,10 @@ pub enum CodecError {
     Malformed(#[from] serde_json::Error),
 }
 
-/// A string that never appears in `Debug` output (passwords and other secret answers).
+/// A string that never appears in `Debug` output (passwords and other secret answers), and
+/// whose bytes are overwritten with zeros when it is dropped (each clone wipes its own copy).
+/// Only the final buffer is wiped: copies left behind by earlier reallocations, by `serde_json`
+/// while decoding, or in socket buffers are not.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Secret(String);
@@ -38,6 +41,24 @@ impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
     }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        let mut bytes = std::mem::take(&mut self.0).into_bytes();
+        wipe(&mut bytes);
+    }
+}
+
+/// Overwrites `buf` with zeros through volatile writes, so the optimiser cannot drop the wipe
+/// of a buffer that is about to be freed.
+#[allow(unsafe_code)]
+pub fn wipe(buf: &mut [u8]) {
+    for b in buf.iter_mut() {
+        // SAFETY: `b` is a valid, aligned, exclusive reference to one initialised byte.
+        unsafe { std::ptr::write_volatile(b, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
 }
 
 impl fmt::Debug for Secret {
@@ -144,6 +165,18 @@ pub fn read_message<R: Read, T: for<'de> Deserialize<'de>>(r: &mut R) -> Result<
 mod tests {
     use super::*;
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn wipe_zeroes_the_buffer_and_secret_stays_transparent() {
+        let mut b = b"hunter 2".to_vec();
+        wipe(&mut b);
+        assert_eq!(b, [0u8; 8]);
+        let s = Secret::new("pw");
+        let c = s.clone();
+        drop(s);
+        assert_eq!(c.expose(), "pw", "a clone owns its own copy");
+        assert_eq!(serde_json::to_string(&Some(c)).unwrap(), r#""pw""#);
+    }
 
     #[test]
     fn rejects_oversize_length() {
