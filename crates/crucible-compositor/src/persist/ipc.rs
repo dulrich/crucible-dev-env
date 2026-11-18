@@ -112,16 +112,10 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return Reply::Now(Response::Err(err.to_string()));
         }
         if let Request::Capture(path) = request {
-            // A held output (plan 38) is captured after its release, so the capture shows what the
-            // user sees; refusals (relative path, locked, powered off) still answer at once.
-            if let Some(rx) = self.defer_capture_if_held(&path) {
-                return Reply::Later(rx);
-            }
-            // Captured here; encoded, written and answered (`ok <w>x<h>`) off the main thread.
-            return match self
-                .ipc_capture(&path)
-                .and_then(|capture| crate::capture::spawn_encode_and_write(capture, path))
-            {
+            // Checked once at request time; a held output (plan 38) is captured after its release
+            // so the capture shows what the user sees, and is admitted again then. Encoded,
+            // written and answered (`ok <w>x<h>`) off the main thread.
+            return match self.request_capture(path) {
                 Ok(rx) => Reply::Later(rx),
                 Err(reason) => Reply::Now(Response::Err(reason)),
             };
@@ -618,7 +612,7 @@ mod tests {
 
     #[test]
     fn locked_capture_is_refused_by_admission_with_the_capture_text() {
-        // `handle_ipc` answers this `err` at once, before `ipc_capture` or any worker runs.
+        // `handle_ipc` answers this `err` at once, before `request_capture` or any worker runs.
         let refused = admit_request(true, &Request::Capture("/tmp/x.png".into()));
         assert_eq!(refused, Err(ActionError::Locked));
         assert_eq!(

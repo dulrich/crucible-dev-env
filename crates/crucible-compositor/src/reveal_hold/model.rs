@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::time::{Duration, Instant};
 
+use crucible_layout::Rect;
+
 /// How long an output may stay held; a client that never commits is shown as-is after this.
 pub const REVEAL_HOLD_TIMEOUT: Duration = Duration::from_millis(80);
 
@@ -159,27 +161,13 @@ impl<O: Hash + Eq + Clone, W: PartialEq> RevealHolds<O, W> {
     }
 }
 
-/// A logical rect as `(x, y, w, h)`.
-pub type RectXywh = (i32, i32, i32, i32);
-
 /// The output a just-placed window lands on: the one its rect overlaps most. **Pure**. Rects are
-/// `(x, y, w, h)` in global logical space. `None` when it overlaps no output.
+/// in global logical space. `None` when it overlaps no output.
 #[must_use]
-pub fn output_for_rect<O: Clone>(outputs: &[(O, RectXywh)], rect: RectXywh) -> Option<O> {
-    let overlap = |(ox, oy, ow, oh): RectXywh| {
-        let (rx, ry, rw, rh) = rect;
-        let w = (ox + ow).min(rx + rw) - ox.max(rx);
-        let h = (oy + oh).min(ry + rh) - oy.max(ry);
-        if w > 0 && h > 0 {
-            i64::from(w) * i64::from(h)
-        } else {
-            0
-        }
-    };
+pub fn output_for_rect<O: Clone>(outputs: &[(O, Rect)], rect: Rect) -> Option<O> {
     outputs
         .iter()
-        .map(|(o, g)| (o, overlap(*g)))
-        .filter(|(_, area)| *area > 0)
+        .filter_map(|(o, g)| g.intersection(rect).map(|overlap| (o, overlap.area())))
         .max_by_key(|(_, area)| *area)
         .map(|(o, _)| o.clone())
 }
@@ -302,9 +290,15 @@ mod tests {
 
     #[test]
     fn output_for_rect_picks_the_most_overlapped_output() {
-        let outs = [("A", (0, 0, 100, 100)), ("B", (100, 0, 100, 100))];
-        assert_eq!(output_for_rect(&outs, (10, 10, 50, 50)), Some("A"));
-        assert_eq!(output_for_rect(&outs, (80, 0, 100, 100)), Some("B"));
-        assert_eq!(output_for_rect(&outs, (500, 500, 10, 10)), None);
+        let outs = [
+            ("A", Rect::new(0, 0, 100, 100)),
+            ("B", Rect::new(100, 0, 100, 100)),
+        ];
+        assert_eq!(output_for_rect(&outs, Rect::new(10, 10, 50, 50)), Some("A"));
+        assert_eq!(
+            output_for_rect(&outs, Rect::new(80, 0, 100, 100)),
+            Some("B")
+        );
+        assert_eq!(output_for_rect(&outs, Rect::new(500, 500, 10, 10)), None);
     }
 }

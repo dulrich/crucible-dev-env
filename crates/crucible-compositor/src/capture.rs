@@ -213,20 +213,6 @@ pub fn encode_and_write(capture: &Capture, path: &Path) -> Result<(), String> {
     std::fs::write(path, &bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
-/// Runs [`encode_and_write`] on a worker thread; its reply (`ok <w>x<h>` or `err <reason>`)
-/// arrives as the returned channel's single message, on the main loop.
-///
-/// # Errors
-/// The thread could not be spawned.
-pub fn spawn_encode_and_write(
-    capture: Capture,
-    path: PathBuf,
-) -> Result<Channel<Response>, String> {
-    let (tx, rx) = channel::<Response>();
-    spawn_encode_and_write_to(capture, path, tx)?;
-    Ok(rx)
-}
-
 /// An IPC `capture` of a held output (plan 38), answered on `tx` once the hold releases.
 #[derive(Debug)]
 pub struct PendingCapture {
@@ -238,7 +224,7 @@ pub struct PendingCapture {
     pub tx: Sender<Response>,
 }
 
-/// [`spawn_encode_and_write`] answering on a caller-supplied `tx`.
+/// Encodes and writes `capture` to `path` off the main thread, answering on `tx`.
 ///
 /// # Errors
 /// The thread could not be spawned.
@@ -281,6 +267,65 @@ pub fn admit_capture(locked: bool, powered_off: bool) -> Result<(), CaptureError
     }
 }
 
+/// Why a `capture` request is refused at request time.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CaptureRefusal {
+    /// The path is relative.
+    NotAbsolute,
+    /// No output is focused.
+    NoOutput,
+    /// The lock or power admission failed ([`admit_capture`]).
+    Admission(CaptureError),
+}
+
+impl CaptureRefusal {
+    /// The `err` reply text.
+    fn reason(&self, path: &Path) -> String {
+        match self {
+            Self::NotAbsolute => format!("{} is not an absolute path", path.display()),
+            Self::NoOutput => CaptureError::NoOutput.to_string(),
+            Self::Admission(err) => err.to_string(),
+        }
+    }
+}
+
+/// What [`CrucibleState::request_capture`] does with a request.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CaptureDecision {
+    /// Refuse with an `err` reply.
+    Refuse(CaptureRefusal),
+    /// Capture the output now.
+    Now,
+    /// The output is reveal-held: park the reply until the hold releases.
+    Park,
+}
+
+/// The request-time capture checks, in order: absolute path, a focused output, lock/power
+/// admission, then whether the output is held. **Pure**.
+#[must_use]
+pub fn decide_capture(
+    absolute: bool,
+    has_output: bool,
+    locked: bool,
+    powered_off: bool,
+    held: bool,
+) -> CaptureDecision {
+    if !absolute {
+        return CaptureDecision::Refuse(CaptureRefusal::NotAbsolute);
+    }
+    if !has_output {
+        return CaptureDecision::Refuse(CaptureRefusal::NoOutput);
+    }
+    if let Err(err) = admit_capture(locked, powered_off) {
+        return CaptureDecision::Refuse(CaptureRefusal::Admission(err));
+    }
+    if held {
+        CaptureDecision::Park
+    } else {
+        CaptureDecision::Now
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Captures `output` with no cursor (see [`render_capture`]).
     ///
@@ -291,6 +336,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.session_lock.is_locked(),
             self.backend_data.output_powered_off(output),
         )?;
+        self.render_capture(output)
+    }
+
+    /// Renders and reads back `output` with no admission check (the caller has admitted it).
+    fn render_capture(&mut self, output: &Output) -> Result<Capture, CaptureError> {
         let started = std::time::Instant::now();
         let capture = B::capture_output(self, output)?;
         tracing::info!(
@@ -303,41 +353,47 @@ impl<B: Backend + 'static> CrucibleState<B> {
         Ok(capture)
     }
 
-    /// `capture <path>` (IPC): captures the focused output; the caller encodes and writes it.
+    /// `capture <path>` (IPC): the one entry. Runs the request-time checks once (see
+    /// [`decide_capture`]), then captures the focused output now and encodes it off-thread, or,
+    /// when that output is reveal-held (plan 38), parks the reply until the hold releases
+    /// ([`Self::run_deferred_captures`] admits it again, against the same output).
     ///
     /// # Errors
-    /// The `err` reply: `session locked`, no focused output, or the capture's failure.
-    pub fn ipc_capture(&mut self, path: &Path) -> Result<Capture, String> {
-        if !path.is_absolute() {
-            return Err(format!("{} is not an absolute path", path.display()));
-        }
-        let output = self
-            .focused_smithay_output()
-            .ok_or_else(|| CaptureError::NoOutput.to_string())?;
-        self.capture_output(&output).map_err(|e| e.to_string())
-    }
-
-    /// Defers `path`'s capture of `output` until its reveal hold releases. `None` when the
-    /// capture should proceed now (not held, relative path, or refused: those answer as today).
-    pub fn defer_capture_if_held(&mut self, path: &Path) -> Option<Channel<Response>> {
-        let output = self.focused_smithay_output()?;
-        if !path.is_absolute()
-            || !self.reveal_holds.is_held(&output)
-            || admit_capture(
-                self.session_lock.is_locked(),
-                self.backend_data.output_powered_off(&output),
-            )
-            .is_err()
-        {
-            return None;
-        }
+    /// The `err` reply: a relative path, no focused output, `session locked`, `output powered
+    /// off`, or the capture's failure.
+    pub fn request_capture(&mut self, path: PathBuf) -> Result<Channel<Response>, String> {
+        let output = self.focused_smithay_output();
+        let powered_off = output
+            .as_ref()
+            .is_some_and(|o| self.backend_data.output_powered_off(o));
+        let held = output
+            .as_ref()
+            .is_some_and(|o| self.reveal_holds.is_held(o));
+        let decision = decide_capture(
+            path.is_absolute(),
+            output.is_some(),
+            self.session_lock.is_locked(),
+            powered_off,
+            held,
+        );
         let (tx, rx) = channel::<Response>();
-        self.pending_captures.push(PendingCapture {
-            output,
-            path: path.to_path_buf(),
-            tx,
-        });
-        Some(rx)
+        match (decision, output) {
+            (CaptureDecision::Refuse(refusal), _) => Err(refusal.reason(&path)),
+            (CaptureDecision::Park, Some(output)) => {
+                self.pending_captures
+                    .push(PendingCapture { output, path, tx });
+                Ok(rx)
+            }
+            (CaptureDecision::Now, Some(output)) => {
+                let capture = self.render_capture(&output).map_err(|e| e.to_string())?;
+                spawn_encode_and_write_to(capture, path, tx)?;
+                Ok(rx)
+            }
+            // `decide_capture` refuses a missing output before it can park or capture.
+            (CaptureDecision::Park | CaptureDecision::Now, None) => {
+                Err(CaptureError::NoOutput.to_string())
+            }
+        }
     }
 
     /// Performs and answers the captures deferred on any of the `released` outputs, under
@@ -419,6 +475,55 @@ mod tests {
         assert_eq!(admit_capture(false, true), Err(CaptureError::PoweredOff));
         assert_eq!(admit_capture(false, false), Ok(()));
         assert_eq!(CaptureError::Locked.to_string(), "session locked");
+    }
+
+    #[test]
+    fn capture_request_checks_run_in_order_and_park_only_when_admitted() {
+        use CaptureDecision::{Now, Park, Refuse};
+        use CaptureRefusal::{Admission, NoOutput, NotAbsolute};
+        // Relative path first, then no output, then lock before power-off.
+        assert_eq!(
+            decide_capture(false, false, true, true, true),
+            Refuse(NotAbsolute)
+        );
+        assert_eq!(
+            decide_capture(true, false, true, true, true),
+            Refuse(NoOutput)
+        );
+        assert_eq!(
+            decide_capture(true, true, true, true, true),
+            Refuse(Admission(CaptureError::Locked))
+        );
+        assert_eq!(
+            decide_capture(true, true, false, true, true),
+            Refuse(Admission(CaptureError::PoweredOff))
+        );
+        // Admitted: held parks, otherwise captures now.
+        assert_eq!(decide_capture(true, true, false, false, true), Park);
+        assert_eq!(decide_capture(true, true, false, false, false), Now);
+        assert_eq!(
+            NotAbsolute.reason(Path::new("x.png")),
+            "x.png is not an absolute path"
+        );
+    }
+
+    #[test]
+    fn a_parked_capture_is_admitted_again_at_release() {
+        // A request that parked was admitted; `run_deferred_captures` re-admits through
+        // `capture_output` (= `admit_capture`), so a lock or power-off since then is refused with
+        // the same text as at request time.
+        assert_eq!(
+            decide_capture(true, true, false, false, true),
+            CaptureDecision::Park
+        );
+        assert_eq!(
+            admit_capture(true, false).unwrap_err().to_string(),
+            "session locked"
+        );
+        assert_eq!(
+            admit_capture(false, true).unwrap_err().to_string(),
+            "output powered off"
+        );
     }
 
     #[test]
