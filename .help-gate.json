@@ -6,6 +6,7 @@
     { "path": "scripts/wallpaper-rotate.sh" },
     { "path": "scripts/foot/build.sh" },
     { "path": "scripts/foot/install.sh" },
+    { "path": "scripts/greeter-install.sh" },
     { "path": "docs/spikes/terminal-matrix/matrix.sh" },
     { "path": "crates/crucible-login/src/main.rs", "version": "semver" },
     { "path": "crates/crucible/src/main.rs", "version": "semver", "subcommands": ["pick", "launch", "keys", "resume", "relaunch", "mem", "msg", "overlay-host", "terminal-theme", "lock-config", "greeter"] }

@@ -82,8 +82,8 @@ Logout: when you quit CDE (`Super+Shift+Q` or `crucible msg exec quit`), CDE sho
 
 1. Make `/opt/cde` root-owned: `sudo install -d -o root -g root -m 0755 /opt/cde`, or for an existing user-owned one `sudo chown -R root:root /opt/cde`.
 2. Create the profile directory (you write it, the greeter user `_greetd` reads it): `sudo install -d -o <you> -g _greetd -m 0750 /var/lib/cde-greeter`
-3. Run the deploy for the host. It stages the files in `~/.local/share/cde/opt-staging` and prints one `sudo sh -c '...'` command that installs them into `/opt/cde`; run it. Start CDE once (or reload its config) so the profile is published.
-4. Install the unit and the PAM files:
+3. Run the deploy for the host. It stages the files in `~/.local/share/cde/opt-staging` and prints one command, `sudo ~/.local/share/cde/opt-staging/cde-greeter-install`; run it. The script installs the binaries into `/opt/cde`, the unit into `/etc/systemd/system` and the PAM files into `/etc/pam.d`, then runs `systemctl daemon-reload`; it never restarts or enables a unit. Start CDE once (or reload its config) so the profile is published.
+4. Install the unit and the PAM files. The script from step 3 already did this; these commands are the route for a checkout without the deploy:
 
    ```sh
    sudo install -m 0644 dist/systemd/cde-login.service /etc/systemd/system/
@@ -95,11 +95,11 @@ Logout: when you quit CDE (`Super+Shift+Q` or `crucible msg exec quit`), CDE sho
 
 Migration from a greetd setup: `/etc/greetd/config.toml` is no longer read. The greeter command and the VTs are `cde-login` flags (see `cde-login --help`), and the defaults match the old config.
 
-Rollback: `sudo systemctl disable cde-login && sudo systemctl enable greetd`, then reboot. Binary rollback: the printed sudo install keeps the previous pair as `.prev`; restore it with `sudo sh -c 'mv /opt/cde/bin/crucible.prev /opt/cde/bin/crucible && mv /opt/cde/bin/cde-login.prev /opt/cde/bin/cde-login'`.
+Rollback: `sudo systemctl disable cde-login && sudo systemctl enable greetd`, then reboot. Binary rollback: the install script keeps the previous pair as `.prev`; restore it with `sudo ~/.local/share/cde/opt-staging/cde-greeter-install --rollback` (it needs both `.prev` files, copies them back over the installed binaries and keeps them).
 
-Every release on a greeter host leaves one sudo install step: the deploy prints it and reports `sudo install pending` until the installed `--build` matches.
+Every release on a greeter host leaves one sudo install step: the deploy prints the `cde-greeter-install` command and reports `sudo install pending` until the installed `--build` matches.
 
-Security note: `/opt/cde` is root-owned because `cde-login` runs as root and the greeter runs as `_greetd`; a user-writable `/opt/cde` would be a path to root.
+Security note: `/opt/cde` is root-owned because `cde-login` runs as root and the greeter runs as `_greetd`; a user-writable `/opt/cde` would be a path to root. For the same reason the printed command runs a script from your own staging directory as root, so that account is trusted with root on a greeter host.
 
 ### What gets published, and when
 
@@ -109,4 +109,4 @@ On start and on every config reload, when the config has a `greeter` block and `
 - `stock`: the profile points at `/opt/cde/share/backgrounds/stock.png`, installed by the deploy where the greeter user can read it.
 - `user`: the session copies the first image of your wallpaper state (`${XDG_STATE_HOME:-~/.local/state}/wallpaper-rotate/current`, the first output's image in `separate` mode) to `/var/lib/cde-greeter/background.<ext>` and points the profile at the copy. It also keeps an empty `user-background` marker in the directory while the background is `user` (removed otherwise). With the marker present, `cde-wallpaper-rotate` refreshes the copy on every rotation. If a rotation changes the image's extension, the profile keeps the old path until the next config apply republishes it. Without a wallpaper state the greeter shows black.
 
-The deploy also installs the stock image to `${XDG_DATA_HOME:-~/.local/share}/cde/backgrounds/stock.png` on every host (the lock screen's `stock` background). Where `/opt/cde` exists it never writes there: it stages the files in `~/.local/share/cde/opt-staging` and prints one `sudo sh -c '...'` command (or `deploy: <host>: /opt/cde is current`); elsewhere it prints `deploy: <host>: /opt/cde absent; greeter install skipped`.
+The deploy also installs the stock image to `${XDG_DATA_HOME:-~/.local/share}/cde/backgrounds/stock.png` on every host (the lock screen's `stock` background). Where `/opt/cde` exists it never writes there: it stages the files and a generated `cde-greeter-install` script in `~/.local/share/cde/opt-staging` and prints one `sudo ~/.local/share/cde/opt-staging/cde-greeter-install` command (or `deploy: <host>: /opt/cde is current`); elsewhere it prints `deploy: <host>: /opt/cde absent; greeter install skipped`.
