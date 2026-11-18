@@ -47,6 +47,9 @@ impl Child for FakeChild {
         self.pid
     }
     fn try_wait(&mut self) -> Result<Option<ExitStatus>, SeamError> {
+        if self.s.borrow().log_waits {
+            self.s.borrow_mut().log.push(format!("wait {}", self.pid));
+        }
         let mut p = self.proc_.borrow_mut();
         if p.wait_errs > 0 {
             p.wait_errs -= 1;
@@ -55,6 +58,12 @@ impl Child for FakeChild {
         Ok(p.exit)
     }
     fn signal(&mut self, sig: i32) -> Result<(), SeamError> {
+        if self.s.borrow().log_waits {
+            self.s
+                .borrow_mut()
+                .log
+                .push(format!("signal {} {sig}", self.pid));
+        }
         let dies = {
             let mut p = self.proc_.borrow_mut();
             p.signals.push((sig, signal_target(sig)));
@@ -74,8 +83,20 @@ struct Shared {
     opened: usize,
     closed_open: usize,
     fail_greeter: usize,
+    /// The next this many greeter steps fail.
+    fail_greeter_step: usize,
+    /// Greeter steps answer with a prompt (a conversation that never finishes).
+    greeter_prompts: bool,
+    /// The next this many opens fail.
+    fail_open: usize,
     /// The next this many spawns fail.
     fail_spawn: usize,
+    /// The next this many spawns see the worker exit before its reply (EOF).
+    spawn_eof: usize,
+    /// While set, every reply stays outstanding ("not yet readable").
+    hold: bool,
+    /// Log every `try_wait` and signal (for the shutdown order).
+    log_waits: bool,
 }
 
 type S = Rc<RefCell<Shared>>;
@@ -95,6 +116,8 @@ struct FakeHandle {
     account: Option<String>,
     /// The VT given to `open`.
     vt: Option<u32>,
+    /// The reply to the request sent, collected by `take_reply`.
+    reply: Option<Result<Reply, SeamError>>,
 }
 
 impl Backend for FakeBackend {
@@ -116,15 +139,23 @@ impl Backend for FakeBackend {
             step: 0,
             account: None,
             vt: None,
+            reply: None,
         })
     }
 }
 
-impl SessionHandle for FakeHandle {
-    type Child = FakeChild;
-    fn auth_step(&mut self, answer: Option<Secret>) -> Result<AuthStep, SeamError> {
+impl FakeHandle {
+    fn step_reply(&mut self, answer: Option<Secret>) -> Result<AuthStep, SeamError> {
         let ok = if self.class == Class::Greeter {
-            true
+            let mut s = self.s.borrow_mut();
+            if s.fail_greeter_step > 0 {
+                s.fail_greeter_step -= 1;
+                false
+            } else if s.greeter_prompts {
+                return Ok(AuthStep::Prompt(AuthMessageType::Info, "hi".into()));
+            } else {
+                true
+            }
         } else {
             self.step += 1;
             match self.step {
@@ -145,9 +176,27 @@ impl SessionHandle for FakeHandle {
             account: self.user.clone(),
         })
     }
-    fn open(&mut self, spec: &OpenSpec) -> Result<(), SeamError> {
+}
+
+impl SessionHandle for FakeHandle {
+    type Child = FakeChild;
+    fn fd(&self) -> RawFd {
+        1000 + self.id as RawFd
+    }
+    fn send_step(&mut self, answer: Option<Secret>) -> Result<(), SeamError> {
+        assert!(self.reply.is_none(), "a request is outstanding");
+        self.reply = Some(self.step_reply(answer).map(Reply::Step));
+        Ok(())
+    }
+    fn send_open(&mut self, spec: &OpenSpec) -> Result<(), SeamError> {
+        assert!(self.reply.is_none(), "a request is outstanding");
         let account = self.account.as_deref().expect("open before authentication");
         let mut s = self.s.borrow_mut();
+        if s.fail_open > 0 {
+            s.fail_open -= 1;
+            self.reply = Some(Err(SeamError::Other("open failed".into())));
+            return Ok(());
+        }
         s.log.push(format!(
             "open {} {account} vt{}",
             self.class.xdg_class(),
@@ -155,48 +204,69 @@ impl SessionHandle for FakeHandle {
         ));
         s.opened += 1;
         self.vt = Some(spec.vt);
+        self.reply = Some(Ok(Reply::Opened));
         Ok(())
     }
-    fn spawn(self, spec: SpawnSpec) -> Result<FakeChild, SeamError> {
+    fn send_spawn(&mut self, spec: SpawnSpec) -> Result<(), SeamError> {
+        assert!(self.reply.is_none(), "a request is outstanding");
         assert!(self.vt.is_some(), "spawn before open");
         let account = self.account.clone().expect("spawn before authentication");
         let fd = spec.extra_fd.as_ref().map(|(_, n)| *n);
-        let failed = {
-            let mut s = self.s.borrow_mut();
-            s.log.push(format!(
-                "spawn {account} {} env={} fd={fd:?}",
-                spec.cmd.join(" "),
-                spec.env.join(",")
-            ));
-            let failed = s.fail_spawn > 0;
-            s.fail_spawn = s.fail_spawn.saturating_sub(1);
-            failed
-        };
-        if failed {
-            // The backend closes PAM itself when nothing was spawned.
-            self.close()?;
-            return Err(SeamError::Other("spawn failed".into()));
+        let mut s = self.s.borrow_mut();
+        s.log.push(format!(
+            "spawn {account} {} env={} fd={fd:?}",
+            spec.cmd.join(" "),
+            spec.env.join(",")
+        ));
+        // The spec (and the extra fd) is dropped once the request is sent.
+        drop(spec);
+        self.reply = Some(if s.fail_spawn > 0 {
+            s.fail_spawn -= 1;
+            Err(SeamError::Other("spawn failed".into()))
+        } else if s.spawn_eof > 0 {
+            s.spawn_eof -= 1;
+            Err(SeamError::Other("session worker exited".into()))
+        } else {
+            Ok(Reply::Spawned)
+        });
+        Ok(())
+    }
+    fn take_reply(&mut self) -> Result<Option<Reply>, SeamError> {
+        if self.s.borrow().hold {
+            return Ok(None);
         }
+        self.reply.take().transpose()
+    }
+    fn into_child(self) -> FakeChild {
+        let account = self.account.clone().expect("spawned before authentication");
         let mut s = self.s.borrow_mut();
         let p = Rc::new(RefCell::new(Proc {
             session: Some((self.id, self.class)),
             ..Proc::default()
         }));
         s.procs.push((account, p.clone()));
-        Ok(FakeChild {
+        FakeChild {
             pid: 100 + s.procs.len() as i32,
             proc_: p,
             s: self.s.clone(),
-        })
+        }
     }
-    fn close(self) -> Result<(), SeamError> {
+    fn close(self) -> Result<FakeChild, SeamError> {
         let mut s = self.s.borrow_mut();
         s.log
             .push(format!("close #{} {}", self.id, self.class.xdg_class()));
         if self.vt.is_some() {
             s.closed_open += 1;
         }
-        Ok(())
+        // The closed worker, already exited (reaped at once).
+        Ok(FakeChild {
+            pid: 0,
+            proc_: Rc::new(RefCell::new(Proc {
+                exit: Some(ExitStatus::Code(0)),
+                ..Proc::default()
+            })),
+            s: self.s.clone(),
+        })
     }
 }
 
@@ -255,8 +325,57 @@ fn pos(l: &[String], prefix: &str) -> usize {
         .unwrap_or_else(|| panic!("{prefix} not in {l:#?}"))
 }
 
-fn create(d: &mut Daemon<FakeBackend, FakeVt>, user: &str, now: Instant) -> Option<Response> {
-    d.handle(
+type D = Daemon<FakeBackend, FakeVt>;
+
+/// The client id the single-client tests use.
+const C: ClientId = 1;
+
+/// The reply in the slot (asserting it is for `C`).
+fn reply(d: &mut D) -> Option<Response> {
+    d.take_reply().map(|(id, r)| {
+        assert_eq!(id, C, "reply routed to the wrong client");
+        r
+    })
+}
+
+/// Sends `r` from `client`; a busy refusal or the slot's reply.
+fn req_from(d: &mut D, client: ClientId, r: Request, now: Instant) -> Option<(ClientId, Response)> {
+    match d.handle(client, r, now) {
+        Err(refusal) => Some((client, refusal)),
+        Ok(()) => d.take_reply(),
+    }
+}
+
+fn req(d: &mut D, r: Request, now: Instant) -> Option<Response> {
+    req_from(d, C, r, now).map(|(id, r)| {
+        assert_eq!(id, C);
+        r
+    })
+}
+
+fn ready(d: &mut D) -> Option<Response> {
+    d.on_ready();
+    reply(d)
+}
+
+fn tick(d: &mut D, t: Instant) -> Option<Response> {
+    d.on_tick(t);
+    reply(d)
+}
+
+fn children(d: &mut D, t: Instant) -> Option<Response> {
+    d.poll_children(t);
+    reply(d)
+}
+
+fn input(d: &mut D, buf: &[u8], eof: bool, t: Instant) -> Option<Response> {
+    d.on_session_input(buf, eof, t);
+    reply(d)
+}
+
+fn create(d: &mut D, user: &str, now: Instant) -> Option<Response> {
+    req(
+        d,
         Request::CreateSession {
             username: user.into(),
         },
@@ -264,8 +383,9 @@ fn create(d: &mut Daemon<FakeBackend, FakeVt>, user: &str, now: Instant) -> Opti
     )
 }
 
-fn answer(d: &mut Daemon<FakeBackend, FakeVt>, pw: &str, now: Instant) -> Option<Response> {
-    d.handle(
+fn answer(d: &mut D, pw: &str, now: Instant) -> Option<Response> {
+    req(
+        d,
         Request::PostAuthMessageResponse {
             response: Some(Secret::new(pw)),
         },
@@ -273,8 +393,9 @@ fn answer(d: &mut Daemon<FakeBackend, FakeVt>, pw: &str, now: Instant) -> Option
     )
 }
 
-fn start_cmd(d: &mut Daemon<FakeBackend, FakeVt>, now: Instant) -> Option<Response> {
-    d.handle(
+fn start_cmd(d: &mut D, now: Instant) -> Option<Response> {
+    req(
+        d,
         Request::StartSession {
             cmd: vec!["cde-session".into()],
             env: vec!["X=1".into()],
@@ -324,7 +445,7 @@ fn success_path_order() {
     let (mut d, s, now) = setup(&[]);
     login(&mut d, "alice", now);
     assert!(d.ready_fd().is_some());
-    let reply = d.on_ready();
+    let reply = ready(&mut d);
     mark(&s, "reply");
     assert_eq!(reply, Some(Response::Success));
     let l = log(&s);
@@ -364,11 +485,11 @@ fn wrong_password_then_retry() {
         })
     ));
     assert_eq!(
-        d.handle(Request::CancelSession, now),
+        req(&mut d, Request::CancelSession, now),
         Some(Response::Success)
     );
     login(&mut d, "alice", now);
-    assert_eq!(d.on_ready(), Some(Response::Success));
+    assert_eq!(ready(&mut d), Some(Response::Success));
 }
 
 #[test]
@@ -376,7 +497,7 @@ fn cancel_closes_the_pending_auth() {
     let (mut d, s, now) = setup(&[]);
     create(&mut d, "alice", now);
     assert_eq!(
-        d.handle(Request::CancelSession, now),
+        req(&mut d, Request::CancelSession, now),
         Some(Response::Success)
     );
     assert!(
@@ -409,7 +530,10 @@ fn child_dies_before_ready() {
     let (mut d, s, now) = setup(&[]);
     login(&mut d, "alice", now);
     exit(&s, "alice");
-    assert!(matches!(d.poll_children(now), Some(Response::Error { .. })));
+    assert!(matches!(
+        children(&mut d, now),
+        Some(Response::Error { .. })
+    ));
     assert!(!d.session_active());
     assert!(d.greeter_running());
     let l = log(&s);
@@ -422,9 +546,9 @@ fn ready_timeout_activates_anyway() {
     let (mut d, s, now) = setup(&[]);
     login(&mut d, "alice", now);
     assert_eq!(d.next_deadline(), Some(now + Duration::from_secs(10)));
-    assert_eq!(d.on_tick(now + Duration::from_secs(5)), None);
+    assert_eq!(tick(&mut d, now + Duration::from_secs(5)), None);
     assert_eq!(
-        d.on_tick(now + Duration::from_secs(10)),
+        tick(&mut d, now + Duration::from_secs(10)),
         Some(Response::Success)
     );
     assert_eq!(pos(&log(&s), "activate"), pos(&log(&s), "activate vt8"));
@@ -434,13 +558,13 @@ fn ready_timeout_activates_anyway() {
 fn logout_restarts_greeter_and_activates_its_vt() {
     let (mut d, s, now) = setup(&[]);
     login(&mut d, "alice", now);
-    d.on_ready();
+    ready(&mut d);
     exit(&s, "_greetd");
-    assert_eq!(d.poll_children(now), None);
+    assert_eq!(children(&mut d, now), None);
     assert!(!d.greeter_running());
     assert_eq!(d.greeter_due(), None, "no restart while the session runs");
     exit(&s, "alice");
-    d.poll_children(now);
+    children(&mut d, now);
     let l = log(&s);
     assert!(d.greeter_running());
     assert!(pos(&l, "close") < pos(&l, "spawn _greetd"));
@@ -462,7 +586,7 @@ fn second_create_session_refused_while_session_runs() {
         create(&mut d, "bob", now),
         Some(Response::Error { .. })
     ));
-    d.on_ready();
+    ready(&mut d);
     assert!(matches!(
         create(&mut d, "bob", now),
         Some(Response::Error { .. })
@@ -475,13 +599,13 @@ fn greeter_crash_backs_off() {
     let mut t = now;
     for expect in [1u64, 2, 4] {
         exit(&s, "_greetd");
-        d.poll_children(t);
+        children(&mut d, t);
         assert!(!d.greeter_running());
         let due = d.greeter_due().unwrap();
         assert_eq!(due - t, Duration::from_secs(expect));
-        d.on_tick(due - Duration::from_millis(1));
+        tick(&mut d, due - Duration::from_millis(1));
         assert!(!d.greeter_running());
-        d.on_tick(due);
+        tick(&mut d, due);
         assert!(d.greeter_running());
         t = due;
     }
@@ -574,7 +698,7 @@ fn e2_stop_during_ready_wait() {
 fn e2_stop_during_session_kills_stubborn_child() {
     let (mut d, s, now) = setup(&[]);
     login(&mut d, "alice", now);
-    d.on_ready();
+    ready(&mut d);
     proc_of(&s, "alice").borrow_mut().ignores_term = true;
     d.shutdown(Duration::from_millis(50));
     assert_eq!(
@@ -588,7 +712,7 @@ fn e2_stop_during_session_kills_stubborn_child() {
 fn a13_sigkill_escalation_aims_at_the_user_pidfd() {
     let (mut d, s, now) = setup(&[]);
     login(&mut d, "alice", now);
-    d.on_ready();
+    ready(&mut d);
     proc_of(&s, "alice").borrow_mut().ignores_term = true;
     d.shutdown(Duration::from_millis(50));
     assert_eq!(
@@ -604,7 +728,7 @@ fn a13_sigkill_escalation_aims_at_the_user_pidfd() {
 fn a13_shutdown_wait_error_is_not_an_exit() {
     let (mut d, s, now) = setup(&[]);
     login(&mut d, "alice", now);
-    d.on_ready();
+    ready(&mut d);
     // SIGTERM "works", but every wait fails: the child is not counted dead, so it is still
     // escalated, and its handle is still closed.
     proc_of(&s, "alice").borrow_mut().wait_errs = usize::MAX;
@@ -624,11 +748,11 @@ fn a13_reap_error_keeps_the_session_running() {
     let (mut d, s, now) = setup(&[]);
     running_session(&mut d, &s, now);
     proc_of(&s, "alice").borrow_mut().wait_errs = 1;
-    d.poll_children(now);
+    children(&mut d, now);
     assert!(d.session_active());
     assert_eq!(count_after(&log(&s), "running", "close"), 0);
     exit(&s, "alice");
-    d.poll_children(now);
+    children(&mut d, now);
     assert!(!d.session_active());
 }
 
@@ -636,12 +760,9 @@ fn a13_reap_error_keeps_the_session_running() {
 /// after `start_session`) and marks the log.
 fn running_session(d: &mut Daemon<FakeBackend, FakeVt>, s: &S, now: Instant) {
     login(d, "alice", now);
-    assert_eq!(
-        d.on_session_input(b"ready\n", false, now),
-        Some(Response::Success)
-    );
+    assert_eq!(input(d, b"ready\n", false, now), Some(Response::Success));
     exit(s, "_greetd");
-    d.poll_children(now);
+    children(d, now);
     assert!(!d.greeter_running());
     mark(s, "running");
 }
@@ -665,7 +786,7 @@ fn logout_quit_greeter_ready_switch_then_leader_exit() {
     let (mut d, s, now) = setup(&[]);
     running_session(&mut d, &s, now);
     assert!(d.ready_fd().is_some(), "channel stays open after ready");
-    assert_eq!(d.on_session_input(b"quit\n", false, now), None);
+    assert_eq!(input(&mut d, b"quit\n", false, now), None);
     assert!(d.greeter_running() && d.handed_off());
     assert!(d.greeter_ready_fd().is_some());
     let l = log(&s);
@@ -680,7 +801,7 @@ fn logout_quit_greeter_ready_switch_then_leader_exit() {
     assert!(d.greeter_ready_fd().is_none());
     mark(&s, "switched");
     exit(&s, "alice");
-    assert_eq!(d.poll_children(now), None);
+    assert_eq!(children(&mut d, now), None);
     assert!(!d.session_active() && d.greeter_running());
     let l = log(&s);
     assert_eq!(count_after(&l, "running", "activate vt7"), 1);
@@ -705,7 +826,7 @@ fn ready_and_quit_in_one_read() {
     login(&mut d, "alice", now);
     mark(&s, "running");
     assert_eq!(
-        d.on_session_input(b"ready\nquit\n", false, now),
+        input(&mut d, b"ready\nquit\n", false, now),
         Some(Response::Success)
     );
     // The boot greeter is still up (already drawn), so the hand-off switches to it at once.
@@ -720,16 +841,16 @@ fn ready_and_quit_in_one_read() {
 fn logout_greeter_dies_before_ready() {
     let (mut d, s, now) = setup(&[]);
     running_session(&mut d, &s, now);
-    d.on_session_input(b"quit\n", false, now);
+    input(&mut d, b"quit\n", false, now);
     exit(&s, "_greetd");
-    d.poll_children(now);
+    children(&mut d, now);
     assert!(!d.greeter_running() && d.greeter_ready_fd().is_none());
     assert!(d.greeter_due().is_some(), "today's restart path");
     assert_eq!(count_after(&log(&s), "running", "activate vt7"), 1);
     exit(&s, "alice");
-    d.poll_children(now);
+    children(&mut d, now);
     let due = d.greeter_due().unwrap();
-    d.on_tick(due);
+    tick(&mut d, due);
     assert!(d.greeter_running());
 }
 
@@ -738,7 +859,7 @@ fn logout_greeter_start_failure_switches_anyway() {
     let (mut d, s, now) = setup(&[]);
     running_session(&mut d, &s, now);
     s.borrow_mut().fail_greeter = 1;
-    d.on_session_input(b"quit\n", false, now);
+    input(&mut d, b"quit\n", false, now);
     assert!(!d.greeter_running() && d.greeter_due().is_some());
     assert_eq!(count_after(&log(&s), "running", "activate vt7"), 1);
 }
@@ -747,11 +868,11 @@ fn logout_greeter_start_failure_switches_anyway() {
 fn logout_fallback_after_fixed_wait() {
     let (mut d, s, now) = setup(&[]);
     running_session(&mut d, &s, now);
-    d.on_session_input(b"quit\n", false, now);
+    input(&mut d, b"quit\n", false, now);
     assert_eq!(d.next_deadline(), Some(now + LOGOUT_WAIT));
-    d.on_tick(now + LOGOUT_WAIT - Duration::from_millis(1));
+    tick(&mut d, now + LOGOUT_WAIT - Duration::from_millis(1));
     assert_eq!(count_after(&log(&s), "running", "activate"), 0);
-    d.on_tick(now + LOGOUT_WAIT);
+    tick(&mut d, now + LOGOUT_WAIT);
     assert_eq!(count_after(&log(&s), "running", "activate vt7"), 1);
     assert!(d.greeter_ready_fd().is_none() && d.greeter_running());
 }
@@ -761,7 +882,7 @@ fn crash_without_quit_keeps_todays_path() {
     let (mut d, s, now) = setup(&[]);
     running_session(&mut d, &s, now);
     exit(&s, "alice");
-    d.poll_children(now);
+    children(&mut d, now);
     let l = log(&s);
     assert!(d.greeter_running());
     assert!(pos(&l, "running") < pos(&l, "spawn _greetd"));
@@ -772,7 +893,7 @@ fn crash_without_quit_keeps_todays_path() {
 fn eof_after_ready_retires_the_channel() {
     let (mut d, s, now) = setup(&[]);
     running_session(&mut d, &s, now);
-    assert_eq!(d.on_session_input(b"", true, now), None);
+    assert_eq!(input(&mut d, b"", true, now), None);
     assert!(d.ready_fd().is_none() && !d.handed_off() && !d.greeter_running());
     assert_eq!(log(&s).last().map(String::as_str), Some("running"));
 }
@@ -781,7 +902,7 @@ fn eof_after_ready_retires_the_channel() {
 fn login_while_old_session_closes_waits_then_opens() {
     let (mut d, s, now) = setup(&[]);
     running_session(&mut d, &s, now);
-    d.on_session_input(b"quit\n", false, now);
+    input(&mut d, b"quit\n", false, now);
     d.on_greeter_ready();
     login(&mut d, "bob", now);
     assert!(
@@ -789,11 +910,11 @@ fn login_while_old_session_closes_waits_then_opens() {
         "session VT not opened while alice is open"
     );
     exit(&s, "alice");
-    assert_eq!(d.poll_children(now), None, "now starting");
+    assert_eq!(children(&mut d, now), None, "now starting");
     let l = log(&s);
     assert!(pos(&l, "close") < pos(&l, "open user bob vt8"));
     assert_eq!(
-        d.on_session_input(b"ready\n", false, now),
+        input(&mut d, b"ready\n", false, now),
         Some(Response::Success)
     );
     assert!(!d.handed_off() && d.session_active());
@@ -803,15 +924,15 @@ fn login_while_old_session_closes_waits_then_opens() {
 fn queued_start_times_out() {
     let (mut d, s, now) = setup(&[]);
     running_session(&mut d, &s, now);
-    d.on_session_input(b"quit\n", false, now);
+    input(&mut d, b"quit\n", false, now);
     d.on_greeter_ready();
     login(&mut d, "bob", now);
     assert!(matches!(
-        d.on_tick(now + LOGOUT_WAIT),
+        tick(&mut d, now + LOGOUT_WAIT),
         Some(Response::Error { .. })
     ));
     exit(&s, "alice");
-    d.poll_children(now);
+    children(&mut d, now);
     assert!(!d.session_active());
     assert!(!log(&s).iter().any(|e| e.starts_with("open user bob")));
 }
@@ -843,7 +964,7 @@ fn a4_failed_greeter_spawn_is_closed_once_and_retried() {
     let (mut d, s, now) = setup(&[]);
     exit(&s, "_greetd");
     s.borrow_mut().fail_spawn = 1;
-    d.poll_children(now);
+    children(&mut d, now);
     d.on_tick(d.greeter_due().unwrap());
     assert!(!d.greeter_running(), "the restart's spawn failed");
     d.on_tick(d.greeter_due().unwrap());
@@ -858,10 +979,13 @@ fn a4_a_session_that_ends_is_closed_by_its_child_not_the_daemon() {
     running_session(&mut d, &s, now);
     exit(&s, "alice");
     mark(&s, "exited");
-    d.poll_children(now);
+    children(&mut d, now);
     let l = log(&s);
     // The one close of alice's handle came with its end, before the daemon reaped it.
     assert_eq!(count_after(&l, "running", "close #"), 1, "{l:#?}");
     assert_eq!(count_after(&l, "exited", "close #"), 0, "{l:#?}");
     assert!(!d.session_active());
 }
+
+#[path = "daemon_event_tests.rs"]
+mod events;

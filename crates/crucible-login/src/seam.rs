@@ -2,13 +2,18 @@
 //! implements it with PAM (one PAM handle per [`SessionHandle`], living in a root process for
 //! the session's lifetime), and the tests drive a fake.
 //!
-//! Lifecycle of one handle: [`Backend::begin`] (fixes the class) → [`SessionHandle::auth_step`]
-//! until [`AuthStep::Authenticated`] (fixes the account) → [`SessionHandle::open`] (fixes the
-//! VT) → [`SessionHandle::spawn`], which consumes the handle: the returned [`Child`] is the
-//! session, and the backend closes PAM when it ends (or itself when the spawn fails).
-//! [`SessionHandle::close`] is only for a handle that never spawned (failed or abandoned
-//! authentication, a failed `open`, a queued start dropped); it consumes the handle too, so the
-//! daemon closes each unspawned handle exactly once.
+//! Lifecycle of one handle: [`Backend::begin`] (fixes the class) → steps until
+//! [`AuthStep::Authenticated`] (fixes the account) → open (fixes the VT) → spawn, after which
+//! [`SessionHandle::into_child`] turns the handle into the [`Child`] that is the session; the
+//! backend closes PAM when it ends. [`SessionHandle::close`] is for a handle that never spawned
+//! (failed or abandoned authentication, a failed open or spawn, a queued start dropped); it
+//! consumes the handle, so the daemon closes each unspawned handle exactly once.
+//!
+//! Every step is an event, never a blocking round trip (review A6): `send_*` writes the request
+//! and returns at once; the handle's [`SessionHandle::fd`] becomes readable when the reply is
+//! there, and [`SessionHandle::take_reply`] collects it with one non-blocking receive. At most
+//! one request is outstanding per handle. The daemon polls the fds of the handles it is waiting
+//! on (request → worker fd readable → reply → the daemon's reply slot → the client).
 
 use std::os::fd::{OwnedFd, RawFd};
 
@@ -128,25 +133,44 @@ pub trait Child {
     fn signal(&mut self, sig: i32) -> Result<(), SeamError>;
 }
 
-/// One PAM-like handle: authentication, then the open session, then close.
+/// A reply collected by [`SessionHandle::take_reply`]; which one depends on the request sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reply {
+    /// The answer to a step request.
+    Step(AuthStep),
+    /// The open request succeeded.
+    Opened,
+    /// The spawn request succeeded: call [`SessionHandle::into_child`].
+    Spawned,
+}
+
+/// One PAM-like handle: authentication, then the open session, then close. Requests return at
+/// once; the reply arrives on [`SessionHandle::fd`].
 pub trait SessionHandle {
     /// The spawned process type.
     type Child: Child;
-    /// Advances the conversation. The first call passes `None`; later calls pass the answer to
-    /// the previous prompt (`None` acknowledges `Info`/`Error`). Errors end the conversation;
-    /// the daemon then closes the handle.
-    fn auth_step(&mut self, answer: Option<Secret>) -> Result<AuthStep, SeamError>;
-    /// Opens the session (`pam_setcred` + `pam_open_session`) after authentication.
-    fn open(&mut self, spec: &OpenSpec) -> Result<(), SeamError>;
-    /// Spawns the command as the authenticated account inside the open session, on the VT
-    /// given to `open` (it becomes the child's controlling tty and stdio; nothing is written to
-    /// it). Consumes the handle: on success the child is the session and its end closes PAM; on
-    /// failure the backend has closed PAM before returning the error.
-    fn spawn(self, spec: SpawnSpec) -> Result<Self::Child, SeamError>;
-    /// Ends a handle that never spawned: closes the session if it was opened, then ends PAM
-    /// (`pam_close_session`, `pam_setcred(DELETE_CRED)`, `pam_end`); also how an abandoned
-    /// authentication is cancelled.
-    fn close(self) -> Result<(), SeamError>;
+    /// The poll source: readable (or hung up) when a reply can be collected.
+    fn fd(&self) -> RawFd;
+    /// Requests the next conversation step. The first call passes `None`; later calls pass the
+    /// answer to the previous prompt (`None` acknowledges `Info`/`Error`). An error reply ends
+    /// the conversation; the daemon then closes the handle.
+    fn send_step(&mut self, answer: Option<Secret>) -> Result<(), SeamError>;
+    /// Requests the open (`pam_setcred` + `pam_open_session`) after authentication.
+    fn send_open(&mut self, spec: &OpenSpec) -> Result<(), SeamError>;
+    /// Requests the spawn of the command as the authenticated account inside the open session,
+    /// on the VT given to the open (it becomes the child's controlling tty and stdio). The spec
+    /// (and our copy of its extra fd) is dropped once the request is sent.
+    fn send_spawn(&mut self, spec: SpawnSpec) -> Result<(), SeamError>;
+    /// One non-blocking receive: `Ok(None)` while the reply is not there yet; an error reply,
+    /// an undecodable one or the worker's EOF is `Err`. After an `Err` or a reply to a failed
+    /// spawn the handle is unspawned and the daemon closes it.
+    fn take_reply(&mut self) -> Result<Option<Reply>, SeamError>;
+    /// The session, after [`Reply::Spawned`]: its end closes PAM.
+    fn into_child(self) -> Self::Child;
+    /// Ends a handle that never spawned: sends the close (`pam_close_session` if opened,
+    /// `pam_setcred(DELETE_CRED)`, `pam_end`) without waiting, and returns the worker to reap
+    /// without blocking (on `SIGCHLD`).
+    fn close(self) -> Result<Self::Child, SeamError>;
 }
 
 /// Creates handles.

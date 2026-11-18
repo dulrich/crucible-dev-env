@@ -1,5 +1,8 @@
-//! The poll loop: the greeter socket, signals (self-pipe), the ready pipe and timers, turned
-//! into [`Daemon`] calls. Blocking I/O with `poll(2)`; no async runtime.
+//! The poll loop: the greeter socket, signals (self-pipe), the session and greeter pipes, the
+//! PAM worker sockets and timers, turned into [`Daemon`] calls. One `poll(2)` loop, no threads,
+//! no async runtime. A PAM round trip never blocks it: a request returns at once, the worker's
+//! socket becomes readable, the daemon collects the reply and puts the client's answer in its
+//! reply slot, and the loop writes it to the client that asked.
 
 use std::fs;
 use std::io;
@@ -10,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
+use crucible_greetd::Request;
 use crucible_greetd::codec::{read_message, write_message};
-use crucible_greetd::{Request, Response};
 
-use crate::daemon::{Daemon, peer_allowed, ready_seen};
+use crate::daemon::{Daemon, peer_allowed};
 use crate::seam::Backend;
 use crate::vt::Vt;
 
@@ -88,17 +91,14 @@ struct Client {
     stream: UnixStream,
 }
 
-fn send(clients: &mut Vec<Client>, id: u64, resp: &Response) {
-    if let Some(i) = clients.iter().position(|c| c.id == id)
-        && let Err(e) = write_message(&mut clients[i].stream, resp)
-    {
-        tracing::warn!("greeter client write failed: {e}");
-        clients.remove(i);
-    }
-}
-
 /// Runs the daemon until SIGTERM/SIGINT/SIGHUP; then stops it in order, removes the socket and
 /// returns.
+///
+/// Each iteration polls the signal pipe, the listener, the session channel, the logout
+/// greeter's ready pipe, the worker sockets the daemon waits on and the clients; it only reads
+/// bytes and hands them to the daemon. A client request is tagged with its client id; its reply
+/// (immediate or after a worker reply, a ready wait or a queued start) comes out of the
+/// daemon's reply slot and is written to that client.
 pub fn serve<B: Backend, V: Vt>(
     mut daemon: Daemon<B, V>,
     listener: UnixListener,
@@ -109,16 +109,18 @@ pub fn serve<B: Backend, V: Vt>(
     daemon.start(Instant::now());
     let mut clients: Vec<Client> = Vec::new();
     let mut next_id = 0u64;
-    let mut pending: Option<u64> = None;
     'main: loop {
         let ready_fd = daemon.ready_fd();
         let greeter_fd = daemon.greeter_ready_fd();
+        let worker_fds = daemon.worker_fds();
         let mut fds: Vec<libc::pollfd> = vec![
             pfd(sig.as_raw_fd()),
             pfd(listener.as_raw_fd()),
             pfd(ready_fd.unwrap_or(-1)),
             pfd(greeter_fd.unwrap_or(-1)),
         ];
+        fds.extend(worker_fds.iter().map(|&fd| pfd(fd)));
+        let first_client = fds.len();
         fds.extend(clients.iter().map(|c| pfd(c.stream.as_raw_fd())));
         let timeout = daemon.next_deadline().map_or(-1, |d| {
             let ms = d.saturating_duration_since(Instant::now()).as_millis();
@@ -134,7 +136,6 @@ pub fn serve<B: Backend, V: Vt>(
             }
         }
         let now = Instant::now();
-        let mut replies: Vec<Response> = Vec::new();
 
         if fds[0].revents != 0 {
             let mut buf = [0u8; 64];
@@ -146,7 +147,7 @@ pub fn serve<B: Backend, V: Vt>(
                 tracing::info!("stopping");
                 break 'main;
             }
-            replies.extend(daemon.poll_children(now));
+            daemon.poll_children(now);
         }
         if fds[1].revents != 0 {
             match listener.accept() {
@@ -170,18 +171,19 @@ pub fn serve<B: Backend, V: Vt>(
             && fds[2].revents != 0
         {
             let (got, eof) = read_pipe(rfd);
-            replies.extend(daemon.on_session_input(&got, eof, now));
+            daemon.on_session_input(&got, eof, now);
         }
         if let Some(gfd) = greeter_fd
             && fds[3].revents != 0
         {
             let (got, eof) = read_pipe(gfd);
-            if eof || ready_seen(&got) {
-                daemon.on_greeter_ready();
-            }
+            daemon.on_greeter_input(&got, eof);
+        }
+        if fds[4..first_client].iter().any(|pf| pf.revents != 0) {
+            daemon.on_worker_input(now);
         }
         let mut gone = Vec::new();
-        for (i, pf) in fds[4..].iter().enumerate() {
+        for (i, pf) in fds[first_client..].iter().enumerate() {
             if pf.revents == 0 {
                 continue;
             }
@@ -190,29 +192,43 @@ pub fn serve<B: Backend, V: Vt>(
                 Ok(r) => r,
                 Err(_) => {
                     gone.push(c.id);
+                    daemon.on_client_gone(c.id);
                     continue;
                 }
             };
-            match daemon.handle(req, now) {
-                Some(resp) => {
-                    if write_message(&mut c.stream, &resp).is_err() {
-                        gone.push(c.id);
-                    }
+            if let Err(refusal) = daemon.handle(c.id, req, now) {
+                // Busy: this client's request is refused at once.
+                if write_message(&mut c.stream, &refusal).is_err() {
+                    gone.push(c.id);
                 }
-                None => pending = Some(c.id),
+                continue;
             }
+            take_and_send(&mut daemon, &mut clients, &mut gone);
         }
+        daemon.on_tick(Instant::now());
+        take_and_send(&mut daemon, &mut clients, &mut gone);
         clients.retain(|c| !gone.contains(&c.id));
-        replies.extend(daemon.on_tick(Instant::now()));
-        for r in replies {
-            if let Some(id) = pending.take() {
-                send(&mut clients, id, &r);
-            }
-        }
     }
     daemon.shutdown(STOP_GRACE);
     let _ = fs::remove_file(sock_path);
     Ok(())
+}
+
+/// Writes the daemon's pending reply (if any) to the client that asked.
+fn take_and_send<B: Backend, V: Vt>(
+    daemon: &mut Daemon<B, V>,
+    clients: &mut [Client],
+    gone: &mut Vec<u64>,
+) {
+    if let Some((id, resp)) = daemon.take_reply()
+        && let Some(c) = clients
+            .iter_mut()
+            .find(|c| c.id == id && !gone.contains(&id))
+        && let Err(e) = write_message(&mut c.stream, &resp)
+    {
+        tracing::warn!("greeter client write failed: {e}");
+        gone.push(id);
+    }
 }
 
 /// Whether the signal-pipe bytes carry a stop signal (SIGTERM, SIGINT or SIGHUP).

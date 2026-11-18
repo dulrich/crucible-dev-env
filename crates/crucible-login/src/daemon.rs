@@ -2,6 +2,13 @@
 //! switches, as an event-driven state machine over the [`Backend`] seam and the [`Vt`] trait.
 //! The poll loop ([`crate::server`]) turns fds, signals and timers into calls here; the tests
 //! call it directly with fakes.
+//!
+//! Event flow: a client request ([`Daemon::handle`], tagged with the server's client id) sends
+//! a worker request and returns; the worker's socket ([`Daemon::worker_fds`]) becomes readable,
+//! [`Daemon::on_worker_input`] collects the reply and advances (a greeter start, an
+//! authentication step, a session open/spawn); the answer for the client lands in the one reply
+//! slot, which the server drains with [`Daemon::take_reply`]. One client request is in flight at
+//! a time; SIGCHLD, the session and greeter pipes and the timers are served meanwhile.
 
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -10,7 +17,8 @@ use std::time::{Duration, Instant};
 use crucible_greetd::{ErrorType, Request, Response, Secret};
 
 use crate::seam::{
-    AuthStep, Backend, Child, Class, ExitStatus, OpenSpec, SeamError, SessionHandle, SpawnSpec,
+    AuthStep, Backend, Child, Class, ExitStatus, OpenSpec, Reply, SeamError, SessionHandle,
+    SpawnSpec,
 };
 use crate::vt::Vt;
 
@@ -101,31 +109,65 @@ struct Running<H: SessionHandle> {
     started: Instant,
 }
 
+/// The opaque id the server gives each greeter-socket connection; a reply goes to the id that
+/// asked.
+pub type ClientId = u64;
+
+/// Who waits for the reply to the request in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asker {
+    Client(ClientId),
+    /// The asker disconnected: the reply is computed as usual and then discarded.
+    Gone,
+}
+
+/// The user's authentication conversation.
 enum Auth<H> {
+    /// A step request is outstanding.
+    Waiting(H),
+    /// A step request is outstanding but the conversation was cancelled: the late reply is
+    /// consumed, then the handle closed.
+    Cancelled(H),
+    /// Waiting for the user's answer to a prompt.
     Pending(H),
     Authenticated(H, String),
 }
 
-enum UserSession<H: SessionHandle> {
-    None,
-    Starting {
-        run: Running<H>,
-        ready: OwnedFd,
-        deadline: Instant,
-    },
-    Running {
-        run: Running<H>,
-        /// The session channel, kept open after `ready` for the `quit` notice; `None` after EOF.
-        chan: Option<OwnedFd>,
-        /// The session sent `quit`: the greeter was brought up for it and the session is closing.
-        handed_off: bool,
-    },
-}
-
-/// A logout hand-off waiting for the new greeter to draw.
-struct Logout {
+/// The logout greeter's ready pipe while the hand-off waits for it to draw.
+struct HandOff {
     ready: OwnedFd,
     deadline: Instant,
+}
+
+/// Where a greeter start is in its reply-driven sequence.
+#[derive(Debug, Clone, Copy)]
+enum GreeterPhase {
+    /// The n-th step request is outstanding.
+    Auth(usize),
+    Open,
+    Spawn,
+}
+
+struct GreeterStart<H> {
+    handle: H,
+    phase: GreeterPhase,
+    /// A logout start: the VT switch belongs to the hand-off, not to the start.
+    logout: bool,
+    /// The logout ready pipe's write end, until the spawn request carries it.
+    ready_w: Option<OwnedFd>,
+    hand_off: Option<HandOff>,
+}
+
+enum Greeter<H: SessionHandle> {
+    Idle,
+    /// A restart is scheduled.
+    Retry(Instant),
+    /// A start is waiting for a worker reply.
+    Starting(GreeterStart<H>),
+    Up {
+        run: Running<H>,
+        hand_off: Option<HandOff>,
+    },
 }
 
 /// A `start_session` waiting for the handed-off session to close.
@@ -137,18 +179,56 @@ struct Queued<H> {
     deadline: Instant,
 }
 
+enum UserSession<H: SessionHandle> {
+    None,
+    /// The open request is outstanding.
+    Opening {
+        handle: H,
+        account: String,
+        cmd: Vec<String>,
+        env: Vec<String>,
+    },
+    /// The spawn request is outstanding; `ready` is the ready pipe's read end.
+    Spawning {
+        handle: H,
+        account: String,
+        ready: OwnedFd,
+    },
+    /// Spawned, waiting for `ready`.
+    Starting {
+        run: Running<H>,
+        ready: OwnedFd,
+        deadline: Instant,
+    },
+    Running {
+        run: Running<H>,
+        /// The session channel, kept open after `ready` for the `quit` notice; `None` after EOF.
+        chan: Option<OwnedFd>,
+    },
+    /// The session sent `quit`: the greeter was brought up for it and the session is closing,
+    /// optionally with the next `start_session` queued behind it.
+    Closing {
+        run: Running<H>,
+        chan: Option<OwnedFd>,
+        queued: Option<Queued<H>>,
+    },
+}
+
 /// The daemon state machine.
 pub struct Daemon<B: Backend, V: Vt> {
     backend: B,
     vt: V,
     cfg: Config,
-    greeter: Option<Running<B::Handle>>,
-    greeter_due: Option<Instant>,
+    greeter: Greeter<B::Handle>,
     backoff: Backoff,
     auth: Option<Auth<B::Handle>>,
     session: UserSession<B::Handle>,
-    logout: Option<Logout>,
-    queued: Option<Queued<B::Handle>>,
+    /// Closed unspawned workers, reaped on `SIGCHLD`.
+    closing: Vec<<B::Handle as SessionHandle>::Child>,
+    /// The client request in flight (at most one).
+    asker: Option<Asker>,
+    /// The reply waiting for the server.
+    reply: Option<(ClientId, Response)>,
 }
 
 fn error(description: impl Into<String>) -> Response {
@@ -168,10 +248,8 @@ fn seam_reply(e: &SeamError) -> Response {
     }
 }
 
-fn close_handle<H: SessionHandle>(handle: H, what: &str) {
-    if let Err(e) = handle.close() {
-        tracing::warn!("closing {what}: {e}");
-    }
+fn unexpected(r: &Reply) -> SeamError {
+    SeamError::Other(format!("unexpected reply {r:?}"))
 }
 
 impl<B: Backend, V: Vt> Daemon<B, V> {
@@ -181,19 +259,20 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             backend,
             vt,
             cfg,
-            greeter: None,
-            greeter_due: None,
+            greeter: Greeter::Idle,
             backoff: Backoff::default(),
             auth: None,
             session: UserSession::None,
-            logout: None,
-            queued: None,
+            closing: Vec::new(),
+            asker: None,
+            reply: None,
         }
     }
 
-    /// Starts the greeter on its VT and switches to it.
+    /// Starts the greeter on its VT and switches to it (once its start sequence completes).
     pub fn start(&mut self, now: Instant) {
-        self.start_greeter(now);
+        self.start_greeter(now, None);
+        self.drive(now);
     }
 
     fn activate(&mut self, vt: u32) -> io::Result<()> {
@@ -204,73 +283,52 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
         r
     }
 
-    /// Starts a greeter; `ready` (a ready pipe's write end) goes to [`READY_FD`] with
-    /// [`READY_ENV`] set, for a logout hand-off. Greeters started otherwise get none.
-    fn try_start_greeter(
-        &mut self,
-        ready: Option<OwnedFd>,
-    ) -> Result<Running<B::Handle>, SeamError> {
-        let mut handle = self.backend.begin(Class::Greeter, &self.cfg.greeter_user)?;
-        let mut account = None;
-        for _ in 0..GREETER_MAX_STEPS {
-            match handle.auth_step(None) {
-                Ok(AuthStep::Authenticated { account: a }) => {
-                    account = Some(a);
-                    break;
-                }
-                Ok(AuthStep::Prompt(..)) => {}
-                Err(e) => {
-                    close_handle(handle, "greeter handle");
-                    return Err(e);
+    /// Closes an unspawned handle; its worker is reaped now if it already exited, else on
+    /// `SIGCHLD`.
+    fn close_handle(&mut self, handle: B::Handle, what: &str) {
+        match handle.close() {
+            Ok(mut w) => {
+                if reap(&mut w, what).is_none() {
+                    self.closing.push(w);
                 }
             }
+            Err(e) => tracing::warn!("closing {what}: {e}"),
         }
-        let Some(account) = account else {
-            close_handle(handle, "greeter handle");
-            return Err(SeamError::Other(
-                "greeter conversation did not finish".into(),
-            ));
-        };
-        tracing::debug!("greeter authenticated as {account:?}");
-        let sock = format!("GREETD_SOCK={}", self.cfg.sock_path);
-        if let Err(e) = handle.open(&OpenSpec {
-            vt: self.cfg.greeter_vt,
-            env: vec![sock.clone()],
-        }) {
-            close_handle(handle, "greeter session");
-            return Err(e);
-        }
-        let mut env = vec![sock];
-        if ready.is_some() {
-            env.push(format!("{READY_ENV}={READY_FD}"));
-        }
-        // A failed spawn has closed the handle already.
-        let child = handle.spawn(SpawnSpec {
-            cmd: self.cfg.greeter_cmd.clone(),
-            env,
-            extra_fd: ready.map(|w| (w, READY_FD)),
-        })?;
-        Ok(Running {
-            child,
-            started: Instant::now(),
-        })
     }
 
-    fn start_greeter(&mut self, now: Instant) {
-        self.greeter_due = None;
-        match self.try_start_greeter(None) {
-            Ok(run) => {
-                tracing::info!("greeter started (pid {})", run.child.pid());
-                self.greeter = Some(run);
-                let _ = self.activate(self.cfg.greeter_vt);
-            }
-            Err(e) => {
-                let delay = self.backoff.on_failure(Duration::ZERO);
-                tracing::error!("greeter start failed: {e}; retrying in {delay:?}");
-                self.greeter_due = Some(now + delay);
-            }
+    // ---- the reply slot ----------------------------------------------------------------------
+
+    /// Whether a client request is in flight or its reply waits in the slot. A request that
+    /// arrives meanwhile is refused (see [`Daemon::handle`]).
+    pub fn busy(&self) -> bool {
+        self.asker.is_some() || self.reply.is_some()
+    }
+
+    /// The reply for the request in flight, with the client that asked; the server takes it
+    /// once per loop iteration (and after each request).
+    pub fn take_reply(&mut self) -> Option<(ClientId, Response)> {
+        self.reply.take()
+    }
+
+    /// A client disconnected: a reply still owed to it is discarded when it comes.
+    pub fn on_client_gone(&mut self, id: ClientId) {
+        if self.asker == Some(Asker::Client(id)) {
+            self.asker = Some(Asker::Gone);
+        }
+        if self.reply.as_ref().is_some_and(|(c, _)| *c == id) {
+            self.reply = None;
         }
     }
+
+    fn answer(&mut self, resp: Response) {
+        match self.asker.take() {
+            Some(Asker::Client(id)) => self.reply = Some((id, resp)),
+            Some(Asker::Gone) => tracing::debug!("reply for a disconnected client discarded"),
+            None => tracing::debug!("reply with no request in flight discarded"),
+        }
+    }
+
+    // ---- probes ------------------------------------------------------------------------------
 
     /// Whether a user session is starting or running.
     pub fn session_active(&self) -> bool {
@@ -279,29 +337,30 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
 
     /// Whether the greeter is running.
     pub fn greeter_running(&self) -> bool {
-        self.greeter.is_some()
+        matches!(self.greeter, Greeter::Up { .. })
     }
 
     /// When a scheduled greeter restart is due.
     pub fn greeter_due(&self) -> Option<Instant> {
-        self.greeter_due
+        match self.greeter {
+            Greeter::Retry(d) => Some(d),
+            _ => None,
+        }
     }
 
     /// Whether the session sent `quit` and is closing behind a new greeter.
     pub fn handed_off(&self) -> bool {
-        matches!(
-            self.session,
-            UserSession::Running {
-                handed_off: true,
-                ..
-            }
-        )
+        matches!(self.session, UserSession::Closing { .. })
     }
 
-    /// Whether a session blocks a new login conversation: starting, or running without a
-    /// logout hand-off.
+    /// Whether a session blocks a new login conversation: starting, running without a logout
+    /// hand-off, or closing with a start already queued.
     fn session_blocks(&self) -> bool {
-        self.session_active() && !self.handed_off()
+        match &self.session {
+            UserSession::None => false,
+            UserSession::Closing { queued, .. } => queued.is_some(),
+            _ => true,
+        }
     }
 
     /// The session channel's read end: the ready pipe while a session starts, then (until EOF)
@@ -309,108 +368,284 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
     pub fn ready_fd(&self) -> Option<RawFd> {
         match &self.session {
             UserSession::Starting { ready, .. } => Some(ready.as_raw_fd()),
-            UserSession::Running { chan, .. } => chan.as_ref().map(AsRawFd::as_raw_fd),
-            UserSession::None => None,
+            UserSession::Running { chan, .. } | UserSession::Closing { chan, .. } => {
+                chan.as_ref().map(AsRawFd::as_raw_fd)
+            }
+            _ => None,
         }
     }
 
     /// The logout greeter's ready pipe while a hand-off waits for it.
     pub fn greeter_ready_fd(&self) -> Option<RawFd> {
-        self.logout.as_ref().map(|l| l.ready.as_raw_fd())
+        match &self.greeter {
+            Greeter::Up {
+                hand_off: Some(h), ..
+            } => Some(h.ready.as_raw_fd()),
+            _ => None,
+        }
+    }
+
+    /// The worker sockets whose replies the daemon waits for; when one is readable the server
+    /// calls [`Daemon::on_worker_input`].
+    pub fn worker_fds(&self) -> Vec<RawFd> {
+        let auth = match &self.auth {
+            Some(Auth::Waiting(h) | Auth::Cancelled(h)) => Some(h.fd()),
+            _ => None,
+        };
+        let greeter = match &self.greeter {
+            Greeter::Starting(g) => Some(g.handle.fd()),
+            _ => None,
+        };
+        let session = match &self.session {
+            UserSession::Opening { handle, .. } | UserSession::Spawning { handle, .. } => {
+                Some(handle.fd())
+            }
+            _ => None,
+        };
+        [auth, greeter, session].into_iter().flatten().collect()
     }
 
     /// The earliest timer the poll loop must wake for.
     pub fn next_deadline(&self) -> Option<Instant> {
-        let ready = match &self.session {
+        let session = match &self.session {
             UserSession::Starting { deadline, .. } => Some(*deadline),
+            UserSession::Closing {
+                queued: Some(q), ..
+            } => Some(q.deadline),
             _ => None,
         };
-        [
-            ready,
-            self.greeter_due,
-            self.logout.as_ref().map(|l| l.deadline),
-            self.queued.as_ref().map(|q| q.deadline),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-    }
-
-    /// Bytes (or EOF) from the session channel. Before ready, `ready` or EOF means ready (as
-    /// does a `quit` that arrives first); after ready, `quit` starts the logout hand-off and EOF
-    /// retires the channel. Returns the deferred `start_session` reply when it became ready.
-    pub fn on_session_input(&mut self, buf: &[u8], eof: bool, now: Instant) -> Option<Response> {
-        let quit = quit_seen(buf);
-        let mut reply = None;
-        if matches!(self.session, UserSession::Starting { .. }) && (eof || quit || ready_seen(buf))
-        {
-            tracing::info!(
-                "session ready ({})",
-                if eof && !ready_seen(buf) {
-                    "pipe closed"
-                } else {
-                    "ready"
-                }
-            );
-            reply = self.on_ready();
-        }
-        if quit {
-            self.on_quit(now);
-        }
-        if eof && let UserSession::Running { chan, .. } = &mut self.session {
-            *chan = None;
-        }
-        reply
-    }
-
-    /// The session's `quit` notice: bring the greeter up in the background with its own ready
-    /// pipe; [`Daemon::on_greeter_ready`], the [`LOGOUT_WAIT`] fallback or the greeter's exit
-    /// then switch to it.
-    pub fn on_quit(&mut self, now: Instant) {
-        let UserSession::Running { handed_off, .. } = &mut self.session else {
-            return;
+        let greeter = match &self.greeter {
+            Greeter::Retry(d) => Some(*d),
+            Greeter::Up {
+                hand_off: Some(h), ..
+            } => Some(h.deadline),
+            Greeter::Starting(GreeterStart {
+                hand_off: Some(h), ..
+            }) => Some(h.deadline),
+            _ => None,
         };
-        if *handed_off {
-            return;
+        session.into_iter().chain(greeter).min()
+    }
+
+    // ---- worker replies ----------------------------------------------------------------------
+
+    /// A worker socket is readable: collect every reply that is there and advance.
+    pub fn on_worker_input(&mut self, now: Instant) {
+        self.drive(now);
+    }
+
+    /// Collects replies (one non-blocking receive per outstanding request) until none is
+    /// there. Every entry point ends here, so a reply that is already available is consumed at
+    /// once.
+    fn drive(&mut self, now: Instant) {
+        loop {
+            let a = self.drive_auth();
+            let g = self.drive_greeter(now);
+            let s = self.drive_session(now);
+            if !(a || g || s) {
+                break;
+            }
         }
-        *handed_off = true;
-        tracing::info!("logout: quit notice");
-        if self.greeter.is_some() {
-            self.switch_to_greeter();
-            return;
+    }
+
+    fn drive_auth(&mut self) -> bool {
+        let (mut h, cancelled) = match self.auth.take() {
+            Some(Auth::Waiting(h)) => (h, false),
+            Some(Auth::Cancelled(h)) => (h, true),
+            other => {
+                self.auth = other;
+                return false;
+            }
+        };
+        let got = match h.take_reply() {
+            Ok(None) => {
+                self.auth = Some(if cancelled {
+                    Auth::Cancelled(h)
+                } else {
+                    Auth::Waiting(h)
+                });
+                return false;
+            }
+            Ok(Some(r)) => Ok(r),
+            Err(e) => Err(e),
+        };
+        if cancelled {
+            self.close_handle(h, "authentication");
+            self.answer(error("authentication cancelled"));
+            return true;
         }
-        self.greeter_due = None;
-        let started = crate::sys::pipe_cloexec(0)
-            .map_err(|e| SeamError::Other(format!("pipe: {e}")))
-            .and_then(|(r, w)| self.try_start_greeter(Some(w)).map(|run| (run, r)));
-        match started {
-            Ok((run, ready)) => {
-                tracing::info!("logout: greeter started (pid {})", run.child.pid());
-                self.greeter = Some(run);
-                self.logout = Some(Logout {
-                    ready,
-                    deadline: now + LOGOUT_WAIT,
+        match got {
+            Ok(Reply::Step(AuthStep::Prompt(kind, text))) => {
+                self.auth = Some(Auth::Pending(h));
+                self.answer(Response::AuthMessage {
+                    auth_message_type: kind,
+                    auth_message: text,
                 });
             }
-            Err(e) => {
-                let delay = self.backoff.on_failure(Duration::ZERO);
-                tracing::error!("logout: greeter start failed: {e}; retrying in {delay:?}");
-                self.greeter_due = Some(now + delay);
-                self.switch_to_greeter();
+            Ok(Reply::Step(AuthStep::Authenticated { account })) => {
+                tracing::info!("authenticated as {account:?}");
+                self.auth = Some(Auth::Authenticated(h, account));
+                self.answer(Response::Success);
             }
+            Ok(r) => {
+                self.close_handle(h, "authentication");
+                self.answer(seam_reply(&unexpected(&r)));
+            }
+            Err(e) => {
+                tracing::info!("authentication failed: {e}");
+                self.close_handle(h, "authentication");
+                self.answer(seam_reply(&e));
+            }
+        }
+        true
+    }
+
+    // ---- greeter -----------------------------------------------------------------------------
+
+    /// Starts a greeter: `begin` and the first step request; the replies drive the rest
+    /// ([`Daemon::drive_greeter`]). A logout start passes the ready pipe (read end, write end):
+    /// the write end goes to [`READY_FD`] with [`READY_ENV`] set. Greeters started otherwise
+    /// get none.
+    fn start_greeter(&mut self, now: Instant, hand_off: Option<(OwnedFd, OwnedFd)>) {
+        let logout = hand_off.is_some();
+        let (hand_off, ready_w) = match hand_off {
+            Some((r, w)) => (
+                Some(HandOff {
+                    ready: r,
+                    deadline: now + LOGOUT_WAIT,
+                }),
+                Some(w),
+            ),
+            None => (None, None),
+        };
+        let mut handle = match self.backend.begin(Class::Greeter, &self.cfg.greeter_user) {
+            Ok(h) => h,
+            Err(e) => return self.greeter_failed(now, &e, logout),
+        };
+        if let Err(e) = handle.send_step(None) {
+            self.close_handle(handle, "greeter handle");
+            return self.greeter_failed(now, &e, logout);
+        }
+        self.greeter = Greeter::Starting(GreeterStart {
+            handle,
+            phase: GreeterPhase::Auth(1),
+            logout,
+            ready_w,
+            hand_off,
+        });
+    }
+
+    fn greeter_failed(&mut self, now: Instant, e: &SeamError, logout: bool) {
+        let delay = self.backoff.on_failure(Duration::ZERO);
+        if logout {
+            tracing::error!("logout: greeter start failed: {e}; retrying in {delay:?}");
+        } else {
+            tracing::error!("greeter start failed: {e}; retrying in {delay:?}");
+        }
+        self.greeter = Greeter::Retry(now + delay);
+        if logout {
+            self.switch_to_greeter();
+        }
+    }
+
+    fn drive_greeter(&mut self, now: Instant) -> bool {
+        let mut g = match std::mem::replace(&mut self.greeter, Greeter::Idle) {
+            Greeter::Starting(g) => g,
+            other => {
+                self.greeter = other;
+                return false;
+            }
+        };
+        let r = match g.handle.take_reply() {
+            Ok(None) => {
+                self.greeter = Greeter::Starting(g);
+                return false;
+            }
+            Ok(Some(r)) => r,
+            Err(e) => {
+                self.close_handle(g.handle, "greeter handle");
+                self.greeter_failed(now, &e, g.logout);
+                return true;
+            }
+        };
+        let next = match (g.phase, r) {
+            (GreeterPhase::Auth(_), Reply::Step(AuthStep::Authenticated { account })) => {
+                tracing::debug!("greeter authenticated as {account:?}");
+                let env = vec![format!("GREETD_SOCK={}", self.cfg.sock_path)];
+                g.handle
+                    .send_open(&OpenSpec {
+                        vt: self.cfg.greeter_vt,
+                        env,
+                    })
+                    .map(|()| GreeterPhase::Open)
+            }
+            (GreeterPhase::Auth(n), Reply::Step(AuthStep::Prompt(..))) if n < GREETER_MAX_STEPS => {
+                g.handle.send_step(None).map(|()| GreeterPhase::Auth(n + 1))
+            }
+            (GreeterPhase::Auth(_), Reply::Step(AuthStep::Prompt(..))) => Err(SeamError::Other(
+                "greeter conversation did not finish".into(),
+            )),
+            (GreeterPhase::Open, Reply::Opened) => {
+                let mut env = vec![format!("GREETD_SOCK={}", self.cfg.sock_path)];
+                if g.ready_w.is_some() {
+                    env.push(format!("{READY_ENV}={READY_FD}"));
+                }
+                g.handle
+                    .send_spawn(SpawnSpec {
+                        cmd: self.cfg.greeter_cmd.clone(),
+                        env,
+                        extra_fd: g.ready_w.take().map(|w| (w, READY_FD)),
+                    })
+                    .map(|()| GreeterPhase::Spawn)
+            }
+            (GreeterPhase::Spawn, Reply::Spawned) => {
+                let run: Running<B::Handle> = Running {
+                    child: g.handle.into_child(),
+                    started: now,
+                };
+                if g.logout {
+                    tracing::info!("logout: greeter started (pid {})", run.child.pid());
+                } else {
+                    tracing::info!("greeter started (pid {})", run.child.pid());
+                }
+                self.greeter = Greeter::Up {
+                    run,
+                    hand_off: g.hand_off,
+                };
+                if !g.logout {
+                    let _ = self.activate(self.cfg.greeter_vt);
+                }
+                return true;
+            }
+            (_, r) => Err(unexpected(&r)),
+        };
+        match next {
+            Ok(phase) => {
+                g.phase = phase;
+                self.greeter = Greeter::Starting(g);
+            }
+            Err(e) => {
+                self.close_handle(g.handle, "greeter handle");
+                self.greeter_failed(now, &e, g.logout);
+            }
+        }
+        true
+    }
+
+    /// Bytes (or EOF) from the logout greeter's ready pipe: `ready` or EOF completes the
+    /// hand-off.
+    pub fn on_greeter_input(&mut self, buf: &[u8], eof: bool) {
+        if eof || ready_seen(buf) {
+            self.on_greeter_ready();
         }
     }
 
     /// The logout greeter signalled `ready` (or closed its pipe).
     pub fn on_greeter_ready(&mut self) {
-        if self.logout.is_some() {
+        if let Greeter::Up { hand_off, .. } = &mut self.greeter
+            && hand_off.take().is_some()
+        {
             tracing::info!("logout: greeter ready");
-            self.finish_logout();
-        }
-    }
-
-    fn finish_logout(&mut self) {
-        if self.logout.take().is_some() {
             self.switch_to_greeter();
         }
     }
@@ -422,193 +657,345 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
         }
     }
 
-    fn drop_queued(&mut self) {
-        if let Some(q) = self.queued.take() {
-            close_handle(q.handle, "queued session");
+    // ---- session channel ---------------------------------------------------------------------
+
+    /// Bytes (or EOF) from the session channel. Before ready, `ready` or EOF means ready (as
+    /// does a `quit` that arrives first); after ready, `quit` starts the logout hand-off and EOF
+    /// retires the channel. Becoming ready puts the deferred `start_session` reply in the slot.
+    pub fn on_session_input(&mut self, buf: &[u8], eof: bool, now: Instant) {
+        let quit = quit_seen(buf);
+        if matches!(self.session, UserSession::Starting { .. }) && (eof || quit || ready_seen(buf))
+        {
+            tracing::info!(
+                "session ready ({})",
+                if eof && !ready_seen(buf) {
+                    "pipe closed"
+                } else {
+                    "ready"
+                }
+            );
+            self.on_ready();
         }
+        if quit {
+            self.on_quit(now);
+        }
+        if eof
+            && let UserSession::Running { chan, .. } | UserSession::Closing { chan, .. } =
+                &mut self.session
+        {
+            *chan = None;
+        }
+        self.drive(now);
     }
 
+    /// The session's `quit` notice: bring the greeter up in the background with its own ready
+    /// pipe; [`Daemon::on_greeter_ready`], the [`LOGOUT_WAIT`] fallback or the greeter's exit
+    /// then switch to it.
+    pub fn on_quit(&mut self, now: Instant) {
+        let (run, chan) = match std::mem::replace(&mut self.session, UserSession::None) {
+            UserSession::Running { run, chan } => (run, chan),
+            other => {
+                self.session = other;
+                return;
+            }
+        };
+        self.session = UserSession::Closing {
+            run,
+            chan,
+            queued: None,
+        };
+        tracing::info!("logout: quit notice");
+        match self.greeter {
+            // Up (already drawn) or starting without a ready pipe: switch at once.
+            Greeter::Up { .. } | Greeter::Starting(_) => self.switch_to_greeter(),
+            Greeter::Idle | Greeter::Retry(_) => match crate::sys::pipe_cloexec(0) {
+                Ok(pipe) => self.start_greeter(now, Some(pipe)),
+                Err(e) => self.greeter_failed(now, &SeamError::Other(format!("pipe: {e}")), true),
+            },
+        }
+        self.drive(now);
+    }
+
+    // ---- greeter requests --------------------------------------------------------------------
+
+    /// Cancels the user's conversation: an idle handle is closed now; one with a step request
+    /// outstanding is closed when its late reply has been consumed.
     fn cancel_auth(&mut self) {
-        if let Some(auth) = self.auth.take() {
-            let h = match auth {
-                Auth::Pending(h) | Auth::Authenticated(h, _) => h,
-            };
-            close_handle(h, "authentication");
+        match self.auth.take() {
+            Some(Auth::Waiting(h) | Auth::Cancelled(h)) => self.auth = Some(Auth::Cancelled(h)),
+            Some(Auth::Pending(h) | Auth::Authenticated(h, _)) => {
+                self.close_handle(h, "authentication");
+            }
+            None => {}
         }
     }
 
-    /// Serves one greeter request. `None` means the reply is deferred (a starting session):
-    /// it comes back from [`Daemon::on_ready`], [`Daemon::on_tick`] or
-    /// [`Daemon::poll_children`].
-    pub fn handle(&mut self, req: Request, now: Instant) -> Option<Response> {
+    /// Drops a queued start (its client gets an error).
+    fn drop_queued(&mut self, why: &str) {
+        if let UserSession::Closing { queued, .. } = &mut self.session
+            && let Some(q) = queued.take()
+        {
+            self.close_handle(q.handle, "queued session");
+            self.answer(error(why));
+        }
+    }
+
+    /// Serves one greeter request from `client`. Every reply, immediate or after worker
+    /// replies, a ready wait or a queued start, goes to the reply slot for `client`
+    /// ([`Daemon::take_reply`]). While a request is in flight ([`Daemon::busy`]) another one is
+    /// refused at once with the returned error, which the server writes to that client.
+    pub fn handle(&mut self, client: ClientId, req: Request, now: Instant) -> Result<(), Response> {
+        if self.busy() {
+            return Err(error("another request is in progress"));
+        }
+        self.asker = Some(Asker::Client(client));
         match req {
-            Request::CreateSession { username } => Some(self.create_session(&username)),
-            Request::PostAuthMessageResponse { response } => Some(self.post_response(response)),
+            Request::CreateSession { username } => self.create_session(&username),
+            Request::PostAuthMessageResponse { response } => self.post_response(response),
             Request::StartSession { cmd, env } => self.start_session(cmd, env, now),
             Request::CancelSession => {
                 self.cancel_auth();
-                Some(Response::Success)
+                self.answer(Response::Success);
             }
         }
+        self.drive(now);
+        Ok(())
     }
 
-    fn create_session(&mut self, username: &str) -> Response {
-        if self.session_blocks() || self.queued.is_some() {
-            return error("a session is already active");
+    fn create_session(&mut self, username: &str) {
+        if self.session_blocks() {
+            return self.answer(error("a session is already active"));
         }
         self.cancel_auth();
         tracing::info!("create_session for {username:?}");
         match self.backend.begin(Class::User, username) {
-            Ok(h) => {
-                self.auth = Some(Auth::Pending(h));
-                self.step(None)
-            }
-            Err(e) => seam_reply(&e),
+            Ok(h) => self.send_step(h, None),
+            Err(e) => self.answer(seam_reply(&e)),
         }
     }
 
-    fn post_response(&mut self, answer: Option<Secret>) -> Response {
-        match &self.auth {
-            None => error("no session under configuration"),
-            Some(Auth::Authenticated(..)) => error("session has no pending questions"),
-            Some(Auth::Pending(_)) => self.step(answer),
-        }
-    }
-
-    fn step(&mut self, answer: Option<Secret>) -> Response {
-        let Some(Auth::Pending(mut h)) = self.auth.take() else {
-            return error("no session under configuration");
-        };
-        match h.auth_step(answer) {
-            Ok(AuthStep::Prompt(kind, text)) => {
-                self.auth = Some(Auth::Pending(h));
-                Response::AuthMessage {
-                    auth_message_type: kind,
-                    auth_message: text,
-                }
-            }
-            Ok(AuthStep::Authenticated { account }) => {
-                tracing::info!("authenticated as {account:?}");
-                self.auth = Some(Auth::Authenticated(h, account));
-                Response::Success
-            }
+    fn send_step(&mut self, mut h: B::Handle, answer: Option<Secret>) {
+        match h.send_step(answer) {
+            Ok(()) => self.auth = Some(Auth::Waiting(h)),
             Err(e) => {
-                tracing::info!("authentication failed: {e}");
-                close_handle(h, "authentication");
-                seam_reply(&e)
+                self.close_handle(h, "authentication");
+                self.answer(seam_reply(&e));
             }
         }
     }
 
-    fn start_session(
-        &mut self,
-        cmd: Vec<String>,
-        env: Vec<String>,
-        now: Instant,
-    ) -> Option<Response> {
-        if self.session_blocks() || self.queued.is_some() {
-            return Some(error("a session is already active"));
+    fn post_response(&mut self, answer: Option<Secret>) {
+        match self.auth.take() {
+            Some(Auth::Pending(h)) => self.send_step(h, answer),
+            other => {
+                let msg = match other {
+                    None => "no session under configuration",
+                    Some(Auth::Authenticated(..)) => "session has no pending questions",
+                    Some(Auth::Waiting(_) | Auth::Cancelled(_) | Auth::Pending(_)) => {
+                        "a step is already in progress"
+                    }
+                };
+                self.auth = other;
+                self.answer(error(msg));
+            }
+        }
+    }
+
+    fn start_session(&mut self, cmd: Vec<String>, env: Vec<String>, now: Instant) {
+        if self.session_blocks() {
+            return self.answer(error("a session is already active"));
         }
         let (handle, account) = match self.auth.take() {
             Some(Auth::Authenticated(h, a)) => (h, a),
-            Some(pending @ Auth::Pending(_)) => {
-                self.auth = Some(pending);
-                return Some(error("session is not ready"));
+            None => return self.answer(error("no session under configuration")),
+            pending => {
+                self.auth = pending;
+                return self.answer(error("session is not ready"));
             }
-            None => return Some(error("no session under configuration")),
         };
-        if self.handed_off() {
+        if let UserSession::Closing { queued, .. } = &mut self.session {
             // Only one user session at a time: wait (bounded) for the old one to close.
             tracing::info!("start_session: waiting for the previous session to close");
-            self.queued = Some(Queued {
+            *queued = Some(Queued {
                 handle,
                 account,
                 cmd,
                 env,
                 deadline: now + LOGOUT_WAIT,
             });
-            return None;
+            return;
         }
-        self.open_session(handle, account, cmd, env, now)
+        self.open_session(handle, account, cmd, env);
     }
 
+    /// The first step of a user session start: the open request.
     fn open_session(
         &mut self,
         mut handle: B::Handle,
         account: String,
         cmd: Vec<String>,
         env: Vec<String>,
-        now: Instant,
-    ) -> Option<Response> {
+    ) {
+        let spec = OpenSpec {
+            vt: self.cfg.session_vt,
+            env: Vec::new(),
+        };
+        match handle.send_open(&spec) {
+            Ok(()) => {
+                self.session = UserSession::Opening {
+                    handle,
+                    account,
+                    cmd,
+                    env,
+                }
+            }
+            Err(e) => self.start_failed(handle, &e),
+        }
+    }
+
+    /// After the open: KD_GRAPHICS, the ready pipe and the spawn request.
+    fn spawn_session(
+        &mut self,
+        mut handle: B::Handle,
+        account: String,
+        cmd: Vec<String>,
+        env: Vec<String>,
+    ) {
         let vt = self.cfg.session_vt;
-        let prepared = (|| {
-            handle.open(&OpenSpec {
-                vt,
-                env: Vec::new(),
-            })?;
-            self.vt
-                .set_graphics(vt)
-                .map_err(|e| SeamError::Other(format!("KD_GRAPHICS on VT {vt}: {e}")))?;
-            crate::sys::pipe_cloexec(0).map_err(|e| SeamError::Other(format!("pipe: {e}")))
-        })();
+        let prepared = self
+            .vt
+            .set_graphics(vt)
+            .map_err(|e| SeamError::Other(format!("KD_GRAPHICS on VT {vt}: {e}")))
+            .and_then(|()| {
+                crate::sys::pipe_cloexec(0).map_err(|e| SeamError::Other(format!("pipe: {e}")))
+            });
         let (r, w) = match prepared {
             Ok(p) => p,
-            Err(e) => {
-                tracing::error!("session start failed: {e}");
-                close_handle(handle, "user session");
-                return Some(seam_reply(&e));
-            }
+            Err(e) => return self.start_failed(handle, &e),
         };
         let mut env = env;
         env.push(format!("{READY_ENV}={READY_FD}"));
-        // The write end is moved into the spec and dropped by the backend after spawn, so EOF on
-        // `r` means the session closed it. A failed spawn has closed the handle already.
-        match handle.spawn(SpawnSpec {
+        // The write end is moved into the spec and dropped once the request is sent, so EOF on
+        // `r` means the session closed it.
+        match handle.send_spawn(SpawnSpec {
             cmd,
             env,
             extra_fd: Some((w, READY_FD)),
         }) {
-            Ok(child) => {
-                tracing::info!("session for {account:?} started (pid {})", child.pid());
-                self.session = UserSession::Starting {
-                    run: Running {
-                        child,
-                        started: now,
-                    },
+            Ok(()) => {
+                self.session = UserSession::Spawning {
+                    handle,
+                    account,
                     ready: r,
-                    deadline: now + self.cfg.ready_timeout,
-                };
-                None
+                }
             }
-            Err(e) => {
-                tracing::error!("session start failed: {e}");
-                Some(seam_reply(&e))
+            Err(e) => self.start_failed(handle, &e),
+        }
+    }
+
+    fn start_failed(&mut self, handle: B::Handle, e: &SeamError) {
+        tracing::error!("session start failed: {e}");
+        self.close_handle(handle, "user session");
+        self.answer(seam_reply(e));
+    }
+
+    fn drive_session(&mut self, now: Instant) -> bool {
+        match std::mem::replace(&mut self.session, UserSession::None) {
+            UserSession::Opening {
+                mut handle,
+                account,
+                cmd,
+                env,
+            } => match handle.take_reply() {
+                Ok(None) => {
+                    self.session = UserSession::Opening {
+                        handle,
+                        account,
+                        cmd,
+                        env,
+                    };
+                    false
+                }
+                Ok(Some(Reply::Opened)) => {
+                    self.spawn_session(handle, account, cmd, env);
+                    true
+                }
+                Ok(Some(r)) => {
+                    self.start_failed(handle, &unexpected(&r));
+                    true
+                }
+                Err(e) => {
+                    self.start_failed(handle, &e);
+                    true
+                }
+            },
+            UserSession::Spawning {
+                mut handle,
+                account,
+                ready,
+            } => match handle.take_reply() {
+                Ok(None) => {
+                    self.session = UserSession::Spawning {
+                        handle,
+                        account,
+                        ready,
+                    };
+                    false
+                }
+                Ok(Some(Reply::Spawned)) => {
+                    let child = handle.into_child();
+                    tracing::info!("session for {account:?} started (pid {})", child.pid());
+                    self.session = UserSession::Starting {
+                        run: Running {
+                            child,
+                            started: now,
+                        },
+                        ready,
+                        deadline: now + self.cfg.ready_timeout,
+                    };
+                    true
+                }
+                // A failed spawn, or the worker's exit racing its reply: nothing was spawned.
+                Ok(Some(r)) => {
+                    self.start_failed(handle, &unexpected(&r));
+                    true
+                }
+                Err(e) => {
+                    self.start_failed(handle, &e);
+                    true
+                }
+            },
+            other => {
+                self.session = other;
+                false
             }
         }
     }
 
     /// The session signalled `ready` (or closed the pipe, or timed out): switch to its VT and
-    /// only then reply `success`.
-    pub fn on_ready(&mut self) -> Option<Response> {
-        let UserSession::Starting { run, ready, .. } =
-            std::mem::replace(&mut self.session, UserSession::None)
-        else {
-            return None;
+    /// only then put `success` in the reply slot.
+    pub fn on_ready(&mut self) {
+        let (run, ready) = match std::mem::replace(&mut self.session, UserSession::None) {
+            UserSession::Starting { run, ready, .. } => (run, ready),
+            other => {
+                self.session = other;
+                return;
+            }
         };
         self.session = UserSession::Running {
             run,
             chan: Some(ready),
-            handed_off: false,
         };
-        match self.activate(self.cfg.session_vt) {
-            Ok(()) => Some(Response::Success),
-            Err(e) => Some(error(format!("could not switch to the session VT: {e}"))),
-        }
+        let resp = match self.activate(self.cfg.session_vt) {
+            Ok(()) => Response::Success,
+            Err(e) => error(format!("could not switch to the session VT: {e}")),
+        };
+        self.answer(resp);
     }
 
-    /// Fires due timers: the ready timeout and a scheduled greeter restart.
-    pub fn on_tick(&mut self, now: Instant) -> Option<Response> {
-        let mut reply = None;
+    /// Fires due timers: the ready timeout, the logout fallback, the queued-start limit and a
+    /// scheduled greeter restart.
+    pub fn on_tick(&mut self, now: Instant) {
         if let UserSession::Starting { deadline, .. } = &self.session
             && now >= *deadline
         {
@@ -616,125 +1003,176 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
                 "session not ready after {:?}; switching anyway",
                 self.cfg.ready_timeout
             );
-            reply = self.on_ready();
+            self.on_ready();
         }
-        if self.logout.as_ref().is_some_and(|l| now >= l.deadline) {
+        let hand_off = match &mut self.greeter {
+            Greeter::Up { hand_off, .. } => Some(hand_off),
+            Greeter::Starting(g) => Some(&mut g.hand_off),
+            _ => None,
+        };
+        if let Some(h) = hand_off
+            && h.as_ref().is_some_and(|h| now >= h.deadline)
+        {
+            *h = None;
             tracing::warn!("logout: fallback (greeter not ready after {LOGOUT_WAIT:?})");
-            self.finish_logout();
+            self.switch_to_greeter();
         }
-        if self.queued.as_ref().is_some_and(|q| now >= q.deadline) {
+        if let UserSession::Closing {
+            queued: Some(q), ..
+        } = &self.session
+            && now >= q.deadline
+        {
             tracing::error!("start_session: the previous session did not close in time");
-            self.drop_queued();
-            reply = Some(error("the previous session did not close in time"));
+            self.drop_queued("the previous session did not close in time");
         }
-        if self.greeter_due.is_some_and(|d| now >= d) && self.greeter.is_none() {
-            self.start_greeter(now);
+        if let Greeter::Retry(d) = self.greeter
+            && now >= d
+        {
+            self.start_greeter(now, None);
         }
-        reply
+        self.drive(now);
     }
 
-    /// Reaps exited children (on `SIGCHLD`). Returns the deferred reply when a starting
-    /// session died before it was ready.
-    pub fn poll_children(&mut self, now: Instant) -> Option<Response> {
-        let mut reply = None;
+    /// Reaps exited children (on `SIGCHLD`): the session, the greeter and closed workers. A
+    /// starting session that died before it was ready answers its `start_session` with an
+    /// error.
+    pub fn poll_children(&mut self, now: Instant) {
         let session_exit = match &mut self.session {
-            UserSession::Starting { run, .. } | UserSession::Running { run, .. } => {
-                reap(&mut run.child, "session")
-            }
-            UserSession::None => None,
+            UserSession::Starting { run, .. }
+            | UserSession::Running { run, .. }
+            | UserSession::Closing { run, .. } => reap(&mut run.child, "session"),
+            _ => None,
         };
         if session_exit.is_some() {
             match std::mem::replace(&mut self.session, UserSession::None) {
                 UserSession::Starting { .. } => {
-                    reply = Some(error("the session exited before it was ready"));
+                    self.answer(error("the session exited before it was ready"));
                 }
-                UserSession::Running {
-                    handed_off: true, ..
-                } => {
+                UserSession::Closing { queued, .. } => {
                     // The greeter was brought up at `quit`; it (or its fallback) owns the switch.
                     tracing::info!("logout: session closed");
                     self.backoff.reset();
-                    if let Some(q) = self.queued.take() {
-                        reply = self.open_session(q.handle, q.account, q.cmd, q.env, now);
+                    if let Some(q) = queued {
+                        self.open_session(q.handle, q.account, q.cmd, q.env);
                     }
                 }
                 UserSession::Running { .. } => {
                     tracing::info!("session ended; restarting the greeter");
                     self.backoff.reset();
-                    if self.greeter.is_none() {
-                        self.start_greeter(now);
-                    } else {
-                        let _ = self.activate(self.cfg.greeter_vt);
+                    match self.greeter {
+                        Greeter::Up { .. } => {
+                            let _ = self.activate(self.cfg.greeter_vt);
+                        }
+                        // Its start switches to it when it completes.
+                        Greeter::Starting(_) => {}
+                        Greeter::Idle | Greeter::Retry(_) => self.start_greeter(now, None),
                     }
                 }
-                UserSession::None => {}
+                other => self.session = other,
             }
         }
-        let greeter_exit = self
-            .greeter
-            .as_mut()
-            .and_then(|g| reap(&mut g.child, "greeter"));
-        if greeter_exit.is_some()
-            && let Some(g) = self.greeter.take()
-        {
-            let lived = now.saturating_duration_since(g.started);
+        let greeter_exit = match &mut self.greeter {
+            Greeter::Up { run, .. } => reap(&mut run.child, "greeter").map(|_| run.started),
+            _ => None,
+        };
+        if let Some(started) = greeter_exit {
+            let lived = now.saturating_duration_since(started);
+            let hand_off = match std::mem::replace(&mut self.greeter, Greeter::Idle) {
+                Greeter::Up { hand_off, .. } => hand_off,
+                other => {
+                    self.greeter = other;
+                    None
+                }
+            };
             self.cancel_auth();
-            self.drop_queued();
-            if self.logout.is_some() {
+            self.drop_queued("the greeter exited");
+            if hand_off.is_some() {
                 tracing::warn!("logout: greeter exited before ready");
-                self.finish_logout();
+                self.switch_to_greeter();
             }
             if !self.session_blocks() {
                 let delay = self.backoff.on_failure(lived);
                 tracing::warn!("greeter exited; restarting in {delay:?}");
-                self.greeter_due = Some(now + delay);
+                self.greeter = Greeter::Retry(now + delay);
             }
         }
-        reply
+        self.closing
+            .retain_mut(|w| reap(w, "closed session worker").is_none());
+        self.drive(now);
     }
 
-    /// Orderly stop: cancel authentication, SIGTERM the children, SIGKILL after `grace`, close
-    /// every open session.
+    /// Orderly stop (the loop has ended, so this may block): close every unspawned handle
+    /// (outstanding requests included), SIGTERM every child, wait once for all of them within
+    /// `grace`, SIGKILL the survivors and wait once more.
     pub fn shutdown(&mut self, grace: Duration) {
-        self.cancel_auth();
-        self.drop_queued();
-        self.logout = None;
         let mut runs: Vec<Running<B::Handle>> = Vec::new();
+        if let Some(a) = self.auth.take() {
+            let (Auth::Waiting(h)
+            | Auth::Cancelled(h)
+            | Auth::Pending(h)
+            | Auth::Authenticated(h, _)) = a;
+            self.close_handle(h, "authentication");
+        }
         match std::mem::replace(&mut self.session, UserSession::None) {
+            UserSession::Opening { handle, .. } | UserSession::Spawning { handle, .. } => {
+                self.close_handle(handle, "user session");
+            }
             UserSession::Starting { run, .. } | UserSession::Running { run, .. } => runs.push(run),
+            UserSession::Closing { run, queued, .. } => {
+                runs.push(run);
+                if let Some(q) = queued {
+                    self.close_handle(q.handle, "queued session");
+                }
+            }
             UserSession::None => {}
         }
-        runs.extend(self.greeter.take());
-        self.greeter_due = None;
+        match std::mem::replace(&mut self.greeter, Greeter::Idle) {
+            Greeter::Starting(g) => self.close_handle(g.handle, "greeter handle"),
+            Greeter::Up { run, .. } => runs.push(run),
+            Greeter::Idle | Greeter::Retry(_) => {}
+        }
+        self.asker = None;
+        self.reply = None;
+        let mut closing = std::mem::take(&mut self.closing);
         for r in &mut runs {
             let _ = r.child.signal(libc::SIGTERM);
         }
-        let end = Instant::now() + grace;
-        let mut alive: Vec<bool> = vec![true; runs.len()];
-        loop {
-            for (r, a) in runs.iter_mut().zip(alive.iter_mut()) {
-                if *a && exited(&mut r.child, "session") {
-                    *a = false;
-                }
-            }
-            if !alive.contains(&true) || Instant::now() >= end {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        }
+        let mut alive = vec![true; runs.len()];
+        wait_all(&mut runs, &mut alive, &mut closing, Instant::now() + grace);
         // Dropping each run drops its child: the worker closes PAM once it has reaped the user
         // process.
         for (r, a) in runs.iter_mut().zip(&alive) {
             if *a {
                 let _ = r.child.signal(libc::SIGKILL);
-                for _ in 0..50 {
-                    if exited(&mut r.child, "session") {
-                        break;
-                    }
-                    std::thread::sleep(Duration::from_millis(20));
-                }
             }
         }
+        wait_all(
+            &mut runs,
+            &mut alive,
+            &mut closing,
+            Instant::now() + Duration::from_secs(1),
+        );
+    }
+}
+
+/// Shutdown's one wait for every child still alive (and every closed worker) until `end`.
+fn wait_all<H: SessionHandle>(
+    runs: &mut [Running<H>],
+    alive: &mut [bool],
+    closing: &mut Vec<H::Child>,
+    end: Instant,
+) {
+    loop {
+        for (r, a) in runs.iter_mut().zip(alive.iter_mut()) {
+            if *a && exited(&mut r.child, "session") {
+                *a = false;
+            }
+        }
+        closing.retain_mut(|w| !exited(w, "closed session worker"));
+        if (!alive.contains(&true) && closing.is_empty()) || Instant::now() >= end {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 

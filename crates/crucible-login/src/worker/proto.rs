@@ -143,6 +143,15 @@ pub(super) fn send(sock: RawFd, data: &[u8], fd: Option<RawFd>) -> io::Result<()
 /// Receives one message (`None`: peer closed) and an optional passed fd (close-on-exec). A
 /// datagram or control message the buffers could not hold is an error.
 pub(super) fn recv(sock: RawFd) -> io::Result<Option<(Vec<u8>, Option<OwnedFd>)>> {
+    recv_flags(sock, 0)
+}
+
+/// [`recv`] with extra `recvmsg` flags (`MSG_DONTWAIT` for the daemon's non-blocking receive:
+/// an empty socket is `ErrorKind::WouldBlock`).
+pub(super) fn recv_flags(
+    sock: RawFd,
+    flags: libc::c_int,
+) -> io::Result<Option<(Vec<u8>, Option<OwnedFd>)>> {
     // One byte more than the budget, so an over-budget datagram also shows as truncated.
     let mut buf = vec![0u8; MAX_MSG + 1];
     let mut iov = libc::iovec {
@@ -159,8 +168,9 @@ pub(super) fn recv(sock: RawFd) -> io::Result<Option<(Vec<u8>, Option<OwnedFd>)>
     msg.msg_control = cbuf.as_mut_ptr().cast();
     msg.msg_controllen = space as _;
     // SAFETY: msg points at live buffers.
-    let n = retry_eintr(|| cvt(unsafe { libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC) }))?
-        as usize;
+    let n = retry_eintr(|| {
+        cvt(unsafe { libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC | flags) })
+    })? as usize;
     let mut fd = None;
     // SAFETY: walking the control buffer the kernel filled.
     unsafe {
