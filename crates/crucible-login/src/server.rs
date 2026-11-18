@@ -1,10 +1,9 @@
 //! The poll loop: the greeter socket, signals (self-pipe), the ready pipe and timers, turned
 //! into [`Daemon`] calls. Blocking I/O with `poll(2)`; no async runtime.
 
-use std::ffi::CString;
 use std::fs;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -33,59 +32,21 @@ extern "C" fn on_signal(sig: libc::c_int) {
     }
 }
 
-#[allow(unsafe_code)]
 fn signal_pipe() -> io::Result<OwnedFd> {
-    let mut fds = [0 as libc::c_int; 2];
-    // SAFETY: pipe2 fills the array with two new fds.
-    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    SIG_WRITE.store(fds[1], Ordering::Relaxed);
+    let (r, w) = crate::sys::pipe_cloexec(libc::O_NONBLOCK)?;
+    // The write end stays open for the process lifetime.
+    SIG_WRITE.store(w.into_raw_fd(), Ordering::Relaxed);
     // SIGHUP stops the daemon like SIGTERM: the unit's `SendSIGHUP=yes` sends it alongside the
     // stop signal, and its default action would end the daemon before `shutdown` runs (A7).
     for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP, libc::SIGCHLD] {
-        // SAFETY: a zeroed sigaction with a plain handler and an empty mask is valid.
-        unsafe {
-            let mut sa: libc::sigaction = std::mem::zeroed();
-            sa.sa_sigaction = on_signal as *const () as usize;
-            sa.sa_flags = libc::SA_RESTART;
-            libc::sigemptyset(&mut sa.sa_mask);
-            if libc::sigaction(sig, &sa, std::ptr::null_mut()) < 0 {
-                return Err(io::Error::last_os_error());
-            }
-        }
+        crate::sys::set_handler(sig, on_signal as *const () as usize, libc::SA_RESTART)?;
     }
-    // SAFETY: fds[0] is a fresh fd we own; the write end stays open for the process lifetime.
-    Ok(unsafe { OwnedFd::from_raw_fd(fds[0]) })
+    Ok(r)
 }
 
 /// Looks up `user`'s uid and gid.
-#[allow(unsafe_code)]
 pub fn lookup_user(user: &str) -> io::Result<(u32, u32)> {
-    let name = CString::new(user).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut buf = vec![0 as libc::c_char; 16 * 1024];
-    let mut out: *mut libc::passwd = std::ptr::null_mut();
-    // SAFETY: all pointers reference live locals sized as passed.
-    let rc = unsafe {
-        libc::getpwnam_r(
-            name.as_ptr(),
-            &mut pw,
-            buf.as_mut_ptr(),
-            buf.len(),
-            &mut out,
-        )
-    };
-    if rc != 0 {
-        return Err(io::Error::from_raw_os_error(rc));
-    }
-    if out.is_null() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no user {user:?}"),
-        ));
-    }
-    Ok((pw.pw_uid, pw.pw_gid))
+    crate::sys::lookup_account(user).map(|a| (a.uid, a.gid))
 }
 
 /// Creates `runtime_dir` (0755) and binds a fresh greeter socket in it, owned by the greeter

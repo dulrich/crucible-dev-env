@@ -154,7 +154,6 @@ impl SessionHandle for FakeHandle {
 
 struct FakeVt {
     s: S,
-    active: u32,
 }
 
 impl Vt for FakeVt {
@@ -164,11 +163,7 @@ impl Vt for FakeVt {
     }
     fn activate(&mut self, vt: u32) -> io::Result<()> {
         self.s.borrow_mut().log.push(format!("activate vt{vt}"));
-        self.active = vt;
         Ok(())
-    }
-    fn active(&mut self) -> io::Result<u32> {
-        Ok(self.active)
     }
 }
 
@@ -192,14 +187,7 @@ fn setup(remap: &[(&str, &str)]) -> (Daemon<FakeBackend, FakeVt>, S, Instant) {
             .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
             .collect(),
     };
-    let mut d = Daemon::new(
-        b,
-        FakeVt {
-            s: s.clone(),
-            active: 1,
-        },
-        cfg(),
-    );
+    let mut d = Daemon::new(b, FakeVt { s: s.clone() }, cfg());
     let now = Instant::now();
     d.start(now);
     (d, s, now)
@@ -459,14 +447,7 @@ fn greeter_start_failure_is_retried() {
         s: s.clone(),
         remap: HashMap::new(),
     };
-    let mut d = Daemon::new(
-        b,
-        FakeVt {
-            s: s.clone(),
-            active: 1,
-        },
-        cfg(),
-    );
+    let mut d = Daemon::new(b, FakeVt { s: s.clone() }, cfg());
     let now = Instant::now();
     d.start(now);
     assert!(!d.greeter_running());
@@ -601,13 +582,6 @@ fn a13_reap_error_keeps_the_session_running() {
     exit(&s, "alice");
     d.poll_children(now);
     assert!(!d.session_active());
-}
-
-#[test]
-fn stub_backend_reports_wp3() {
-    let mut b = crate::seam::StubBackend;
-    let err = b.begin(Class::User, "x").unwrap_err();
-    assert!(err.to_string().contains("WP-3"));
 }
 
 /// Logs `alice` in, makes the session ready, lets the boot greeter exit (as a real greeter does

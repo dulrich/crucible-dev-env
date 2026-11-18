@@ -1,6 +1,6 @@
-//! The authenticator/session seam. The daemon core drives it; WP-3 implements it with PAM (one
-//! PAM handle per [`SessionHandle`], living in a root process for the session's lifetime), the
-//! tests drive a fake, and [`StubBackend`] stands in until WP-3 lands.
+//! The authenticator/session seam. The daemon core drives it; [`crate::worker::PamBackend`]
+//! implements it with PAM (one PAM handle per [`SessionHandle`], living in a root process for
+//! the session's lifetime), and the tests drive a fake.
 //!
 //! Lifecycle of one handle: [`Backend::begin`] → [`SessionHandle::auth_step`] until
 //! [`AuthStep::Authenticated`] → [`SessionHandle::open`] → [`SessionHandle::spawn`] →
@@ -23,7 +23,7 @@ pub enum SeamError {
 }
 
 /// Which PAM service (and session class) a handle is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Class {
     /// A user session (PAM service `cde-login`, `XDG_SESSION_CLASS=user`).
     User,
@@ -155,49 +155,4 @@ pub trait Backend {
     type Handle: SessionHandle;
     /// Starts a conversation for `user` with the service of `class`.
     fn begin(&mut self, class: Class, user: &str) -> Result<Self::Handle, SeamError>;
-}
-
-/// The placeholder backend until WP-3: every `begin` fails.
-#[derive(Debug, Default)]
-pub struct StubBackend;
-
-/// Uninhabited: the stub never produces a handle or child.
-#[derive(Debug)]
-pub enum Never {}
-
-impl Backend for StubBackend {
-    type Handle = Never;
-    fn begin(&mut self, _class: Class, _user: &str) -> Result<Never, SeamError> {
-        Err(SeamError::Other(
-            "PAM backend not implemented (WP-3)".to_owned(),
-        ))
-    }
-}
-
-impl SessionHandle for Never {
-    type Child = Never;
-    fn auth_step(&mut self, _: Option<Secret>) -> Result<AuthStep, SeamError> {
-        match *self {}
-    }
-    fn open(&mut self, _: &OpenSpec) -> Result<(), SeamError> {
-        match *self {}
-    }
-    fn spawn(&mut self, _: SpawnSpec) -> Result<Never, SeamError> {
-        match *self {}
-    }
-    fn close(self) -> Result<(), SeamError> {
-        match self {}
-    }
-}
-
-impl Child for Never {
-    fn pid(&self) -> i32 {
-        match *self {}
-    }
-    fn try_wait(&mut self) -> Result<Option<ExitStatus>, SeamError> {
-        match *self {}
-    }
-    fn signal(&mut self, _: i32) -> Result<(), SeamError> {
-        match *self {}
-    }
 }

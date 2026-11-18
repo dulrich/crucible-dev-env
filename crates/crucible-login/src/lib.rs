@@ -6,5 +6,6 @@ pub mod daemon;
 pub mod pam;
 pub mod seam;
 pub mod server;
+pub mod sys;
 pub mod vt;
 pub mod worker;

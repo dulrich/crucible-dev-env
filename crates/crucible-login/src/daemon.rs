@@ -174,22 +174,6 @@ fn close_handle<H: SessionHandle>(handle: H, what: &str) {
     }
 }
 
-fn make_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
-    let mut fds = [0 as libc::c_int; 2];
-    #[allow(unsafe_code)]
-    // SAFETY: pipe2 writes two fds into the array; on success we take ownership of both.
-    let rc = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-    if rc < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    #[allow(unsafe_code)]
-    // SAFETY: both fds were just created and are owned by nobody else.
-    Ok(unsafe {
-        use std::os::fd::FromRawFd;
-        (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
-    })
-}
-
 impl<B: Backend, V: Vt> Daemon<B, V> {
     /// A daemon with nothing running yet; call [`Daemon::start`].
     pub fn new(backend: B, vt: V, cfg: Config) -> Self {
@@ -405,7 +389,7 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             return;
         }
         self.greeter_due = None;
-        let started = make_pipe()
+        let started = crate::sys::pipe_cloexec(0)
             .map_err(|e| SeamError::Other(format!("pipe: {e}")))
             .and_then(|(r, w)| self.try_start_greeter(Some(w)).map(|run| (run, r)));
         match started {
@@ -576,7 +560,8 @@ impl<B: Backend, V: Vt> Daemon<B, V> {
             self.vt
                 .set_graphics(vt)
                 .map_err(|e| SeamError::Other(format!("KD_GRAPHICS on VT {vt}: {e}")))?;
-            let (r, w) = make_pipe().map_err(|e| SeamError::Other(format!("pipe: {e}")))?;
+            let (r, w) =
+                crate::sys::pipe_cloexec(0).map_err(|e| SeamError::Other(format!("pipe: {e}")))?;
             let mut env = env;
             env.push(format!("{READY_ENV}={READY_FD}"));
             let child = handle.spawn(SpawnSpec {
