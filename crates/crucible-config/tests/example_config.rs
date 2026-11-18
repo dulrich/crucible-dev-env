@@ -22,4 +22,24 @@ fn example_slashdashed_settings_are_valid_when_enabled() {
     assert!(parsed.night_light.is_some());
     assert!(parsed.terminal.command.is_some());
     assert!(!parsed.binds.is_empty());
+    assert_eq!(parsed.input_devices.len(), 1);
+    assert!(parsed.input_devices[0].layer.is_some());
+}
+
+#[test]
+fn docs_input_device_examples_parse() {
+    let doc = include_str!("../../../docs/config.md");
+    let blocks: Vec<&str> = doc
+        .split("```kdl\n")
+        .skip(1)
+        .filter_map(|b| b.split("```").next())
+        .filter(|b| b.contains("input-device \""))
+        .collect();
+    assert_eq!(blocks.len(), 2, "the starting and reversed tables");
+    for block in blocks {
+        let parsed = parse(block).expect("docs input-device example parses");
+        let d = &parsed.input_devices[0];
+        assert_eq!((d.vendor, d.product), (0x1532, 0x0207));
+        assert!(d.maps.len() >= 15);
+    }
 }

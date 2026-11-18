@@ -15,11 +15,16 @@
 //! - [`action`] — the [`Action`] verb set produced by chord resolution.
 //! - [`bindings`] — the data-driven [`Bindings`] table (default + config overrides) and its chord/action grammar.
 //! - [`chord`] — the Smithay-free [`chord::Modifiers`] type and [`chord::resolve`].
+//! - [`remap`] — per-device key remapping (`input-device`): tables, press ledger, holder counts.
 
 pub mod action;
 pub mod bindings;
 pub mod chord;
+pub mod remap;
 
 pub use action::{Action, ActionParseError, Area, NightLightArg, terminal_command};
 pub use bindings::{BindError, BindTarget, Bindings, Chord};
 pub use chord::{Keysym, Modifiers, resolve};
+pub use remap::{
+    DeviceSpec, RemapError, RemapOutcome, RemapSet, RemapTarget, Remapper, SpecTarget,
+};

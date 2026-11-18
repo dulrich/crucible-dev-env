@@ -6,8 +6,9 @@
 //! calls on a config reload. The decision logic is in the pure [`plan_bindings`]/[`pick_terminal`] so it is
 //! unit-tested without a compositor.
 
+use crucible_config::KeyMapTarget;
 use crucible_config::{Config, ConfigError, Named};
-use crucible_keys::{BindError, Bindings};
+use crucible_keys::{BindError, Bindings, DeviceSpec, RemapError, RemapSet, SpecTarget};
 use tracing::{error, info, warn};
 
 use crate::state::{Backend, CrucibleState};
@@ -46,6 +47,39 @@ pub fn plan_bindings(current: &Bindings, config: &Config) -> (Bindings, Option<B
         Ok(next) => (next, None),
         Err(err) => (current.clone(), Some(err)),
     }
+}
+
+/// The `input-device` blocks as the remap engine's uncompiled specs.
+#[must_use]
+pub fn remap_specs(config: &Config) -> Vec<DeviceSpec> {
+    let maps = |entries: &[crucible_config::KeyMapEntry]| {
+        entries
+            .iter()
+            .map(|m| {
+                let target = match &m.target {
+                    KeyMapTarget::Key(code) => SpecTarget::Key(*code),
+                    KeyMapTarget::Action(text) => SpecTarget::Action(text.clone()),
+                };
+                (m.source, target)
+            })
+            .collect()
+    };
+    config
+        .input_devices
+        .iter()
+        .map(|d| DeviceSpec {
+            vendor: d.vendor,
+            product: d.product,
+            maps: maps(&d.maps),
+            layer: d.layer.as_ref().map(|l| (l.key, maps(&l.maps))),
+        })
+        .collect()
+}
+
+/// The remap tables for `config`, or on a [`RemapError`] `None` (keep the previous set as a
+/// whole) with the error for logging, mirroring [`plan_bindings`].
+pub fn plan_remaps(config: &Config) -> Result<RemapSet, RemapError> {
+    RemapSet::compile(&remap_specs(config))
 }
 
 /// The stable environment an overlay spawn exports, built once from `(config, program)` by
@@ -262,6 +296,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
             error!(%err, "invalid binds in config; keeping the previous bindings");
         }
         self.bindings = bindings;
+        match plan_remaps(&config) {
+            Ok(set) => self.key_remap.set_remaps(set),
+            Err(err) => {
+                error!(%err, "invalid input-device action in config; keeping the previous remaps")
+            }
+        }
         // Class insets or the header reservation changed: forget the applied projection so every
         // window is re-placed (and re-configured), once. The stored `toggle` state is kept
         // (it has no effect outside `toggle` mode), so toggle -> always -> toggle restores it.
@@ -802,6 +842,32 @@ mod tests {
         let (b, err) = plan_bindings(&current, &config);
         assert!(matches!(err, Some(BindError::BadAction { .. })));
         assert_eq!(b, current);
+    }
+
+    #[test]
+    fn plan_remaps_compiles_and_a_bad_action_keeps_the_previous_set() {
+        use crucible_keys::{RemapOutcome, Remapper};
+        let good = crucible_config::parse(
+            "input-device \"1532:0207\" {\n  map \"KEY_GRAVE\" \"KEY_1\"\n  map \"KEY_1\" action=\"slot 2\"\n}\n",
+        )
+        .unwrap();
+        let bad = crucible_config::parse(
+            "input-device \"1532:0207\" {\n  map \"KEY_GRAVE\" action=\"none\"\n}\n",
+        )
+        .unwrap();
+        let mut remap = Remapper::new();
+        remap.set_remaps(plan_remaps(&good).unwrap());
+        // The apply path keeps the previous set on an error, as here.
+        if let Ok(set) = plan_remaps(&bad) {
+            remap.set_remaps(set);
+            panic!("`none` must not compile");
+        }
+        let pad = Some((0x1532, 0x0207));
+        assert_eq!(remap.process("e", pad, 41, true), RemapOutcome::Forward(2));
+        assert_eq!(
+            remap.process("e", pad, 2, true),
+            RemapOutcome::Action(Action::Slot(2))
+        );
     }
 
     #[test]

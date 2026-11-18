@@ -361,6 +361,17 @@ impl<'a> NodeReader<'a> {
         Ok(self.children_unchecked(repeatable, Some(&[])))
     }
 
+    /// Like [`NodeReader::children_keeping_args`] but children named in `exempt` may carry
+    /// properties (`input-device`'s `map … action="…"`).
+    pub(crate) fn children_keeping_args_exempt(
+        &self,
+        repeatable: &'static [&'static str],
+        exempt: &'static [&'static str],
+    ) -> Result<Children<'a>, ConfigError> {
+        self.no_properties()?;
+        Ok(self.children_unchecked(repeatable, Some(exempt)))
+    }
+
     fn children_unchecked(
         &self,
         repeatable: &'static [&'static str],

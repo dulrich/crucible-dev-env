@@ -222,6 +222,72 @@ keyboard {
 - The `set-layout <name>` action switches to the layout by its position in `layouts` (not by xkb's long layout name). A name not in the list is a logged no-op. Defaults: `Super+E` is `set-layout us` and `Super+S` is `set-layout es`; with the default `layouts "us"`, `set-layout es` does nothing.
 - Chords match the keysym the active layout produces, not the physical key. Under `es`, punctuation chords (`Super+backslash`, `Super+minus`, `Super+bracketleft/right`) and the US shifted-digit `pin-slot` aliases (`Super+Shift+!` and friends) therefore follow the Spanish keys; letters and digits are unaffected. Rebind via `binds` if you want different punctuation chords under another layout.
 
+### `input-device`
+
+```kdl
+// Razer Orbweaver: pad 01–10 type digits, thumb pad = arrows, space thumb = Enter, alt thumb = Super.
+input-device "1532:0207" {
+    map "KEY_GRAVE" "KEY_1"
+    map "KEY_1" "KEY_2"
+    map "KEY_2" "KEY_3"
+    map "KEY_3" "KEY_4"
+    map "KEY_4" "KEY_5"
+    map "KEY_TAB" "KEY_6"
+    map "KEY_Q" "KEY_7"
+    map "KEY_W" "KEY_8"
+    map "KEY_E" "KEY_9"
+    map "KEY_R" "KEY_0"
+    map "KEY_UP" "KEY_UP"
+    map "KEY_DOWN" "KEY_DOWN"
+    map "KEY_LEFT" "KEY_LEFT"
+    map "KEY_RIGHT" "KEY_RIGHT"
+    map "KEY_SPACE" "KEY_ENTER"
+    map "KEY_LEFTALT" "KEY_LEFTMETA"
+}
+```
+
+The reversed variant: bare pad keys switch slots, and digits need the alt thumb held.
+
+```kdl
+input-device "1532:0207" {
+    map "KEY_GRAVE" action="slot 1"
+    map "KEY_1" action="slot 2"
+    map "KEY_2" action="slot 3"
+    map "KEY_3" action="slot 4"
+    map "KEY_4" action="slot 5"
+    map "KEY_TAB" action="slot 6"
+    map "KEY_Q" action="slot 7"
+    map "KEY_W" action="slot 8"
+    map "KEY_E" action="slot 9"
+    map "KEY_R" action="slot 0"
+    map "KEY_UP" "KEY_UP"
+    map "KEY_DOWN" "KEY_DOWN"
+    map "KEY_LEFT" "KEY_LEFT"
+    map "KEY_RIGHT" "KEY_RIGHT"
+    map "KEY_SPACE" "KEY_ENTER"
+    layer "KEY_LEFTALT" {
+        map "KEY_GRAVE" "KEY_1"
+        map "KEY_1" "KEY_2"
+        map "KEY_2" "KEY_3"
+        map "KEY_3" "KEY_4"
+        map "KEY_4" "KEY_5"
+        map "KEY_TAB" "KEY_6"
+        map "KEY_Q" "KEY_7"
+        map "KEY_W" "KEY_8"
+        map "KEY_E" "KEY_9"
+        map "KEY_R" "KEY_0"
+    }
+}
+```
+
+- `input-device "<vendor>:<product>"` (repeatable, one per id) takes over **every** keyboard node with that USB vendor:product (hex, case-insensitive). A bad id, an unknown key name, a repeated `map` source, a second `layer` or a repeated device is a located config error that rejects the file.
+- Keys are Linux evdev `KEY_*` names (letters, digits, `KEY_F1`–`KEY_F24`, modifiers, navigation, editing keys, punctuation, keypad, a few media keys).
+- `map "<SRC>" "<DST>"` rewrites the key: xkb, modifiers, chords and clients all see `<DST>`. `map "<SRC>" action="<action>"` runs the action (the `binds` action grammar; `none` is invalid) on press and swallows the key. An action string that does not compile keeps the previous `input-device` set as a whole (logged); every other setting still applies.
+- A key with no `map` is swallowed: a configured device never sends its native codes.
+- `layer "<KEY>" { map … }` (zero or one per device): while that key is held (on any node of the device) its entries override the base table; the layer key itself is swallowed. A release always replays its press's outcome, across a layer change or a reload.
+- Remapping happens **before** chord resolution, so a configured device's native keys cannot form chords (the hard-wired VT switch included); only the rewritten keys can. The greeter ignores `input-device`; the lock screen and snip mode apply it.
+- With the starting mapping, alt thumb + pad 01–10 is `Super+<digit>`, which switches to slot `<n>` only when that slot is pinned (`pin-slot`).
+
 ### `idle`
 
 ```kdl

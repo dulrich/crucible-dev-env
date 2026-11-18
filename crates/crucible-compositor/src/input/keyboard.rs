@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use smithay::backend::input::{Event, InputBackend, KeyState, KeyboardKeyEvent};
+use smithay::backend::input::{Device, Event, InputBackend, KeyState, KeyboardKeyEvent};
 use smithay::input::keyboard::{FilterResult, Keysym};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::SERIAL_COUNTER;
@@ -58,6 +58,30 @@ impl SuppressedKeys {
     }
 }
 
+/// Backend keycodes (libinput, winit) are evdev + 8 (the xkb offset).
+const XKB_OFFSET: u32 = 8;
+
+/// The evdev code of backend keycode `raw`, or `None` outside the evdev `u16` range.
+#[must_use]
+fn backend_to_evdev(raw: u32) -> Option<u16> {
+    raw.checked_sub(XKB_OFFSET)
+        .and_then(|c| u16::try_from(c).ok())
+}
+
+/// The backend keycode for evdev `code`.
+#[must_use]
+fn evdev_to_backend(code: u16) -> u32 {
+    u32::from(code) + XKB_OFFSET
+}
+
+/// smithay's `Device::usb_id()` is `(product, vendor)`; the config selector is `(vendor, product)`.
+/// `None` when either id does not fit a USB `u16`.
+#[must_use]
+fn selector_from_usb_id(usb_id: Option<(u32, u32)>) -> Option<(u16, u16)> {
+    let (product, vendor) = usb_id?;
+    Some((u16::try_from(vendor).ok()?, u16::try_from(product).ok()?))
+}
+
 /// What an intercepted key press does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum KeyHit {
@@ -102,8 +126,33 @@ impl<B: Backend + 'static> CrucibleState<B> {
         mode: &InputMode,
         evt: I::KeyboardKeyEvent,
     ) {
-        let keycode = evt.key_code();
+        let mut keycode = evt.key_code();
         let key_state = evt.state();
+        // Per-device remapping (`input-device`), before chord resolution and the seat; never in
+        // greeter mode (the greeter loads no user config and owns its wake-key path).
+        if !mode.is_greeter()
+            && self.greeter.is_none()
+            && let Some(code) = backend_to_evdev(keycode.raw())
+        {
+            let device = evt.device();
+            let outcome = self.key_remap.process(
+                &device.id(),
+                selector_from_usb_id(device.usb_id()),
+                code,
+                key_state == KeyState::Pressed,
+            );
+            match outcome {
+                crucible_keys::RemapOutcome::Forward(code) => {
+                    keycode = evdev_to_backend(code).into();
+                }
+                crucible_keys::RemapOutcome::Swallow => return,
+                crucible_keys::RemapOutcome::Action(action) => {
+                    // Gated by `admit` like a chord; refused or not, the key is swallowed.
+                    let _ = self.handle_key_action(action, super::Origin::Chord);
+                    return;
+                }
+            }
+        }
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time_msec(&evt);
 
@@ -244,6 +293,25 @@ impl<B: Backend + 'static> CrucibleState<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_codes_are_evdev_plus_eight() {
+        assert_eq!(backend_to_evdev(49), Some(41)); // KEY_GRAVE
+        assert_eq!(evdev_to_backend(2), 10); // KEY_1
+        assert_eq!(backend_to_evdev(evdev_to_backend(125)), Some(125));
+        assert_eq!(backend_to_evdev(3), None);
+        assert_eq!(backend_to_evdev(u32::MAX), None);
+    }
+
+    #[test]
+    fn usb_id_is_product_vendor_and_selector_is_vendor_product() {
+        assert_eq!(
+            selector_from_usb_id(Some((0x0207, 0x1532))),
+            Some((0x1532, 0x0207))
+        );
+        assert_eq!(selector_from_usb_id(None), None);
+        assert_eq!(selector_from_usb_id(Some((0x1_0000, 1))), None);
+    }
 
     #[test]
     fn snip_keys_map_escape_and_enter_only() {

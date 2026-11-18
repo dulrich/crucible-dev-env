@@ -5,6 +5,7 @@
 mod cursor;
 mod header;
 mod idle;
+mod input_device;
 mod keyboard;
 mod night_light;
 mod output;
@@ -39,7 +40,12 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
     })?;
 
     let mut config = Config::default();
-    for node in Children::new(text, doc.nodes(), &["output", "autostart"], None) {
+    for node in Children::new(
+        text,
+        doc.nodes(),
+        &["output", "autostart", "input-device"],
+        None,
+    ) {
         let node = node?;
         match node.name() {
             "terminal" => parse_terminal(node, &mut config.terminal)?,
@@ -68,6 +74,23 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "launcher" => config.launcher = overlay::parse_launcher(node)?,
             "header" => config.header = header::parse_header(node)?,
             "keyboard" => config.keyboard = keyboard::parse_keyboard(node)?,
+            "input-device" => {
+                let device = input_device::parse_input_device(node)?;
+                if config
+                    .input_devices
+                    .iter()
+                    .any(|d| (d.vendor, d.product) == (device.vendor, device.product))
+                {
+                    return Err(ConfigError::Duplicate {
+                        at: node.at(),
+                        name: format!(
+                            "input-device \"{:04x}:{:04x}\"",
+                            device.vendor, device.product
+                        ),
+                    });
+                }
+                config.input_devices.push(device);
+            }
             "cursor" => config.cursor = cursor::parse_cursor(node)?,
             "screenshot" => config.screenshot = screenshot::parse_screenshot(node)?,
             "idle" => config.idle = idle::parse_idle(node)?,

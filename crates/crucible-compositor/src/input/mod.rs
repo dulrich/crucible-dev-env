@@ -112,6 +112,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
             InputEvent::PointerButton { event } => self.process_pointer_button::<I>(&mode, event),
             InputEvent::PointerAxis { event } => self.process_pointer_axis::<I>(event),
+            // A removed device leaves no held remap key or layer for a reused source id.
+            InputEvent::DeviceRemoved { device } => {
+                use smithay::backend::input::Device;
+                self.key_remap.remove_source(&device.id());
+            }
             // Touch/gesture/device events are not handled yet; the udev source inspects
             // DeviceAdded/DeviceRemoved itself for keyboard-LED bookkeeping before calling us.
             _ => {}

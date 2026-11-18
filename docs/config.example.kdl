@@ -72,6 +72,18 @@ keyboard {
     layouts "us" // e.g. "us" "es"; set-layout <name> switches by name
 }
 
+// Per-device key remap by USB vendor:product (evdev KEY_* names). Full takeover: unmapped keys
+// are swallowed. Remaps run before chords; the greeter ignores them. See docs/config.md.
+/-input-device "1532:0207" {
+    map "KEY_GRAVE" "KEY_1"
+    map "KEY_1" action="slot 2"
+    map "KEY_SPACE" "KEY_ENTER"
+    map "KEY_LEFTALT" "KEY_LEFTMETA"
+    layer "KEY_CAPSLOCK" {
+        map "KEY_1" "KEY_2"
+    }
+}
+
 // Idle timers, in seconds. Both off by default.
 idle {
     /-lock-after 300

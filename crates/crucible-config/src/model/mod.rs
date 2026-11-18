@@ -6,12 +6,14 @@ use std::path::{Path, PathBuf};
 use crate::overlay::{OverlayConfig, TerminalKind};
 
 mod header;
+mod input_device;
 mod tiling;
 
 pub use header::{
     DEFAULT_DIVIDER_COLOR, DEFAULT_HEADER_FONT, HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX,
     HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderActive, HeaderConfig, HeaderMode, HeaderStart,
 };
+pub use input_device::{InputDeviceConfig, InputDeviceLayer, KeyMapEntry, KeyMapTarget};
 pub use tiling::{
     AppTiling, TerminalTiling, TilingConfig, clamp_ring, clamp_ring_inset, substitute_gap,
 };
@@ -310,6 +312,9 @@ pub struct Config {
     pub launcher: LauncherConfig,
     /// Binding overrides as raw `(chord, action)` strings, in file order.
     pub binds: Vec<(String, String)>,
+    /// Per-device key remap tables (`input-device`, repeatable), in file order; one per
+    /// vendor:product.
+    pub input_devices: Vec<InputDeviceConfig>,
     /// Per-output settings keyed by connector name (`output "DP-1" { … }`).
     pub outputs: BTreeMap<String, OutputConfig>,
 }
@@ -354,6 +359,7 @@ impl Default for Config {
             launcher: LauncherConfig::default(),
             binds: Vec::new(),
             outputs: BTreeMap::new(),
+            input_devices: Vec::new(),
             lock_command: "swaylock --indicator-idle-visible".to_string(),
             autostart: Vec::new(),
         }

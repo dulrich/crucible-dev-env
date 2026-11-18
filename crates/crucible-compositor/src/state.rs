@@ -173,6 +173,10 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// a modifier change between press and release cannot desync the match. See [`crate::input`].
     pub suppressed_keys: SuppressedKeys,
 
+    /// Per-device key remapping (`input-device`): the compiled tables, press ledger and seat-code
+    /// holder counts. Applied before the seat in the logged-in session only (never the greeter).
+    pub key_remap: crucible_keys::Remapper,
+
     /// The running XWayland X11 window manager, once XWayland has reached `Ready`.
     ///
     /// `None` until [`Self::start_xwayland`] has spawned the server and `X11Wm::start_wm` attached
@@ -417,6 +421,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             cursor: crate::cursor::Cursor::default(),
             seat_name,
             suppressed_keys: SuppressedKeys::new(),
+            key_remap: crucible_keys::Remapper::new(),
             snip: None,
             reveal_holds: crate::reveal_hold::RevealHolds::default(),
             login_ready: crate::login_ready::LoginReady::default(),
