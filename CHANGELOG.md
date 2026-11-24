@@ -4,6 +4,25 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.8.0 — 2026-11-23
+
+### Changed
+
+- **Breaking:** `keyboard { layouts }` now rejects a layout name containing whitespace (a located config error); such a config no longer loads.
+- Opening a saved workspace (picker, `Super+<digit>` slot, `crucible msg open`, open-folder) now restores it onto the focused output instead of the output it was last viewed on; `workspace-open { saved "last-output" }` restores the old behaviour. Startup session restore is unchanged.
+- `move-workspace-to-output <n>` (and `Super+Ctrl+]` / `[`) steps through the outputs in screen order rather than internal output order.
+- `Super+Left` / `Right` / `Up` / `Down` are bound by default to move the active workspace to the output on that side.
+
+### Added
+
+- `workspace-open { live "jump"|"bring"; saved "focused"|"last-output" }` sets where an existing workspace lands when opened; `bring` moves a live workspace onto the focused output.
+- `move-workspace-to-output left|right|up|down` moves the active workspace to the neighbouring output in that direction (no wrap).
+- `lock { background "glass" [alpha=<0..1>] }`: swaylock fills with the theme background at an alpha and CDE draws the `swaybg` wallpaper beneath it, only for a swaylock CDE itself spawned with the generated config; any other case stays black.
+
+### Fixed
+
+- A typed `root` request can no longer be encoded as the `root -` clear: a relative or non-UTF-8 root is refused before it is sent (raw `crucible msg root -` still clears).
+
 ## 0.7.15 — 2026-11-18
 
 ### Added
