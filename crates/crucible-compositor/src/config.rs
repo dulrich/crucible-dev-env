@@ -330,7 +330,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         crate::lock_config::write_swaylock_config(&config);
         crate::greeter::publish::publish_for_env(&config);
-        let positions_changed = output_positions(&self.config) != output_positions(&config);
+        let mut positions_changed = output_positions(&self.config) != output_positions(&config);
+        // A reload that changed an `output` block clears the live overrides (plan 53); an
+        // unrelated reload keeps them.
+        if self.config.outputs != config.outputs && !self.output_management.overrides.is_empty() {
+            info!("output blocks changed; clearing the live output overrides");
+            self.output_management.overrides = crate::output_management::OutputOverrides::default();
+            positions_changed = true;
+        }
         self.config = config;
         if delta.idle {
             self.idle.machine.reset();
@@ -390,13 +397,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// Re-applies the configured scale to every mapped output; when any output's scale changed or
+    /// Re-applies the effective scale (live override, else config) to every mapped output; when any output's scale changed or
     /// `positions_changed` (a config reload changed an `output` block's `position`), reflows the outputs through the backend ([`Backend::outputs_changed`]) and re-places an open
     /// overlay. A scale change is a geometry change (plan 12 invariant).
     pub fn apply_output_scales(&mut self, positions_changed: bool) {
         let mut changed = positions_changed;
-        for output in self.space.outputs() {
-            let wanted = configured_scale(&self.config, &output.name());
+        let outputs: Vec<_> = self.space.outputs().cloned().collect();
+        for output in &outputs {
+            let wanted = self.effective_output_scale(output);
             if output.current_scale().fractional_scale() != wanted.fractional_scale() {
                 info!(output = %output.name(), scale = wanted.fractional_scale(), "output scale");
                 output.change_current_state(None, None, Some(wanted), None);
@@ -404,6 +412,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
         }
         if changed {
+            self.cancel_snip_for_geometry();
             self.invalidate_projection();
             B::outputs_changed(self);
             self.replace_mapped_overlay();
@@ -413,6 +422,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 self.backend_data.reset_buffers(output);
             }
         }
+        self.output_layout_changed();
     }
 }
 

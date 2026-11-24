@@ -477,6 +477,8 @@ Per-output settings, keyed by the connector name (as in `DP-1`, `HDMI-A-1`). The
 
 An output with no `output` block has scale 1. Every Wayland app grows with the scale, the terminal included, so retune its font size when you set one. X11 apps follow the largest scale among all configured `output` blocks (whether or not that connector is currently connected) unless `CDE_XWAYLAND_SCALE` is set, which overrides it; with no `output` blocks it is 1. XWayland's scale is fixed when XWayland starts, so a change to the largest scale reaches X11 apps after a CDE restart.
 
+Live relocation: CDE serves `zwlr_output_manager_v1` (wlr-output-management), so `wlr-randr` and `kanshi` can move and rescale outputs while the session runs (for example `wlr-randr --output DP-1 --pos -1920,0` or `--scale 1.25`). Only position and scale are applied, all-or-nothing, within the same ranges as the config; an overlapping result is refused, and a change of mode, custom mode, transform or adaptive sync, or turning an output on or off, is refused with nothing changed. A live change is an override for the running session: a live move pins every output's position for the session (a monitor connected later with no position still joins the strip to the right); it survives replugging the monitor, is never written to the config file, and is cleared when a config reload changes any `output` block (an unrelated reload keeps it). With no live change, placement and scale are exactly what the config gives.
+
 ### `binds`
 
 ```kdl

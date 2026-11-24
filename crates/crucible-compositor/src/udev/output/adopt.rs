@@ -71,7 +71,23 @@ impl CrucibleState<UdevData> {
             device_id: node,
             crtc,
         };
-        let scale = crate::config::configured_scale(&self.config, &output.name());
+        let scale = self.effective_output_scale(&output);
+        crate::output_management::set_output_modes(
+            &output,
+            connector
+                .modes()
+                .iter()
+                .map(|m| {
+                    let wm = WlMode::from(*m);
+                    crate::output_management::ModeInfo {
+                        width: wm.size.w,
+                        height: wm.size.h,
+                        refresh: wm.refresh,
+                        preferred: m.mode_type().contains(ModeTypeFlags::PREFERRED),
+                    }
+                })
+                .collect(),
+        );
         output.set_preferred(wl_mode);
         output.change_current_state(Some(wl_mode), None, Some(scale), None);
         let (width, height) = super::logical_size(&output);
@@ -128,6 +144,7 @@ impl CrucibleState<UdevData> {
         // Strip outputs the new output displaced move now (a positioned output returning pushes
         // an unpositioned neighbour along the strip).
         super::apply_survivor_reflow(self, &connect);
+        self.output_layout_changed();
 
         // Start-up (plan 44): the first commit waits for this output's wallpaper buffer, or for
         // the adoption timeout. An output connected later adopts at once, as before.

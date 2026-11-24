@@ -227,6 +227,9 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// The active snip session (frozen frames + selection), `None` outside snip mode; see
     /// [`crate::snip`].
     pub snip: Option<crate::snip::SnipSession>,
+    /// The `zwlr_output_manager_v1` server state and the live output overrides; see
+    /// [`crate::output_management`].
+    pub output_management: crate::output_management::OutputManagement,
     /// Outputs held on their previous frame while a re-shown window repaints (plan 38).
     pub reveal_holds: crate::reveal_hold::RevealHolds<Output, WlSurface>,
     /// The login ready rule and readiness fd (plan 45).
@@ -342,6 +345,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let idle_inhibit_state =
             smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<CrucibleState<B>>(&dh);
         crate::identity_protocol::create_global::<B>(&dh);
+        crate::output_management::create_global::<B>(&dh);
         let mut seat_state = SeatState::new();
 
         // Create the seat with keyboard + pointer capabilities. NB: this only *advertises* the
@@ -423,6 +427,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             suppressed_keys: SuppressedKeys::new(),
             key_remap: crucible_keys::Remapper::new(),
             snip: None,
+            output_management: crate::output_management::OutputManagement::default(),
             reveal_holds: crate::reveal_hold::RevealHolds::default(),
             login_ready: crate::login_ready::LoginReady::default(),
             quit: crate::login_ready::QuitPhase::default(),

@@ -39,7 +39,8 @@ pub use model::{
     HeaderConfig, HeaderMode, HeaderStart, IdleConfig, InputDeviceConfig, InputDeviceLayer,
     KeyMapEntry, KeyMapTarget, KeyboardConfig, LauncherConfig, LiveOpen,
     NIGHT_LIGHT_DEFAULT_KELVIN, NIGHT_LIGHT_IDENTITY_KELVIN, NIGHT_LIGHT_MIN_KELVIN, Named,
-    NightLightConfig, PickerConfig, Rgb, SavedOpen, ScreenshotConfig, ScreenshotDestination,
+    NightLightConfig, OUTPUT_POSITION_MAX, OUTPUT_POSITION_MIN, OUTPUT_SCALE_MAX, OUTPUT_SCALE_MIN,
+    OUTPUT_SCALE_STEPS, PickerConfig, Rgb, SavedOpen, ScreenshotConfig, ScreenshotDestination,
     TerminalConfig, TerminalTiling, TilingConfig, WorkspaceOpenConfig, clamp_ring, substitute_gap,
 };
 pub use overlay::{

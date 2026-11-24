@@ -77,28 +77,21 @@ pub(super) fn output_strip(space: &Space<WindowElement>) -> Vec<MappedOutput<Ude
 }
 
 /// The desired origin of each output by connector name: the **only** source the planner is fed
-/// from. Today that is the `output "<connector>" { position x y }` config; live overrides (the
-/// `zwlr_output_manager_v1` server) extend exactly this function.
+/// from (live overrides over config positions; see
+/// [`CrucibleState::desired_output_positions`]).
 pub(super) fn desired_output_positions(state: &CrucibleState<UdevData>) -> DesiredPositions {
-    state
-        .config
-        .outputs
-        .iter()
-        .filter_map(|(name, output)| Some((name.clone(), output.position?)))
-        .collect()
+    state.desired_output_positions()
 }
 
 /// The logical size Smithay's `Space` will report for `output` once mapped (transformed mode
 /// size, divided by the fractional scale, rounded up), or `(0, 0)` without a mode.
 pub(super) fn logical_size(output: &Output) -> (i32, i32) {
     output.current_mode().map_or((0, 0), |mode| {
-        let size = output
-            .current_transform()
-            .transform_size(mode.size)
-            .to_f64()
-            .to_logical(output.current_scale().fractional_scale())
-            .to_i32_ceil::<i32>();
-        (size.w, size.h)
+        crate::output_management::logical_size(
+            (mode.size.w, mode.size.h),
+            output.current_transform(),
+            output.current_scale().fractional_scale(),
+        )
     })
 }
 
@@ -179,6 +172,7 @@ fn apply_positions(state: &mut CrucibleState<UdevData>, plan: &OutputPlan<UdevOu
     }
     // Output positions/sizes changed: re-assert the model-driven projection (idempotent).
     state.apply_layout();
+    state.output_layout_changed();
 }
 
 /// Moves the existing outputs a connect plan displaced (`survivor_reflow`), leaving the addition

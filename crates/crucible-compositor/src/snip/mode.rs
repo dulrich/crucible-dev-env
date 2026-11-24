@@ -395,6 +395,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
+    /// Cancels an active snip through its normal cleanup before a committed output geometry
+    /// change (its frozen frames and output rects would be stale).
+    pub(crate) fn cancel_snip_for_geometry(&mut self) {
+        if self.snip.is_some() {
+            info!(reason = "output geometry changed", "snip: ended");
+            self.end_snip();
+        }
+    }
+
     /// Drops snip state without the focus/redraw follow-up (lock acceptance owns both).
     pub(crate) fn discard_snip(&mut self) {
         if self.snip.take().is_some() {

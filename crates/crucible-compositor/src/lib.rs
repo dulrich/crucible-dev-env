@@ -99,6 +99,9 @@ pub mod pointer_lock;
 /// The `crucible-window-identity-v1` protocol server (authenticated per-window identity).
 pub mod identity_protocol;
 
+/// The `zwlr_output_manager_v1` server (live output position and scale, plan 53).
+pub mod output_management;
+
 /// Built-in screenshots: offscreen capture and PNG encoding (plan 34).
 pub mod capture;
 

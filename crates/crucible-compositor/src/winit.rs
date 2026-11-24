@@ -110,6 +110,26 @@ impl Backend for WinitData {
     }
 
     fn update_led_state(&mut self, _led_state: smithay::input::keyboard::LedState) {}
+
+    /// Re-maps the single output at its effective origin (live override, else config, else
+    /// `(0,0)`), so a live apply moves the Space and the `Output` state together, then re-lays it.
+    fn outputs_changed(state: &mut CrucibleState<Self>) {
+        let outputs: Vec<Output> = state.space.outputs().cloned().collect();
+        for output in &outputs {
+            remap_at_effective_origin(state, output);
+            state.relayout_output(output);
+        }
+        state.apply_layout();
+    }
+}
+
+/// Maps `output` at its effective origin in both the Space and the `Output` state.
+fn remap_at_effective_origin(state: &mut CrucibleState<WinitData>, output: &Output) {
+    let position = state
+        .effective_output_position(&output.name())
+        .unwrap_or((0, 0));
+    output.change_current_state(None, None, None, Some(position.into()));
+    state.space.map_output(output, position);
 }
 
 /// Brings up and runs the nested `winit` development backend.
@@ -234,10 +254,11 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
     state
         .shm_state
         .update_formats(state.backend_data.backend.renderer().shm_formats());
-    state.space.map_output(&output, (0, 0));
+    remap_at_effective_origin(&mut state, &output);
     // Adopt the model's initial output for this single winit output and size it to its logical
     // size (the window's pixels divided by the configured scale).
     state.register_output(&output);
+    state.output_layout_changed();
     // XWayland for a session (on readiness it exports `DISPLAY` and attaches the X11 window
     // manager; see `crate::xwayland`), then the mode's ready rule.
     state.finish_mode_start(ready_fd);
@@ -254,10 +275,11 @@ pub fn run_winit_mode(greeter: Option<crate::greeter::GreeterSetup>) -> i32 {
                 };
                 output.change_current_state(Some(mode), None, None, None);
                 output.set_preferred(mode);
-                state.space.map_output(&output, (0, 0));
+                remap_at_effective_origin(&mut state, &output);
                 // Keep the model's stored rect in sync, then re-tile (model-driven, idempotent).
                 state.sync_output_rect(&output);
                 state.apply_layout();
+                state.output_layout_changed();
             }
             WinitEvent::CloseRequested => {
                 state
