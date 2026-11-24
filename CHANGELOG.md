@@ -4,6 +4,18 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.8.1 — 2026-11-24
+
+### Added
+
+- `output "<connector>" { position <x> <y> }` places an output at a fixed origin in logical pixels (each coordinate -65536..=65536). Positioned outputs are placed first in connector-name order, and one that would overlap falls back to the strip; the rest form the left-to-right strip to their right. A replugged or power-cycled monitor returns to its configured slot whatever order the monitors connect in, and a config reload re-places the outputs.
+- `zwlr_output_manager_v1` (wlr-output-management, version 4), so `wlr-randr` and `kanshi` can move and rescale outputs live. Position and scale changes apply all-or-nothing for the session (a move pins every output), survive replugs and are never written to config; a config reload that changes an `output` block clears them. Mode, transform and on/off changes are refused.
+
+### Changed
+
+- `move-workspace-to-output up|down` reaches a vertical neighbour when outputs are arranged with `position`.
+- An active screenshot snip is cancelled when the output layout changes.
+
 ## 0.8.0 — 2026-11-23
 
 ### Changed
