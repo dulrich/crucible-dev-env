@@ -151,6 +151,39 @@ impl<'a> NodeReader<'a> {
             .ok_or_else(|| self.wrong_type("argument", "an integer"))
     }
 
+    /// Exactly two integer arguments, each within `range`; a wrong count, a non-integer or an
+    /// outside value is an error at the offending argument (the integer quoted as written).
+    pub(crate) fn int_pair_in(
+        &self,
+        range: RangeInclusive<i32>,
+        labels: [&'static str; 2],
+    ) -> Result<(i32, i32), ConfigError> {
+        let all = self.args();
+        if all.len() < 2 {
+            return Err(self.missing(labels[all.len()]));
+        }
+        if let Some((_, at)) = all.get(2) {
+            return Err(self.unexpected_at(*at));
+        }
+        let mut out = [0_i32; 2];
+        for (i, (value, at)) in all.iter().enumerate() {
+            let n = value.as_integer().ok_or_else(|| {
+                self.wrong_type_at(*at, &format!("argument {}", i + 1), "an integer")
+            })?;
+            out[i] = i32::try_from(n)
+                .ok()
+                .filter(|n| range.contains(n))
+                .ok_or_else(|| {
+                    self.invalid_at(
+                        *at,
+                        &format!("argument {}", i + 1),
+                        format!("{n} is outside {}..={}", range.start(), range.end()),
+                    )
+                })?;
+        }
+        Ok((out[0], out[1]))
+    }
+
     /// Exactly one integer argument within `range`; outside it is an `InvalidValue` at the node
     /// that quotes the integer as written (`-1 is outside 8..=64`).
     pub(crate) fn u32_arg_in(&self, range: RangeInclusive<u32>) -> Result<u32, ConfigError> {

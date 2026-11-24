@@ -44,7 +44,7 @@ use crate::{
     state::CrucibleState,
 };
 
-use super::plan::{self, MappedOutput, OutputPlan};
+use super::plan::{self, DesiredPositions, MappedOutput, OutputPlan};
 use super::{OutputElements, UdevData};
 mod adopt;
 mod records;
@@ -67,11 +67,56 @@ pub(super) fn output_strip(space: &Space<WindowElement>) -> Vec<MappedOutput<Ude
             let geometry = space.output_geometry(output);
             Some(MappedOutput {
                 key,
+                name: output.name(),
                 width: geometry.map(|geo| geo.size.w).unwrap_or(0),
+                height: geometry.map(|geo| geo.size.h).unwrap_or(0),
                 position: geometry.map(|geo| (geo.loc.x, geo.loc.y)).unwrap_or((0, 0)),
             })
         })
         .collect()
+}
+
+/// The desired origin of each output by connector name: the **only** source the planner is fed
+/// from. Today that is the `output "<connector>" { position x y }` config; live overrides (the
+/// `zwlr_output_manager_v1` server) extend exactly this function.
+pub(super) fn desired_output_positions(state: &CrucibleState<UdevData>) -> DesiredPositions {
+    state
+        .config
+        .outputs
+        .iter()
+        .filter_map(|(name, output)| Some((name.clone(), output.position?)))
+        .collect()
+}
+
+/// The logical size Smithay's `Space` will report for `output` once mapped (transformed mode
+/// size, divided by the fractional scale, rounded up), or `(0, 0)` without a mode.
+pub(super) fn logical_size(output: &Output) -> (i32, i32) {
+    output.current_mode().map_or((0, 0), |mode| {
+        let size = output
+            .current_transform()
+            .transform_size(mode.size)
+            .to_f64()
+            .to_logical(output.current_scale().fractional_scale())
+            .to_i32_ceil::<i32>();
+        (size.w, size.h)
+    })
+}
+
+/// Logs the warn-worthy outcomes of a plan: configured positions that fell back to the strip,
+/// outputs the pointer cannot reach, and outputs left unplaced by overflowing arithmetic.
+pub(super) fn warn_plan(plan: &OutputPlan<UdevOutputId>) {
+    for name in &plan.fallbacks {
+        warn!(output = %name, "configured output position overlaps another output (or overflows); placing it on the strip instead");
+    }
+    for name in &plan.unreachable {
+        warn!(output = %name, "output shares no edge with any other output; the pointer cannot reach it");
+    }
+    for key in &plan.skipped {
+        warn!(
+            ?key,
+            "output position arithmetic overflowed; leaving it unplaced"
+        );
+    }
 }
 
 /// Looks up the mapped [`Output`] driven by `key`.
@@ -93,16 +138,20 @@ pub(super) fn apply_plan(state: &mut CrucibleState<UdevData>, plan: &OutputPlan<
     for key in &plan.remove {
         drop_mapped_output(state, *key);
     }
+    warn_plan(plan);
     apply_positions(state, plan);
 }
 
-/// Re-lays every mapped output left-to-right and re-arranges each output's layer map.
+/// Re-lays every mapped output per the placement rule and re-arranges each output's layer map.
 ///
-/// Called after a device rescan so the outputs form a contiguous left-to-right strip with no gaps
-/// or overlaps (anvil's `fixup_positions`); a mode change can resize an output under us, which
-/// moves everything to its right. The placement rule itself lives in [`plan::plan_reflow`].
+/// Called after a device rescan so the unpositioned outputs form a contiguous left-to-right strip
+/// with no gaps or overlaps (anvil's `fixup_positions`); a mode change can resize an output under us, which
+/// moves everything to its right. The placement rule itself lives in [`plan::plan_reflow`]; it
+/// also re-places outputs whose desired position changed.
 pub(super) fn reflow_outputs(state: &mut CrucibleState<UdevData>) {
-    let plan = plan::plan_reflow(&output_strip(&state.space));
+    let desired = desired_output_positions(state);
+    let plan = plan::plan_reflow(&output_strip(&state.space), &desired);
+    warn_plan(&plan);
     apply_positions(state, &plan);
 }
 
@@ -130,6 +179,22 @@ fn apply_positions(state: &mut CrucibleState<UdevData>, plan: &OutputPlan<UdevOu
     }
     // Output positions/sizes changed: re-assert the model-driven projection (idempotent).
     state.apply_layout();
+}
+
+/// Moves the existing outputs a connect plan displaced (`survivor_reflow`), leaving the addition
+/// to the caller, which maps it itself.
+pub(super) fn apply_survivor_reflow(
+    state: &mut CrucibleState<UdevData>,
+    plan: &OutputPlan<UdevOutputId>,
+) {
+    for placement in &plan.survivor_reflow {
+        let Some(output) = output_for(&state.space, placement.key) else {
+            continue;
+        };
+        state.space.map_output(&output, placement.position);
+        output.change_current_state(None, None, None, Some(placement.position.into()));
+        state.relayout_output(&output);
+    }
 }
 
 /// Tears down one mapped output: migrates its model workspaces onto a survivor, then unmaps it.

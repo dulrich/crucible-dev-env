@@ -330,11 +330,12 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
         crate::lock_config::write_swaylock_config(&config);
         crate::greeter::publish::publish_for_env(&config);
+        let positions_changed = output_positions(&self.config) != output_positions(&config);
         self.config = config;
         if delta.idle {
             self.idle.machine.reset();
         }
-        self.apply_output_scales();
+        self.apply_output_scales(positions_changed);
         if delta.warm {
             self.warm_config_changed();
         }
@@ -389,11 +390,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// Re-applies the configured scale to every mapped output; when any output's scale changed,
-    /// reflows the outputs through the backend ([`Backend::outputs_changed`]) and re-places an open
+    /// Re-applies the configured scale to every mapped output; when any output's scale changed or
+    /// `positions_changed` (a config reload changed an `output` block's `position`), reflows the outputs through the backend ([`Backend::outputs_changed`]) and re-places an open
     /// overlay. A scale change is a geometry change (plan 12 invariant).
-    pub fn apply_output_scales(&mut self) {
-        let mut changed = false;
+    pub fn apply_output_scales(&mut self, positions_changed: bool) {
+        let mut changed = positions_changed;
         for output in self.space.outputs() {
             let wanted = configured_scale(&self.config, &output.name());
             if output.current_scale().fractional_scale() != wanted.fractional_scale() {
@@ -413,6 +414,15 @@ impl<B: Backend + 'static> CrucibleState<B> {
             }
         }
     }
+}
+
+/// The configured `position` of every `output` block that has one, by connector name.
+fn output_positions(config: &Config) -> Vec<(&str, (i32, i32))> {
+    config
+        .outputs
+        .iter()
+        .filter_map(|(name, output)| Some((name.as_str(), output.position?)))
+        .collect()
 }
 
 /// The scale `connector` gets from `config`: `Scale::Fractional` of its `output` block, 1 when

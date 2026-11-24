@@ -142,8 +142,10 @@ screenshot {
     directory "~/Pictures/Screenshots"
 }
 
-// One block per connector; no block = scale 1.
+// One block per connector; no block = scale 1, placed on the left-to-right strip.
+// `position x y` pins the output's top-left (logical pixels, each -65536..=65536).
 /-output "DP-1" {
+    position 0 0
     scale 1.4167
 }
 

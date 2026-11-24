@@ -129,17 +129,25 @@ pub const OUTPUT_SCALE_MAX: f64 = 4.0;
 /// Fractional-scale steps per 1.0 (the `wp_fractional_scale_v1` unit).
 pub const OUTPUT_SCALE_STEPS: u32 = 120;
 
+/// Lowest accepted `output` position coordinate (logical pixels).
+pub const OUTPUT_POSITION_MIN: i32 = -65536;
+/// Highest accepted `output` position coordinate (logical pixels).
+pub const OUTPUT_POSITION_MAX: i32 = 65536;
+
 /// One output's settings (`output "<connector>" { … }`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputConfig {
     /// The scale in 1/120 steps (120 = 1.0), quantized from the configured number.
     pub scale_120: u32,
+    /// The desired top-left origin in logical pixels (`position x y`), if configured.
+    pub position: Option<(i32, i32)>,
 }
 
 impl Default for OutputConfig {
     fn default() -> Self {
         Self {
             scale_120: OUTPUT_SCALE_STEPS,
+            position: None,
         }
     }
 }
@@ -369,6 +377,13 @@ impl Config {
     #[must_use]
     pub fn output_scale(&self, connector: &str) -> f64 {
         self.outputs.get(connector).map_or(1.0, OutputConfig::scale)
+    }
+
+    /// The configured logical-pixel origin for the output with connector name `connector`, or
+    /// `None` when no `output` block names it or the block has no `position`.
+    #[must_use]
+    pub fn output_position(&self, connector: &str) -> Option<(i32, i32)> {
+        self.outputs.get(connector).and_then(|o| o.position)
     }
 
     /// The largest scale among all configured `output` blocks (mapped or not), or `1.0` with none.

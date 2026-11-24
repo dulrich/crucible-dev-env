@@ -464,11 +464,14 @@ Default binds: `Super+Print` runs `screenshot` (the whole focused output, withou
 
 ```kdl
 output "DP-1" {
+    position 0 0
     scale 1.4167
 }
 ```
 
-Per-output settings, keyed by the connector name (as in `DP-1`, `HDMI-A-1`). The block may repeat, once per connector; a second block for the same connector is a config error. The only child, `scale`, is optional and may appear once.
+Per-output settings, keyed by the connector name (as in `DP-1`, `HDMI-A-1`). The block may repeat, once per connector; a second block for the same connector is a config error. The children `position` and `scale` are optional and each may appear once.
+
+- `position` — `position <x> <y>`: exactly two integers, the output's top-left corner in logical pixels (the same space `scale` produces, as in sway and kanshi). Each coordinate must be within -65536 to 65536 inclusive; a wrong count, a non-integer or an out-of-range value is a config error, never clamped. Outputs with a `position` are placed first, in connector-name order, at their configured origin. One whose rectangle would overlap an already placed output falls back to the strip (a warning is logged). Every other output joins the strip: left to right in its existing order (a newly connected one last), starting at the right edge of the positioned outputs, at `y = 0`. With no `position` anywhere this is the plain left-to-right strip. A reconnecting (replugged) output returns to its configured slot whatever order the monitors connect in; positioned outputs never move when another output disconnects, while strip outputs close the gap. Changing a `position` and reloading the config re-places the outputs. Outputs need not touch, but the pointer only crosses between outputs that share an edge (touching with overlapping span); CDE logs a warning when a layout leaves an output unreachable.
 
 - `scale` — a number (a float such as `1.4167` or an integer such as `2`) from 0.5 to 4.0 inclusive; anything outside the range is a config error, never clamped. The value is quantized to the nearest 1/120 (the unit of Wayland fractional scale), so `1.4167` becomes 170/120. An `output` block without `scale` means 1.
 
@@ -518,7 +521,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `close-workspace` | Save, then close the active workspace and end its windows (refused on the output's last workspace) |
 | `delete-workspace` | (unbound by default) Delete the active workspace: end its windows, move its saved record to `deleted/` (beside the `workspaces/` store, `$XDG_STATE_HOME/cde/deleted/`; a later delete of the same name replaces the earlier file) and clear its slot pins. No final save; refused on the output's last workspace and while a restore is pending. Restore a deleted workspace by moving its file back into `workspaces/` |
 | `close-all-workspaces` | Save and close every open workspace, leaving one fresh workspace per output (unbound by default) |
-| `move-workspace-to-output <n>\|left\|right\|up\|down` | Send the active workspace to another output. `<n>` steps `n` outputs along the screen order (left to right by output position, wraparound); a direction sends it to the output beside this one on that side (no wrap, a no-op when there is none). Up and down are no-ops with today's side-by-side output strip |
+| `move-workspace-to-output <n>\|left\|right\|up\|down` | Send the active workspace to another output. `<n>` steps `n` outputs along the screen order (left to right by output position, wraparound); a direction sends it to the output beside this one on that side (no wrap, a no-op when there is none). Up and down are no-ops on the default side-by-side strip, and reach vertical neighbours once outputs are arranged with [`output` `position`](#output) |
 | `slot <n>` | Switch to the workspace pinned to slot `n` (0-9); a live one is opened and a saved one restored as [`workspace-open`](#workspace-open) says (default: a live one is jumped to, a saved one lands on the focused output), an unpinned slot opens the workspace picker, and the workspace chosen there is pinned to `n`; a slot pinned to a workspace that is neither live nor saved opens the picker in pin mode the same way, while other open failures do nothing |
 | `unpin-workspace` | (unbound by default) Clear every slot pin naming the active workspace (its `Super+<digit>` shortcuts); the workspace itself is untouched. No-op when it has none |
 | `pin-slot <n>` | Pin the active workspace to slot `n` (0-9); pins persist in `$XDG_STATE_HOME/cde/slots.kdl` |

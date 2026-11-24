@@ -1,7 +1,10 @@
-//! The `output "<connector>" { scale … }` block.
+//! The `output "<connector>" { position … ; scale … }` block.
 
 use crate::error::ConfigError;
-use crate::model::{OUTPUT_SCALE_MAX, OUTPUT_SCALE_MIN, OUTPUT_SCALE_STEPS, OutputConfig};
+use crate::model::{
+    OUTPUT_POSITION_MAX, OUTPUT_POSITION_MIN, OUTPUT_SCALE_MAX, OUTPUT_SCALE_MIN,
+    OUTPUT_SCALE_STEPS, OutputConfig,
+};
 use crate::reader::NodeReader;
 
 pub(super) fn parse_output(node: NodeReader<'_>) -> Result<(String, OutputConfig), ConfigError> {
@@ -24,6 +27,12 @@ pub(super) fn parse_output(node: NodeReader<'_>) -> Result<(String, OutputConfig
                 {
                     out.scale_120 = steps as u32;
                 }
+            }
+            "position" => {
+                out.position = Some(child.int_pair_in(
+                    OUTPUT_POSITION_MIN..=OUTPUT_POSITION_MAX,
+                    ["an x coordinate", "a y coordinate"],
+                )?);
             }
             _ => return Err(child.unknown_node("output")),
         }
@@ -71,6 +80,53 @@ mod tests {
             assert!(matches!(err, ConfigError::InvalidValue { .. }), "{bad}");
             assert_eq!(at.line, 1);
         }
+    }
+
+    #[test]
+    fn output_position_parses_and_is_looked_up_by_connector() {
+        let c =
+            parse("output \"DP-1\" { position -1920 0; scale 2; }\noutput \"B\" { }\n").unwrap();
+        assert_eq!(c.outputs["DP-1"].position, Some((-1920, 0)));
+        assert_eq!(c.output_position("DP-1"), Some((-1920, 0)));
+        assert_eq!(c.output_position("B"), None);
+        assert_eq!(c.output_position("missing"), None);
+        assert_eq!(c.outputs["DP-1"].scale_120, 240);
+    }
+
+    #[test]
+    fn output_position_range_is_inclusive_and_never_clamped() {
+        let c = parse("output \"A\" { position -65536 65536; }\n").unwrap();
+        assert_eq!(c.output_position("A"), Some((-65536, 65536)));
+        for bad in [
+            "65537 0",
+            "0 -65537",
+            "0",
+            "1 2 3",
+            "1.5 2",
+            "\"a\" 2",
+            "99999999999 0",
+            "",
+        ] {
+            let (err, at) = err_at(&format!("output \"A\" {{ position {bad}; }}\n"));
+            assert!(
+                matches!(
+                    err,
+                    ConfigError::InvalidValue { .. }
+                        | ConfigError::WrongType { .. }
+                        | ConfigError::MissingArgument { .. }
+                        | ConfigError::UnexpectedArgument { .. }
+                ),
+                "{bad}: {err:?}"
+            );
+            assert_eq!(at.line, 1, "{bad}");
+        }
+    }
+
+    #[test]
+    fn output_position_duplicate_is_an_error() {
+        let (err, at) = err_at("output \"A\" {\n position 0 0\n position 1 1\n}\n");
+        assert!(matches!(err, ConfigError::Duplicate { .. }), "{err:?}");
+        assert_eq!(at.line, 3);
     }
 
     #[test]

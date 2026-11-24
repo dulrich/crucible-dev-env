@@ -457,7 +457,8 @@ impl CrucibleState<UdevData> {
                 crtc,
             })
             .collect();
-        let plan = plan::plan_disconnect(&output::output_strip(&self.space), &departing);
+        let desired = output::desired_output_positions(self);
+        let plan = plan::plan_disconnect(&output::output_strip(&self.space), &departing, &desired);
         output::apply_plan(self, &plan);
 
         self.night_light.cache.remove_where(|(n, _)| *n == node);

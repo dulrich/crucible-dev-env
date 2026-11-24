@@ -64,24 +64,35 @@ impl CrucibleState<UdevData> {
         );
         let global = output.create_global::<CrucibleState<UdevData>>(&self.display_handle);
 
-        // Lay this output to the right of all existing ones. A connect always plans exactly one
-        // addition, and appending never moves an existing output; an empty strip puts this first
-        // output at the origin.
+        // Place this output by the placement rule (its configured position, else the strip). The
+        // configured scale (by connector name, e.g. `DP-1`) is set first, so its logical size,
+        // the Space geometry, the strip and the model rect are all logical from the start.
         let id = UdevOutputId {
             device_id: node,
             crtc,
         };
-        let connect = plan::plan_connect(&output_strip(&self.space), id);
+        let scale = crate::config::configured_scale(&self.config, &output.name());
+        output.set_preferred(wl_mode);
+        output.change_current_state(Some(wl_mode), None, Some(scale), None);
+        let (width, height) = super::logical_size(&output);
+        let desired = super::desired_output_positions(self);
+        let connect = plan::plan_connect(
+            &output_strip(&self.space),
+            plan::MappedOutput {
+                key: id,
+                name: output.name(),
+                width,
+                height,
+                position: (0, 0),
+            },
+            &desired,
+        );
+        super::warn_plan(&connect);
         let position = connect
             .add
             .first()
             .map_or((0, 0), |placement| placement.position);
-
-        // The configured scale (by connector name, e.g. `DP-1`) is set before mapping, so the Space
-        // geometry, the strip and the model rect are all logical from the start.
-        let scale = crate::config::configured_scale(&self.config, &output.name());
-        output.set_preferred(wl_mode);
-        output.change_current_state(Some(wl_mode), None, Some(scale), Some(position.into()));
+        output.change_current_state(None, None, None, Some(position.into()));
         self.space.map_output(&output, position);
         output.user_data().insert_if_missing(|| id);
 
@@ -114,6 +125,9 @@ impl CrucibleState<UdevData> {
         // via `add_output`, seeded off the live and saved names. A start-up output is registered
         // before its DRM adoption, so the wallpaper client binds and arranges on it meanwhile.
         self.register_output(&output);
+        // Strip outputs the new output displaced move now (a positioned output returning pushes
+        // an unpositioned neighbour along the strip).
+        super::apply_survivor_reflow(self, &connect);
 
         // Start-up (plan 44): the first commit waits for this output's wallpaper buffer, or for
         // the adoption timeout. An output connected later adopts at once, as before.
@@ -318,7 +332,12 @@ impl CrucibleState<UdevData> {
             device_id: node,
             crtc,
         };
-        let plan = plan::plan_disconnect(&output_strip(&self.space), &[id]);
+        let plan = plan::plan_disconnect(
+            &output_strip(&self.space),
+            &[id],
+            &plan::DesiredPositions::new(),
+        );
+        // Only the removal is applied here; the rescan that reports it reflows once afterwards.
         for key in &plan.remove {
             drop_mapped_output(self, *key);
         }
