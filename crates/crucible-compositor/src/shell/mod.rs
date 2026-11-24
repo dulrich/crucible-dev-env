@@ -237,6 +237,17 @@ impl<B: Backend + 'static> WlrLayerShellHandler for CrucibleState<B> {
             warn!("Rejecting layer surface: no output available to anchor it");
             return;
         };
+        if layer == Layer::Background {
+            let exe = self
+                .wayland_client_pid(surface.wl_surface())
+                .and_then(|pid| {
+                    use crate::persist::identity::{ProcView, RealProc};
+                    RealProc.exe(pid)
+                });
+            if crate::lock::is_trusted_wallpaper(layer, exe.as_deref()) {
+                crate::lock::tag_wallpaper_trusted(surface.wl_surface());
+            }
+        }
         let mut map = layer_map_for_output(&output);
         if let Err(err) = map.map_layer(&smithay::desktop::LayerSurface::new(surface, namespace)) {
             warn!("Failed to map layer surface: {}", err);

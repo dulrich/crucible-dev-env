@@ -13,7 +13,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crucible_config::{
-    Config, LockConfig, Rgb, SurfaceBackground, ThemeConfig, config_path_from, surface_palette,
+    Config, LockBackground, LockConfig, Rgb, SurfaceBackground, ThemeConfig, config_path_from,
+    surface_palette,
 };
 use tracing::{info, warn};
 
@@ -71,16 +72,26 @@ pub fn swaylock_config(
 ) -> String {
     let p = surface_palette(lock.style, lock.accent, theme);
     let mut out = String::from("indicator-idle-visible\n");
-    match lock.background {
-        SurfaceBackground::Color(c) => {
+    let background = match lock.background {
+        LockBackground::Glass { .. } => {
+            if let Some((c, alpha)) = lock.background.glass_tint(theme) {
+                let _ = writeln!(out, "color={}{alpha:02x}", rgb(c));
+            }
+            None
+        }
+        LockBackground::Surface(b) => Some(b),
+    };
+    match background {
+        None => {}
+        Some(SurfaceBackground::Color(c)) => {
             let _ = writeln!(out, "color={}", rgb(c));
         }
-        SurfaceBackground::Stock => {
+        Some(SurfaceBackground::Stock) => {
             let _ = writeln!(out, "color=000000");
             let _ = writeln!(out, "image={}", stock_path.display());
             let _ = writeln!(out, "scaling=fill");
         }
-        SurfaceBackground::User => {
+        Some(SurfaceBackground::User) => {
             let _ = writeln!(out, "color=000000");
             for image in state_text.map(wallpaper_images).unwrap_or_default() {
                 let _ = writeln!(out, "image={image}");
@@ -182,20 +193,38 @@ pub fn render_for_env(config: &Config) -> Option<String> {
     ))
 }
 
+/// The prepared swaylock fragment: where it lives and whether its current content is on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fragment {
+    /// The fragment's path.
+    pub path: PathBuf,
+    /// `true` when the content was written or was already identical on disk; `false` after a
+    /// write error (the file may be missing or stale).
+    pub on_disk: bool,
+}
+
 /// Writes the swaylock config for `config` (nothing without a `lock` block). A failure only
-/// warns. Returns the file's path when a `lock` block is set and a path resolves.
-pub fn write_swaylock_config(config: &Config) -> Option<PathBuf> {
+/// warns. Returns the fragment when a `lock` block is set and a path resolves; its
+/// [`Fragment::on_disk`] is `false` after a write error, so a caller that trusts the content
+/// (the glass gate) fails closed.
+pub fn write_swaylock_config(config: &Config) -> Option<Fragment> {
     let text = render_for_env(config)?;
     let Some(path) = fragment_path() else {
         warn!("neither XDG_CONFIG_HOME nor HOME is set; swaylock config not written");
         return None;
     };
-    match write_file(&path, &text) {
-        Ok(true) => info!(path = %path.display(), "swaylock config written"),
-        Ok(false) => {}
-        Err(err) => warn!(path = %path.display(), %err, "cannot write the swaylock config"),
-    }
-    Some(path)
+    let on_disk = match write_file(&path, &text) {
+        Ok(true) => {
+            info!(path = %path.display(), "swaylock config written");
+            true
+        }
+        Ok(false) => true,
+        Err(err) => {
+            warn!(path = %path.display(), %err, "cannot write the swaylock config");
+            false
+        }
+    };
+    Some(Fragment { path, on_disk })
 }
 
 fn write_file(path: &Path, text: &str) -> io::Result<bool> {
@@ -210,6 +239,16 @@ fn write_file(path: &Path, text: &str) -> io::Result<bool> {
 /// `words`, `-C <fragment>` is inserted first. **Pure.**
 #[must_use]
 pub fn locker_args(program: &str, words: &[&str], fragment: Option<&Path>) -> Vec<OsString> {
+    insert_fragment(program, words, fragment).0
+}
+
+/// [`locker_args`] plus whether `-C <fragment>` was actually inserted. **Pure.**
+#[must_use]
+pub fn insert_fragment(
+    program: &str,
+    words: &[&str],
+    fragment: Option<&Path>,
+) -> (Vec<OsString>, bool) {
     let mut args: Vec<OsString> = words.iter().map(OsString::from).collect();
     let is_swaylock = Path::new(program)
         .file_name()
@@ -217,6 +256,7 @@ pub fn locker_args(program: &str, words: &[&str], fragment: Option<&Path>) -> Ve
     let has_config = words
         .iter()
         .any(|w| w.starts_with("-C") || *w == "--config" || w.starts_with("--config="));
+    let mut inserted = false;
     if let Some(fragment) = fragment
         && is_swaylock
         && !has_config
@@ -225,8 +265,21 @@ pub fn locker_args(program: &str, words: &[&str], fragment: Option<&Path>) -> Ve
             0..0,
             [OsString::from("-C"), fragment.as_os_str().to_owned()],
         );
+        inserted = true;
     }
-    args
+    (args, inserted)
+}
+
+/// Whether a locker launch may be bound to glass: the `lock` block is glass, its fragment content
+/// is on disk, and `-C <fragment>` was inserted into the argv (a locker with its own config, or
+/// not a plain `swaylock`, never reads the glass fragment). **Pure.**
+#[must_use]
+pub fn glass_launch_eligible(
+    background: LockBackground,
+    fragment: Option<&Fragment>,
+    inserted: bool,
+) -> bool {
+    background.is_glass() && inserted && fragment.is_some_and(|f| f.on_disk)
 }
 
 #[cfg(test)]
@@ -237,7 +290,7 @@ mod tests {
     fn lock(style: SurfaceStyle, background: SurfaceBackground) -> LockConfig {
         LockConfig {
             style,
-            background,
+            background: LockBackground::Surface(background),
             ..LockConfig::default()
         }
     }
@@ -264,6 +317,90 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("ring-wrong-color=e04f5fff\n"), "{text}");
+    }
+
+    fn glass(alpha: Option<u32>) -> LockConfig {
+        LockConfig {
+            background: LockBackground::Glass {
+                alpha: alpha.and_then(crucible_config::Alpha::from_milli),
+            },
+            ..LockConfig::default()
+        }
+    }
+
+    #[test]
+    fn glass_emits_the_translucent_tint_and_no_image() {
+        // Default: black at 0.8 -> cc; indicator colours are the style's, unchanged.
+        let text = swaylock_config(&glass(None), None, Path::new("/s.png"), Some("/w/a.png\n"));
+        assert!(
+            text.starts_with("indicator-idle-visible\ncolor=000000cc\ninside-color="),
+            "{text}"
+        );
+        assert!(
+            !text.contains("image=") && !text.contains("scaling="),
+            "{text}"
+        );
+        let plain = swaylock_config(
+            &lock(SurfaceStyle::N1Med, SurfaceBackground::Color(Rgb(0, 0, 0))),
+            None,
+            Path::new("/s.png"),
+            None,
+        );
+        assert_eq!(
+            text.replace("color=000000cc\n", "color=000000\n"),
+            plain,
+            "only the colour line differs"
+        );
+        // alpha= and the theme: aa = round(alpha * 255), two lowercase hex digits.
+        let theme = ThemeConfig {
+            background: Some(Rgb(0x10, 0xab, 0xff)),
+            ..ThemeConfig::default()
+        };
+        for (alpha, aa) in [(500, "80"), (0, "00"), (1000, "ff"), (50, "0d")] {
+            let text =
+                swaylock_config(&glass(Some(alpha)), Some(&theme), Path::new("/s.png"), None);
+            assert!(
+                text.contains(&format!("\ncolor=10abff{aa}\n")),
+                "{alpha}: {text}"
+            );
+        }
+        // The theme's alpha applies when `alpha=` is not given.
+        let theme = ThemeConfig {
+            alpha: crucible_config::Alpha::from_milli(500),
+            ..ThemeConfig::default()
+        };
+        let text = swaylock_config(&glass(None), Some(&theme), Path::new("/s.png"), None);
+        assert!(text.contains("\ncolor=00000080\n"), "{text}");
+    }
+
+    #[test]
+    fn glass_launch_needs_a_glass_block_a_prepared_fragment_and_an_inserted_c() {
+        let frag = |on_disk| Fragment {
+            path: PathBuf::from("/c/cde/swaylock/config"),
+            on_disk,
+        };
+        let g = glass(None).background;
+        let plain = LockConfig::default().background;
+        assert!(glass_launch_eligible(g, Some(&frag(true)), true));
+        // A write failure: the content is not on disk.
+        assert!(!glass_launch_eligible(g, Some(&frag(false)), true));
+        // No fragment path, or `-C` not inserted (own config / another locker).
+        assert!(!glass_launch_eligible(g, None, true));
+        assert!(!glass_launch_eligible(g, Some(&frag(true)), false));
+        // Not a glass block.
+        assert!(!glass_launch_eligible(plain, Some(&frag(true)), true));
+        // The insertion report follows `locker_args`.
+        let f = Path::new("/c/cde/swaylock/config");
+        assert!(insert_fragment("swaylock", &["-f"], Some(f)).1);
+        for (program, words) in [
+            ("swaylock", &["-C", "/mine"][..]),
+            ("swaylock", &["--config=/mine"]),
+            ("swaylock-effects", &[]),
+            ("i3lock", &[]),
+        ] {
+            assert!(!insert_fragment(program, words, Some(f)).1, "{program}");
+        }
+        assert!(!insert_fragment("swaylock", &[], None).1);
     }
 
     #[test]

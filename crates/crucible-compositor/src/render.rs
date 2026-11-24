@@ -261,7 +261,10 @@ pub fn icon_location(
 ///
 /// - **Locked** (or locking): only `output`'s lock surface, over
 ///   [`LOCK_CLEAR_COLOR`](crate::lock::LOCK_CLEAR_COLOR). Chrome, header, cursor and windows are
-///   not built.
+///   not built. The one exception is a glass-bound lock ([`crate::lock::GlassEligibility`]): once
+///   its lock surface has a renderable element, that output's trusted `swaybg` Background-layer
+///   surfaces are drawn beneath it; with no lock element the output stays black, and no other
+///   layer or window is ever drawn.
 /// - **Snipping** (an output the snip froze): cursor → size label → ring → dim → the frozen
 ///   frame ([`crate::snip::snip_elements`]); no header, chrome or live windows.
 /// - **Unlocked**: cursor (only when `inputs.cursor` is `Some`, at that output-local physical location)
@@ -294,7 +297,7 @@ where
     let scale = inputs.scale;
     if view.session_lock.is_locked() {
         let elements =
-            crate::lock::lock_render_elements(view.session_lock, view.output, renderer, scale)
+            crate::lock::locked_elements(view.session_lock, view.output, renderer, scale)
                 .into_iter()
                 .map(OutputRenderElements::Custom)
                 .collect();

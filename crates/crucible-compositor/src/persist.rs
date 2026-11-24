@@ -503,6 +503,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             debug!(?reaped, "reaped exited children");
         }
         self.warm_reaped(&reaped);
+        self.locker_reaped(&reaped);
         // A reaped session spawn no longer holds back the login ready rule (plan 45).
         self.check_login_ready();
         // One `/proc` capture per tick feeds both the recovery set and the auto-save.

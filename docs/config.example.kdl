@@ -118,7 +118,9 @@ idle {
 // the block; defaults style "n1-med", background "color" "#000000".
 /-lock {
     style "n1-dark"
-    background "user" // "stock" | "user" | "color" "#rrggbb"
+    background "user" // "stock" | "user" | "color" "#rrggbb" | "glass" | "glass" alpha=0.8
+    // "glass" is lock-only: swaylock paints theme background (else black) at alpha (else theme
+    // alpha, else 0.8) over the live swaybg wallpaper. The greeter does not accept it.
 }
 
 // The optional greetd greeter (see docs/greeter.md). Defaults style "n1-med", background "stock",

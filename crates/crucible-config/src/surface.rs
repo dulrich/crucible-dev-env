@@ -6,7 +6,7 @@
 
 use crate::model::{Named, Rgb};
 use crate::overlay::{N1_DARK, N1_LIGHT, N1_MED, Palette};
-use crate::theme::ThemeConfig;
+use crate::theme::{Alpha, ThemeConfig};
 
 /// The look of a CDE surface (header, overlay, lock screen, greeter): the terminal's own colours or one of the
 /// N1 Console surrounds.
@@ -59,6 +59,46 @@ pub enum SurfaceBackground {
     User,
 }
 
+/// What the lock screen shows behind its indicator: any [`SurfaceBackground`], or `glass`, which is
+/// lock-only (the greeter rejects it).
+///
+/// KDL: the [`SurfaceBackground`] forms, or `background "glass"` / `background "glass" alpha=0.8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockBackground {
+    /// A shared surface background (colour, stock image, user wallpaper).
+    Surface(SurfaceBackground),
+    /// A translucent colour over the live wallpaper: swaylock paints `theme.background` at the
+    /// alpha and the compositor draws the trusted `swaybg` wallpaper beneath it.
+    Glass {
+        /// The explicit `alpha=`; `None` falls back to `theme { alpha }`, then 0.8.
+        alpha: Option<Alpha>,
+    },
+}
+
+impl LockBackground {
+    /// For glass, the resolved tint and opacity: the colour is `theme.background` else black, the
+    /// opacity is `alpha=` else `theme.alpha` else 0.8, as the `0..=255` byte swaylock takes
+    /// (`round(alpha * 255)`). `None` for every other background. **Pure.**
+    #[must_use]
+    pub fn glass_tint(self, theme: Option<&ThemeConfig>) -> Option<(Rgb, u8)> {
+        let Self::Glass { alpha } = self else {
+            return None;
+        };
+        let milli = alpha
+            .or_else(|| theme.and_then(|t| t.alpha))
+            .map_or(DEFAULT_GLASS_ALPHA_MILLI, Alpha::milli);
+        let colour = theme.and_then(|t| t.background).unwrap_or(Rgb(0, 0, 0));
+        let byte = u8::try_from((milli * 255 + 500) / 1000).unwrap_or(u8::MAX);
+        Some((colour, byte))
+    }
+
+    /// Whether this is [`LockBackground::Glass`].
+    #[must_use]
+    pub const fn is_glass(self) -> bool {
+        matches!(self, Self::Glass { .. })
+    }
+}
+
 /// Which accent a surface paints. KDL: `accent "style" | "theme" | "#rrggbb"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SurfaceAccent {
@@ -74,7 +114,10 @@ pub enum SurfaceAccent {
 /// The default `lock` style.
 pub const DEFAULT_LOCK_STYLE: SurfaceStyle = SurfaceStyle::N1Med;
 /// The default `lock` background: solid black.
-pub const DEFAULT_LOCK_BACKGROUND: SurfaceBackground = SurfaceBackground::Color(Rgb(0, 0, 0));
+pub const DEFAULT_LOCK_BACKGROUND: LockBackground =
+    LockBackground::Surface(SurfaceBackground::Color(Rgb(0, 0, 0)));
+/// The default glass opacity (thousandths) when neither `alpha=` nor `theme { alpha }` is set.
+pub const DEFAULT_GLASS_ALPHA_MILLI: u32 = 800;
 /// The default `greeter` style.
 pub const DEFAULT_GREETER_STYLE: SurfaceStyle = SurfaceStyle::N1Dark;
 /// The default `greeter` background.
@@ -140,7 +183,7 @@ pub struct LockConfig {
     /// Indicator colours (default [`DEFAULT_LOCK_STYLE`]).
     pub style: SurfaceStyle,
     /// Lock-screen background (default [`DEFAULT_LOCK_BACKGROUND`]).
-    pub background: SurfaceBackground,
+    pub background: LockBackground,
     /// Indicator accent (default [`SurfaceAccent::Style`]).
     pub accent: SurfaceAccent,
 }

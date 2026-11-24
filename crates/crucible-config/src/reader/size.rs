@@ -226,6 +226,25 @@ impl<'a> NodeReader<'a> {
         Rgb::from_hex(s).ok_or_else(|| self.invalid(what, format!("`{s}` is not a #rrggbb colour")))
     }
 
+    /// A number property `key` in `0.0..=1.0`, as an [`Alpha`], if present. A non-number is a
+    /// `WrongType` and an out-of-range value an `InvalidValue`, both at the property (never clamped).
+    pub(crate) fn alpha_prop(&self, key: &str) -> Result<Option<Alpha>, ConfigError> {
+        let Some(entry) = self.node.entry(key) else {
+            return Ok(None);
+        };
+        let at = locate(self.text, entry.span().offset());
+        let what = format!("property `{key}`");
+        let value = entry.value();
+        #[allow(clippy::cast_precision_loss)]
+        let a = value
+            .as_float()
+            .or_else(|| value.as_integer().map(|n| n as f64))
+            .ok_or_else(|| self.wrong_type_at(at, &what, "a number"))?;
+        Alpha::from_f64(a)
+            .map(Some)
+            .ok_or_else(|| self.invalid_at(at, &what, format!("{a} is outside 0.0..=1.0")))
+    }
+
     /// Exactly one number argument in `0.0..=1.0`, as an [`Alpha`].
     pub(crate) fn alpha_arg(&self) -> Result<Alpha, ConfigError> {
         let a = self.float_arg()?;

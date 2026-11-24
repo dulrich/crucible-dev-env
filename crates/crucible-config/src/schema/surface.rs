@@ -4,7 +4,9 @@
 use crate::error::ConfigError;
 use crate::model::Rgb;
 use crate::reader::NodeReader;
-use crate::surface::{GreeterConfig, LockConfig, SurfaceAccent, SurfaceBackground, SurfaceStyle};
+use crate::surface::{
+    GreeterConfig, LockBackground, LockConfig, SurfaceAccent, SurfaceBackground, SurfaceStyle,
+};
 
 /// `style "<terminal|n1-dark|n1-med|n1-light>"`.
 pub(super) fn parse_style(child: &NodeReader<'_>) -> Result<SurfaceStyle, ConfigError> {
@@ -25,7 +27,8 @@ pub(super) fn parse_accent(child: &NodeReader<'_>) -> Result<SurfaceAccent, Conf
     }
 }
 
-/// `background "stock"`, `background "user"` or `background "color" "#rrggbb"`.
+/// `background "stock"`, `background "user"` or `background "color" "#rrggbb"` (the shared forms;
+/// `glass` is lock-only and parsed by [`parse_lock_background`], so the greeter rejects it).
 fn parse_background(child: &NodeReader<'_>) -> Result<SurfaceBackground, ConfigError> {
     let kind = child.string_args_min("a background kind string")?;
     match kind {
@@ -50,14 +53,28 @@ fn parse_background(child: &NodeReader<'_>) -> Result<SurfaceBackground, ConfigE
     }
 }
 
+/// The `lock` background: `background "glass"` / `background "glass" alpha=<0.0..=1.0>` (lock-only,
+/// never clamped), else the shared forms (which take no properties).
+fn parse_lock_background(child: &NodeReader<'_>) -> Result<LockBackground, ConfigError> {
+    if child.string_args_min("a background kind string")? != "glass" {
+        child.no_properties()?;
+        return parse_background(child).map(LockBackground::Surface);
+    }
+    child.allow_properties(&["alpha"])?;
+    child.string_args(&["a background kind string"])?;
+    Ok(LockBackground::Glass {
+        alpha: child.alpha_prop("alpha")?,
+    })
+}
+
 pub(super) fn parse_lock(node: NodeReader<'_>) -> Result<LockConfig, ConfigError> {
     let mut out = LockConfig::default();
-    for child in node.children_strict(&[], &[])? {
+    for child in node.children_strict(&[], &["background"])? {
         let child = child?;
         match child.name() {
             "style" => out.style = parse_style(&child)?,
             "accent" => out.accent = parse_accent(&child)?,
-            "background" => out.background = parse_background(&child)?,
+            "background" => out.background = parse_lock_background(&child)?,
             _ => return Err(child.unknown_node("lock")),
         }
     }
@@ -88,7 +105,10 @@ mod tests {
     use crate::error::ConfigError;
     use crate::model::{Config, Rgb};
     use crate::surface::SurfaceStyle;
-    use crate::surface::{GreeterConfig, LockConfig, SurfaceBackground};
+    use crate::surface::{
+        DEFAULT_LOCK_BACKGROUND, GreeterConfig, LockBackground, LockConfig, SurfaceBackground,
+    };
+    use crate::theme::{Alpha, ThemeConfig};
 
     #[test]
     fn background_colour_error_keeps_its_text_and_location() {
@@ -108,7 +128,10 @@ mod tests {
         assert_eq!(lock, LockConfig::default());
         assert_eq!(
             (lock.style, lock.background),
-            (SurfaceStyle::N1Med, SurfaceBackground::Color(Rgb(0, 0, 0)))
+            (
+                SurfaceStyle::N1Med,
+                LockBackground::Surface(SurfaceBackground::Color(Rgb(0, 0, 0)))
+            )
         );
         let g = c.greeter.unwrap();
         assert_eq!(g, GreeterConfig::default());
@@ -133,7 +156,10 @@ mod tests {
         let lock = c.lock.unwrap();
         assert_eq!(
             (lock.style, lock.background),
-            (SurfaceStyle::N1Dark, SurfaceBackground::User)
+            (
+                SurfaceStyle::N1Dark,
+                LockBackground::Surface(SurfaceBackground::User)
+            )
         );
         let g = c.greeter.unwrap();
         assert_eq!(
@@ -145,7 +171,104 @@ mod tests {
             )
         );
         let c = parse("lock { background \"stock\"; }\n").unwrap();
-        assert_eq!(c.lock.unwrap().background, SurfaceBackground::Stock);
+        assert_eq!(
+            c.lock.unwrap().background,
+            LockBackground::Surface(SurfaceBackground::Stock)
+        );
+    }
+
+    fn lock_bg(body: &str) -> LockBackground {
+        parse(&format!("lock {{\n {body}\n}}\n"))
+            .unwrap()
+            .lock
+            .unwrap()
+            .background
+    }
+
+    #[test]
+    fn glass_parses_with_and_without_alpha() {
+        assert_eq!(
+            lock_bg("background \"glass\""),
+            LockBackground::Glass { alpha: None }
+        );
+        assert_eq!(
+            lock_bg("background \"glass\" alpha=0.5"),
+            LockBackground::Glass {
+                alpha: Alpha::from_milli(500)
+            }
+        );
+        // Integer bounds are numbers too.
+        assert_eq!(
+            lock_bg("background \"glass\" alpha=1"),
+            LockBackground::Glass {
+                alpha: Some(Alpha::OPAQUE)
+            }
+        );
+        assert_eq!(
+            lock_bg("background \"glass\" alpha=0"),
+            LockBackground::Glass {
+                alpha: Alpha::from_milli(0)
+            }
+        );
+    }
+
+    #[test]
+    fn glass_rejects_bad_alpha_and_properties_with_a_location() {
+        for bad in [
+            "background \"glass\" alpha=1.5",
+            "background \"glass\" alpha=-0.1",
+            "background \"glass\" alpha=\"0.5\"",
+            "background \"glass\" alpha=nan",
+            "background \"glass\" tint=0.5",
+            "background \"glass\" \"extra\"",
+            "background \"stock\" alpha=0.5",
+            "background \"color\" \"#000000\" alpha=0.5",
+        ] {
+            let (err, at) = err_at(&format!("\nlock {{\n {bad}\n}}\n"));
+            assert_eq!(at.line, 3, "{bad}: {err:?}");
+        }
+        let (err, _) = err_at("lock {\n   background \"glass\" alpha=1.5\n}\n");
+        assert_eq!(
+            err.to_string(),
+            "2:23: `background` property `alpha`: 1.5 is outside 0.0..=1.0"
+        );
+    }
+
+    #[test]
+    fn glass_is_lock_only() {
+        for bad in ["background \"glass\"", "background \"glass\" alpha=0.5"] {
+            let (err, at) = err_at(&format!("\ngreeter {{\n {bad}\n}}\n"));
+            assert_eq!(at.line, 3, "{bad}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn glass_tint_resolves_alpha_then_theme_then_default() {
+        let theme = |alpha: Option<u32>, bg: Option<Rgb>| ThemeConfig {
+            alpha: alpha.and_then(Alpha::from_milli),
+            background: bg,
+            ..ThemeConfig::default()
+        };
+        let g = |alpha: Option<u32>| LockBackground::Glass {
+            alpha: alpha.and_then(Alpha::from_milli),
+        };
+        // No theme: black at 0.8 (round(0.8 * 255) = 204).
+        assert_eq!(g(None).glass_tint(None), Some((Rgb(0, 0, 0), 204)));
+        // The theme's alpha and background.
+        let t = theme(Some(500), Some(Rgb(1, 2, 3)));
+        assert_eq!(g(None).glass_tint(Some(&t)), Some((Rgb(1, 2, 3), 128)));
+        // An explicit alpha wins over the theme's.
+        assert_eq!(
+            g(Some(1000)).glass_tint(Some(&t)),
+            Some((Rgb(1, 2, 3), 255))
+        );
+        assert_eq!(g(Some(0)).glass_tint(Some(&t)), Some((Rgb(1, 2, 3), 0)));
+        // A theme without either falls back to black / 0.8.
+        let t = theme(None, None);
+        assert_eq!(g(None).glass_tint(Some(&t)), Some((Rgb(0, 0, 0), 204)));
+        // Only glass has a tint.
+        assert_eq!(DEFAULT_LOCK_BACKGROUND.glass_tint(None), None);
+        assert!(g(None).is_glass() && !DEFAULT_LOCK_BACKGROUND.is_glass());
     }
 
     #[test]

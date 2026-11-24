@@ -48,10 +48,11 @@ pub use overlay::{
 };
 pub use schema::parse;
 pub use surface::{
-    CHROME_ACCENT, DEFAULT_GREETER_BACKGROUND, DEFAULT_GREETER_POSITION, DEFAULT_GREETER_SESSION,
-    DEFAULT_GREETER_STYLE, DEFAULT_LOCK_BACKGROUND, DEFAULT_LOCK_STYLE, GreeterConfig, LockConfig,
-    PanelPosition, Surface, SurfaceAccent, SurfaceBackground, SurfaceStyle, resolve_accent,
-    resolve_palette, surface_accent, surface_palette,
+    CHROME_ACCENT, DEFAULT_GLASS_ALPHA_MILLI, DEFAULT_GREETER_BACKGROUND, DEFAULT_GREETER_POSITION,
+    DEFAULT_GREETER_SESSION, DEFAULT_GREETER_STYLE, DEFAULT_LOCK_BACKGROUND, DEFAULT_LOCK_STYLE,
+    GreeterConfig, LockBackground, LockConfig, PanelPosition, Surface, SurfaceAccent,
+    SurfaceBackground, SurfaceStyle, resolve_accent, resolve_palette, surface_accent,
+    surface_palette,
 };
 pub use theme::{
     Alpha, Milli, ThemeConfig, ThemeFont, ThemeTarget, render as render_theme, theme_dir,

@@ -7,13 +7,22 @@
 //! ## States
 //! - `Unlocked` — normal operation.
 //! - `Locking { pending, progress }` — a locker was accepted (its [`SessionLocker`] rides in the
-//!   phase); every output shows black (plus its lock surface) and CDE waits until each lit output
+//!   phase); every output shows black (plus its lock surface; glass adds the trusted wallpaper, see
+//!   below) and CDE waits until each lit output
 //!   has *presented* such a frame before it sends `locked` (`SessionLocker::lock`). The wait is
 //!   the presentation gate's lock arm ([`crate::present_gate::ArmKind::Lock`]), keyed to the
 //!   accepted lock.
 //! - `Locked { confirmed }` — `locked` was sent. If the confirmed lock object dies without a
 //!   valid unlock (the locker crashed) the session stays locked and black, and a new locker may
 //!   take the lock (it goes through `Locking` again).
+//!
+//! ## Glass exception (plan 52)
+//! The locked frame is the lock surface over black and nothing else, with one exception: a lock
+//! bound to glass ([`GlassEligibility`]) also draws that output's trusted wallpaper surfaces
+//! (Background-layer surfaces of a `swaybg` client, [`WallpaperTrusted`]) beneath the lock
+//! surface, once the lock surface has a renderable element ([`glass_stack`]); before that, and
+//! for every non-glass or ineligible lock, the output is black as before. No window and no other
+//! layer is ever drawn while locked, and trusted surfaces get frame callbacks only, never input.
 //!
 //! ## Unlock guard (plan 07, audit B3)
 //! The pinned Smithay calls [`SessionLockHandler::unlock`] even for an *invalid*
@@ -30,16 +39,20 @@ use smithay::{
         ImportAll, ImportMem, Renderer,
         element::{Kind, surface::render_elements_from_surface_tree},
     },
-    desktop::{Space, utils::send_frames_surface_tree},
+    desktop::{LayerSurface, Space, layer_map_for_output, utils::send_frames_surface_tree},
     output::Output,
     reexports::{
         wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1,
-        wayland_server::{Resource, protocol::wl_output::WlOutput},
+        wayland_server::{
+            Client, Resource,
+            protocol::{wl_output::WlOutput, wl_surface::WlSurface},
+        },
     },
     utils::{Logical, Point, Scale},
     wayland::session_lock::{
         LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
     },
+    wayland::{compositor::with_states, shell::wlr_layer::Layer},
 };
 use tracing::{info, warn};
 
@@ -98,7 +111,8 @@ impl<L, P> LockMachine<L, P> {
         &self.phase
     }
 
-    /// Whether the session is locked or locking (only lock surfaces and black are shown).
+    /// Whether the session is locked or locking (only lock surfaces and black are shown, plus the
+    /// trusted wallpaper under a glass lock's surface).
     #[must_use]
     pub fn is_locked(&self) -> bool {
         !matches!(self.phase, LockPhase::Unlocked)
@@ -171,6 +185,119 @@ impl<L, P> LockMachine<L, P> {
     }
 }
 
+/// The glass eligibility state machine, generic over the lock handle `H` (like [`LockMachine`]) so
+/// it tests without Smithay objects.
+///
+/// A launch is **pending** for the PID of the CDE-spawned glass locker ([`Self::expect`]); the
+/// entry is dropped when that spawn is reaped ([`Self::reaped`]) or replaced by a later launch,
+/// and is consumed by the first accepted lock whose peer PID equals it ([`Self::accept`]), which
+/// binds glass to that lock handle. Every accepted lock first forgets the previous binding, so a
+/// replacement locker is glass only if it was itself an eligible spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlassEligibility<H> {
+    pending: Option<u32>,
+    bound: Option<H>,
+}
+
+impl<H> Default for GlassEligibility<H> {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            bound: None,
+        }
+    }
+}
+
+impl<H: PartialEq> GlassEligibility<H> {
+    /// A locker launch finished spawning as `pid`: `Some(pid)` for an eligible glass launch,
+    /// `None` for an ineligible one or a failed spawn. Replaces any earlier pending entry.
+    pub fn launched(&mut self, pid: Option<u32>) {
+        self.pending = pid;
+    }
+
+    /// The spawn registry reaped `pids`: a pending entry for one of them is dropped.
+    pub fn reaped(&mut self, pids: &[u32]) {
+        if self.pending.is_some_and(|p| pids.contains(&p)) {
+            self.pending = None;
+        }
+    }
+
+    /// A lock was accepted for `handle` from a client whose peer PID is `peer`: glass is bound to
+    /// `handle` only when `peer` is the pending spawn (which is consumed); otherwise the lock is
+    /// not glass. Returns whether it is glass.
+    pub fn accept(&mut self, peer: Option<u32>, handle: H) -> bool {
+        self.bound = None;
+        if peer.is_some() && peer == self.pending {
+            self.pending = None;
+            self.bound = Some(handle);
+            return true;
+        }
+        false
+    }
+
+    /// Whether glass is bound to `current`, the pending or confirmed lock handle.
+    #[must_use]
+    pub fn is_bound(&self, current: Option<&H>) -> bool {
+        current.is_some() && self.bound.as_ref() == current
+    }
+}
+
+/// The per-surface marker of a wallpaper-trusted layer surface; it lives in the surface's data
+/// map and so dies with the surface.
+#[derive(Debug)]
+struct WallpaperTrusted;
+
+/// Whether a new layer surface is wallpaper-trusted: it is on the `Background` layer and its
+/// client's executable basename is exactly `swaybg`. The gate guards accidental exposure of
+/// another background-layer app on the lock screen, not a hostile same-UID process. **Pure.**
+#[must_use]
+pub fn is_trusted_wallpaper(layer: Layer, exe: Option<&std::path::Path>) -> bool {
+    layer == Layer::Background
+        && exe
+            .and_then(std::path::Path::file_name)
+            .is_some_and(|n| n == "swaybg")
+}
+
+/// Tags `surface` wallpaper-trusted (see [`is_trusted_wallpaper`]).
+pub fn tag_wallpaper_trusted(surface: &WlSurface) {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .insert_if_missing_threadsafe(|| WallpaperTrusted);
+    });
+}
+
+fn is_wallpaper_tagged(surface: &WlSurface) -> bool {
+    with_states(surface, |states| {
+        states.data_map.get::<WallpaperTrusted>().is_some()
+    })
+}
+
+/// The trusted wallpaper surfaces of `output` (Background layer, tagged) with their output-local
+/// logical positions.
+fn wallpaper_layers(output: &Output) -> Vec<(LayerSurface, Point<i32, Logical>)> {
+    let map = layer_map_for_output(output);
+    map.layers_on(Layer::Background)
+        .filter(|l| is_wallpaper_tagged(l.wl_surface()))
+        .filter_map(|l| Some((l.clone(), map.layer_geometry(l)?.loc)))
+        .collect()
+}
+
+/// The locked frame's element list (front-to-back) for one output: the lock surface's `lock`
+/// elements, then — only for a glass-bound lock whose lock surface produced at least one
+/// element — the trusted `wallpaper` elements beneath. With no lock element the result is empty
+/// (black), glass or not. `wallpaper` is only evaluated when needed. **Pure.**
+pub fn glass_stack<T>(
+    glass_bound: bool,
+    mut lock: Vec<T>,
+    wallpaper: impl FnOnce() -> Vec<T>,
+) -> Vec<T> {
+    if glass_bound && !lock.is_empty() {
+        lock.extend(wallpaper());
+    }
+    lock
+}
+
 /// CDE's session-lock glue state, held by [`CrucibleState`].
 #[derive(Debug)]
 pub struct SessionLock {
@@ -179,6 +306,8 @@ pub struct SessionLock {
     /// The authoritative lock state; while `Locking` it carries the accepted [`SessionLocker`]
     /// (consumed to send `locked`).
     pub machine: LockMachine<ExtSessionLockV1, SessionLocker>,
+    /// Which lock (if any) is bound to glass, and the pending glass spawn.
+    pub glass: GlassEligibility<ExtSessionLockV1>,
     /// Lock surfaces, one per output.
     surfaces: Vec<(Output, LockSurface)>,
 }
@@ -190,6 +319,7 @@ impl SessionLock {
         Self {
             manager,
             machine: LockMachine::default(),
+            glass: GlassEligibility::default(),
             surfaces: Vec::new(),
         }
     }
@@ -212,6 +342,12 @@ impl SessionLock {
             .iter()
             .find(|(o, s)| o == output && s.alive())
             .map(|(_, s)| s)
+    }
+
+    /// Whether the current (pending or confirmed) lock is bound to glass.
+    #[must_use]
+    pub fn glass_bound(&self) -> bool {
+        self.glass.is_bound(self.machine.current())
     }
 
     fn current_alive(&self) -> bool {
@@ -243,17 +379,57 @@ where
     )
 }
 
-/// Sends frame callbacks to `output`'s lock surface (while locked).
+/// The locked frame's elements for `output`: [`lock_render_elements`], plus the trusted
+/// wallpaper beneath them for a glass-bound lock whose lock surface has an element
+/// ([`glass_stack`]).
+pub fn locked_elements<R>(
+    lock: &SessionLock,
+    output: &Output,
+    renderer: &mut R,
+    scale: Scale<f64>,
+) -> Vec<CustomRenderElements<R>>
+where
+    R: Renderer + ImportAll + ImportMem,
+    R::TextureId: Clone + 'static,
+{
+    let lock_elements = lock_render_elements(lock, output, renderer, scale);
+    glass_stack(lock.glass_bound(), lock_elements, || {
+        wallpaper_layers(output)
+            .into_iter()
+            .flat_map(|(layer, loc)| {
+                render_elements_from_surface_tree(
+                    renderer,
+                    layer.wl_surface(),
+                    loc.to_physical_precise_round(scale),
+                    scale,
+                    1.0,
+                    Kind::Unspecified,
+                )
+            })
+            .collect()
+    })
+}
+
+/// Sends frame callbacks to `output`'s lock surface (while locked), and for a glass-bound lock to
+/// its trusted wallpaper surfaces so a wallpaper rotation during the lock lands.
 pub fn send_lock_frames(
     lock: &SessionLock,
     output: &Output,
     time: impl Into<std::time::Duration>,
     throttle: Option<std::time::Duration>,
 ) {
+    let time = time.into();
     if let Some(surface) = lock.surface_for(output) {
         send_frames_surface_tree(surface.wl_surface(), output, time, throttle, |_, _| {
             Some(output.clone())
         });
+    }
+    if lock.glass_bound() {
+        for (layer, _) in wallpaper_layers(output) {
+            send_frames_surface_tree(layer.wl_surface(), output, time, throttle, |_, _| {
+                Some(output.clone())
+            });
+        }
     }
 }
 
@@ -293,18 +469,37 @@ impl<B: Backend + 'static> CrucibleState<B> {
         // With a `lock` block: refresh the generated swaylock config (a `user` background follows
         // wallpaper rotations) and pass it to a plain `swaylock`.
         let fragment = crate::lock_config::write_swaylock_config(&self.config);
-        let args = crate::lock_config::locker_args(program, &words, fragment.as_deref());
+        let (args, inserted) = crate::lock_config::insert_fragment(
+            program,
+            &words,
+            fragment.as_ref().map(|f| f.path.as_path()),
+        );
+        let eligible = self.config.lock.as_ref().is_some_and(|l| {
+            crate::lock_config::glass_launch_eligible(l.background, fragment.as_ref(), inserted)
+        });
         info!(cmd, "lock: spawning the locker");
-        if self
-            .spawn(crate::persist::SpawnRequest::new(
-                program,
-                args,
-                crate::persist::SpawnKind::Overlay,
-            ))
-            .is_none()
-        {
+        let pid = self.spawn(crate::persist::SpawnRequest::new(
+            program,
+            args,
+            crate::persist::SpawnKind::Overlay,
+        ));
+        if pid.is_none() {
             warn!(cmd, "lock: the locker could not be spawned");
         }
+        // A pending glass entry follows this spawn (and replaces any earlier one).
+        self.session_lock.glass.launched(pid.filter(|_| eligible));
+    }
+
+    /// The spawn registry reaped `pids`: a glass locker that exited before taking the lock is no
+    /// longer eligible.
+    pub(crate) fn locker_reaped(&mut self, pids: &[u32]) {
+        self.session_lock.glass.reaped(pids);
+    }
+
+    /// The peer PID of `client` (`SO_PEERCRED` at connect time).
+    fn peer_pid(&self, client: &Client) -> Option<u32> {
+        let creds = client.get_credentials(&self.display_handle).ok()?;
+        u32::try_from(creds.pid).ok()
     }
 
     /// The lock arm released: every lit output presented a frame queued after `handle` was
@@ -387,7 +582,9 @@ impl<B: Backend + 'static> SessionLockHandler for CrucibleState<B> {
             // The refused request dropped the unconfirmed locker, which sends `finished`.
             return;
         }
-        info!("lock: lock accepted; blanking every output");
+        let peer = handle.client().and_then(|c| self.peer_pid(&c));
+        let glass = self.session_lock.glass.accept(peer, handle.clone());
+        info!(glass, "lock: lock accepted; blanking every output");
         self.session_lock.reset_surfaces();
         // The lock wins over a reveal hold (and so releases any deferred capture).
         self.clear_reveal_holds();
@@ -452,7 +649,115 @@ impl<B: Backend + 'static> SessionLockHandler for CrucibleState<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::{LockMachine, LockPhase};
+    use super::{
+        GlassEligibility, Layer, LockMachine, LockPhase, glass_stack, is_trusted_wallpaper,
+    };
+    use std::path::Path;
+
+    #[test]
+    fn a_matching_accept_binds_glass_to_that_lock_only() {
+        let mut g: GlassEligibility<u8> = GlassEligibility::default();
+        g.launched(Some(100));
+        assert!(g.accept(Some(100), 1));
+        assert!(g.is_bound(Some(&1)));
+        assert!(!g.is_bound(Some(&2)), "bound to the accepted handle");
+        assert!(!g.is_bound(None), "no current lock, no glass");
+    }
+
+    #[test]
+    fn a_peer_pid_mismatch_is_not_glass() {
+        let mut g: GlassEligibility<u8> = GlassEligibility::default();
+        g.launched(Some(100));
+        assert!(!g.accept(Some(101), 1));
+        assert!(!g.accept(None, 2), "an unknown peer is never glass");
+        assert!(!g.is_bound(Some(&2)));
+        // The pending entry survives a foreign locker: the real one can still take the lock.
+        assert!(g.accept(Some(100), 3));
+        assert!(g.is_bound(Some(&3)));
+    }
+
+    #[test]
+    fn a_locker_reaped_before_acceptance_is_not_eligible() {
+        let mut g: GlassEligibility<u8> = GlassEligibility::default();
+        g.launched(Some(100));
+        g.reaped(&[7, 100]);
+        assert!(!g.accept(Some(100), 1));
+        assert!(!g.is_bound(Some(&1)));
+        // An unrelated reap leaves the entry alone.
+        g.launched(Some(200));
+        g.reaped(&[100]);
+        assert!(g.accept(Some(200), 2));
+    }
+
+    #[test]
+    fn a_replacement_lock_is_not_glass_unless_it_was_itself_eligible() {
+        let mut g: GlassEligibility<u8> = GlassEligibility::default();
+        g.launched(Some(100));
+        assert!(g.accept(Some(100), 1));
+        // The locker crashed; a replacement (same or new PID) takes the lock without a spawn.
+        assert!(!g.accept(Some(100), 2), "the entry was consumed");
+        assert!(!g.is_bound(Some(&1)) && !g.is_bound(Some(&2)));
+        // A replacement that is itself an eligible spawn is glass.
+        g.launched(Some(300));
+        assert!(g.accept(Some(300), 3));
+        assert!(g.is_bound(Some(&3)));
+    }
+
+    #[test]
+    fn a_later_launch_replaces_the_pending_entry() {
+        let mut g: GlassEligibility<u8> = GlassEligibility::default();
+        g.launched(Some(100));
+        g.launched(Some(101));
+        assert!(!g.accept(Some(100), 1), "replaced");
+        assert!(g.accept(Some(101), 2));
+        // An ineligible launch (or a failed spawn) clears it.
+        g.launched(Some(102));
+        g.launched(None);
+        assert!(!g.accept(Some(102), 3));
+    }
+
+    #[test]
+    fn only_a_swaybg_background_surface_is_trusted() {
+        let swaybg = Some(Path::new("/usr/bin/swaybg"));
+        assert!(is_trusted_wallpaper(Layer::Background, swaybg));
+        assert!(!is_trusted_wallpaper(Layer::Bottom, swaybg));
+        assert!(!is_trusted_wallpaper(Layer::Overlay, swaybg));
+        for exe in [
+            "/usr/bin/swaybg2",
+            "/usr/bin/swaybg.sh",
+            "/x/not-swaybg",
+            "/",
+        ] {
+            assert!(
+                !is_trusted_wallpaper(Layer::Background, Some(Path::new(exe))),
+                "{exe}"
+            );
+        }
+        assert!(!is_trusted_wallpaper(Layer::Background, None));
+    }
+
+    #[test]
+    fn the_locked_stack_adds_wallpaper_only_for_glass_with_a_lock_element() {
+        let wall = || vec![10, 11];
+        // Glass, a lock element, trusted surfaces: lock first, wallpaper beneath.
+        assert_eq!(glass_stack(true, vec![1], wall), vec![1, 10, 11]);
+        // Glass with no trusted surface: the lock element over black.
+        assert_eq!(glass_stack(true, vec![1], Vec::new), vec![1]);
+        // Glass but no usable lock element: black, and the wallpaper is never even built.
+        assert_eq!(
+            glass_stack(true, Vec::<i32>::new(), || unreachable!("no lock element")),
+            Vec::<i32>::new()
+        );
+        // Not glass: exactly today's stack.
+        assert_eq!(
+            glass_stack(false, vec![1], || unreachable!("not glass")),
+            vec![1]
+        );
+        assert_eq!(
+            glass_stack(false, Vec::<i32>::new(), || unreachable!("not glass")),
+            Vec::<i32>::new()
+        );
+    }
 
     // The presentation rules (every lit output presents a post-acceptance frame, off outputs
     // exempt, a synchronous adoption commit counts, output removal re-evaluates) are the gate's
