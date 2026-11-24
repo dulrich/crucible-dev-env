@@ -308,6 +308,22 @@ Any input event (key, pointer, touch, gesture) restarts the idle period and wake
 
 Blanking powers the monitors off on the TTY (DRM) backend; under the nested `winit` backend it does nothing. CDE also advertises `ext-idle-notify-v1` and `zwp-idle-inhibit-manager-v1`, so third-party idle clients and idle-inhibiting apps work whether or not an `idle` block is present.
 
+### `workspace-open`
+
+```kdl
+workspace-open {
+    live "jump"
+    saved "focused"
+}
+```
+
+Where a workspace lands when you open one that already exists: from the workspace picker, a pinned slot (`Super+<digit>`), `crucible msg open` or an open-folder that matches an existing workspace. Each child is optional and may appear once; an unknown child, a repeated child or an unknown value is a located config error (never coerced). With no block both take their defaults. The same rule applies however the workspace is opened (hotkey or picker); there is no per-source setting.
+
+- `live` — a workspace that is already open. `"jump"` (default) switches to it where it lives and focuses that output. `"bring"` moves it onto the focused output, using the same move as `move-workspace-to-output`, so it becomes the active workspace there. A workspace already on the focused output is just switched to, and one that is the only workspace on its output cannot be moved (the model refuses), so it is jumped to instead (logged at `info`).
+- `saved` — a workspace restored from its saved file. `"focused"` (default) restores it onto the focused output at the moment you open it. `"last-output"` restores it onto the output it was last viewed on, falling back to the focused output when that connector is not connected or the record has none.
+
+Startup session restore is not governed by this block: it keeps returning each workspace to the output it was last viewed on. A brand-new workspace (a folder that is not already open or saved, or a new name) is also created on the focused output as before.
+
 ### `night-light`
 
 ```kdl
@@ -503,7 +519,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `delete-workspace` | (unbound by default) Delete the active workspace: end its windows, move its saved record to `deleted/` (beside the `workspaces/` store, `$XDG_STATE_HOME/cde/deleted/`; a later delete of the same name replaces the earlier file) and clear its slot pins. No final save; refused on the output's last workspace and while a restore is pending. Restore a deleted workspace by moving its file back into `workspaces/` |
 | `close-all-workspaces` | Save and close every open workspace, leaving one fresh workspace per output (unbound by default) |
 | `move-workspace-to-output <n>` | Send the active workspace `n` outputs over (wraparound) |
-| `slot <n>` | Switch to the workspace pinned to slot `n` (0-9); a closed or saved one reopens on the monitor it was last viewed on, an unpinned slot opens the workspace picker, and the workspace chosen there is pinned to `n`; a slot pinned to a workspace that is neither live nor saved opens the picker in pin mode the same way, while other open failures do nothing |
+| `slot <n>` | Switch to the workspace pinned to slot `n` (0-9); a live one is opened and a saved one restored as [`workspace-open`](#workspace-open) says (default: a live one is jumped to, a saved one lands on the focused output), an unpinned slot opens the workspace picker, and the workspace chosen there is pinned to `n`; a slot pinned to a workspace that is neither live nor saved opens the picker in pin mode the same way, while other open failures do nothing |
 | `unpin-workspace` | (unbound by default) Clear every slot pin naming the active workspace (its `Super+<digit>` shortcuts); the workspace itself is untouched. No-op when it has none |
 | `pin-slot <n>` | Pin the active workspace to slot `n` (0-9); pins persist in `$XDG_STATE_HOME/cde/slots.kdl` |
 | `open-picker` | Open the workspace picker (`crucible pick`) |

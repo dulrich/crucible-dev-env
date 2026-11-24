@@ -92,6 +92,7 @@ pub trait Overlay {
 pub fn error_reply(err: &ClientError) -> Response {
     Response::Err(match err {
         ClientError::BadResponse(line) => format!("bad response {line:?}"),
+        ClientError::Unencodable(e) => e.to_string(),
         ClientError::Io(_) | ClientError::Closed => format!("compositor error: {err}"),
     })
 }

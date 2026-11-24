@@ -37,10 +37,10 @@ pub use model::{
     AppTiling, Config, CursorConfig, DEFAULT_DIVIDER_COLOR, DEFAULT_HEADER_FONT,
     HEADER_DIVIDER_INSET_MAX, HEADER_DIVIDER_MAX, HEADER_SIZE_MAX, HEADER_SIZE_MIN, HeaderActive,
     HeaderConfig, HeaderMode, HeaderStart, IdleConfig, InputDeviceConfig, InputDeviceLayer,
-    KeyMapEntry, KeyMapTarget, KeyboardConfig, LauncherConfig, NIGHT_LIGHT_DEFAULT_KELVIN,
-    NIGHT_LIGHT_IDENTITY_KELVIN, NIGHT_LIGHT_MIN_KELVIN, Named, NightLightConfig, PickerConfig,
-    Rgb, ScreenshotConfig, ScreenshotDestination, TerminalConfig, TerminalTiling, TilingConfig,
-    clamp_ring, substitute_gap,
+    KeyMapEntry, KeyMapTarget, KeyboardConfig, LauncherConfig, LiveOpen,
+    NIGHT_LIGHT_DEFAULT_KELVIN, NIGHT_LIGHT_IDENTITY_KELVIN, NIGHT_LIGHT_MIN_KELVIN, Named,
+    NightLightConfig, PickerConfig, Rgb, SavedOpen, ScreenshotConfig, ScreenshotDestination,
+    TerminalConfig, TerminalTiling, TilingConfig, WorkspaceOpenConfig, clamp_ring, substitute_gap,
 };
 pub use overlay::{
     FOOT_UNBOUND_ACTIONS, GHOSTTY_OVERLAY_DEFAULT_ARGS, N1_DARK, N1_LIGHT, N1_MED, OverlayConfig,

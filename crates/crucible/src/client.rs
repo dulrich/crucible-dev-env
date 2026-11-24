@@ -5,7 +5,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crucible_compositor::ipc::{Request, Response, SOCKET_ENV};
+use crucible_compositor::ipc::{EncodeError, Request, Response, SOCKET_ENV};
 
 /// Read timeout so a hung compositor cannot wedge a client.
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -61,10 +61,12 @@ impl Client {
     ///
     /// # Errors
     /// [`ClientError`]: an I/O error or timeout, the compositor closing the connection without
-    /// answering, or a reply line that is neither `ok` nor `err`.
+    /// answering, a reply line that is neither `ok` nor `err`, or a request the wire cannot carry
+    /// losslessly (nothing is sent).
     pub fn send(&mut self, request: &Request) -> Result<Response, ClientError> {
+        let wire = request.to_line().map_err(ClientError::Unencodable)?;
         let line = self
-            .exchange(&request.to_line())
+            .exchange(&wire)
             .map_err(ClientError::Io)?
             .ok_or(ClientError::Closed)?;
         Response::parse(&line).ok_or(ClientError::BadResponse(line))
@@ -96,6 +98,9 @@ pub enum ClientError {
     Closed,
     /// The reply line was neither `ok …` nor `err …` (the raw line).
     BadResponse(String),
+    /// The request cannot be encoded losslessly (a relative or non-UTF-8 root to set); nothing was
+    /// sent.
+    Unencodable(EncodeError),
 }
 
 impl std::fmt::Display for ClientError {
@@ -104,6 +109,7 @@ impl std::fmt::Display for ClientError {
             ClientError::Io(e) => e.fmt(f),
             ClientError::Closed => f.write_str("compositor closed the connection"),
             ClientError::BadResponse(line) => write!(f, "unrecognised response {line:?}"),
+            ClientError::Unencodable(e) => e.fmt(f),
         }
     }
 }
@@ -186,6 +192,25 @@ mod tests {
             c.send(&Request::Bindings).unwrap(),
             Response::Ok("a:b".into())
         );
+        t.join().unwrap();
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// The typed boundary refuses an unencodable root and sends nothing; the raw `crucible msg`
+    /// path still sends `root -` exactly as typed.
+    #[test]
+    fn typed_send_refuses_a_relative_root_but_raw_sends_the_clear() {
+        let (path, t) = serve("root", &["ok"]);
+        let mut c = Client::connect(&path).unwrap();
+        for bad in ["-", "rel/dir"] {
+            let req = Request::SetRoot(Some(PathBuf::from(bad)));
+            assert!(matches!(
+                c.send(&req),
+                Err(ClientError::Unencodable(EncodeError::Root(_)))
+            ));
+        }
+        // The server has seen no line yet: its only reply answers this raw one.
+        assert_eq!(c.request_raw("root -").unwrap(), "ok");
         t.join().unwrap();
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }

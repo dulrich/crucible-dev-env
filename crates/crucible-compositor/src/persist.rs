@@ -649,8 +649,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
         Capture::Record(record)
     }
 
-    fn restore(&mut self, record: WorkspaceRecord) -> Result<(), String> {
-        let wanted = record.output.clone();
+    /// Restores a saved workspace the user opened (`ipc_open`, open-folder), placed by
+    /// `workspace-open { saved }`. Startup restore does not come through here: it passes the
+    /// session's connector straight to [`Self::restore_on`].
+    fn open_saved(&mut self, record: WorkspaceRecord) -> Result<(), String> {
+        let wanted = workspace::saved_open_wanted(
+            self.config.workspace_open.saved,
+            record.output.as_deref(),
+            &self.connected_outputs(),
+            self.layout.world.focused_output(),
+        );
         self.restore_on(record, wanted.as_deref())
     }
 

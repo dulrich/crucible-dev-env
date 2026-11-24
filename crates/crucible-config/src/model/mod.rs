@@ -191,6 +191,48 @@ pub struct IdleConfig {
     pub blank_after: Option<u32>,
 }
 
+/// What opening an already-live workspace does (`workspace-open { live ... }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LiveOpen {
+    /// Switch to the workspace where it lives, focusing its output (the default).
+    #[default]
+    Jump,
+    /// Move the workspace onto the focused output.
+    Bring,
+}
+
+impl Named for LiveOpen {
+    const NAMES: &'static [(Self, &'static str)] = &[(Self::Jump, "jump"), (Self::Bring, "bring")];
+}
+
+/// Where opening a saved (not live) workspace restores it (`workspace-open { saved ... }`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SavedOpen {
+    /// Onto the focused output at open time (the default).
+    #[default]
+    Focused,
+    /// Onto its recorded last-viewed output, falling back to the focused one.
+    LastOutput,
+}
+
+impl Named for SavedOpen {
+    const NAMES: &'static [(Self, &'static str)] = &[
+        (Self::Focused, "focused"),
+        (Self::LastOutput, "last-output"),
+    ];
+}
+
+/// Placement of user-initiated opens of an existing workspace
+/// (`workspace-open { live "jump"; saved "focused" }`). Startup restore and brand-new folder
+/// workspaces are not governed by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorkspaceOpenConfig {
+    /// Opening a live workspace.
+    pub live: LiveOpen,
+    /// Opening a saved workspace.
+    pub saved: SavedOpen,
+}
+
 /// The lowest night-light temperature in kelvin, for the config and the `night-light` verb.
 pub const NIGHT_LIGHT_MIN_KELVIN: u32 = 2500;
 /// The identity night-light temperature in kelvin: no tint, and the highest accepted value.
@@ -289,6 +331,8 @@ pub struct Config {
     pub keyboard: KeyboardConfig,
     /// Idle lock and blank timers (both off by default).
     pub idle: IdleConfig,
+    /// Where opening an existing workspace lands (`workspace-open`).
+    pub workspace_open: WorkspaceOpenConfig,
     /// Night light schedule; `None` (no `night-light` block) leaves the display ramp untouched.
     pub night_light: Option<NightLightConfig>,
     /// Terminal theme (`theme`); `None` writes no fragment files and adds no spawn arguments.
@@ -350,6 +394,7 @@ impl Default for Config {
             header: HeaderConfig::default(),
             keyboard: KeyboardConfig::default(),
             idle: IdleConfig::default(),
+            workspace_open: WorkspaceOpenConfig::default(),
             night_light: None,
             theme: None,
             lock: None,

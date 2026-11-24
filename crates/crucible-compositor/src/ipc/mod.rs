@@ -32,6 +32,12 @@
 //!
 //! An empty candidate list is answered with a bare `ok`.
 //!
+//! **The `root -` sentinel:** `root -` clears the root, and any other `root <path>` sets it. That
+//! is unambiguous because an admitted root is absolute (`check_root`): a set root never encodes
+//! to `-`. The typed sender enforces it: [`Request::to_line`] refuses a `SetRoot(Some(_))` that is
+//! relative (`-` included) or not valid UTF-8 with an [`EncodeError`], never rewriting it to a
+//! clear or a lossy path. The raw `crucible msg` path sends its line as typed.
+//!
 //! The pure items ([`encode_field`], [`decode_field`], [`Request`], [`Response`], [`Candidate`])
 //! are what the `crucible pick`/`msg` client side imports; the socket server ([`bind_socket`],
 //! [`CrucibleState::start_ipc`]) is compositor-only.
@@ -50,4 +56,4 @@ pub use payload::{
     parse_bindings, parse_candidates, parse_outputs,
 };
 pub use server::{Outbox, Reply, Ticket, bind_socket, socket_path, take_lines};
-pub use wire::{Request, Response, decode_field, encode_field};
+pub use wire::{EncodeError, Request, Response, decode_field, encode_field};

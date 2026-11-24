@@ -142,9 +142,22 @@ impl Request {
     }
 
     /// Formats the request as one wire line (no trailing newline). Paths must be UTF-8 (lossy
-    /// otherwise).
-    #[must_use]
-    pub fn to_line(&self) -> String {
+    /// otherwise), except a set root, which is checked.
+    ///
+    /// # Errors
+    /// [`EncodeError::Root`] for a `SetRoot(Some(p))` the wire cannot carry losslessly: `p` must be
+    /// an absolute, valid-UTF-8 path. Any other form would encode as the bare `root -` clear
+    /// sentinel (`-`) or as a different, lossy path, so it is refused rather than rewritten.
+    pub fn to_line(&self) -> Result<String, EncodeError> {
+        if let Request::SetRoot(Some(p)) = self {
+            if !p.is_absolute() || p.to_str().is_none() {
+                return Err(EncodeError::Root(p.clone()));
+            }
+        }
+        Ok(self.to_line_unchecked())
+    }
+
+    fn to_line_unchecked(&self) -> String {
         match self {
             Request::Candidates => "candidates".into(),
             Request::Bindings => "bindings".into(),
@@ -166,6 +179,27 @@ impl Request {
         }
     }
 }
+
+/// Why a typed [`Request`] cannot be put on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncodeError {
+    /// A `root` to set that is not an absolute, valid-UTF-8 path.
+    Root(PathBuf),
+}
+
+impl std::fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EncodeError::Root(p) => write!(
+                f,
+                "cannot set root {}: it must be an absolute UTF-8 path",
+                p.display()
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EncodeError {}
 
 /// One IPC response.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,8 +265,63 @@ mod tests {
             Request::ClosePid(4242),
         ];
         for r in reqs {
-            assert_eq!(Request::parse(&r.to_line()), Ok(r.clone()));
+            assert_eq!(Request::parse(&r.to_line().unwrap()), Ok(r.clone()));
         }
+    }
+
+    /// Every encodable `SetRoot` (none, or an absolute UTF-8 path) round-trips exactly.
+    #[test]
+    fn every_encodable_set_root_round_trips() {
+        let roots = [
+            None,
+            Some("/"),
+            Some("/home/u/proj"),
+            Some("/tmp/a:b"),
+            Some("/tmp/100%"),
+            Some("/tmp/with space/and  two"),
+            Some("/tmp/a%3Ab:%25"),
+            Some("/tmp/caf\u{e9}/\u{65e5}\u{672c}\u{8a9e}/\u{1f600}"),
+            Some("/tmp/-"),
+        ];
+        for root in roots {
+            let req = Request::SetRoot(root.map(PathBuf::from));
+            let line = req.to_line().unwrap();
+            assert_eq!(Request::parse(&line), Ok(req), "{root:?} via {line:?}");
+        }
+    }
+
+    /// The typed boundary refuses a set root it cannot encode losslessly; none becomes a clear.
+    #[test]
+    fn typed_set_root_refuses_relative_and_non_utf8_roots() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+        let non_utf8 = PathBuf::from(OsString::from_vec(b"/tmp/\xff\xfe".to_vec()));
+        let bad = [
+            PathBuf::from("-"),
+            PathBuf::from("rel/dir"),
+            PathBuf::from("./x"),
+            PathBuf::from(""),
+            non_utf8,
+        ];
+        for p in bad {
+            let err = Request::SetRoot(Some(p.clone())).to_line().unwrap_err();
+            assert_eq!(err, EncodeError::Root(p.clone()));
+            assert!(err.to_string().contains("absolute UTF-8"), "{err}");
+        }
+    }
+
+    /// The wire grammar is unchanged: the bare `root -` is the clear, and an absolute root
+    /// can never encode to it.
+    #[test]
+    fn bare_root_dash_still_parses_to_clear() {
+        assert_eq!(Request::parse("root -"), Ok(Request::SetRoot(None)));
+        assert_eq!(Request::SetRoot(None).to_line().as_deref(), Ok("root -"));
+        assert_ne!(
+            Request::SetRoot(Some(PathBuf::from("/-")))
+                .to_line()
+                .unwrap(),
+            "root -"
+        );
     }
 
     #[test]

@@ -118,7 +118,7 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+Shift+C` | Close the focused window (polite close request; an X11 window without `WM_DELETE_WINDOW` is destroyed) |
 | `Super+E` / `Super+S` | Switch keyboard layout to `us` / `es` (`set-layout`; layouts come from config `keyboard { layouts … }`) |
 | `Super+F` | Toggle fullscreen for the focused window (`toggle-fullscreen`; covers the output, hides the header and other panes) |
-| `Super+1` ... `Super+0` | Switch to the workspace pinned to that slot; a closed or saved one reopens on the monitor it was last viewed on |
+| `Super+1` ... `Super+0` | Switch to the workspace pinned to that slot; a live one is jumped to and a saved one reopens on the focused monitor (configurable with `workspace-open`) |
 | `Super+Shift+1` ... `Super+Shift+0` | Pin the active workspace to that slot |
 | `Super+Ctrl+]` / `Super+Ctrl+[` | Move the active workspace to the next / previous monitor |
 | `Ctrl+Alt+F1`…`F12` | Switch virtual terminal (`--tty-udev` only) |
@@ -126,7 +126,7 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 Splitting creates an **empty** focused pane; the next terminal you spawn (`Super+Shift+Return`) fills it.
 Spawning into a pane that already holds a window **stacks** it (only the focused one is visible —
 cycle with `Super+Tab`). New windows, splits and workspace verbs act where the focused window is —
-the window you last clicked or (with focus-follows-mouse) hovered. A restored workspace returns to the monitor it was last viewed on when that monitor is connected.
+the window you last clicked or (with focus-follows-mouse) hovered. Opening an existing workspace (picker, slot, `crucible msg open`) jumps to a live one and restores a saved one onto the focused monitor; `workspace-open { live "bring"; saved "last-output" }` changes that (see `docs/config.md`). Startup session restore still returns each workspace to the monitor it was last viewed on when that monitor is connected.
 
 ## Workspaces, persistence and the picker
 

@@ -15,7 +15,9 @@ use super::placement::{
     select_siblings,
 };
 use super::spawn::{DirPolicy, SpawnRequest};
-use super::workspace::{folder_workspace_name, run_on_target};
+use super::workspace::{
+    BringOutcome, LiveOpenPlan, bring_outcome, folder_workspace_name, live_open_plan, run_on_target,
+};
 use super::{capture_env, close_element, proc_root};
 use crate::input::{ActionError, Origin};
 use crate::ipc::{Reply, Request, Response};
@@ -243,16 +245,46 @@ impl<B: Backend + 'static> CrucibleState<B> {
         .map_err(|e| e.to_string())
     }
 
+    /// Opens the live workspace `ws` as `workspace-open { live }` says: jump to its output, or
+    /// bring it onto the focused output (the model move activates it; a refusal jumps instead).
+    fn open_live(&mut self, ws: WorkspaceId) -> Result<(), String> {
+        let owner = self
+            .live_workspaces()
+            .into_iter()
+            .find(|(_, w)| *w == ws)
+            .map(|(o, _)| o);
+        let plan = live_open_plan(
+            self.config.workspace_open.live,
+            owner,
+            self.layout.world.focused_output(),
+        );
+        let LiveOpenPlan::Bring(target) = plan else {
+            return self.switch_to_live(ws);
+        };
+        let moved = self.with_model(|w| w.move_workspace_to_output(ws, target));
+        match bring_outcome(&moved) {
+            BringOutcome::Done => Ok(()),
+            BringOutcome::Jump => {
+                info!(
+                    ?ws,
+                    "workspace-open bring: not moved; jumping to it instead"
+                );
+                self.switch_to_live(ws)
+            }
+            BringOutcome::Failed(err) => Err(err),
+        }
+    }
+
     pub(super) fn ipc_open(&mut self, name: &str) -> Result<(), String> {
         if let Some(ws) = self.layout.world.workspace_by_name(name) {
-            return self.switch_to_live(ws);
+            return self.open_live(ws);
         }
         let path = self.persist.file_of(name)?;
         if !path.exists() {
             return Err(format!("no workspace named {name}"));
         }
         let record = store::load(&path).map_err(|e| e.to_string())?;
-        self.restore(record)
+        self.open_saved(record)
     }
 
     /// `delete <name>`: only a saved, not live workspace; a live one is refused.
@@ -285,7 +317,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             })
             .map(|(ws, _)| *ws);
         if let Some(ws) = live {
-            return self.switch_to_live(ws);
+            return self.open_live(ws);
         }
         let saved = self.persist.saved_names();
         if let Some(base) = path.file_name().and_then(|b| b.to_str()) {
@@ -293,7 +325,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 let file = self.persist.file_of(base)?;
                 if let Ok(record) = store::load(&file) {
                     if record.root.as_deref() == Some(path) {
-                        return self.restore(record);
+                        return self.open_saved(record);
                     }
                 }
             }

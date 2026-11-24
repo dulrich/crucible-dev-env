@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crucible_config::{LiveOpen, SavedOpen};
 use crucible_layout::{OutputId, PaneId, WorkspaceId, World};
 use crucible_persist::slots::slots_path;
 use tracing::{debug, info, warn};
@@ -216,6 +217,73 @@ pub fn restore_target(
     wanted
         .and_then(|w| connected.iter().find(|(name, _)| name == w))
         .map_or(focused, |(_, id)| *id)
+}
+
+/// What opening a live workspace does, decided from the policy and where it lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LiveOpenPlan {
+    /// Switch to the workspace where it lives (focusing that output).
+    Jump,
+    /// Move the workspace onto this output (the focused one); the model move activates it.
+    Bring(OutputId),
+}
+
+/// The plan for opening a live workspace owned by `owner` while `focused` has the focus. `Bring`
+/// on the focused output is a plain switch, which is [`LiveOpenPlan::Jump`]. An unknown owner
+/// jumps, so the jump reports the missing output.
+#[must_use]
+pub fn live_open_plan(
+    policy: LiveOpen,
+    owner: Option<OutputId>,
+    focused: OutputId,
+) -> LiveOpenPlan {
+    match (policy, owner) {
+        (LiveOpen::Bring, Some(owner)) if owner != focused => LiveOpenPlan::Bring(focused),
+        _ => LiveOpenPlan::Jump,
+    }
+}
+
+/// What to do after a `Bring` move: the model's refusal of an output's last workspace falls back
+/// to a jump; `SameOutput` means it was already there (a switch is the same as a jump); any other
+/// error is reported.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BringOutcome {
+    /// Moved and activated by the model.
+    Done,
+    /// Jump instead (the model refused, or it already lives on the focused output).
+    Jump,
+    /// An unexpected model error.
+    Failed(String),
+}
+
+/// Classifies the result of `move_workspace_to_output` for a `Bring`.
+#[must_use]
+pub fn bring_outcome(result: &Result<(), crucible_layout::LayoutError>) -> BringOutcome {
+    use crucible_layout::LayoutError;
+    match result {
+        Ok(()) => BringOutcome::Done,
+        Err(LayoutError::LastWorkspace(_) | LayoutError::SameOutput(_)) => BringOutcome::Jump,
+        Err(other) => BringOutcome::Failed(other.to_string()),
+    }
+}
+
+/// The connector to restore a saved workspace onto, as `restore_on` takes it: under
+/// [`SavedOpen::Focused`] the focused output's connector (`None` when it has none, which falls
+/// back to the focused output anyway); under [`SavedOpen::LastOutput`] the record's output.
+#[must_use]
+pub fn saved_open_wanted(
+    policy: SavedOpen,
+    recorded: Option<&str>,
+    connected: &[(String, OutputId)],
+    focused: OutputId,
+) -> Option<String> {
+    match policy {
+        SavedOpen::LastOutput => recorded.map(str::to_string),
+        SavedOpen::Focused => connected
+            .iter()
+            .find(|(_, id)| *id == focused)
+            .map(|(name, _)| name.clone()),
+    }
 }
 
 /// The output `delta` steps from `current` in `order` (wraparound). `None` when there is only one
@@ -826,6 +894,107 @@ mod tests {
         assert_eq!(restore_target(Some("DP-1"), &connected, oid(1)), oid(2));
         assert_eq!(restore_target(Some("DP-9"), &connected, oid(1)), oid(1));
         assert_eq!(restore_target(None, &connected, oid(2)), oid(2));
+    }
+
+    #[test]
+    fn live_open_plan_follows_the_policy() {
+        let (a, b) = (oid(1), oid(2));
+        assert_eq!(
+            live_open_plan(LiveOpen::Jump, Some(b), a),
+            LiveOpenPlan::Jump
+        );
+        assert_eq!(
+            live_open_plan(LiveOpen::Bring, Some(b), a),
+            LiveOpenPlan::Bring(a)
+        );
+        // Already on the focused output: a plain switch.
+        assert_eq!(
+            live_open_plan(LiveOpen::Bring, Some(a), a),
+            LiveOpenPlan::Jump
+        );
+        assert_eq!(live_open_plan(LiveOpen::Bring, None, a), LiveOpenPlan::Jump);
+    }
+
+    #[test]
+    fn bring_outcome_classifies_the_model_result() {
+        use crucible_layout::LayoutError;
+        assert_eq!(bring_outcome(&Ok(())), BringOutcome::Done);
+        assert_eq!(
+            bring_outcome(&Err(LayoutError::SameOutput(oid(1)))),
+            BringOutcome::Jump
+        );
+        assert_eq!(
+            bring_outcome(&Err(LayoutError::LastWorkspace(oid(1)))),
+            BringOutcome::Jump
+        );
+        assert!(matches!(
+            bring_outcome(&Err(LayoutError::UnknownOutput(oid(9)))),
+            BringOutcome::Failed(_)
+        ));
+    }
+
+    /// The model move's own activation: the brought workspace is active on the focused output,
+    /// which is focused; a lone workspace is refused and nothing changes.
+    #[test]
+    fn bring_uses_the_model_move_activation_and_refuses_a_last_workspace() {
+        let mut world = World::new("1");
+        let a = world.focused_output();
+        let b = world
+            .add_output(crucible_layout::Rect::new(1920, 0, 1920, 1080), "2")
+            .unwrap();
+        let on_b = world.output(b).unwrap().active_workspace();
+        // `on_b` is b's only workspace: refused, nothing changes.
+        let refused = world.move_workspace_to_output(on_b, a);
+        assert_eq!(bring_outcome(&refused), BringOutcome::Jump);
+        assert_eq!(world.focused_output(), a);
+        // Give b a second workspace, then bring the first one to a.
+        world
+            .insert_workspace(b, "extra", &crucible_layout::WorkspaceLayout::single(()))
+            .unwrap();
+        assert_eq!(
+            live_open_plan(LiveOpen::Bring, Some(b), a),
+            LiveOpenPlan::Bring(a)
+        );
+        let moved = world.move_workspace_to_output(on_b, a);
+        assert_eq!(bring_outcome(&moved), BringOutcome::Done);
+        assert_eq!(world.focused_output(), a);
+        assert_eq!(world.active_workspace_id(), on_b);
+        let again = world.move_workspace_to_output(on_b, a);
+        assert_eq!(bring_outcome(&again), BringOutcome::Jump);
+    }
+
+    #[test]
+    fn saved_open_wanted_follows_the_policy() {
+        let connected = vec![("HDMI-1".to_string(), oid(1)), ("DP-1".to_string(), oid(2))];
+        let wanted = |p, rec, focused| saved_open_wanted(p, rec, &connected, focused);
+        // Focused: the focused output's connector, whatever the record says.
+        assert_eq!(
+            wanted(SavedOpen::Focused, Some("DP-1"), oid(1)).as_deref(),
+            Some("HDMI-1")
+        );
+        assert_eq!(
+            wanted(SavedOpen::Focused, None, oid(2)).as_deref(),
+            Some("DP-1")
+        );
+        // The focused output has no connector: restore_on falls back to focused.
+        assert_eq!(wanted(SavedOpen::Focused, Some("DP-1"), oid(9)), None);
+        // LastOutput: the recorded connector (restore_target does the connected/focused fallback).
+        assert_eq!(
+            wanted(SavedOpen::LastOutput, Some("DP-1"), oid(1)).as_deref(),
+            Some("DP-1")
+        );
+        assert_eq!(wanted(SavedOpen::LastOutput, None, oid(1)), None);
+        // End to end with restore_target.
+        let t = |p, rec, focused| {
+            restore_target(
+                saved_open_wanted(p, rec, &connected, focused).as_deref(),
+                &connected,
+                focused,
+            )
+        };
+        assert_eq!(t(SavedOpen::Focused, Some("DP-1"), oid(1)), oid(1));
+        assert_eq!(t(SavedOpen::LastOutput, Some("DP-1"), oid(1)), oid(2));
+        assert_eq!(t(SavedOpen::LastOutput, Some("DP-9"), oid(1)), oid(1));
     }
 
     fn last(map: &HashMap<WorkspaceId, WorkspaceMeta>, ws: WorkspaceId) -> Option<&str> {

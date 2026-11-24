@@ -14,6 +14,7 @@ mod screenshot;
 mod surface;
 mod theme;
 mod tiling;
+mod workspace_open;
 
 use kdl::KdlDocument;
 
@@ -94,6 +95,9 @@ pub fn parse(text: &str) -> Result<Config, ConfigError> {
             "cursor" => config.cursor = cursor::parse_cursor(node)?,
             "screenshot" => config.screenshot = screenshot::parse_screenshot(node)?,
             "idle" => config.idle = idle::parse_idle(node)?,
+            "workspace-open" => {
+                config.workspace_open = workspace_open::parse_workspace_open(node)?;
+            }
             "night-light" => config.night_light = Some(night_light::parse_night_light(node)?),
             "theme" => config.theme = Some(theme::parse_theme(node)?),
             "lock" => config.lock = Some(surface::parse_lock(node)?),
