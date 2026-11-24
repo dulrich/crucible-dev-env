@@ -22,6 +22,12 @@ pub(super) fn parse_keyboard(node: NodeReader<'_>) -> Result<KeyboardConfig, Con
                             format!("`{layout}` contains `,` (list layouts as separate arguments)"),
                         ));
                     }
+                    if layout.chars().any(char::is_whitespace) {
+                        return Err(child.invalid(
+                            "layout name",
+                            format!("`{layout}` contains whitespace (a layout name is one word)"),
+                        ));
+                    }
                 }
                 out.layouts = layouts;
             }
@@ -65,6 +71,15 @@ mod tests {
             );
             assert_eq!(at.line, 3);
         }
+        for bad in ["\"a b\"", "\"a\\tb\""] {
+            let (err, at) = err_at(&format!("\n\nkeyboard {{ layouts {bad}; }}\n"));
+            assert!(
+                matches!(err, ConfigError::InvalidValue { .. }),
+                "{bad}: {err:?}"
+            );
+            assert_eq!(at.line, 3);
+        }
+        assert!(parse("keyboard { layouts \"us\"; }\n").is_ok());
         let (err, _) = err_at("keyboard { variant \"x\"; }\n");
         assert!(matches!(err, ConfigError::UnknownNode { .. }));
     }

@@ -27,7 +27,7 @@ use xkeysym::Keysym;
 
 use std::str::FromStr;
 
-use crate::action::{Action, ActionParseError};
+use crate::action::{Action, ActionParseError, OutputStep};
 use crate::chord::Modifiers;
 
 /// A keyboard chord: modifier set plus keysym.
@@ -296,16 +296,30 @@ impl Default for Bindings {
             );
         }
 
+        // Super+arrow moves the active workspace to the output beside this one (no wrap).
+        for (keysym, dir) in [
+            (Keysym::Left, Direction::Left),
+            (Keysym::Right, Direction::Right),
+            (Keysym::Up, Direction::Up),
+            (Keysym::Down, Direction::Down),
+        ] {
+            bind(
+                sup,
+                &[keysym],
+                Action::MoveWorkspaceToOutput(OutputStep::Dir(dir)),
+            );
+        }
+
         // ---- Super+Ctrl ----
         bind(
             sup_ctrl,
             &[Keysym::bracketright],
-            Action::MoveWorkspaceToOutput(1),
+            Action::MoveWorkspaceToOutput(OutputStep::Delta(1)),
         );
         bind(
             sup_ctrl,
             &[Keysym::bracketleft],
-            Action::MoveWorkspaceToOutput(-1),
+            Action::MoveWorkspaceToOutput(OutputStep::Delta(-1)),
         );
         bind(
             sup_ctrl,

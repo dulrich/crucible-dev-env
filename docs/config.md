@@ -216,7 +216,7 @@ keyboard {
 }
 ```
 
-- `layouts` — the xkb layout names, in group order. Default `layouts "us"`; a `keyboard` block without `layouts` keeps the default. Zero names, an empty name, or a name containing `,` is a located config error (list layouts as separate arguments; no variants or options).
+- `layouts` — the xkb layout names, in group order. Default `layouts "us"`; a `keyboard` block without `layouts` keeps the default. Zero names, an empty name, or a name containing `,` or whitespace is a located config error (list layouts as separate arguments; no variants or options).
 - The seat's keymap is built from the list at startup. A list xkb cannot compile (for example an unknown layout name) logs a warning and falls back to the default `us` keymap; startup never fails on it.
 - Hot reload recompiles the keymap when `layouts` changed (a failed compile keeps the previous keymap). The active layout resets to the first listed layout after such a reload.
 - The `set-layout <name>` action switches to the layout by its position in `layouts` (not by xkb's long layout name). A name not in the list is a logged no-op. Defaults: `Super+E` is `set-layout us` and `Super+S` is `set-layout es`; with the default `layouts "us"`, `set-layout es` does nothing.
@@ -518,7 +518,7 @@ Each `bind "<chord>" "<action>"` replaces the default binding of that chord only
 | `close-workspace` | Save, then close the active workspace and end its windows (refused on the output's last workspace) |
 | `delete-workspace` | (unbound by default) Delete the active workspace: end its windows, move its saved record to `deleted/` (beside the `workspaces/` store, `$XDG_STATE_HOME/cde/deleted/`; a later delete of the same name replaces the earlier file) and clear its slot pins. No final save; refused on the output's last workspace and while a restore is pending. Restore a deleted workspace by moving its file back into `workspaces/` |
 | `close-all-workspaces` | Save and close every open workspace, leaving one fresh workspace per output (unbound by default) |
-| `move-workspace-to-output <n>` | Send the active workspace `n` outputs over (wraparound) |
+| `move-workspace-to-output <n>\|left\|right\|up\|down` | Send the active workspace to another output. `<n>` steps `n` outputs along the screen order (left to right by output position, wraparound); a direction sends it to the output beside this one on that side (no wrap, a no-op when there is none). Up and down are no-ops with today's side-by-side output strip |
 | `slot <n>` | Switch to the workspace pinned to slot `n` (0-9); a live one is opened and a saved one restored as [`workspace-open`](#workspace-open) says (default: a live one is jumped to, a saved one lands on the focused output), an unpinned slot opens the workspace picker, and the workspace chosen there is pinned to `n`; a slot pinned to a workspace that is neither live nor saved opens the picker in pin mode the same way, while other open failures do nothing |
 | `unpin-workspace` | (unbound by default) Clear every slot pin naming the active workspace (its `Super+<digit>` shortcuts); the workspace itself is untouched. No-op when it has none |
 | `pin-slot <n>` | Pin the active workspace to slot `n` (0-9); pins persist in `$XDG_STATE_HOME/cde/slots.kdl` |

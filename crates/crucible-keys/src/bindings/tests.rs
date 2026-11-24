@@ -173,7 +173,7 @@ fn every_action_form_parses() {
         ("snip", Action::Snip),
         (
             "move-workspace-to-output -2",
-            Action::MoveWorkspaceToOutput(-2),
+            Action::MoveWorkspaceToOutput(crate::OutputStep::Delta(-2)),
         ),
         ("slot 3", Action::Slot(3)),
         ("pin-slot 0", Action::PinSlot(0)),

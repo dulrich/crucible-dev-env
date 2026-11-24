@@ -22,7 +22,7 @@ pub mod bindings;
 pub mod chord;
 pub mod remap;
 
-pub use action::{Action, ActionParseError, Area, NightLightArg, terminal_command};
+pub use action::{Action, ActionParseError, Area, NightLightArg, OutputStep, terminal_command};
 pub use bindings::{BindError, BindTarget, Bindings, Chord};
 pub use chord::{Keysym, Modifiers, resolve};
 pub use remap::{

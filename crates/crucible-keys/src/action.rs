@@ -26,6 +26,16 @@ use crucible_layout::Direction;
 /// launches the child with `WAYLAND_DISPLAY` pointed at CDE's own socket so it connects back.
 pub const DEFAULT_TERMINAL: &str = "foot";
 
+/// The argument of [`Action::MoveWorkspaceToOutput`]: a signed step along the screen order (wraps) or a
+/// direction to the neighbouring output (no wrap). The numeric text form is the bare integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStep {
+    /// `<n>`: `n` outputs along the screen order, wrapping.
+    Delta(i64),
+    /// `left|right|up|down`: the output beside the source in that direction; none means a no-op.
+    Dir(Direction),
+}
+
 /// The argument of [`Action::NightLight`]. The compositor maps it onto its own night-light model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NightLightArg {
@@ -79,7 +89,9 @@ pub enum Action {
     /// window without it is destroyed). `Super+Shift+C`.
     CloseWindow,
     /// Switch the keyboard to the layout named `<name>` in config `keyboard { layouts … }`
-    /// (selected by its position in that list). A name not in the list is a logged no-op.
+    /// (selected by its position in that list). A name not in the list is a logged no-op. The name is
+    /// one whitespace-free word (config validation enforces it), so `Display` is injective for every
+    /// name config or the grammar can produce.
     /// Defaults: `Super+E` -> `us`, `Super+S` -> `es`.
     SetLayout(String),
     /// Spawn the configured terminal into the focused pane (the window joins the pane's stack). The
@@ -173,9 +185,10 @@ pub enum Action {
     PinSlot(u8),
     /// Clear every slot pin naming the active workspace; a no-op when it has none. Unbound by default.
     UnpinWorkspace,
-    /// Move the focused output's active workspace `delta` outputs along the output order
-    /// (wraparound). `Super+Ctrl+]` (`1`) / `Super+Ctrl+[` (`-1`). No-op with one output.
-    MoveWorkspaceToOutput(i64),
+    /// Move the focused output's active workspace to another output: a signed step along the screen
+    /// order (wraparound; `Super+Ctrl+]` = `1` / `Super+Ctrl+[` = `-1`) or to the neighbouring output in
+    /// a direction (no wrap; `Super+<arrow>`). A no-op with nothing to move to.
+    MoveWorkspaceToOutput(OutputStep),
 
     /// Open the fuzzy workspace picker. `Super+P`.
     OpenPicker,
@@ -277,7 +290,12 @@ impl std::fmt::Display for Action {
             Self::Slot(n) => write!(f, "slot {n}"),
             Self::PinSlot(n) => write!(f, "pin-slot {n}"),
             Self::NightLight(arg) => write!(f, "night-light {arg}"),
-            Self::MoveWorkspaceToOutput(n) => write!(f, "move-workspace-to-output {n}"),
+            Self::MoveWorkspaceToOutput(OutputStep::Delta(n)) => {
+                write!(f, "move-workspace-to-output {n}")
+            }
+            Self::MoveWorkspaceToOutput(OutputStep::Dir(d)) => {
+                write!(f, "move-workspace-to-output {}", direction_word(*d))
+            }
             Self::VtSwitch(n) => write!(f, "vt-switch {n}"),
             // Every nullary verb returned from `NULLARY` above.
             _ => unreachable!("{self:?} has no NULLARY row"),
@@ -488,7 +506,15 @@ impl FromStr for Action {
             "cycle-workspace" => unary(Self::CycleWorkspace(delta(words.get(1))?)),
             "reorder-workspace" => unary(Self::ReorderWorkspace(delta(words.get(1))?)),
             "move-window-to-workspace" => unary(Self::MoveWindowToWorkspace(delta(words.get(1))?)),
-            "move-workspace-to-output" => unary(Self::MoveWorkspaceToOutput(delta(words.get(1))?)),
+            "move-workspace-to-output" => {
+                let step = match words.get(1).map(|w| w.to_ascii_lowercase()) {
+                    Some(word) if DIRECTIONS.iter().any(|(_, name)| *name == word) => {
+                        OutputStep::Dir(direction(words.get(1))?)
+                    }
+                    _ => OutputStep::Delta(delta(words.get(1))?),
+                };
+                unary(Self::MoveWorkspaceToOutput(step))
+            }
             "slot" => unary(Self::Slot(slot_index(words.get(1))?)),
             "pin-slot" => unary(Self::PinSlot(slot_index(words.get(1))?)),
             "night-light" => unary(Self::NightLight(night_light_arg(words.get(1))?)),
@@ -583,10 +609,35 @@ mod tests {
             Action::PinSlot(0),
             Action::NightLight(NightLightArg::Kelvin(4500)),
             Action::NightLight(NightLightArg::Toggle),
-            Action::MoveWorkspaceToOutput(-2),
+            Action::MoveWorkspaceToOutput(OutputStep::Delta(-2)),
+            Action::MoveWorkspaceToOutput(OutputStep::Dir(Direction::Left)),
             Action::VtSwitch(3),
         ]);
         all
+    }
+
+    #[test]
+    fn move_workspace_to_output_round_trips_and_rejects_bad_words() {
+        let steps = [
+            ("left", OutputStep::Dir(Direction::Left)),
+            ("right", OutputStep::Dir(Direction::Right)),
+            ("up", OutputStep::Dir(Direction::Up)),
+            ("down", OutputStep::Dir(Direction::Down)),
+            ("1", OutputStep::Delta(1)),
+            ("-1", OutputStep::Delta(-1)),
+            ("-9223372036854775808", OutputStep::Delta(i64::MIN)),
+            ("9223372036854775807", OutputStep::Delta(i64::MAX)),
+        ];
+        for (word, step) in steps {
+            let text = format!("move-workspace-to-output {word}");
+            let action = Action::MoveWorkspaceToOutput(step);
+            assert_eq!(text.parse::<Action>().unwrap(), action, "{text}");
+            assert_eq!(action.to_string(), text);
+        }
+        for bad in ["sideways", "", "1.5", "left right"] {
+            let text = format!("move-workspace-to-output {bad}");
+            assert!(text.parse::<Action>().is_err(), "{text}");
+        }
     }
 
     #[test]
@@ -665,7 +716,10 @@ mod tests {
             (Action::CycleStack(1), Area::Stacks),
             (Action::DeleteWorkspace, Area::Workspaces),
             (Action::ReorderWorkspace(1), Area::Workspaces),
-            (Action::MoveWorkspaceToOutput(1), Area::Outputs),
+            (
+                Action::MoveWorkspaceToOutput(OutputStep::Delta(1)),
+                Area::Outputs,
+            ),
             (Action::OpenSettings, Area::LaunchAndOverlays),
             (Action::Lock, Area::SessionAndSystem),
             (

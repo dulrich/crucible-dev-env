@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crucible_config::{LiveOpen, SavedOpen};
-use crucible_layout::{OutputId, PaneId, WorkspaceId, World};
+use crucible_keys::OutputStep;
+use crucible_layout::{Direction, OutputId, PaneId, Rect, WorkspaceId, World};
 use crucible_persist::slots::slots_path;
 use tracing::{debug, info, warn};
 
@@ -287,7 +288,7 @@ pub fn saved_open_wanted(
 }
 
 /// The output `delta` steps from `current` in `order` (wraparound). `None` when there is only one
-/// output, `current` is not in `order`, or the step lands back on `current`.
+/// output, `current` is not in `order`, or the step lands back on `current`. Safe for the full `i64` range.
 #[must_use]
 pub fn shifted_output(order: &[OutputId], current: OutputId, delta: i64) -> Option<OutputId> {
     let len = i64::try_from(order.len()).ok()?;
@@ -295,8 +296,76 @@ pub fn shifted_output(order: &[OutputId], current: OutputId, delta: i64) -> Opti
         return None;
     }
     let at = i64::try_from(order.iter().position(|o| *o == current)?).ok()?;
-    let target = order[usize::try_from((at + delta).rem_euclid(len)).ok()?];
+    // Reduce the step first: `at + delta` would overflow near `i64::MAX`; both terms are now `< len`.
+    let target = order[usize::try_from((at + delta.rem_euclid(len)).rem_euclid(len)).ok()?];
     (target != current).then_some(target)
+}
+
+/// Whether `rect` is the zero-size placeholder of an output whose geometry is not yet known.
+fn is_placeholder(rect: Rect) -> bool {
+    rect.width <= 0 || rect.height <= 0
+}
+
+/// The screen order of `outputs` (given in `output_ids()` order with each model rect): placed outputs
+/// sorted by rect origin `(x, y)` (stable, so ties keep id order), then placeholder-rect outputs in id order.
+#[must_use]
+pub fn spatial_order(outputs: &[(OutputId, Rect)]) -> Vec<OutputId> {
+    let mut placed: Vec<&(OutputId, Rect)> = outputs
+        .iter()
+        .filter(|(_, r)| !is_placeholder(*r))
+        .collect();
+    placed.sort_by_key(|(_, r)| (r.x, r.y));
+    placed
+        .into_iter()
+        .map(|(id, _)| *id)
+        .chain(
+            outputs
+                .iter()
+                .filter(|(_, r)| is_placeholder(*r))
+                .map(|(id, _)| *id),
+        )
+        .collect()
+}
+
+/// The output beside `source` in `dir`: one whose rect lies entirely on that side of the source's. The
+/// nearest gap along the move axis wins, then the smallest perpendicular offset between rect origins, then
+/// id order. Never wraps; placeholder-rect outputs are neither source nor candidate (`None`).
+#[must_use]
+pub fn neighbour(
+    outputs: &[(OutputId, Rect)],
+    source: OutputId,
+    dir: Direction,
+) -> Option<OutputId> {
+    let src = outputs.iter().find(|(id, _)| *id == source)?.1;
+    if is_placeholder(src) {
+        return None;
+    }
+    let (sx, sy, sw, sh) = (
+        i64::from(src.x),
+        i64::from(src.y),
+        i64::from(src.width),
+        i64::from(src.height),
+    );
+    outputs
+        .iter()
+        .filter(|(id, r)| *id != source && !is_placeholder(*r))
+        .filter_map(|(id, r)| {
+            let (x, y, w, h) = (
+                i64::from(r.x),
+                i64::from(r.y),
+                i64::from(r.width),
+                i64::from(r.height),
+            );
+            let (gap, offset) = match dir {
+                Direction::Left => (sx - (x + w), (y - sy).abs()),
+                Direction::Right => (x - (sx + sw), (y - sy).abs()),
+                Direction::Up => (sy - (y + h), (x - sx).abs()),
+                Direction::Down => (y - (sy + sh), (x - sx).abs()),
+            };
+            (gap >= 0).then_some((gap, offset, *id))
+        })
+        .min()
+        .map(|(_, _, id)| id)
 }
 
 /// The workspace name for folder `path`: its basename, else `basename (parent)`, else
@@ -525,14 +594,22 @@ impl<B: Backend + 'static> CrucibleState<B> {
         }
     }
 
-    /// Moves the focused output's active workspace `delta` outputs along the model output order
-    /// (`move-workspace-to-output`). No-op with one output; refused on the source's last workspace.
-    pub(crate) fn move_active_workspace_to_output(&mut self, delta: i64) {
+    /// Moves the focused output's active workspace to another output (`move-workspace-to-output`): a
+    /// signed step along the screen order (wraps) or the neighbour in a direction (no wrap). No-op with
+    /// nothing to move to; refused on the source's last workspace.
+    pub(crate) fn move_active_workspace_to_output(&mut self, step: OutputStep) {
         let world = &self.layout.world;
-        let order: Vec<OutputId> = world.output_ids().collect();
+        let outputs: Vec<(OutputId, Rect)> = world.outputs().map(|(id, o)| (id, o.rect)).collect();
         let source = world.focused_output();
-        let Some(target) = shifted_output(&order, source, delta) else {
-            debug!(delta, "move-workspace-to-output: no other output; ignoring");
+        let target = match step {
+            OutputStep::Delta(delta) => shifted_output(&spatial_order(&outputs), source, delta),
+            OutputStep::Dir(dir) => neighbour(&outputs, source, dir),
+        };
+        let Some(target) = target else {
+            debug!(
+                ?step,
+                "move-workspace-to-output: no eligible output; ignoring"
+            );
             return;
         };
         let ws = world.active_workspace_id();
@@ -886,6 +963,136 @@ mod tests {
         assert_eq!(shifted_output(&order, oid(2), 3), None);
         assert_eq!(shifted_output(&[oid(1)], oid(1), 1), None);
         assert_eq!(shifted_output(&order, oid(9), 1), None);
+    }
+
+    #[test]
+    fn shifted_output_is_safe_at_the_i64_extremes() {
+        let order = [oid(1), oid(2), oid(3)];
+        // `i64::MAX` = 1 (mod 3), `i64::MIN` = 1 (mod 3), `i64::MIN + 1` = 2 (mod 3).
+        assert_eq!(shifted_output(&order, oid(2), i64::MAX), Some(oid(3)));
+        assert_eq!(shifted_output(&order, oid(2), i64::MIN), Some(oid(3)));
+        assert_eq!(shifted_output(&order, oid(2), i64::MIN + 1), Some(oid(1)));
+        assert_eq!(shifted_output(&order, oid(3), i64::MAX), Some(oid(1)));
+    }
+
+    fn rect(x: i32, y: i32, w: i32, h: i32) -> Rect {
+        Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    #[test]
+    fn spatial_order_sorts_by_origin_with_placeholders_last() {
+        // A reflowed strip: id order 1,2,3 but screen order 3,1,2.
+        let strip = [
+            (oid(1), rect(1920, 0, 1920, 1080)),
+            (oid(2), rect(3840, 0, 1920, 1080)),
+            (oid(3), rect(0, 0, 1920, 1080)),
+        ];
+        assert_eq!(spatial_order(&strip), [oid(3), oid(1), oid(2)]);
+        // A placeholder goes after every placed output, placeholders in id order.
+        let with_placeholder = [
+            (oid(1), rect(0, 0, 0, 0)),
+            (oid(2), rect(1920, 0, 1920, 1080)),
+            (oid(3), rect(0, 0, 1920, 0)),
+            (oid(4), rect(0, 0, 1920, 1080)),
+        ];
+        assert_eq!(
+            spatial_order(&with_placeholder),
+            [oid(4), oid(2), oid(1), oid(3)]
+        );
+        // Ties keep id order.
+        let tied = [
+            (oid(1), rect(0, 0, 100, 100)),
+            (oid(2), rect(0, 0, 100, 100)),
+        ];
+        assert_eq!(spatial_order(&tied), [oid(1), oid(2)]);
+        // The numeric step follows the screen order.
+        assert_eq!(
+            shifted_output(&spatial_order(&strip), oid(3), 1),
+            Some(oid(1))
+        );
+    }
+
+    #[test]
+    fn neighbour_picks_the_adjacent_output_in_each_direction_without_wrap() {
+        // Two rows: 1 | 2 on top, 3 under 1.
+        let grid = [
+            (oid(1), rect(0, 0, 1000, 500)),
+            (oid(2), rect(1000, 0, 1000, 500)),
+            (oid(3), rect(0, 500, 1000, 500)),
+        ];
+        assert_eq!(neighbour(&grid, oid(1), Direction::Right), Some(oid(2)));
+        assert_eq!(neighbour(&grid, oid(2), Direction::Left), Some(oid(1)));
+        assert_eq!(neighbour(&grid, oid(1), Direction::Down), Some(oid(3)));
+        assert_eq!(neighbour(&grid, oid(3), Direction::Up), Some(oid(1)));
+        // No wrap, nothing beyond the edge, unknown source.
+        assert_eq!(neighbour(&grid, oid(1), Direction::Left), None);
+        assert_eq!(neighbour(&grid, oid(2), Direction::Right), None);
+        assert_eq!(neighbour(&grid, oid(9), Direction::Left), None);
+    }
+
+    #[test]
+    fn neighbour_ranks_by_gap_then_perpendicular_offset_then_id() {
+        let src = (oid(1), rect(2000, 0, 1000, 1000));
+        // Nearer gap beats a smaller offset.
+        let by_gap = [
+            src,
+            (oid(2), rect(0, 0, 1000, 1000)),
+            (oid(3), rect(1000, 300, 800, 1000)),
+        ];
+        assert_eq!(neighbour(&by_gap, oid(1), Direction::Left), Some(oid(3)));
+        // Equal gaps: the smaller perpendicular offset wins.
+        let by_offset = [
+            src,
+            (oid(2), rect(1000, 400, 1000, 1000)),
+            (oid(3), rect(1000, 100, 1000, 1000)),
+        ];
+        assert_eq!(neighbour(&by_offset, oid(1), Direction::Left), Some(oid(3)));
+        // Equal gap and offset: id order.
+        let by_id = [
+            src,
+            (oid(3), rect(1000, 200, 1000, 1000)),
+            (oid(2), rect(1000, -200, 1000, 1000)),
+        ];
+        assert_eq!(neighbour(&by_id, oid(1), Direction::Left), Some(oid(2)));
+    }
+
+    #[test]
+    fn neighbour_on_a_top_aligned_mixed_height_strip_has_no_vertical_moves() {
+        let strip = [
+            (oid(1), rect(0, 0, 2560, 1440)),
+            (oid(2), rect(2560, 0, 1920, 1080)),
+        ];
+        assert_eq!(neighbour(&strip, oid(1), Direction::Right), Some(oid(2)));
+        assert_eq!(neighbour(&strip, oid(2), Direction::Left), Some(oid(1)));
+        for source in [oid(1), oid(2)] {
+            assert_eq!(neighbour(&strip, source, Direction::Up), None);
+            assert_eq!(neighbour(&strip, source, Direction::Down), None);
+        }
+    }
+
+    #[test]
+    fn neighbour_ignores_placeholder_rects() {
+        let outputs = [
+            (oid(1), rect(0, 0, 1000, 500)),
+            (oid(2), rect(0, 0, 0, 0)),
+            (oid(3), rect(1000, 0, 1000, 500)),
+        ];
+        // The placeholder is never a candidate, and a placeholder source has no neighbours.
+        assert_eq!(neighbour(&outputs, oid(1), Direction::Right), Some(oid(3)));
+        assert_eq!(neighbour(&outputs, oid(3), Direction::Left), Some(oid(1)));
+        for dir in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            assert_eq!(neighbour(&outputs, oid(2), dir), None);
+        }
     }
 
     #[test]

@@ -120,7 +120,8 @@ hotkeys. Defaults (rebindable in the config file, see `docs/config.md`):
 | `Super+F` | Toggle fullscreen for the focused window (`toggle-fullscreen`; covers the output, hides the header and other panes) |
 | `Super+1` ... `Super+0` | Switch to the workspace pinned to that slot; a live one is jumped to and a saved one reopens on the focused monitor (configurable with `workspace-open`) |
 | `Super+Shift+1` ... `Super+Shift+0` | Pin the active workspace to that slot |
-| `Super+Ctrl+]` / `Super+Ctrl+[` | Move the active workspace to the next / previous monitor |
+| `Super+Left` / `Right` / `Up` / `Down` | Move the active workspace to the monitor beside this one in that direction (no wrap; up and down do nothing with side-by-side monitors) |
+| `Super+Ctrl+]` / `Super+Ctrl+[` | Move the active workspace to the next / previous monitor, following screen order |
 | `Ctrl+Alt+F1`…`F12` | Switch virtual terminal (`--tty-udev` only) |
 
 Splitting creates an **empty** focused pane; the next terminal you spawn (`Super+Shift+Return`) fills it.

@@ -171,7 +171,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             Action::Slot(n) => self.slot_open(n),
             Action::PinSlot(n) => self.pin_slot(n),
             Action::UnpinWorkspace => self.unpin_workspace(),
-            Action::MoveWorkspaceToOutput(delta) => self.move_active_workspace_to_output(delta),
+            Action::MoveWorkspaceToOutput(step) => self.move_active_workspace_to_output(step),
             Action::RenameWorkspace => self.open_picker(PickerMode::Rename),
             Action::SetWorkspaceRoot => self.open_picker(PickerMode::Root),
             Action::CaptureWorkspaceRoot => {

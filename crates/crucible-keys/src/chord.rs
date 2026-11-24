@@ -34,8 +34,9 @@
 //! | `Super+M`             | `MarkWindow`                   | `World::mark_window`              |
 //! | `Super+Shift+M`       | `SwapMarkedWindow`             | `World::swap_marked_window`       |
 //! | `Super+Shift+W`       | `CloseWorkspace`               | save, then `World::remove_workspace` |
-//! | `Super+Ctrl+]`        | `MoveWorkspaceToOutput(1)`     | `World::move_workspace_to_output` |
-//! | `Super+Ctrl+[`        | `MoveWorkspaceToOutput(-1)`    | `World::move_workspace_to_output` |
+//! | `Super+Ctrl+]`        | `MoveWorkspaceToOutput(Delta(1))` | `World::move_workspace_to_output` (screen order) |
+//! | `Super+Ctrl+[`        | `MoveWorkspaceToOutput(Delta(-1))` | `World::move_workspace_to_output` (screen order) |
+//! | `Super+Left/Right/Up/Down` | `MoveWorkspaceToOutput(Dir(..))` | `World::move_workspace_to_output` (neighbour, no wrap) |
 //! | `Super+<0-9>`         | `Slot(n)`                      | open the workspace pinned to slot n |
 //! | `Super+Shift+<0-9>`   | `PinSlot(n)`                   | pin the active workspace to slot n |
 //! | `Super+P`             | `OpenPicker`                   | fuzzy workspace picker           |
@@ -109,6 +110,7 @@ pub fn resolve(bindings: &Bindings, modifiers: Modifiers, keysym: Keysym) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action::OutputStep;
 
     /// `resolve` against the default table (the pre-config behaviour these tests were written for).
     fn resolve(modifiers: Modifiers, keysym: Keysym) -> Option<Action> {
@@ -164,6 +166,22 @@ mod tests {
             (Keysym::j, Action::Focus(Direction::Down)),
             (Keysym::k, Action::Focus(Direction::Up)),
             (Keysym::l, Action::Focus(Direction::Right)),
+            (
+                Keysym::Left,
+                Action::MoveWorkspaceToOutput(OutputStep::Dir(Direction::Left)),
+            ),
+            (
+                Keysym::Right,
+                Action::MoveWorkspaceToOutput(OutputStep::Dir(Direction::Right)),
+            ),
+            (
+                Keysym::Up,
+                Action::MoveWorkspaceToOutput(OutputStep::Dir(Direction::Up)),
+            ),
+            (
+                Keysym::Down,
+                Action::MoveWorkspaceToOutput(OutputStep::Dir(Direction::Down)),
+            ),
             (Keysym::backslash, Action::Split(Direction::Right)),
             (Keysym::minus, Action::Split(Direction::Down)),
             (Keysym::Tab, Action::CycleStack(1)),
@@ -250,8 +268,14 @@ mod tests {
             (Keysym::K, Action::Resize(Direction::Up)),
             (Keysym::l, Action::Resize(Direction::Right)),
             (Keysym::L, Action::Resize(Direction::Right)),
-            (Keysym::bracketright, Action::MoveWorkspaceToOutput(1)),
-            (Keysym::bracketleft, Action::MoveWorkspaceToOutput(-1)),
+            (
+                Keysym::bracketright,
+                Action::MoveWorkspaceToOutput(OutputStep::Delta(1)),
+            ),
+            (
+                Keysym::bracketleft,
+                Action::MoveWorkspaceToOutput(OutputStep::Delta(-1)),
+            ),
         ];
         for (keysym, expected) in super_ctrl_chords {
             assert_eq!(
@@ -455,8 +479,12 @@ mod tests {
             (true, false, Keysym::parenleft) => Some(Action::PinSlot(9)),
             // Shift+W closes the workspace; Ctrl+[ / ] move it to the adjacent output.
             (true, false, Keysym::w | Keysym::W) => Some(Action::CloseWorkspace),
-            (false, true, Keysym::bracketright) => Some(Action::MoveWorkspaceToOutput(1)),
-            (false, true, Keysym::bracketleft) => Some(Action::MoveWorkspaceToOutput(-1)),
+            (false, true, Keysym::bracketright) => {
+                Some(Action::MoveWorkspaceToOutput(OutputStep::Delta(1)))
+            }
+            (false, true, Keysym::bracketleft) => {
+                Some(Action::MoveWorkspaceToOutput(OutputStep::Delta(-1)))
+            }
             // The seven verbs added after the cut-over.
             (false, false, Keysym::p | Keysym::P) => Some(Action::OpenPicker),
             (true, false, Keysym::r | Keysym::R) => Some(Action::RenameWorkspace),
@@ -467,6 +495,19 @@ mod tests {
             // F: toggle fullscreen (plan 23 WP-4).
             (false, false, Keysym::f | Keysym::F) => Some(Action::ToggleFullscreen),
             (false, false, Keysym::Escape) => Some(Action::Lock),
+            // Super+arrow: the workspace to the neighbouring output (plan 52 WP-2).
+            (false, false, Keysym::Left) => Some(Action::MoveWorkspaceToOutput(OutputStep::Dir(
+                Direction::Left,
+            ))),
+            (false, false, Keysym::Right) => Some(Action::MoveWorkspaceToOutput(OutputStep::Dir(
+                Direction::Right,
+            ))),
+            (false, false, Keysym::Up) => Some(Action::MoveWorkspaceToOutput(OutputStep::Dir(
+                Direction::Up,
+            ))),
+            (false, false, Keysym::Down) => Some(Action::MoveWorkspaceToOutput(OutputStep::Dir(
+                Direction::Down,
+            ))),
             _ => None,
         }
     }
@@ -480,6 +521,9 @@ mod tests {
             Keysym::ISO_Left_Tab,
             Keysym::Escape,
             Keysym::Left,
+            Keysym::Right,
+            Keysym::Up,
+            Keysym::Down,
             Keysym::F1,
         ]);
         let mut checked = 0;
