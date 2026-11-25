@@ -4,6 +4,14 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.8.2 — 2026-11-25
+
+### Added
+
+- IPC requests `focus-pid <n>` (focus the window process <n> or its nearest ancestor stands for), `workspace-of-pid <n>` (read-only lookup, allowed while locked) and `focus-live <name>` (switch to a live workspace; never restores a saved one), with matching `crucible msg` verbs. The two focus verbs are refused while the session is locked or an overlay, snip or logout modal holds input.
+- `crucible url <url>` handles `cde:focus?pid=<n>&workspace=<name>` links (`cde://focus?…` also accepted): it focuses the pid's window and falls back to the live workspace. The socket is `$CDE_SOCKET`, else the single socket in `$XDG_RUNTIME_DIR/cde/`. Exit 0 focused, 1 nothing focused, 2 malformed URL.
+- The deploy installs `cde-url.desktop` and registers it as the `x-scheme-handler/cde` default, so a browser can open `cde:` links.
+
 ## 0.8.1 — 2026-11-24
 
 ### Added
