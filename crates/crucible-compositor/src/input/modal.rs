@@ -94,6 +94,17 @@ pub(crate) fn resolve_mode<O>(
     }
 }
 
+/// The admission of an IPC focus request (`focus-pid`, `focus-live`) in `mode`, decided before any
+/// mutation: only Normal input admits it. The lock answers `session locked` (as the lock admission
+/// does, which runs first); greeter, logging out, snip and a mapped overlay answer `input busy`.
+pub(crate) fn admit_ipc_focus<O>(mode: &InputMode<O>) -> Result<(), &'static str> {
+    match mode {
+        InputMode::Normal => Ok(()),
+        InputMode::Locked => Err("session locked"),
+        _ => Err("input busy"),
+    }
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
     /// Resolves the input mode for one event. Precedence is **Greeter > Locked > LoggingOut >
     /// Snip > Overlay > Normal** ([`resolve_mode`]), and this is the only place it is written.
@@ -105,6 +116,11 @@ impl<B: Backend + 'static> CrucibleState<B> {
             self.snip.is_some(),
             self.mapped_overlay().cloned(),
         )
+    }
+
+    /// [`admit_ipc_focus`] for the current input mode; the error is the reply reason.
+    pub(crate) fn ipc_focus_admitted(&self) -> Result<(), String> {
+        admit_ipc_focus(&self.input_mode()).map_err(str::to_string)
     }
 }
 
@@ -235,6 +251,25 @@ mod tests {
 
     const OVERLAY: u32 = 1;
     const OTHER: u32 = 2;
+
+    /// The IPC focus admission table: only Normal admits; the precedence winner decides.
+    #[test]
+    fn ipc_focus_requests_are_admitted_only_in_normal_mode() {
+        let table: [(InputMode<u32>, Result<(), &str>); 6] = [
+            (InputMode::Normal, Ok(())),
+            (InputMode::Locked, Err("session locked")),
+            (InputMode::Greeter, Err("input busy")),
+            (InputMode::LoggingOut, Err("input busy")),
+            (InputMode::Snip, Err("input busy")),
+            (InputMode::Overlay(OVERLAY), Err("input busy")),
+        ];
+        for (mode, want) in table {
+            assert_eq!(admit_ipc_focus(&mode), want, "{mode:?}");
+        }
+        // A mapped overlay under the lock: the lock wins.
+        let mode = resolve_mode(false, true, false, false, Some(OVERLAY));
+        assert_eq!(admit_ipc_focus(&mode), Err("session locked"));
+    }
 
     fn locked() -> InputMode<u32> {
         InputMode::Locked

@@ -202,6 +202,10 @@ pub struct CrucibleState<B: Backend + 'static> {
     /// The workspace last seen shown on the output under the pointer; a change refocuses the pane
     /// under the pointer ([`Self::hover_after_workspace_switch`]).
     pub hover_workspace: Option<crucible_layout::WorkspaceId>,
+    /// Set while an IPC focus request (`focus-pid`, `focus-live`) applies its layout: the
+    /// switch-induced hover is absorbed (recorded without a refocus) so it cannot steal focus from
+    /// the requested target ([`Self::with_hover_absorbed`]).
+    pub hover_absorb: bool,
     /// Workspace persistence, IPC and picker state; see [`crate::persist`].
     pub persist: crate::persist::PersistState,
     /// Workspace header strip toggle and consumed-button record.
@@ -446,6 +450,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             hover_target: None,
             hover_deferred: false,
             hover_workspace: None,
+            hover_absorb: false,
             persist: crate::persist::PersistState::new(store_dir),
             header: crate::header::HeaderState::default(),
             header_text: crate::text::HeaderFonts::new(crate::text::TextRenderer::from_font(None)),

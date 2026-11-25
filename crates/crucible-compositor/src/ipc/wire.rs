@@ -44,6 +44,15 @@ pub enum Request {
     /// `close-pid <n>` — politely ask every managed window of process `n` to close (xdg `close` /
     /// X11 `WM_DELETE_WINDOW`; an X11 window without it is destroyed); answers `ok <count>`.
     ClosePid(u32),
+    /// `focus-pid <n>` — focus the window process `n` (or its nearest ancestor) stands for, as
+    /// `relaunch` matches it; answers `ok <workspace>`. Refused unless input is in Normal mode.
+    FocusPid(u32),
+    /// `workspace-of-pid <n>` — the workspace (live or hidden) holding the window `focus-pid <n>`
+    /// would focus; answers `ok <workspace>` and changes nothing (allowed while locked).
+    WorkspaceOfPid(u32),
+    /// `focus-live <name>` — switch to the *live* workspace `name` (never restores, brings or
+    /// pins); answers `ok <name>`. Refused unless input is in Normal mode.
+    FocusLive(String),
     /// `capture <path>` — write a PNG of the focused output (no cursor) to `path`; answers
     /// `ok <w>x<h>` once the file is written. Refused while locked. A debug request (plan 34).
     Capture(PathBuf),
@@ -84,7 +93,11 @@ impl Request {
     #[must_use]
     pub fn acts(&self) -> bool {
         match self {
-            Request::Candidates | Request::Bindings | Request::Save | Request::Outputs => false,
+            Request::Candidates
+            | Request::Bindings
+            | Request::Save
+            | Request::Outputs
+            | Request::WorkspaceOfPid(_) => false,
             Request::Open(_)
             | Request::OpenFolder(_)
             | Request::New(_)
@@ -96,6 +109,8 @@ impl Request {
             | Request::RunTerm(_)
             | Request::Relaunch
             | Request::ClosePid(_)
+            | Request::FocusPid(_)
+            | Request::FocusLive(_)
             | Request::Capture(_) => true,
         }
     }
@@ -136,6 +151,9 @@ impl Request {
             "run-tui" => need(arg).map(Request::RunTui),
             "run-term" => need(arg).map(Request::RunTerm),
             "close-pid" => parse_pid(verb, arg).map(Request::ClosePid),
+            "focus-pid" => parse_pid(verb, arg).map(Request::FocusPid),
+            "workspace-of-pid" => parse_pid(verb, arg).map(Request::WorkspaceOfPid),
+            "focus-live" => need(arg).map(Request::FocusLive),
             "capture" => need(arg).map(|p| Request::Capture(PathBuf::from(p))),
             other => Err(format!("unknown request {other:?}")),
         }
@@ -175,6 +193,9 @@ impl Request {
             Request::RunTui(c) => format!("run-tui {}", encode_field(c)),
             Request::RunTerm(c) => format!("run-term {}", encode_field(c)),
             Request::ClosePid(n) => format!("close-pid {n}"),
+            Request::FocusPid(n) => format!("focus-pid {n}"),
+            Request::WorkspaceOfPid(n) => format!("workspace-of-pid {n}"),
+            Request::FocusLive(n) => format!("focus-live {}", encode_field(n)),
             Request::Capture(p) => format!("capture {}", encode_field(&p.to_string_lossy())),
         }
     }
@@ -263,6 +284,9 @@ mod tests {
             Request::RunTerm("/opt/my term/ghostty".into()),
             Request::Exec("split-right".into()),
             Request::ClosePid(4242),
+            Request::FocusPid(4242),
+            Request::WorkspaceOfPid(1),
+            Request::FocusLive("a:b 100%\tc".into()),
         ];
         for r in reqs {
             assert_eq!(Request::parse(&r.to_line().unwrap()), Ok(r.clone()));
@@ -343,6 +367,33 @@ mod tests {
     }
 
     #[test]
+    fn focus_requests_parse_and_reject_bad_input() {
+        assert_eq!(Request::parse("focus-pid 42"), Ok(Request::FocusPid(42)));
+        assert_eq!(
+            Request::parse("workspace-of-pid 42"),
+            Ok(Request::WorkspaceOfPid(42))
+        );
+        assert_eq!(
+            Request::parse("focus-live a%3Ab c"),
+            Ok(Request::FocusLive("a:b c".into()))
+        );
+        assert_eq!(Request::FocusPid(9).to_line().unwrap(), "focus-pid 9");
+        assert_eq!(
+            Request::FocusLive("a:b".into()).to_line().unwrap(),
+            "focus-live a%3Ab"
+        );
+        for verb in ["focus-pid", "workspace-of-pid"] {
+            for arg in ["", " ", " x", " 0", " +5", " -5", " 5 6", " 4294967296"] {
+                let bad = format!("{verb}{arg}");
+                assert!(Request::parse(&bad).is_err(), "{bad}");
+            }
+        }
+        for bad in ["focus-live", "focus-live ", "focus-live %zz"] {
+            assert!(Request::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn retired_run_requests_no_longer_parse() {
         // `run`/`run-in-terminal` travel as `exec run …`/`exec run-in-terminal …` now.
         assert!(Request::parse("run firefox").is_err());
@@ -351,7 +402,12 @@ mod tests {
 
     #[test]
     fn only_read_only_requests_do_not_act() {
-        for r in [Request::Candidates, Request::Bindings, Request::Save] {
+        for r in [
+            Request::Candidates,
+            Request::Bindings,
+            Request::Save,
+            Request::WorkspaceOfPid(7),
+        ] {
             assert!(!r.acts(), "{r:?}");
         }
         for r in [
@@ -366,6 +422,8 @@ mod tests {
             Request::RunTerm("ghostty".into()),
             Request::Relaunch,
             Request::ClosePid(7),
+            Request::FocusPid(7),
+            Request::FocusLive("w".into()),
         ] {
             assert!(r.acts(), "{r:?}");
         }

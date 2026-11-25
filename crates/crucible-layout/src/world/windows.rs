@@ -342,6 +342,13 @@ impl World {
         };
     }
 
+    /// The workspace holding `window` (live or hidden), read-only; `None` when it is not in the
+    /// model.
+    #[must_use]
+    pub fn workspace_of_window(&self, window: WindowId) -> Option<WorkspaceId> {
+        self.locate_window(window).map(|l| l.workspace)
+    }
+
     /// Finds which workspace + pane currently holds `window`.
     pub(super) fn locate_window(&self, window: WindowId) -> Option<WindowLocation> {
         for ws in self.workspaces.values() {

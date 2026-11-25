@@ -57,6 +57,21 @@ pub(super) enum SwitchHover {
     Wait,
     /// The shown workspace changed: record it and focus what is under the pointer, as an enter.
     Refocus,
+    /// An IPC focus request is applying: record the shown workspace and the hover target under the
+    /// pointer without moving focus, so neither this re-layout nor a later twitch inside the same
+    /// pane steals focus from the requested target; a genuine enter into another pane still
+    /// refocuses.
+    Absorb,
+}
+
+/// [`switch_hover_action`] under an IPC focus request (`absorbing`): a pending refocus, or a
+/// wait that would refocus on a later re-layout, is absorbed instead. Outside one it is unchanged.
+#[must_use]
+pub(super) fn absorb_switch_hover(action: SwitchHover, absorbing: bool) -> SwitchHover {
+    match action {
+        SwitchHover::Refocus | SwitchHover::Wait if absorbing => SwitchHover::Absorb,
+        other => other,
+    }
 }
 
 /// Whether a workspace switch on the output under the pointer refocuses the pane under it.
@@ -130,6 +145,23 @@ mod hover_tests {
             SwitchHover::Wait
         );
         assert_eq!(act(Some(&1), Some(&2), true, &N, true), SwitchHover::Wait);
+    }
+
+    /// An IPC focus request: the pointer over another pane on the destination workspace does not
+    /// refocus (the refocus, or a deferred retry, is absorbed); a settle stays a settle, and
+    /// outside a request nothing changes.
+    #[test]
+    fn an_ipc_focus_request_absorbs_the_switch_refocus() {
+        use super::InputMode;
+        use super::{SwitchHover, absorb_switch_hover as absorb, switch_hover_action as act};
+        const N: InputMode<()> = InputMode::Normal;
+        let switched = act(Some(&1), Some(&2), true, &N, false);
+        assert_eq!(switched, SwitchHover::Refocus);
+        assert_eq!(absorb(switched, true), SwitchHover::Absorb);
+        assert_eq!(absorb(switched, false), SwitchHover::Refocus);
+        assert_eq!(absorb(SwitchHover::Wait, true), SwitchHover::Absorb);
+        assert_eq!(absorb(SwitchHover::Wait, false), SwitchHover::Wait);
+        assert_eq!(absorb(SwitchHover::Settle, true), SwitchHover::Settle);
     }
 
     #[test]

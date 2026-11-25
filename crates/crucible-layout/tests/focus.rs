@@ -251,3 +251,20 @@ fn focus_path_display_is_one_compact_line() {
             .ends_with(&format!("window={}", id.raw()))
     );
 }
+
+#[test]
+fn workspace_of_window_finds_hidden_workspaces_without_moving_focus() {
+    let mut w = World::new("1");
+    let one = w.active_workspace_id();
+    let a = w.open_window();
+    let two = w.new_workspace("2").unwrap();
+    w.switch_workspace(two).unwrap();
+    let b = w.open_window();
+    w.switch_workspace(one).unwrap();
+    let before = w.clone();
+    // `b` lives on the hidden workspace "2".
+    assert_eq!(w.workspace_of_window(b), Some(two));
+    assert_eq!(w.workspace_of_window(a), Some(one));
+    assert_eq!(w.workspace_of_window(WindowId::from_raw(9999)), None);
+    assert_eq!(w, before, "a read-only lookup");
+}

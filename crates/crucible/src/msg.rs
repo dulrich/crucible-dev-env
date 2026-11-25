@@ -6,7 +6,7 @@ use crate::cli::Parsed;
 use crate::client::{Client, socket_from_env};
 
 /// Usage text for `crucible msg --help`.
-pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | outputs | save | open <name> | open-folder <path> | new <name> | rename <name> | root <path>|- | exec <action> | run <command...> | run-in-terminal <command...> | run-on <workspace> <command...> | run-tui <command...> | run-term <program> | close-pid <n> | capture <path> | relaunch\n\n`outputs` prints one line per enabled output: `<name>TAB<x>,<y>TAB<w>x<h>TAB<scale>` (logical geometry), ordered by x, y, then name; the wire reply is a single line.\n`close-pid <n>` politely asks every window of process <n> to close (an X11 window without `WM_DELETE_WINDOW` is destroyed) and answers `ok <count>`, or `err no window for pid <n>`.\n`capture <path>` writes a PNG of the focused output (no cursor) to the absolute <path> and answers `ok <w>x<h>` once the file is written, or `err <reason>`.\n`root <path>` sets the active workspace's root (the folder its new terminals and apps start in; the path must be an absolute existing directory) and `root -` clears it.\n`exec` runs a keybinding action (the `binds` action grammar, for example `crucible msg exec focus left`); a failed action answers `err <reason>`.\n`run` and `run-in-terminal` are shorthands for `exec run <command>` and `exec run-in-terminal <command>`: they take the rest of the arguments as one command line (joined with single spaces) and encode it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. `run-tui` encodes its command the same way.\n`run-on <workspace> <command...>` (shorthand for `exec run-on …`) runs the command in the background into that workspace (created, not shown and ephemeral when missing) and answers `ok <pid>`. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`). While the session is locked, every request but `candidates`, `bindings`, `outputs`, `save` and `exec set-layout <name>` answers `err session locked`.\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
+pub const USAGE: &str = "usage: crucible msg <request...>\n\nSend one request line to the running compositor over $CDE_SOCKET and print the raw response line.\n\n  candidates | bindings | outputs | save | open <name> | open-folder <path> | new <name> | rename <name> | root <path>|- | exec <action> | run <command...> | run-in-terminal <command...> | run-on <workspace> <command...> | run-tui <command...> | run-term <program> | close-pid <n> | focus-pid <n> | workspace-of-pid <n> | focus-live <name> | capture <path> | relaunch\n\n`outputs` prints one line per enabled output: `<name>TAB<x>,<y>TAB<w>x<h>TAB<scale>` (logical geometry), ordered by x, y, then name; the wire reply is a single line.\n`close-pid <n>` politely asks every window of process <n> to close (an X11 window without `WM_DELETE_WINDOW` is destroyed) and answers `ok <count>`, or `err no window for pid <n>`.\n`focus-pid <n>` focuses the window process <n> (or its nearest ancestor, as `relaunch` matches it) stands for and answers `ok <workspace>`; `workspace-of-pid <n>` answers `ok <workspace>` for that window (hidden workspaces too) without changing focus; both answer `err no window for pid <n>` on no match.\n`focus-live <name>` switches to the live workspace <name> (never restores a saved one) and answers `ok <name>`, or `err no live workspace <name>`. The two focus verbs answer `err input busy` while an overlay, snip or the logout modal holds input.\n`capture <path>` writes a PNG of the focused output (no cursor) to the absolute <path> and answers `ok <w>x<h>` once the file is written, or `err <reason>`.\n`root <path>` sets the active workspace's root (the folder its new terminals and apps start in; the path must be an absolute existing directory) and `root -` clears it.\n`exec` runs a keybinding action (the `binds` action grammar, for example `crucible msg exec focus left`); a failed action answers `err <reason>`.\n`run` and `run-in-terminal` are shorthands for `exec run <command>` and `exec run-in-terminal <command>`: they take the rest of the arguments as one command line (joined with single spaces) and encode it for you\n(for example `crucible msg run firefox --new-window`); an unresolvable first word is refused with `err unknown command <word>`. `run-tui` encodes its command the same way.\n`run-on <workspace> <command...>` (shorthand for `exec run-on …`) runs the command in the background into that workspace (created, not shown and ephemeral when missing) and answers `ok <pid>`. For every other request, arguments are sent as typed, joined with single spaces: percent-encode %, :, TAB, LF and CR\nyourself (for example `crucible msg open my%3Aname`). While the session is locked, every request but `candidates`, `bindings`, `outputs`, `save`, `workspace-of-pid` and `exec set-layout <name>` answers `err session locked`.\n\nExit: 0 on an `ok` response, 1 on `err`, 2 on usage errors or a missing $CDE_SOCKET.\n";
 
 /// Joins the arguments into one protocol line and validates it.
 ///
@@ -251,6 +251,25 @@ mod tests {
             "close-pid 42"
         );
         assert!(build_line(&v(&["close-pid", "x"])).is_err());
+    }
+
+    #[test]
+    fn focus_verbs_build_and_reject_bad_arguments() {
+        assert_eq!(
+            build_line(&v(&["focus-pid", "42"])).unwrap(),
+            "focus-pid 42"
+        );
+        assert_eq!(
+            build_line(&v(&["workspace-of-pid", "42"])).unwrap(),
+            "workspace-of-pid 42"
+        );
+        assert_eq!(
+            build_line(&v(&["focus-live", "my%3Aname"])).unwrap(),
+            "focus-live my%3Aname"
+        );
+        assert!(build_line(&v(&["focus-pid", "0"])).is_err());
+        assert!(build_line(&v(&["workspace-of-pid", "x"])).is_err());
+        assert!(build_line(&v(&["focus-live"])).is_err());
     }
 
     #[test]

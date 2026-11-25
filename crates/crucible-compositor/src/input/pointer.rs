@@ -16,7 +16,10 @@ use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Serial};
 
 use tracing::{info, warn};
 
-use super::hover::{HoverTarget, SwitchHover, hover_entered, hover_pane_key, switch_hover_action};
+use super::hover::{
+    HoverTarget, SwitchHover, absorb_switch_hover, hover_entered, hover_pane_key,
+    switch_hover_action,
+};
 use super::modal::{
     DeferredHover, HoverDecision, InputMode, deferred_hover_action, hover_decision, hover_tracks,
     press_route,
@@ -571,9 +574,14 @@ impl<B: Backend + 'static> CrucibleState<B> {
             &mode,
             self.pointer.is_grabbed(),
         );
+        let action = absorb_switch_hover(action, self.hover_absorb);
         match action {
             SwitchHover::Wait => {}
             SwitchHover::Settle => self.hover_workspace = shown,
+            SwitchHover::Absorb => {
+                self.hover_workspace = shown;
+                self.hover_target = self.hover_under_pointer().0;
+            }
             SwitchHover::Refocus => {
                 self.hover_workspace = shown;
                 let (current, managed) = self.hover_under_pointer();
@@ -583,6 +591,16 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 }
             }
         }
+    }
+
+    /// Runs `op` (an IPC focus request's model change) with the switch-induced hover absorbed
+    /// ([`absorb_switch_hover`]): every [`apply_layout`](Self::apply_layout) inside it records the
+    /// workspace and pane under the pointer without refocusing. Later pointer motion is normal.
+    pub(crate) fn with_hover_absorbed<R>(&mut self, op: impl FnOnce(&mut Self) -> R) -> R {
+        self.hover_absorb = true;
+        let out = op(self);
+        self.hover_absorb = false;
+        out
     }
 
     /// Raises `window` in the [`Space`](smithay::desktop::Space) and gives it keyboard focus.

@@ -26,6 +26,7 @@ use crate::state::{Backend, CrucibleState};
 use crucible_keys::{Action, BindTarget};
 use crucible_layout::WorkspaceLayout;
 
+mod focus;
 mod relaunch;
 mod rename;
 
@@ -133,6 +134,9 @@ impl<B: Backend + 'static> CrucibleState<B> {
         let result = match request {
             Request::Relaunch => self.ipc_relaunch(peer),
             Request::ClosePid(pid) => return self.ipc_close_pid(pid),
+            Request::FocusPid(pid) => return self.ipc_focus_pid(pid),
+            Request::WorkspaceOfPid(pid) => return self.ipc_workspace_of_pid(pid),
+            Request::FocusLive(name) => return self.ipc_focus_live(&name),
             Request::Candidates => {
                 return Response::Ok(crate::ipc::format_candidates(&self.candidates()));
             }
@@ -472,6 +476,8 @@ mod tests {
             Request::RunTerm("ghostty".into()),
             Request::Relaunch,
             Request::ClosePid(7),
+            Request::FocusPid(7),
+            Request::FocusLive("w".into()),
             Request::Capture("/tmp/x.png".into()),
         ] {
             assert_eq!(admit_request(true, &r), Err(ActionError::Locked), "{r:?}");
@@ -604,6 +610,7 @@ mod tests {
             Request::Bindings,
             Request::Save,
             Request::Outputs,
+            Request::WorkspaceOfPid(7),
         ] {
             assert_eq!(admit_request(true, &r), Ok(()), "{r:?}");
         }
