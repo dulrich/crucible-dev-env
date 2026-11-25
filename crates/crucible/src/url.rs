@@ -1,5 +1,5 @@
 //! `crucible url <url>` — the `cde:` scheme handler: focus a window by pid, or a live workspace by
-//! name. Registered as the `x-scheme-handler/cde` handler by `scripts/deploy.sh`.
+//! name. Registered as the `x-scheme-handler/cde` handler by the deploy.
 
 use crucible_compositor::ipc::{Request, Response};
 
