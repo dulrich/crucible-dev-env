@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=CDE link handler
+Exec=@CRUCIBLE@ url %u
+MimeType=x-scheme-handler/cde;
+NoDisplay=true
+Terminal=false

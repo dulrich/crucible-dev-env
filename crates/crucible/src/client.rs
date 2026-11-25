@@ -23,6 +23,52 @@ pub fn socket_from_env(value: Option<std::ffi::OsString>) -> Result<PathBuf, Str
     }
 }
 
+/// Picks the socket for `crucible url`, which may run from a desktop launcher without the
+/// session's environment: a non-empty `CDE_SOCKET` wins, else the single `*.sock` entry (file names
+/// in `entries`) of `$XDG_RUNTIME_DIR/cde/`.
+///
+/// # Errors
+/// A message when neither source yields exactly one socket (naming the directory searched).
+pub fn discover_socket(
+    cde_socket: Option<std::ffi::OsString>,
+    runtime_dir: Option<std::ffi::OsString>,
+    entries: &[std::ffi::OsString],
+) -> Result<PathBuf, String> {
+    if let Some(v) = cde_socket.filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(v));
+    }
+    let runtime = runtime_dir
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| format!("neither {SOCKET_ENV} nor XDG_RUNTIME_DIR is set"))?;
+    let dir = Path::new(&runtime).join("cde");
+    let socks: Vec<_> = entries
+        .iter()
+        .filter(|e| Path::new(e).extension().is_some_and(|x| x == "sock"))
+        .collect();
+    match socks.as_slice() {
+        [one] => Ok(dir.join(one)),
+        [] => Err(format!("no CDE socket (*.sock) in {}", dir.display())),
+        _ => Err(format!(
+            "several CDE sockets in {}; set {SOCKET_ENV} to pick one",
+            dir.display()
+        )),
+    }
+}
+
+/// [`discover_socket`] over the real environment and `$XDG_RUNTIME_DIR/cde/` listing.
+///
+/// # Errors
+/// As [`discover_socket`].
+pub fn discover_socket_from_env() -> Result<PathBuf, String> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR");
+    let entries: Vec<std::ffi::OsString> = runtime
+        .as_ref()
+        .and_then(|r| std::fs::read_dir(Path::new(r).join("cde")).ok())
+        .map(|rd| rd.flatten().map(|e| e.file_name()).collect())
+        .unwrap_or_default();
+    discover_socket(std::env::var_os(SOCKET_ENV), runtime, &entries)
+}
+
 /// A connected IPC client; one connection may carry several requests.
 pub struct Client {
     reader: BufReader<UnixStream>,
@@ -121,6 +167,31 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn discovery_prefers_env_then_the_single_socket() {
+        let os = |s: &str| OsString::from(s);
+        let one = [os("cde-1.sock"), os("note.txt")];
+        assert_eq!(
+            discover_socket(Some(os("/x.sock")), Some(os("/run/u")), &[]).unwrap(),
+            PathBuf::from("/x.sock")
+        );
+        // An empty CDE_SOCKET falls through to discovery.
+        assert_eq!(
+            discover_socket(Some(os("")), Some(os("/run/u")), &one).unwrap(),
+            PathBuf::from("/run/u/cde/cde-1.sock")
+        );
+        assert_eq!(
+            discover_socket(None, Some(os("/run/u")), &one).unwrap(),
+            PathBuf::from("/run/u/cde/cde-1.sock")
+        );
+        let none = discover_socket(None, Some(os("/run/u")), &[os("x.txt")]).unwrap_err();
+        assert!(none.contains("/run/u/cde"), "{none}");
+        let two =
+            discover_socket(None, Some(os("/run/u")), &[os("a.sock"), os("b.sock")]).unwrap_err();
+        assert!(two.contains("/run/u/cde"), "{two}");
+        assert!(discover_socket(None, None, &[]).is_err());
+    }
 
     #[test]
     fn missing_or_empty_env_is_an_error() {

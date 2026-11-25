@@ -231,3 +231,51 @@ fn resume_stays_resident_and_capturable_while_the_command_runs() {
     assert_eq!(cap.cwd, dir);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Handler invocation under a minimal environment: no `CDE_SOCKET`, only `XDG_RUNTIME_DIR`; the
+/// socket is found in `$XDG_RUNTIME_DIR/cde/` and the pid link becomes a `focus-pid` line.
+#[test]
+fn url_finds_the_socket_under_xdg_runtime_dir() {
+    use std::io::{BufRead, BufReader, Write};
+    let dir = std::env::temp_dir().join(format!("cde-url-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("cde")).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(dir.join("cde/cde-test.sock")).unwrap();
+    let server = std::thread::spawn(move || {
+        let (s, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        BufReader::new(s.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let mut w = s;
+        writeln!(w, "ok x").unwrap();
+        line
+    });
+    let out = Command::new(env!("CARGO_BIN_EXE_crucible"))
+        .args(["url", "cde:focus?pid=4242"])
+        .env_clear()
+        .env("XDG_RUNTIME_DIR", &dir)
+        .output()
+        .expect("spawn crucible");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(server.join().unwrap().trim_end(), "focus-pid 4242");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn url_help_and_malformed_url() {
+    let out = Command::new(env!("CARGO_BIN_EXE_crucible"))
+        .args(["url", "--help"])
+        .env_clear()
+        .output()
+        .expect("spawn crucible");
+    assert_eq!(out.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("usage: crucible url"));
+    // PATH is empty, so no notify-send fires from the test.
+    let out = Command::new(env!("CARGO_BIN_EXE_crucible"))
+        .args(["url", "cde:focus?pid=0"])
+        .env_clear()
+        .output()
+        .expect("spawn crucible");
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+}

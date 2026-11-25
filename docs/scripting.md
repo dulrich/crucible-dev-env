@@ -33,6 +33,19 @@ Replies start with `ok` or `err <reason>`. Exit status: 0 on `ok`, 1 on `err`, 2
 
 While the session is locked, every request except `candidates`, `bindings`, `outputs`, `save`, `workspace-of-pid` and `exec set-layout <name>` answers `err session locked`. A script that runs on a timer should treat that as "try again next tick", not as a failure.
 
+## `crucible url` and `cde:` links
+
+`crucible url <url>` opens a `cde:` link against the running session; the deploy registers it as the `x-scheme-handler/cde` handler (`cde-url.desktop`), so a `cde:` link in a terminal, a browser or a notification focuses the window or workspace it names.
+
+- `cde:focus?pid=<n>` — focus the window of process `<n>` (as `focus-pid`).
+- `cde:focus?workspace=<name>` — switch to the live workspace `<name>` (as `focus-live`).
+- Both together: the pid is tried first and the workspace is the fallback. `cde://focus?…` is an accepted alias, the scheme is case-insensitive and a `#fragment` is ignored.
+- Only the `focus` action and the `pid` / `workspace` parameters exist; unknown or repeated parameters, empty values and a bad pid are errors. Values use RFC 3986 percent-encoding (`+` is a literal plus), so `cde:focus?workspace=my%20ws%26co` names `my ws&co`.
+
+The socket is `$CDE_SOCKET` when set, else the single `*.sock` in `$XDG_RUNTIME_DIR/cde/`, so a launcher without the session environment still works. Exit status: 0 focused, 1 nothing focused (reason on stderr and via `notify-send` when installed), 2 malformed URL.
+
+The deploy prints `url-handler=verified|failed|skipped` on each host's `RESULT:` line. With `CDE_INSTALL_DIR` set it leaves the real handler alone unless `CDE_REGISTER_URL=1`.
+
 ## Night light
 
 The [`night-light`](config.md#night-light) action takes `on`, `off`, `toggle`, `auto` or a temperature in kelvin (2500–6500; 6500 is no tint):
