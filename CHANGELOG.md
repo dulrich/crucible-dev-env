@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.8.3 — 2026-11-25
+
+### Changed
+
+- A successful `focus-pid` or `focus-live` (and so a `cde:focus` link opened with `crucible url`) also moves the pointer to the centre of the focused pane, when the pointer is free and the pane is shown, so focus-follows-mouse keeps the focus the link set. The warp never changes focus itself and is skipped while a button is held or a pointer constraint is active; an `err` reply never moves the pointer. Replies, wire and exit codes are unchanged.
+
 ## 0.8.2 — 2026-11-25
 
 ### Added
