@@ -21,7 +21,7 @@ use crate::cli::{Parsed, help_requested};
 use crate::table::{self, Col};
 
 /// Usage text for `crucible mem --help`.
-pub const USAGE: &str = "usage: crucible mem [--pid <n>]\n\nReal memory per logical app of a running CDE: one row per direct child process of the compositor\n(PSS, swap, process count, label), largest PSS first, then the compositor itself and a TOTAL.\nPSS and swap are summed over the child's whole process subtree from /proc/<pid>/smaps_rollup. The\nlabel is the child's name plus the deepest process under it that is not a shell and\nnot one of CDE's own `crucible` processes (ties: largest PSS), e.g. `ghostty › htop`. A child whose\nsubtree holds the overlay host gets ` (overlay)` appended. A cterm daemon serving this compositor (same\nWAYLAND_DISPLAY, owned by you) gets one row, `cterm daemon (+N windows)`: the daemon plus its thin clients\n(compositor children named cterm with no child process). What runs in its windows is not in that row:\neach window counts toward its app (the deepest process that is not a shell or one of CDE's own, else\nthe shell), and windows running the same app share one row, e.g. `claude`, `htop`.\n\n  --pid <n>    the compositor's pid. Without it, the compositor is the process owned by you whose\n               command is `crucible` with `--winit` or `--tty-udev`; with several, the one that is an\n               ancestor of this command, else the lowest pid. None found: message on stderr, exit 1.\n  -h, --help   print this usage and exit 0\n\nOnly processes CDE spawned itself are counted: D-Bus-activated apps parented to `systemd --user`\nare not. A process that is unreadable or vanished counts as zero and its row is marked `*`.\n";
+pub const USAGE: &str = "usage: crucible mem [--pid <n>]\n\nReal memory per logical app of a running CDE: one row per direct child process of the compositor\n(PSS, swap, process count, label), largest PSS first, then the compositor itself and a TOTAL.\nPSS and swap are summed over the child's whole process subtree from /proc/<pid>/smaps_rollup. The\nlabel is the child's name plus the deepest process under it that is not a shell and\nnot one of CDE's own `crucible` processes (ties: largest PSS), e.g. `ghostty › htop`. A child whose\nsubtree holds the overlay host gets ` (overlay)` appended. A cterm daemon serving this compositor (owned by you, with the same\nWAYLAND_DISPLAY, or a service daemon with none and the same XDG_RUNTIME_DIR) gets one row, `cterm daemon (+N windows)`: the daemon plus its thin clients\n(compositor children named cterm with no child process). What runs in its windows is not in that row:\neach window counts toward its app (the deepest process that is not a shell or one of CDE's own, else\nthe shell), and windows running the same app share one row, e.g. `claude`, `htop`.\n\n  --pid <n>    the compositor's pid. Without it, the compositor is the process owned by you whose\n               command is `crucible` with `--winit` or `--tty-udev`; with several, the one that is an\n               ancestor of this command, else the lowest pid. None found: message on stderr, exit 1.\n  -h, --help   print this usage and exit 0\n\nOnly processes CDE spawned itself are counted: D-Bus-activated apps parented to `systemd --user`\nare not. A process that is unreadable or vanished counts as zero and its row is marked `*`.\n";
 
 /// Parsed arguments.
 #[derive(Debug, PartialEq, Eq)]
@@ -284,8 +284,17 @@ fn window_app(procs: &ProcSnapshot, tree: &[(u32, usize)], own: &str) -> String 
         .unwrap_or_else(|| "?".into())
 }
 
-/// The cterm daemon rows for the daemons serving `socket` (owned by `uid`, outside `counted`):
-/// one row per daemon (the first also holds the `thin` clients), then the per-app rows.
+/// The cterm daemon rows for the daemons serving this compositor (owned by `uid`, outside
+/// `counted`): one row per daemon, then the per-app rows. Two kinds are selected:
+/// - legacy: the daemon's environment names a Wayland display and its resolved socket equals
+///   `socket` (only when a compositor child yielded one);
+/// - service (`cterm.service`, one per user): the environment is readable, has NO
+///   `WAYLAND_DISPLAY`, and its `XDG_RUNTIME_DIR` equals `runtime` (the compositor's own, else a
+///   child's). Independent of `socket`; an unreadable environment is never selected.
+///
+/// Thin clients (compositor children named `cterm` with no child process) are attributed to the
+/// service daemon when one is selected, else to the first legacy daemon. Each daemon's own
+/// children are counted once, in its own row.
 #[allow(clippy::too_many_arguments)]
 fn daemon_rows(
     proc_root: &Path,
@@ -293,27 +302,42 @@ fn daemon_rows(
     kids: &HashMap<u32, Vec<u32>>,
     pid: u32,
     uid: u32,
-    socket: &Path,
+    socket: Option<&Path>,
+    runtime: Option<&Path>,
     counted: &HashSet<u32>,
     top: &[u32],
     own: &str,
 ) -> (Vec<Row>, Vec<u32>) {
-    let mut daemons: Vec<u32> = procs
-        .iter()
-        .filter(|&(p, info)| {
-            p != pid
-                && !counted.contains(&p)
-                && is_cterm_daemon(&info.argv)
-                && fs::metadata(proc_root.join(p.to_string())).is_ok_and(|m| m.uid() == uid)
-                && proc_env(proc_root, p)
-                    .and_then(|env| wayland_socket(&env))
-                    .is_some_and(|s| s == socket)
+    let candidates = |select: &dyn Fn(&HashMap<OsString, OsString>) -> bool| {
+        let mut found: Vec<u32> = procs
+            .iter()
+            .filter(|&(p, info)| {
+                p != pid
+                    && !counted.contains(&p)
+                    && is_cterm_daemon(&info.argv)
+                    && fs::metadata(proc_root.join(p.to_string())).is_ok_and(|m| m.uid() == uid)
+                    && proc_env(proc_root, p).is_some_and(|env| select(&env))
+            })
+            .map(|(p, _)| p)
+            .collect();
+        found.sort_unstable();
+        found
+    };
+    let legacy = socket.map_or_else(Vec::new, |socket| {
+        candidates(&|env| wayland_socket(env).is_some_and(|s| s == socket))
+    });
+    let service = runtime.map_or_else(Vec::new, |runtime| {
+        candidates(&|env| {
+            !env.contains_key(OsString::from("WAYLAND_DISPLAY").as_os_str())
+                && env
+                    .get(OsString::from("XDG_RUNTIME_DIR").as_os_str())
+                    .is_some_and(|d| Path::new(d) == runtime)
         })
-        .map(|(p, _)| p)
-        .collect();
-    daemons.sort_unstable();
-    // Thin clients (a `cterm` child of the compositor with no child of its own) belong to the
-    // daemon row, not their own rows; with several daemons, to the first.
+    });
+    let thin_owner = service.first().or(legacy.first()).copied();
+    let daemons: Vec<u32> = legacy.into_iter().chain(service).collect();
+    // Thin clients (a `cterm` child of the compositor with no child of its own) belong to a
+    // daemon row, not their own rows.
     let thin: Vec<u32> = if daemons.is_empty() {
         Vec::new()
     } else {
@@ -329,10 +353,10 @@ fn daemon_rows(
     };
     let mut rows: Vec<Row> = Vec::new();
     let mut apps: Vec<Row> = Vec::new();
-    for (i, d) in daemons.into_iter().enumerate() {
+    for d in daemons {
         let windows: &[u32] = kids.get(&d).map_or(&[][..], Vec::as_slice);
         let mut mine: Vec<(u32, usize)> = vec![(d, 0)];
-        if i == 0 {
+        if Some(d) == thin_owner {
             mine.extend(thin.iter().map(|&c| (c, 0)));
         }
         let mut row = subtree_row(proc_root, procs, &mine, String::new(), own);
@@ -390,13 +414,31 @@ pub fn build_report(proc_root: &Path, pid: u32, uid: u32, own: &str) -> Report {
     let socket = top
         .iter()
         .find_map(|&c| proc_env(proc_root, c).and_then(|env| wayland_socket(&env)));
-    if let Some(socket) = socket {
-        let (rows, thin) = daemon_rows(
-            proc_root, &procs, &kids, pid, uid, &socket, &counted, top, own,
-        );
-        children.extend(rows);
-        top_rows.retain(|(p, _)| !thin.contains(p));
-    }
+    // The runtime directory a service daemon must share: the compositor's, else a child's.
+    let runtime_dir = |p: u32| {
+        proc_env(proc_root, p)
+            .and_then(|env| {
+                env.get(OsString::from("XDG_RUNTIME_DIR").as_os_str())
+                    .cloned()
+            })
+            .filter(|d| Path::new(d).is_absolute())
+            .map(PathBuf::from)
+    };
+    let runtime = runtime_dir(pid).or_else(|| top.iter().find_map(|&c| runtime_dir(c)));
+    let (rows, thin) = daemon_rows(
+        proc_root,
+        &procs,
+        &kids,
+        pid,
+        uid,
+        socket.as_deref(),
+        runtime.as_deref(),
+        &counted,
+        top,
+        own,
+    );
+    children.extend(rows);
+    top_rows.retain(|(p, _)| !thin.contains(p));
     children.extend(top_rows.into_iter().map(|(_, r)| r));
     children.sort_by(|a, b| b.pss_kb.cmp(&a.pss_kb).then_with(|| a.label.cmp(&b.label)));
 
@@ -977,5 +1019,97 @@ mod tests {
             (11, 22, 33, true)
         );
         assert_eq!(a.label, "a");
+    }
+
+    /// Compositor 10 (its own runtime dir) with thin client 20 naming wayland-1, plus a service
+    /// daemon 70 (no `WAYLAND_DISPLAY`, runtime dir `rt`) with one window running htop.
+    fn service_fixture(tag: &str, rt: &str) -> Fixture {
+        let f = Fixture::new(tag);
+        f.proc(10, 1, "crucible", &["/x/crucible", "--winit"], None);
+        f.environ(10, &[("XDG_RUNTIME_DIR", "/run/user/1")]);
+        f.proc(20, 10, "cterm", &["/x/cterm"], Some((300, 0)));
+        f.environ(
+            20,
+            &[
+                ("XDG_RUNTIME_DIR", "/run/user/1"),
+                ("WAYLAND_DISPLAY", "wayland-1"),
+            ],
+        );
+        f.proc(70, 1, "cterm", &["/x/cterm", "daemon"], Some((900, 0)));
+        f.environ(70, &[("XDG_RUNTIME_DIR", rt)]);
+        f.proc(71, 70, "bash", &["bash"], Some((10, 0)));
+        f.proc(72, 71, "htop", &["htop"], Some((30, 0)));
+        f
+    }
+
+    fn daemon_rows_of(r: &Report) -> Vec<(&str, u64, usize)> {
+        r.children
+            .iter()
+            .filter(|c| c.label.starts_with("cterm daemon"))
+            .map(|c| (c.label.as_str(), c.pss_kb, c.procs))
+            .collect()
+    }
+
+    #[test]
+    fn service_daemon_without_display_in_the_same_runtime_dir_gets_its_row() {
+        let f = service_fixture("svc", "/run/user/1");
+        let r = build_report(&f.0, 10, uid(), "crucible");
+        // the daemon plus thin client 20; the window's app has its own row
+        assert_eq!(daemon_rows_of(&r), [("cterm daemon (+1 window)", 1200, 2)]);
+        assert!(
+            r.children
+                .iter()
+                .any(|c| c.label == "htop" && c.pss_kb == 40)
+        );
+        assert!(r.children.iter().all(|c| c.label != "cterm"));
+    }
+
+    #[test]
+    fn service_daemon_in_another_runtime_dir_is_excluded() {
+        let f = service_fixture("svcother", "/run/user/2");
+        let r = build_report(&f.0, 10, uid(), "crucible");
+        assert!(daemon_rows_of(&r).is_empty());
+        assert!(r.children.iter().all(|c| c.pss_kb != 900));
+    }
+
+    #[test]
+    fn service_daemon_is_found_without_a_compositor_child_display() {
+        let f = Fixture::new("svcnochild");
+        f.proc(10, 1, "crucible", &["/x/crucible", "--winit"], None);
+        f.environ(10, &[("XDG_RUNTIME_DIR", "/run/user/1")]);
+        f.proc(70, 1, "cterm", &["/x/cterm", "daemon"], Some((900, 0)));
+        f.environ(70, &[("XDG_RUNTIME_DIR", "/run/user/1")]);
+        let r = build_report(&f.0, 10, uid(), "crucible");
+        assert_eq!(daemon_rows_of(&r), [("cterm daemon (+0 windows)", 900, 1)]);
+    }
+
+    #[test]
+    fn coexisting_daemons_each_get_a_row_and_thin_clients_go_to_the_service_one() {
+        let f = daemon_fixture("svccoexist");
+        f.proc(70, 1, "cterm", &["/x/cterm", "daemon"], Some((900, 0)));
+        f.environ(70, &[("XDG_RUNTIME_DIR", "/run/user/1")]);
+        f.proc(71, 70, "zsh", &["zsh"], Some((10, 0)));
+        let r = build_report(&f.0, 10, uid(), "crucible");
+        let mut rows = daemon_rows_of(&r);
+        rows.sort_unstable();
+        assert_eq!(
+            rows,
+            [
+                // legacy daemon 60 alone; service daemon 70 plus thin client 20
+                ("cterm daemon (+1 window)", 1200, 2),
+                ("cterm daemon (+2 windows)", 500, 1),
+            ]
+        );
+        // each window subtree counted once: htop 50 (2 procs), zsh 10 + 10 (2 procs)
+        assert_eq!(r.children.len(), 4);
+        assert_eq!(r.total.procs, 1 + 1 + 2 + 2 + 2);
+    }
+
+    #[test]
+    fn service_daemon_with_unreadable_environment_is_excluded() {
+        let f = service_fixture("svcunread", "/run/user/1");
+        fs::remove_file(f.0.join("70").join("environ")).unwrap();
+        let r = build_report(&f.0, 10, uid(), "crucible");
+        assert!(daemon_rows_of(&r).is_empty());
     }
 }
