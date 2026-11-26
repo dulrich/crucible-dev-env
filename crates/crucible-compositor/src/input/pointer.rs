@@ -73,7 +73,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// The one motion delivery: resolves the surface under `location` in `mode`
     /// ([`Self::surface_under`]) and moves the pointer there ([`Self::deliver_motion_to`]), with
     /// `relative` delivered to the same surface first. Returns nothing; the seat tracks focus.
-    pub(super) fn deliver_motion(
+    pub(crate) fn deliver_motion(
         &mut self,
         mode: &InputMode,
         location: Point<f64, Logical>,
@@ -558,14 +558,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
     /// ([`switch_hover_action`]). Called at the end of every
     /// [`apply_layout`](Self::apply_layout).
     pub(crate) fn hover_after_workspace_switch(&mut self) {
-        let location = self.pointer.current_location();
-        let shown = self
-            .space
-            .output_under(location)
-            .next()
-            .and_then(crate::layout::model_output_id)
-            .and_then(|id| self.layout.world.output(id))
-            .map(|o| o.active_workspace());
+        let shown = self.workspace_under_pointer();
         let mode = self.input_mode();
         let action = switch_hover_action(
             self.hover_workspace.as_ref(),
@@ -591,6 +584,23 @@ impl<B: Backend + 'static> CrucibleState<B> {
                 }
             }
         }
+    }
+
+    /// The workspace shown on the output under the pointer, if the pointer is over a mapped output.
+    pub(crate) fn workspace_under_pointer(&self) -> Option<crucible_layout::WorkspaceId> {
+        self.space
+            .output_under(self.pointer.current_location())
+            .next()
+            .and_then(crate::layout::model_output_id)
+            .and_then(|id| self.layout.world.output(id))
+            .map(|o| o.active_workspace())
+    }
+
+    /// Settles both hover trackers (`hover_target`, `hover_workspace`) at the current pointer
+    /// location without refocusing, so later motion inside what is under the pointer is quiet.
+    pub(crate) fn settle_hover_at_pointer(&mut self) {
+        self.hover_workspace = self.workspace_under_pointer();
+        self.hover_target = self.hover_under_pointer().0;
     }
 
     /// Runs `op` (an IPC focus request's model change) with the switch-induced hover absorbed

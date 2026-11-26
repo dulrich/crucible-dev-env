@@ -209,6 +209,11 @@ pub struct PointerLockState {
 }
 
 impl PointerLockState {
+    /// Whether CDE currently holds a constraint active on the pointer-focused surface.
+    pub fn has_active(&self) -> bool {
+        self.active.is_some()
+    }
+
     /// Creates both globals.
     pub fn new<B: Backend + 'static>(dh: &DisplayHandle) -> Self {
         Self {

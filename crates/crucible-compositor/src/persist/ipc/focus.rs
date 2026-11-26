@@ -1,7 +1,8 @@
 //! The IPC focus requests: `focus-pid`, `workspace-of-pid` and `focus-live` (plan 54).
 
 use super::*;
-use crucible_layout::World;
+use crucible_layout::{Rect, World};
+use tracing::debug;
 
 /// The window a process `pid` stands for, over `windows` as `(id, meta.pid, anchor)`: the
 /// `relaunch` matcher ([`relaunch_window_pid`], unchanged) over `pid` and its `ancestors` gives a
@@ -34,7 +35,83 @@ fn live_focus_target(
         .ok_or_else(|| format!("no live workspace {name}"))
 }
 
+/// The centre of `rect` in global logical coordinates (half-pixel for odd extents).
+fn pane_centre(rect: Rect) -> (f64, f64) {
+    (
+        f64::from(rect.x) + f64::from(rect.width) / 2.0,
+        f64::from(rect.y) + f64::from(rect.height) / 2.0,
+    )
+}
+
+/// Why the post-focus pointer warp is skipped, or `None` to warp. `rect` is the focused pane's
+/// global rect (`None` when its output has no mapped binding); `grabbed` a seat pointer grab;
+/// `header_pressed` an outstanding header-consumed press (its release reads the current pointer
+/// location); `constrained` a pointer constraint still active after the focus change.
+fn warp_skip(
+    rect: Option<Rect>,
+    grabbed: bool,
+    header_pressed: bool,
+    constrained: bool,
+) -> Result<Rect, &'static str> {
+    let rect = rect.ok_or("pane not shown")?;
+    if rect.width <= 0 || rect.height <= 0 {
+        return Err("zero-extent pane");
+    }
+    if grabbed {
+        return Err("pointer grabbed");
+    }
+    if header_pressed {
+        return Err("header press outstanding");
+    }
+    if constrained {
+        return Err("pointer constraint active");
+    }
+    Ok(rect)
+}
+
 impl<B: Backend + 'static> CrucibleState<B> {
+    /// Plan 55: after a successful IPC focus, moves the pointer to the focused pane's centre
+    /// when the pointer is free and the pane is shown ([`warp_skip`]). Never changes keyboard or
+    /// model focus: the constraint is reconciled at the delivered location and both hover trackers
+    /// settle there without refocusing.
+    fn warp_to_focused_pane(&mut self) {
+        let pane = self.layout.world.focused_pane_id();
+        let rect =
+            self.layout
+                .world
+                .pane_rect(&self.output_bindings(), crate::layout::NO_GAPS, pane);
+        let rect = match warp_skip(
+            rect,
+            self.pointer.is_grabbed(),
+            !self.header.consumed.is_empty(),
+            self.pointer_lock.has_active(),
+        ) {
+            Ok(rect) => rect,
+            Err(reason) => {
+                debug!(reason, rect = ?rect, "ipc focus: pointer warp skipped");
+                return;
+            }
+        };
+        let (x, y) = pane_centre(rect);
+        let mode = self.input_mode();
+        let time = self.clock.now().as_millis();
+        self.deliver_motion(
+            &mode,
+            (x, y).into(),
+            smithay::utils::SERIAL_COUNTER.next_serial(),
+            time,
+            None,
+        );
+        let keyboard = self.keyboard_focus_surface();
+        self.reconcile_pointer_constraint(keyboard);
+        self.settle_hover_at_pointer();
+        debug!(
+            location = ?self.pointer.current_location(),
+            rect = ?rect,
+            "ipc focus: pointer warped to the focused pane centre"
+        );
+    }
+
     /// The layout-bound window process `pid` (or its nearest ancestor) stands for.
     fn resolve_pid_window(&self, pid: u32) -> Option<WindowId> {
         let ancestors = crucible_persist::ancestors(proc_root(), pid, ANCESTOR_DEPTH);
@@ -80,6 +157,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return Response::Err(e.to_string());
         }
         self.reconcile_keyboard_focus();
+        self.warp_to_focused_pane();
         Response::Ok(name)
     }
 
@@ -99,6 +177,7 @@ impl<B: Backend + 'static> CrucibleState<B> {
             return Response::Err(reason);
         }
         self.reconcile_keyboard_focus();
+        self.warp_to_focused_pane();
         Response::Ok(crate::ipc::encode_field(name))
     }
 }
@@ -158,6 +237,68 @@ mod tests {
     fn an_unrelated_pid_matches_nothing() {
         assert_eq!(window_for_pid(4242, &[4000, 1], &windows()), None);
         assert_eq!(window_for_pid(4242, &[], &[]), None);
+    }
+
+    #[test]
+    fn the_centre_of_an_even_rect_at_the_origin() {
+        assert_eq!(pane_centre(Rect::new(0, 0, 1920, 1080)), (960.0, 540.0));
+    }
+
+    #[test]
+    fn the_centre_of_an_odd_rect_with_a_non_zero_origin_is_a_half_pixel() {
+        assert_eq!(pane_centre(Rect::new(10, 31, 5, 7)), (12.5, 34.5));
+    }
+
+    #[test]
+    fn a_pane_on_a_second_output_centres_in_global_coordinates() {
+        // Right half of a 2560x1440 output placed right of a 1920-wide one.
+        let rect = Rect::new(1920 + 1280, 0, 1280, 1440);
+        assert_eq!(pane_centre(rect), (3840.0, 720.0));
+    }
+
+    #[test]
+    fn a_free_pointer_over_a_shown_pane_warps() {
+        let rect = Rect::new(0, 0, 100, 100);
+        assert_eq!(warp_skip(Some(rect), false, false, false), Ok(rect));
+    }
+
+    #[test]
+    fn cross_output_jump_targets_the_destination_centre_whatever_the_start() {
+        // The pointer starts on output A (0..1920); the target pane is on output B. The decision
+        // and destination depend only on the target rect, never on the start point.
+        let target = Rect::new(1920, 0, 1920, 1080);
+        let dest = warp_skip(Some(target), false, false, false).map(pane_centre);
+        assert_eq!(dest, Ok((2880.0, 540.0)));
+        assert!(dest.unwrap().0 >= 1920.0);
+    }
+
+    #[test]
+    fn an_unmapped_pane_skips() {
+        assert_eq!(warp_skip(None, false, false, false), Err("pane not shown"));
+    }
+
+    #[test]
+    fn a_zero_extent_pane_skips() {
+        for rect in [Rect::new(5, 5, 0, 10), Rect::new(5, 5, 10, 0)] {
+            assert_eq!(
+                warp_skip(Some(rect), false, false, false),
+                Err("zero-extent pane")
+            );
+        }
+    }
+
+    #[test]
+    fn a_grab_a_header_press_or_an_active_constraint_skips() {
+        let rect = Some(Rect::new(0, 0, 100, 100));
+        assert_eq!(warp_skip(rect, true, false, false), Err("pointer grabbed"));
+        assert_eq!(
+            warp_skip(rect, false, true, false),
+            Err("header press outstanding")
+        );
+        assert_eq!(
+            warp_skip(rect, false, false, true),
+            Err("pointer constraint active")
+        );
     }
 
     #[test]

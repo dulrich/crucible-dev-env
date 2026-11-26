@@ -45,6 +45,11 @@ impl ConsumedButtons {
     pub fn consume_release(&mut self, button: u32) -> Option<HeaderPress> {
         self.0.remove(&button)
     }
+
+    /// Whether no consumed press is outstanding (no release still pending).
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// What a consumed header release does.

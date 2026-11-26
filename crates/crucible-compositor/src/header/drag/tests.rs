@@ -34,9 +34,11 @@ fn consumed_press_swallows_exactly_its_release() {
         workspace: None,
     };
     let mut c = ConsumedButtons::default();
+    assert!(c.is_empty());
     // A release whose press was forwarded is forwarded.
     assert!(c.consume_release(RIGHT).is_none());
     c.consume_press(LEFT, press);
+    assert!(!c.is_empty()); // outstanding: plan 55 skips the pointer warp
     assert!(c.consume_release(RIGHT).is_none()); // unrelated button forwarded
     // Swallowed even if the strip was hidden in between (the record is independent of it).
     assert_eq!(c.consume_release(LEFT), Some(press));

@@ -24,7 +24,7 @@ With more than one CDE instance (for example a nested `crucible --winit` test se
 - `run-on <workspace> <command…>` — launch in the background into a workspace; replies `ok <pid>`.
 - `focus-pid <n>` — focus the window process `<n>` (or its nearest ancestor, matched as `relaunch` does) stands for, switching to its workspace; replies `ok <workspace>` or `err no window for pid <n>`.
 - `workspace-of-pid <n>` — the workspace (hidden ones too) holding that window, without changing focus; replies `ok <workspace>` or `err no window for pid <n>`.
-- `focus-live <name>` — switch to the live workspace `<name>`; never restores a saved one, never brings it to another output. Replies `ok <name>` or `err no live workspace <name>`. Both focus verbs answer `err input busy` while an overlay, snip or the logout modal holds input.
+- `focus-live <name>` — switch to the live workspace `<name>`; never restores a saved one, never brings it to another output. Replies `ok <name>` or `err no live workspace <name>`. Both focus verbs answer `err input busy` while an overlay, snip or the logout modal holds input. On `ok` both move the pointer to the focused pane's centre when it is free and the pane is shown; an `err` never moves it.
 - `capture <abs path>` — write a PNG of the focused output; replies `ok <w>x<h>`.
 - `outputs` — the enabled outputs. On the wire the reply is one line of space-separated `<name>=<x>,<y>,<w>x<h>@<scale>` records (logical geometry, ordered by x, then y, then name). `crucible msg outputs` prints one line per output instead: `<name>`, TAB, `<x>,<y>`, TAB, `<w>x<h>`, TAB, `<scale>`.
 - `candidates`, `bindings` — read-only queries (the picker's rows, the effective keybindings).
@@ -37,8 +37,8 @@ While the session is locked, every request except `candidates`, `bindings`, `out
 
 `crucible url <url>` opens a `cde:` link against the running session; the deploy registers it as the `x-scheme-handler/cde` handler (`cde-url.desktop`), so a `cde:` link in a terminal, a browser or a notification focuses the window or workspace it names.
 
-- `cde:focus?pid=<n>` — focus the window of process `<n>` (as `focus-pid`).
-- `cde:focus?workspace=<name>` — switch to the live workspace `<name>` (as `focus-live`).
+- `cde:focus?pid=<n>` — focus the window of process `<n>` (as `focus-pid`; the pointer moves to the focused pane's centre when it is free and the pane is shown).
+- `cde:focus?workspace=<name>` — switch to the live workspace `<name>` (as `focus-live`; the pointer moves to the focused pane's centre when it is free and the pane is shown).
 - Both together: the pid is tried first and the workspace is the fallback. `cde://focus?…` is an accepted alias, the scheme is case-insensitive and a `#fragment` is ignored.
 - Only the `focus` action and the `pid` / `workspace` parameters exist; unknown or repeated parameters, empty values and a bad pid are errors. Values use RFC 3986 percent-encoding (`+` is a literal plus), so `cde:focus?workspace=my%20ws%26co` names `my ws&co`.
 
