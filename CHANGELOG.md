@@ -4,6 +4,12 @@ All notable changes to Crucible Dev Env are recorded here, in the [Keep a Change
 
 CDE uses pre-1.0 semantic versioning: a breaking change to the config, `session.kdl` or the IPC protocol bumps the minor version; anything else bumps the patch.
 
+## 0.8.4 — 2026-11-25
+
+### Changed
+
+- `crucible mem` also finds a crucible-term daemon that runs as the systemd user service (crucible-term 0.6.0): a same-user `cterm daemon` with no `WAYLAND_DISPLAY` in its environment and the compositor's `XDG_RUNTIME_DIR`. Its row and its windows' per-app rows no longer depend on a display match. The match for a daemon started from a terminal is unchanged.
+
 ## 0.8.3 — 2026-11-25
 
 ### Changed
